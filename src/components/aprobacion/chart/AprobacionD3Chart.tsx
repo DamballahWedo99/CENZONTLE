@@ -27,19 +27,12 @@ import type {
 import type { TransaccionMensualData } from '@/types/aprobacion';
 
 // Default metrics configuration
+// Order matters: render from highest values (back) to lowest values (front)
 const DEFAULT_METRICS: ChartMetric[] = [
   {
-    key: 'aprobacionBase',
-    label: 'Aprobación Base',
-    color: 'hsl(142.1 76.2% 36.3%)', // green-600
-    type: 'area',
-    fillOpacity: 0.3,
-    strokeWidth: 2
-  },
-  {
-    key: 'aprobacionRetry',
-    label: 'Aprobación Retry',
-    color: 'hsl(217.2 91.2% 59.8%)', // blue-600
+    key: 'aprobacionFinal',
+    label: 'Aprobación Final',
+    color: 'hsl(24.6 95% 53.1%)', // orange-600
     type: 'area',
     fillOpacity: 0.3,
     strokeWidth: 2
@@ -53,9 +46,17 @@ const DEFAULT_METRICS: ChartMetric[] = [
     strokeWidth: 2
   },
   {
-    key: 'aprobacionFinal',
-    label: 'Aprobación Final',
-    color: 'hsl(24.6 95% 53.1%)', // orange-600
+    key: 'aprobacionBase',
+    label: 'Aprobación Base',
+    color: 'hsl(142.1 76.2% 36.3%)', // green-600
+    type: 'area',
+    fillOpacity: 0.3,
+    strokeWidth: 2
+  },
+  {
+    key: 'aprobacionRetry',
+    label: 'Aprobación Retry',
+    color: 'hsl(217.2 91.2% 59.8%)', // blue-600
     type: 'area',
     fillOpacity: 0.3,
     strokeWidth: 2
