@@ -34,8 +34,8 @@ export function AprobacionTable({ data, columns, totals, caption }: AprobacionTa
   const filteredData = data.filter((item) => item.id !== 'totals');
 
   return (
-    <div className="h-full rounded-md border border-zinc-200 dark:border-zinc-800 bg-white dark:bg-zinc-950 overflow-auto">
-      <Table className="min-w-full" style={{ height: '100%' }}>
+    <div className="w-full h-full rounded-md border border-zinc-200 dark:border-zinc-800 bg-white dark:bg-zinc-950 overflow-auto">
+      <Table className="w-full" style={{ height: '100%' }}>
         {caption && <TableCaption>{caption}</TableCaption>}
 
         <TableHeader className="sticky top-0 z-10 bg-white dark:bg-zinc-950">
@@ -43,7 +43,7 @@ export function AprobacionTable({ data, columns, totals, caption }: AprobacionTa
             {columns.map((column) => (
               <TableHead
                 key={column.key}
-                className="font-semibold min-w-[140px]"
+                className="font-semibold"
               >
                 {column.label}
               </TableHead>

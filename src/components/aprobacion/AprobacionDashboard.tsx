@@ -17,9 +17,16 @@ import type { DateRange } from 'react-day-picker';
 import { AprobacionTable } from './AprobacionTable';
 import { DataSourceFilter, type DataSource } from './DataSourceFilter';
 import { YearSelector } from './YearSelector';
+import { AprobacionD3Chart } from './chart/AprobacionD3Chart';
 import { Tabs, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { Button } from '@/components/ui/button';
-import { Download } from 'lucide-react';
+import {
+  Tooltip,
+  TooltipContent,
+  TooltipProvider,
+  TooltipTrigger,
+} from '@/components/ui/tooltip';
+import { Download, BarChart3, Table as TableIcon } from 'lucide-react';
 import { exportToPDF } from '@/lib/pdfExport';
 import {
   TransaccionMensualData,
@@ -122,7 +129,7 @@ const MOCK_DATA: TransaccionMensualData[] = [
     trxAuthCon3DS: 7000,
     pctAutenticadoCon3DS: 70.00,
     aprobadoCon3DS: 75.20,
-    aprobacionFinal: 78.80
+    aprobacionFinal: 82.50
   },
   {
     id: '2',
@@ -135,7 +142,7 @@ const MOCK_DATA: TransaccionMensualData[] = [
     trxAuthCon3DS: 7689,
     pctAutenticadoCon3DS: 70.00,
     aprobadoCon3DS: 82.50,
-    aprobacionFinal: 86.10
+    aprobacionFinal: 89.20
   },
   {
     id: '3',
@@ -148,7 +155,7 @@ const MOCK_DATA: TransaccionMensualData[] = [
     trxAuthCon3DS: 8400,
     pctAutenticadoCon3DS: 70.00,
     aprobadoCon3DS: 83.10,
-    aprobacionFinal: 87.00
+    aprobacionFinal: 89.80
   },
   {
     id: '4',
@@ -161,7 +168,7 @@ const MOCK_DATA: TransaccionMensualData[] = [
     trxAuthCon3DS: 7700,
     pctAutenticadoCon3DS: 70.00,
     aprobadoCon3DS: 78.50,
-    aprobacionFinal: 81.30
+    aprobacionFinal: 84.60
   },
   {
     id: '5',
@@ -174,7 +181,7 @@ const MOCK_DATA: TransaccionMensualData[] = [
     trxAuthCon3DS: 9100,
     pctAutenticadoCon3DS: 70.00,
     aprobadoCon3DS: 84.20,
-    aprobacionFinal: 87.50
+    aprobacionFinal: 90.30
   },
   {
     id: '6',
@@ -187,7 +194,7 @@ const MOCK_DATA: TransaccionMensualData[] = [
     trxAuthCon3DS: 9800,
     pctAutenticadoCon3DS: 70.00,
     aprobadoCon3DS: 85.30,
-    aprobacionFinal: 88.20
+    aprobacionFinal: 91.10
   },
   {
     id: '7',
@@ -200,7 +207,7 @@ const MOCK_DATA: TransaccionMensualData[] = [
     trxAuthCon3DS: 10500,
     pctAutenticadoCon3DS: 70.00,
     aprobadoCon3DS: 86.00,
-    aprobacionFinal: 88.50
+    aprobacionFinal: 91.40
   },
   {
     id: '8',
@@ -213,7 +220,7 @@ const MOCK_DATA: TransaccionMensualData[] = [
     trxAuthCon3DS: 9800,
     pctAutenticadoCon3DS: 70.00,
     aprobadoCon3DS: 85.50,
-    aprobacionFinal: 88.50
+    aprobacionFinal: 91.20
   },
   {
     id: '9',
@@ -226,7 +233,7 @@ const MOCK_DATA: TransaccionMensualData[] = [
     trxAuthCon3DS: 9100,
     pctAutenticadoCon3DS: 70.00,
     aprobadoCon3DS: 84.80,
-    aprobacionFinal: 88.20
+    aprobacionFinal: 90.80
   },
   {
     id: '10',
@@ -239,7 +246,7 @@ const MOCK_DATA: TransaccionMensualData[] = [
     trxAuthCon3DS: 8400,
     pctAutenticadoCon3DS: 70.00,
     aprobadoCon3DS: 83.90,
-    aprobacionFinal: 87.70
+    aprobacionFinal: 90.50
   },
   {
     id: '11',
@@ -252,7 +259,7 @@ const MOCK_DATA: TransaccionMensualData[] = [
     trxAuthCon3DS: 7700,
     pctAutenticadoCon3DS: 70.00,
     aprobadoCon3DS: 76.20,
-    aprobacionFinal: 80.30
+    aprobacionFinal: 83.80
   },
   {
     id: '12',
@@ -265,7 +272,7 @@ const MOCK_DATA: TransaccionMensualData[] = [
     trxAuthCon3DS: 7000,
     pctAutenticadoCon3DS: 70.00,
     aprobadoCon3DS: 77.80,
-    aprobacionFinal: 81.90
+    aprobacionFinal: 85.20
   }
 ];
 
@@ -277,13 +284,14 @@ export function AprobacionDashboard() {
     from: new Date(2026, 0, 1),
     to: new Date(2026, 11, 31)
   });
+  const [showChart, setShowChart] = useState(false);
 
-  // Filter columns based on active tab (remove 3DS columns for AFOPS)
+  // Filter columns based on active tab (remove 3DS columns and retry for AFOPS)
   const visibleColumns = useMemo(() => {
     if (selectedSource === 'MIT' && activeTab === 'afops') {
-      // Remove 3DS-related columns for AFOPS tab
+      // Remove 3DS-related columns and retry column for AFOPS tab
       return COLUMNS.filter(
-        col => !['trxAuthCon3DS', 'pctAutenticadoCon3DS', 'aprobadoCon3DS'].includes(col.key as string)
+        col => !['aprobacionRetry', 'trxAuthCon3DS', 'pctAutenticadoCon3DS', 'aprobadoCon3DS'].includes(col.key as string)
       );
     }
     return COLUMNS;
@@ -293,14 +301,20 @@ export function AprobacionDashboard() {
   const stats = useMemo(() => {
     const totalTransacciones = data.reduce((sum, d) => sum + d.trxEnviadasTotales, 0);
     const transaccionesEnviadas3DS = data.reduce((sum, d) => sum + d.trxAuthCon3DS, 0);
+    const transaccionesAprobadas = data.reduce((sum, d) => sum + d.trxAprobadasTotales, 0);
     const aprobacionCompuesta = data.reduce((sum, d) => sum + d.aprobacionCompuesta, 0) / data.length;
     const aprobacion3DS = data.reduce((sum, d) => sum + d.aprobadoCon3DS, 0) / data.length;
+    const aprobacionBase = data.reduce((sum, d) => sum + d.aprobacionBase, 0) / data.length;
+    const aprobacionFinal = data.reduce((sum, d) => sum + d.aprobacionFinal, 0) / data.length;
 
     return {
       totalTransacciones,
       transaccionesEnviadas3DS,
+      transaccionesAprobadas,
       aprobacionCompuesta,
-      aprobacion3DS
+      aprobacion3DS,
+      aprobacionBase,
+      aprobacionFinal
     };
   }, [data]);
 
@@ -347,12 +361,48 @@ export function AprobacionDashboard() {
   };
 
   return (
-    <div className="w-full h-full py-8 px-4 flex flex-col gap-8">
+    <div className="w-full py-8 px-4 flex flex-col gap-8">
       {/* Dashboard Title and Filter */}
-      <div className="flex-shrink-0 flex items-center justify-between">
-        <h1 className="text-3xl font-bold text-zinc-900 dark:text-zinc-50">
-          Dashboard de Aprobación
-        </h1>
+      <div className="w-full flex-shrink-0 flex items-center justify-between">
+        <div className="flex items-center gap-4">
+          <h1 className="text-3xl font-bold text-zinc-900 dark:text-zinc-50">
+            Dashboard de Aprobación
+          </h1>
+          <TooltipProvider>
+            <Tooltip>
+              <TooltipTrigger asChild>
+                <Button
+                  variant="outline"
+                  size="icon"
+                  onClick={() => setShowChart(!showChart)}
+                >
+                  {showChart ? (
+                    <TableIcon className="h-4 w-4" />
+                  ) : (
+                    <BarChart3 className="h-4 w-4" />
+                  )}
+                </Button>
+              </TooltipTrigger>
+              <TooltipContent>
+                <p>{showChart ? 'Ver Tabla' : 'Ver Gráfica'}</p>
+              </TooltipContent>
+            </Tooltip>
+            <Tooltip>
+              <TooltipTrigger asChild>
+                <Button
+                  variant="outline"
+                  size="icon"
+                  onClick={handleExportPDF}
+                >
+                  <Download className="h-4 w-4" />
+                </Button>
+              </TooltipTrigger>
+              <TooltipContent>
+                <p>Exportar PDF</p>
+              </TooltipContent>
+            </Tooltip>
+          </TooltipProvider>
+        </div>
         <div className="flex items-center gap-4">
           {selectedSource === 'MIT' && (
             <Tabs value={activeTab} onValueChange={(value) => setActiveTab(value as 'general' | 'afops')}>
@@ -370,53 +420,100 @@ export function AprobacionDashboard() {
             selectedSource={selectedSource}
             onSourceChange={setSelectedSource}
           />
-          <Button
-            variant="outline"
-            onClick={handleExportPDF}
-            className="gap-2"
-          >
-            <Download className="h-4 w-4" />
-            Exportar PDF
-          </Button>
         </div>
       </div>
 
       {/* Statistics Cards */}
-      <div className="grid grid-cols-1 md:grid-cols-4 gap-4 flex-shrink-0">
-        <div className="bg-white dark:bg-zinc-900 p-6 rounded-lg border border-zinc-200 dark:border-zinc-800">
-          <p className="text-sm font-medium text-zinc-600 dark:text-zinc-400">Aprobación Compuesta</p>
-          <p className="text-2xl font-bold text-green-600 dark:text-green-400 mt-2">
-            {stats.aprobacionCompuesta.toFixed(2)}%
-          </p>
-        </div>
-        <div className="bg-white dark:bg-zinc-900 p-6 rounded-lg border border-zinc-200 dark:border-zinc-800">
-          <p className="text-sm font-medium text-zinc-600 dark:text-zinc-400">Aprobación 3DS</p>
-          <p className="text-2xl font-bold text-blue-600 dark:text-blue-400 mt-2">
-            {stats.aprobacion3DS.toFixed(2)}%
-          </p>
-        </div>
-        <div className="bg-white dark:bg-zinc-900 p-6 rounded-lg border border-zinc-200 dark:border-zinc-800">
-          <p className="text-sm font-medium text-zinc-600 dark:text-zinc-400">Transacciones Totales</p>
-          <p className="text-2xl font-bold text-zinc-900 dark:text-zinc-50 mt-2">
-            {stats.totalTransacciones.toLocaleString('es-MX')}
-          </p>
-        </div>
-        <div className="bg-white dark:bg-zinc-900 p-6 rounded-lg border border-zinc-200 dark:border-zinc-800">
-          <p className="text-sm font-medium text-zinc-600 dark:text-zinc-400">Transacciones Enviadas a 3DS Totales</p>
-          <p className="text-2xl font-bold text-purple-600 dark:text-purple-400 mt-2">
-            {stats.transaccionesEnviadas3DS.toLocaleString('es-MX')}
-          </p>
-        </div>
+      <div className="w-full grid grid-cols-1 md:grid-cols-4 gap-4 flex-shrink-0">
+        {selectedSource === 'MIT' && activeTab === 'afops' ? (
+          // AFOPS-specific cards (no 3DS metrics)
+          <>
+            <div className="bg-white dark:bg-zinc-900 p-6 rounded-lg border border-zinc-200 dark:border-zinc-800">
+              <p className="text-sm font-medium text-zinc-600 dark:text-zinc-400">Aprobación Base</p>
+              <p className="text-2xl font-bold text-green-600 dark:text-green-400 mt-2">
+                {stats.aprobacionBase.toFixed(2)}%
+              </p>
+            </div>
+            <div className="bg-white dark:bg-zinc-900 p-6 rounded-lg border border-zinc-200 dark:border-zinc-800">
+              <p className="text-sm font-medium text-zinc-600 dark:text-zinc-400">Aprobación Final</p>
+              <p className="text-2xl font-bold text-orange-600 dark:text-orange-400 mt-2">
+                {stats.aprobacionFinal.toFixed(2)}%
+              </p>
+            </div>
+            <div className="bg-white dark:bg-zinc-900 p-6 rounded-lg border border-zinc-200 dark:border-zinc-800">
+              <p className="text-sm font-medium text-zinc-600 dark:text-zinc-400">Transacciones Aprobadas Totales</p>
+              <p className="text-2xl font-bold text-blue-600 dark:text-blue-400 mt-2">
+                {stats.transaccionesAprobadas.toLocaleString('es-MX')}
+              </p>
+            </div>
+            <div className="bg-white dark:bg-zinc-900 p-6 rounded-lg border border-zinc-200 dark:border-zinc-800">
+              <p className="text-sm font-medium text-zinc-600 dark:text-zinc-400">Transacciones Enviadas Totales</p>
+              <p className="text-2xl font-bold text-zinc-900 dark:text-zinc-50 mt-2">
+                {stats.totalTransacciones.toLocaleString('es-MX')}
+              </p>
+            </div>
+          </>
+        ) : (
+          // General cards (default with 3DS metrics)
+          <>
+            <div className="bg-white dark:bg-zinc-900 p-6 rounded-lg border border-zinc-200 dark:border-zinc-800">
+              <p className="text-sm font-medium text-zinc-600 dark:text-zinc-400">Aprobación Compuesta</p>
+              <p className="text-2xl font-bold text-green-600 dark:text-green-400 mt-2">
+                {stats.aprobacionCompuesta.toFixed(2)}%
+              </p>
+            </div>
+            <div className="bg-white dark:bg-zinc-900 p-6 rounded-lg border border-zinc-200 dark:border-zinc-800">
+              <p className="text-sm font-medium text-zinc-600 dark:text-zinc-400">Aprobación 3DS</p>
+              <p className="text-2xl font-bold text-blue-600 dark:text-blue-400 mt-2">
+                {stats.aprobacion3DS.toFixed(2)}%
+              </p>
+            </div>
+            <div className="bg-white dark:bg-zinc-900 p-6 rounded-lg border border-zinc-200 dark:border-zinc-800">
+              <p className="text-sm font-medium text-zinc-600 dark:text-zinc-400">Transacciones Totales</p>
+              <p className="text-2xl font-bold text-zinc-900 dark:text-zinc-50 mt-2">
+                {stats.totalTransacciones.toLocaleString('es-MX')}
+              </p>
+            </div>
+            <div className="bg-white dark:bg-zinc-900 p-6 rounded-lg border border-zinc-200 dark:border-zinc-800">
+              <p className="text-sm font-medium text-zinc-600 dark:text-zinc-400">Transacciones Enviadas a 3DS Totales</p>
+              <p className="text-2xl font-bold text-purple-600 dark:text-purple-400 mt-2">
+                {stats.transaccionesEnviadas3DS.toLocaleString('es-MX')}
+              </p>
+            </div>
+          </>
+        )}
       </div>
 
-      {/* Table Section */}
-      <div className="flex-1 min-h-0">
-        <AprobacionTable
-          data={data}
-          columns={visibleColumns}
-          totals={totals}
-        />
-      </div>
+      {/* Chart or Table Section */}
+      {showChart ? (
+        <div className="w-full flex-shrink-0">
+          <AprobacionD3Chart
+            data={data}
+            config={{
+              metrics: selectedSource === 'MIT' && activeTab === 'afops'
+                ? [
+                    {
+                      key: 'aprobacionFinal',
+                      label: 'Aprobación Final',
+                      color: 'hsl(24.6 95% 53.1%)', // orange-600
+                      type: 'area',
+                      fillOpacity: 0.3,
+                      strokeWidth: 2
+                    }
+                  ]
+                : undefined // Use default metrics
+            }}
+          />
+        </div>
+      ) : (
+        <div className="w-full flex-shrink-0">
+          <AprobacionTable
+            data={data}
+            columns={visibleColumns}
+            totals={totals}
+          />
+        </div>
+      )}
     </div>
   );
 }
