@@ -1,0 +1,1 @@
+export { MatrizSeguimiento } from './MatrizSeguimiento';

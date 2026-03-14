@@ -82,7 +82,7 @@ export function useWaterfallData(
       end: data.aprobacionFinal,
       type: contribution3DS >= 0 ? 'increase' : 'decrease',
       color: contribution3DS >= 0
-        ? 'hsl(262.1 83.3% 57.8%)' // purple-600
+        ? 'hsl(328 100% 45%)' // fuchsia (Aeromexico)
         : 'hsl(0 84.2% 60.2%)' // red-600
     });
     cumulative = data.aprobacionFinal;

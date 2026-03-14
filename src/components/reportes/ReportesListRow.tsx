@@ -89,7 +89,7 @@ export function ReportesListRow({
   // Type Badge Renderer
   const getTypeBadge = (type: ReportType) => {
     const baseClasses = "inline-flex items-center rounded-full px-2.5 py-0.5 text-xs font-semibold";
-    const variant = "bg-purple-100 text-purple-800 dark:bg-purple-900 dark:text-purple-200";
+    const variant = "bg-fuchsia-100 text-fuchsia-800 dark:bg-fuchsia-900 dark:text-fuchsia-200";
 
     const labels = {
       [ReportType.FINANCIAL]: "Financiero",

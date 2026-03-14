@@ -40,7 +40,7 @@ const DEFAULT_METRICS: ChartMetric[] = [
   {
     key: 'aprobacionCompuesta',
     label: 'Aprobación Compuesta',
-    color: 'hsl(262.1 83.3% 57.8%)', // purple-600
+    color: 'hsl(328 100% 45%)', // fuchsia (Aeroméxico)
     type: 'area',
     fillOpacity: 0.3,
     strokeWidth: 2

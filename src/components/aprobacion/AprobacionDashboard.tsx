@@ -476,7 +476,7 @@ export function AprobacionDashboard() {
             </div>
             <div className="bg-white dark:bg-zinc-900 p-6 rounded-lg border border-zinc-200 dark:border-zinc-800">
               <p className="text-sm font-medium text-zinc-600 dark:text-zinc-400">Transacciones Enviadas a 3DS Totales</p>
-              <p className="text-2xl font-bold text-purple-600 dark:text-purple-400 mt-2">
+              <p className="text-2xl font-bold text-fuchsia-600 dark:text-fuchsia-400 mt-2">
                 {stats.transaccionesEnviadas3DS.toLocaleString('es-MX')}
               </p>
             </div>

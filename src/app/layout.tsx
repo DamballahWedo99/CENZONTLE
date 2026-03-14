@@ -5,6 +5,8 @@ import { SidebarProvider } from "@/components/ui/sidebar";
 import { ConditionalSidebar } from "@/components/conditional-sidebar";
 import { DashboardHeader } from "@/components/dashboard-header";
 import { ThemeProvider } from "@/components/theme-provider";
+import { BreadcrumbProvider } from "@/context/BreadcrumbContext";
+import { HeaderActionsProvider } from "@/context/HeaderActionsContext";
 
 const geistSans = Geist({
   variable: "--font-geist-sans",
@@ -37,17 +39,19 @@ export default function RootLayout({
           enableSystem
           disableTransitionOnChange
         >
-          <SidebarProvider defaultOpen={false}>
-            <ConditionalSidebar />
-            <div className="flex flex-1 flex-col w-full h-screen overflow-hidden">
-              {/* Dashboard Header with Sidebar Toggle & Theme Toggle */}
-              <DashboardHeader />
-
-              <main className="flex-1 w-full overflow-x-hidden overflow-y-auto">
-                {children}
-              </main>
-            </div>
-          </SidebarProvider>
+          <BreadcrumbProvider>
+            <HeaderActionsProvider>
+              <SidebarProvider defaultOpen={false}>
+                <ConditionalSidebar />
+                <div className="flex flex-1 flex-col w-full h-screen overflow-hidden">
+                  <DashboardHeader />
+                  <main className="flex-1 w-full overflow-x-hidden overflow-y-auto">
+                    {children}
+                  </main>
+                </div>
+              </SidebarProvider>
+            </HeaderActionsProvider>
+          </BreadcrumbProvider>
         </ThemeProvider>
       </body>
     </html>

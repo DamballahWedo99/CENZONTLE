@@ -7,6 +7,9 @@ import { usePathname } from "next/navigation"
 import {
   FileCheck,
   FileText,
+  FolderKanban,
+  Grid3X3,
+  History,
   LogOut,
 } from "lucide-react"
 
@@ -49,6 +52,27 @@ const navigationItems = [
     url: "/reportes",
     icon: FileText,
     description: "Reportes y análisis",
+  },
+]
+
+const proyectosItems = [
+  {
+    title: "Proyectos",
+    url: "/proyectos",
+    icon: FolderKanban,
+    description: "Dashboard de proyectos",
+  },
+  {
+    title: "Matriz",
+    url: "/proyectos/matriz",
+    icon: Grid3X3,
+    description: "Matriz de proyectos",
+  },
+  {
+    title: "Changelog",
+    url: "/proyectos/changelog",
+    icon: History,
+    description: "Historial de cambios",
   },
 ]
 
@@ -114,6 +138,29 @@ export function AppSidebar({ ...props }: React.ComponentProps<typeof Sidebar>) {
           <SidebarGroupContent>
             <SidebarMenu>
               {navigationItems.map((item) => (
+                <SidebarMenuItem key={item.url}>
+                  <SidebarMenuButton
+                    asChild
+                    isActive={pathname === item.url}
+                    className="transition-all duration-300 hover:scale-105 hover:bg-accent/50"
+                    tooltip={item.title}
+                  >
+                    <Link href={item.url}>
+                      <item.icon className="h-4 w-4" />
+                      <span className="flex-1">{item.title}</span>
+                    </Link>
+                  </SidebarMenuButton>
+                </SidebarMenuItem>
+              ))}
+            </SidebarMenu>
+          </SidebarGroupContent>
+        </SidebarGroup>
+
+        <SidebarGroup>
+          <SidebarGroupLabel>Proyectos</SidebarGroupLabel>
+          <SidebarGroupContent>
+            <SidebarMenu>
+              {proyectosItems.map((item) => (
                 <SidebarMenuItem key={item.url}>
                   <SidebarMenuButton
                     asChild
