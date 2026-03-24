@@ -221,10 +221,12 @@ export function AnalysisChartSelector({ selected, onChange }: AnalysisChartSelec
             return (
               <div key={category}>
                 {/* Category header — clickable to expand */}
-                <button
-                  type="button"
+                <div
+                  role="button"
+                  tabIndex={0}
                   onClick={() => setExpandedCategory(isExpanded ? null : category)}
-                  className={`flex items-center gap-2 w-full rounded-md px-2 py-1.5 text-left transition-colors ${
+                  onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); setExpandedCategory(isExpanded ? null : category); } }}
+                  className={`flex items-center gap-2 w-full rounded-md px-2 py-1.5 text-left transition-colors cursor-pointer ${
                     isExpanded
                       ? `${colors.bg}`
                       : 'hover:bg-muted/50'
@@ -285,7 +287,7 @@ export function AnalysisChartSelector({ selected, onChange }: AnalysisChartSelec
                   ) : (
                     <ChevronRight className="h-3 w-3 text-muted-foreground shrink-0" />
                   )}
-                </button>
+                </div>
 
                 {/* Expanded items */}
                 {isExpanded && (

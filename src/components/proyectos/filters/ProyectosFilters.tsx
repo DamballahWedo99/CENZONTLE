@@ -14,9 +14,10 @@ interface FilterDropdownProps {
   options: { value: string; label: string; color?: string }[];
   selected: string[];
   onToggle: (value: string) => void;
+  portalContainer?: HTMLElement | null;
 }
 
-function FilterDropdown({ label, options, selected, onToggle }: FilterDropdownProps) {
+function FilterDropdown({ label, options, selected, onToggle, portalContainer }: FilterDropdownProps) {
   const count = selected.length;
 
   return (
@@ -31,7 +32,7 @@ function FilterDropdown({ label, options, selected, onToggle }: FilterDropdownPr
           )}
         </Button>
       </PopoverTrigger>
-      <PopoverContent className="w-52 p-2" align="start">
+      <PopoverContent className="w-52 p-2" align="start" container={portalContainer}>
         <fieldset>
           <legend className="sr-only">Filtrar por {label}</legend>
           <div className="space-y-1">
@@ -86,7 +87,7 @@ const PRIORITY_LABELS: Record<Priority, string> = {
   [Priority.Low]: 'Baja',
 };
 
-export function ProyectosFilters() {
+export function ProyectosFilters({ portalContainer }: { portalContainer?: HTMLElement | null } = {}) {
   const {
     filters,
     setFilter,
@@ -148,6 +149,7 @@ export function ProyectosFilters() {
         options={initiativeOptions}
         selected={filters.initiativeIds}
         onToggle={(v) => toggleArrayFilter('initiativeIds', v)}
+        portalContainer={portalContainer}
       />
 
       <FilterDropdown
@@ -155,6 +157,7 @@ export function ProyectosFilters() {
         options={podOptions}
         selected={filters.podIds}
         onToggle={(v) => toggleArrayFilter('podIds', v)}
+        portalContainer={portalContainer}
       />
 
       <FilterDropdown
@@ -162,6 +165,7 @@ export function ProyectosFilters() {
         options={poOptions}
         selected={filters.productOwnerIds}
         onToggle={(v) => toggleArrayFilter('productOwnerIds', v)}
+        portalContainer={portalContainer}
       />
 
       <FilterDropdown
@@ -169,6 +173,7 @@ export function ProyectosFilters() {
         options={statusOptions}
         selected={filters.statuses}
         onToggle={(v) => toggleArrayFilter('statuses', v)}
+        portalContainer={portalContainer}
       />
 
       <FilterDropdown
@@ -176,6 +181,7 @@ export function ProyectosFilters() {
         options={epicStatusOptions}
         selected={filters.epicStatuses}
         onToggle={(v) => toggleArrayFilter('epicStatuses', v)}
+        portalContainer={portalContainer}
       />
 
       <FilterDropdown
@@ -183,6 +189,7 @@ export function ProyectosFilters() {
         options={priorityOptions}
         selected={filters.priorities}
         onToggle={(v) => toggleArrayFilter('priorities', v)}
+        portalContainer={portalContainer}
       />
 
       {hasActiveFilters && (

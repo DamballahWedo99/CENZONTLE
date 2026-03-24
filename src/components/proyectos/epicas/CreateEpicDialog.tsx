@@ -61,7 +61,6 @@ export function CreateEpicDialog({ open, onOpenChange }: CreateEpicDialogProps) 
   const handleSubmit = () => {
     if (!canSubmit) return;
 
-    const nextKey = state.epics.length + 101;
     const now = new Date().toISOString();
 
     const newEpic: Epic = {
@@ -82,15 +81,18 @@ export function CreateEpicDialog({ open, onOpenChange }: CreateEpicDialogProps) 
       thirdPartyDependencies: thirdPartyDependencies.trim(),
       documents: [],
       diagrams: [],
+      dependencies: [],
       poApproval: null,
       tlApproval: null,
       qaMatrix: null,
       qaApproval: null,
+      epicQAMatrix: null,
+
       status: EpicStatus.Draft,
       priority,
       initiativeId,
       podIds: selectedPodIds,
-      jiraKey: `GAM-${nextKey}`,
+      jiraKey: null,
       startDate: startDate || now.split('T')[0],
       targetDate: targetDate || '',
       createdAt: now,

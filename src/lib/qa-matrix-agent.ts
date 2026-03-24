@@ -7,7 +7,7 @@
  * templates and generating realistic QA test cases.
  */
 
-import { Epic, UserStory, QAMatrix, QAMatrixRow, QATestCase, TestCasePriority } from '@/types/proyectos';
+import { Epic, UserStory, QAMatrix, QAMatrixRow, QATestCase, TestCasePriority, EpicQAMatrix, EpicQATest, EpicQATestCategory, GherkinScenario } from '@/types/proyectos';
 
 const testCaseTemplates: Record<string, { title: string; steps: string[]; expectedResult: string; priority: TestCasePriority }[]> = {
   pago: [
@@ -97,6 +97,10 @@ function generateTestCasesForStory(story: UserStory, storyIndex: number): QATest
       status: 'pending',
       priority: template.priority,
       assignedTo: null,
+      automationStatus: 'to_automate',
+      linkedDefects: [],
+      executionHistory: [],
+      trend: null,
     });
   }
 
@@ -114,6 +118,10 @@ function generateTestCasesForStory(story: UserStory, storyIndex: number): QATest
       status: 'pending',
       priority: defaultCase.priority,
       assignedTo: null,
+      automationStatus: 'to_automate',
+      linkedDefects: [],
+      executionHistory: [],
+      trend: null,
     });
   }
 
@@ -132,6 +140,10 @@ function generateTestCasesForStory(story: UserStory, storyIndex: number): QATest
         status: 'pending',
         priority: defaultCase.priority,
         assignedTo: null,
+        automationStatus: 'to_automate',
+        linkedDefects: [],
+        executionHistory: [],
+        trend: null,
       });
     }
   }
@@ -150,7 +162,7 @@ export async function generateQAMatrix(epic: Epic, stories: UserStory[]): Promis
     return {
       storyId: story.id,
       storyTitle: story.title,
-      storyJiraKey: story.jiraKey,
+      storyJiraKey: story.jiraKey ?? '',
       acceptanceCriteria: story.po.acceptanceCriteria,
       testCases,
       coverage: 0, // All test cases start as pending, so 0% coverage
@@ -163,6 +175,204 @@ export async function generateQAMatrix(epic: Epic, stories: UserStory[]): Promis
     id: `qa-matrix-${Date.now()}-${Math.random().toString(36).substring(2, 7)}`,
     epicId: epic.id,
     rows,
+    generatedAt: now,
+    generatedBy: 'ai',
+    updatedAt: now,
+  };
+}
+
+// === EPIC-LEVEL (SYSTEMIC) QA GENERATION ===
+
+const epicTestTemplates: Record<string, Record<EpicQATestCategory, { title: string; scenarios: string[]; priority: TestCasePriority }[]>> = {
+  pago: {
+    integration: [
+      { title: 'Integración gateway de pagos con servicio de órdenes', scenarios: ['Crear orden → procesar pago → confirmar orden', 'Pago fallido → orden cancelada automáticamente', 'Webhook de confirmación actualiza estado de orden'], priority: 'critical' },
+      { title: 'Integración con servicio de notificaciones post-pago', scenarios: ['Pago exitoso → email de confirmación', 'Pago fallido → email con instrucciones', 'Reembolso → notificación al cliente'], priority: 'high' },
+    ],
+    e2e: [
+      { title: 'Flujo completo de compra: selección → checkout → pago → confirmación', scenarios: ['Usuario selecciona producto, completa datos, paga con tarjeta y recibe confirmación', 'Usuario con carrito múltiple, aplica cupón, paga y verifica montos', 'Usuario invitado vs registrado completa el mismo flujo'], priority: 'critical' },
+    ],
+    performance: [
+      { title: 'Procesamiento de pagos bajo carga concurrente', scenarios: ['100 transacciones simultáneas con tiempo de respuesta < 3s', 'Pico de 500 usuarios en checkout sin degradación', 'Throughput mínimo de 50 TPS sostenido'], priority: 'high' },
+    ],
+    security: [
+      { title: 'Cumplimiento PCI-DSS en manejo de datos de tarjeta', scenarios: ['Datos de tarjeta nunca almacenados en logs', 'Tokenización antes de transmisión', 'Encriptación TLS 1.3 en todas las comunicaciones'], priority: 'critical' },
+      { title: 'Prevención de fraude y doble cobro', scenarios: ['Idempotencia en procesamiento de pagos', 'Detección de patrones sospechosos', 'Rate limiting por usuario en endpoint de pago'], priority: 'critical' },
+    ],
+    compatibility: [
+      { title: 'Checkout funcional en principales navegadores y dispositivos', scenarios: ['Chrome, Firefox, Safari, Edge en desktop', 'Safari iOS, Chrome Android en mobile', 'Formulario de pago responsive en todas las resoluciones'], priority: 'high' },
+    ],
+    reliability: [
+      { title: 'Resiliencia ante caída de procesador de pagos', scenarios: ['Failover a procesador secundario < 5s', 'Cola de reintentos para pagos pendientes', 'Recuperación automática al restaurar servicio'], priority: 'critical' },
+    ],
+    safety: [
+      { title: 'Validar protecciones contra cobros duplicados', scenarios: ['Idempotencia en reintentos de pago', 'Bloqueo de doble-click en botón de pagar', 'Confirmación obligatoria antes de procesar pago'], priority: 'critical' },
+    ],
+    usability: [
+      { title: 'Validar experiencia de checkout accesible', scenarios: ['Formulario de pago navegable por teclado', 'Mensajes de error descriptivos y accesibles', 'Indicadores visuales de progreso del pago'], priority: 'medium' },
+    ],
+    maintainability: [
+      { title: 'Validar modularidad del módulo de pagos', scenarios: ['Procesadores de pago intercambiables via interfaz', 'Tests unitarios del módulo de pagos > 80%', 'Documentación OpenAPI actualizada'], priority: 'medium' },
+    ],
+  },
+  plataforma: {
+    integration: [
+      { title: 'Integración entre microservicios del ecosistema', scenarios: ['Comunicación API-to-API entre servicios core', 'Contratos OpenAPI validados entre consumer y provider', 'Circuit breaker activado ante fallo de dependencia'], priority: 'critical' },
+    ],
+    e2e: [
+      { title: 'Flujo principal de usuario en la plataforma', scenarios: ['Login → navegación → acción principal → logout', 'Onboarding de nuevo usuario completo', 'Flujo de autoservicio sin intervención humana'], priority: 'critical' },
+    ],
+    performance: [
+      { title: 'Rendimiento de la plataforma bajo carga esperada', scenarios: ['P95 latencia < 2s para endpoints principales', 'Core Web Vitals: LCP < 2.5s, FID < 100ms, CLS < 0.1', 'Tiempo de carga inicial < 3s en conexión 3G'], priority: 'high' },
+    ],
+    security: [
+      { title: 'Auditoría de seguridad de la plataforma', scenarios: ['OWASP Top 10 sin vulnerabilidades críticas', 'Headers de seguridad configurados (CSP, HSTS, X-Frame)', 'Autenticación y autorización validadas en todos los endpoints'], priority: 'critical' },
+    ],
+    compatibility: [
+      { title: 'Compatibilidad cross-browser y cross-device', scenarios: ['Funcionalidad completa en últimas 2 versiones de browsers principales', 'Diseño responsive funcional en mobile, tablet y desktop', 'Accesibilidad WCAG 2.1 AA en flujos principales'], priority: 'high' },
+    ],
+    reliability: [
+      { title: 'Alta disponibilidad de la plataforma', scenarios: ['Uptime > 99.9% medido mensualmente', 'Recuperación ante fallo < 5 minutos (RTO)', 'Pérdida de datos < 1 minuto (RPO)'], priority: 'high' },
+    ],
+    safety: [
+      { title: 'Validar protecciones operativas de la plataforma', scenarios: ['Operaciones admin requieren 2FA', 'Límites de rate configurables por endpoint', 'Alertas automáticas ante comportamiento anómalo'], priority: 'high' },
+    ],
+    usability: [
+      { title: 'Validar experiencia de usuario inclusiva', scenarios: ['WCAG 2.1 AA en todos los flujos principales', 'Soporte para lectores de pantalla', 'Internacionalización correcta en todos los textos'], priority: 'medium' },
+    ],
+    maintainability: [
+      { title: 'Validar mantenibilidad de la plataforma', scenarios: ['Cobertura de tests > 75%', 'Complejidad ciclomática < 15 por función', 'Zero warnings en linter/type-check'], priority: 'medium' },
+    ],
+  },
+};
+
+const defaultEpicTestTemplates: Record<EpicQATestCategory, { title: string; scenarios: string[]; priority: TestCasePriority }[]> = {
+  integration: [
+    { title: 'Validar integración entre componentes de la épica', scenarios: ['Comunicación correcta entre módulos', 'Manejo de errores en comunicación inter-módulo', 'Consistencia de datos entre componentes'], priority: 'high' },
+  ],
+  e2e: [
+    { title: 'Validar flujo de usuario end-to-end', scenarios: ['Flujo principal (happy path) completo', 'Flujos alternativos y excepcionales', 'Flujo con datos límite'], priority: 'critical' },
+  ],
+  performance: [
+    { title: 'Validar rendimiento bajo carga esperada', scenarios: ['Tiempos de respuesta dentro de SLA bajo carga normal', 'Comportamiento bajo pico de carga (2x normal)', 'Sin memory leaks en operación prolongada'], priority: 'medium' },
+  ],
+  security: [
+    { title: 'Validar controles de seguridad', scenarios: ['Autenticación requerida en endpoints protegidos', 'Autorización basada en roles funcional', 'Datos sensibles encriptados en tránsito y reposo'], priority: 'high' },
+  ],
+  compatibility: [
+    { title: 'Validar compatibilidad cross-platform', scenarios: ['Funcionalidad en navegadores principales', 'Diseño responsive en diferentes resoluciones'], priority: 'medium' },
+  ],
+  reliability: [
+    { title: 'Validar resiliencia ante fallos', scenarios: ['Recuperación automática ante fallo de dependencia', 'Degradación graceful cuando un servicio no está disponible'], priority: 'high' },
+  ],
+  safety: [
+    { title: 'Validar restricciones operativas y fail-safe', scenarios: ['Operaciones destructivas requieren confirmación', 'Rollback automático ante estado inconsistente', 'Advertencias claras antes de acciones irreversibles'], priority: 'high' },
+  ],
+  usability: [
+    { title: 'Validar accesibilidad y experiencia de usuario', scenarios: ['Navegación completa por teclado', 'Cumplimiento WCAG 2.1 AA en flujos principales', 'Contraste y legibilidad en modo claro y oscuro'], priority: 'medium' },
+  ],
+  maintainability: [
+    { title: 'Validar testabilidad y modularidad del código', scenarios: ['Cobertura de tests unitarios > 70%', 'Sin dependencias circulares entre módulos', 'APIs documentadas con contratos OpenAPI'], priority: 'medium' },
+  ],
+};
+
+function findBestEpicTemplate(epic: Epic): Record<EpicQATestCategory, { title: string; scenarios: string[]; priority: TestCasePriority }[]> | null {
+  const text = (epic.title + ' ' + epic.description + ' ' + epic.scopeDescription).toLowerCase();
+  let bestKey: string | null = null;
+  let bestScore = 0;
+
+  for (const key of Object.keys(epicTestTemplates)) {
+    const regex = new RegExp(key, 'gi');
+    const matches = text.match(regex);
+    const score = matches ? matches.length : 0;
+    if (score > bestScore) {
+      bestScore = score;
+      bestKey = key;
+    }
+  }
+
+  return bestKey && bestScore > 0 ? epicTestTemplates[bestKey] : null;
+}
+
+function scenarioToGherkin(scenario: string, index: number): GherkinScenario {
+  // Parse "X → Y → Z" patterns into Given/When/Then
+  const parts = scenario.split('→').map(s => s.trim());
+  if (parts.length >= 3) {
+    return {
+      id: `gherkin-${Date.now()}-${index}-${Math.random().toString(36).slice(2, 5)}`,
+      name: parts[0],
+      given: parts[0],
+      when: parts[1],
+      then: parts[parts.length - 1],
+      tags: [],
+    };
+  }
+  // Parse "X con Y" or single statement
+  return {
+    id: `gherkin-${Date.now()}-${index}-${Math.random().toString(36).slice(2, 5)}`,
+    name: scenario.slice(0, 60),
+    given: 'El sistema está en estado operativo',
+    when: scenario,
+    then: 'El resultado es el esperado',
+    tags: [],
+  };
+}
+
+/** Simulates an AI agent generating an epic-level (systemic) QA matrix from an epic's context. */
+export async function generateEpicQAMatrix(epic: Epic): Promise<EpicQAMatrix> {
+  // Simulate AI thinking time (2-4s)
+  await new Promise((resolve) => setTimeout(resolve, 2000 + Math.random() * 2000));
+
+  const matchedTemplate = findBestEpicTemplate(epic);
+  const template = matchedTemplate ?? defaultEpicTestTemplates;
+
+  const tests: EpicQATest[] = [];
+  const categories: EpicQATestCategory[] = ['integration', 'e2e', 'performance', 'security', 'compatibility', 'reliability', 'safety', 'usability', 'maintainability'];
+  let testIdx = 0;
+
+  for (const category of categories) {
+    const categoryTests = template[category] ?? defaultEpicTestTemplates[category];
+    for (const t of categoryTests) {
+      tests.push({
+        id: `epic-tc-${Date.now()}-${++testIdx}`,
+        category,
+        title: t.title,
+        description: `Test sistémico de ${category} para: ${epic.title}`,
+        scenarios: t.scenarios,
+        gherkinScenarios: t.scenarios.map((s, sIdx) => scenarioToGherkin(s, sIdx)),
+        dependencies: [],
+        status: 'pending',
+        priority: t.priority,
+        assignedTo: null,
+        automationStatus: category === 'e2e' || category === 'integration' ? 'to_automate' : 'manual',
+        linkedDefects: [],
+        riskLikelihood: t.priority === 'critical' ? 4 : t.priority === 'high' ? 3 : 2,
+        riskImpact: t.priority === 'critical' ? 5 : t.priority === 'high' ? 4 : 3,
+        executionHistory: [],
+        trend: null,
+      });
+    }
+  }
+
+  const nfrCoverage: Record<EpicQATestCategory, number> = {
+    integration: 0,
+    e2e: 0,
+    performance: 0,
+    security: 0,
+    compatibility: 0,
+    reliability: 0,
+    safety: 0,
+    usability: 0,
+    maintainability: 0,
+  };
+
+  const now = new Date().toISOString();
+
+  return {
+    id: `epic-qa-matrix-${Date.now()}-${Math.random().toString(36).substring(2, 7)}`,
+    epicId: epic.id,
+    tests,
+    nfrCoverage,
     generatedAt: now,
     generatedBy: 'ai',
     updatedAt: now,

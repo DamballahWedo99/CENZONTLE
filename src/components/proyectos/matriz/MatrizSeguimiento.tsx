@@ -90,7 +90,7 @@ export function MatrizSeguimiento() {
                       <td className="p-3 sticky left-0 bg-background z-10">
                         <div className="flex flex-col">
                           <span className="font-mono text-xs text-muted-foreground">
-                            {row.epic.jiraKey}
+                            {row.epic.jiraKey ?? '—'}
                           </span>
                           <span className="font-medium text-sm truncate max-w-[220px]">
                             {row.epic.title}
@@ -174,7 +174,7 @@ export function MatrizSeguimiento() {
                                     role="listitem"
                                   >
                                     <span className="font-mono text-muted-foreground shrink-0">
-                                      {story.jiraKey}
+                                      {story.jiraKey ?? '—'}
                                     </span>
                                     <span className="truncate flex-1">{story.title}</span>
                                     <StoryPointsBadge points={story.storyPoints} />

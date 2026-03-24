@@ -29,7 +29,7 @@ export function DiagramFullPage({ epicId }: DiagramFullPageProps) {
         </Link>
         <span className="text-muted-foreground/40">/</span>
         <Link href={`/proyectos/epicas/${epicId}?tab=diagramas`} className="font-mono text-xs rounded-md bg-muted px-2 py-0.5 text-muted-foreground hover:text-foreground transition-colors">
-          {rawEpic.jiraKey}
+          {rawEpic.jiraKey ?? rawEpic.title}
         </Link>
         <span className="text-muted-foreground/40">/</span>
         <span className="text-foreground">Diagrama</span>
@@ -76,7 +76,7 @@ export function DiagramFullPage({ epicId }: DiagramFullPageProps) {
             </Link>
           </Button>
           <div className="flex items-center gap-2">
-            <span className="text-xs font-mono text-muted-foreground">{rawEpic.jiraKey}</span>
+            <span className="text-xs font-mono text-muted-foreground">{rawEpic.jiraKey ?? '—'}</span>
             <span className="text-muted-foreground/30">·</span>
             <span className="text-sm font-medium">Diagrama de Negocio</span>
           </div>

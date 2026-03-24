@@ -28,7 +28,7 @@ const docTemplates: Record<DocType, { name: string; sections: (epic: Epic) => Ep
   'release-notes': {
     name: 'Notas de Release',
     sections: (epic) => [
-      { id: 's1', title: 'Release', content: `# ${epic.title}\n\nVersión: 1.0\nFecha: ${epic.targetDate}\nJira: ${epic.jiraKey}` },
+      { id: 's1', title: 'Release', content: `# ${epic.title}\n\nVersión: 1.0\nFecha: ${epic.targetDate}${epic.jiraKey ? `\nJira: ${epic.jiraKey}` : ''}` },
       { id: 's2', title: 'Descripción del Cambio', content: epic.description },
       { id: 's3', title: 'Beneficios', content: `**Cualitativos:**\n${epic.qualitativeBenefits || 'N/A'}\n\n**Cuantitativos:**\n${epic.quantitativeBenefits || 'N/A'}` },
       { id: 's4', title: 'Canales Impactados', content: epic.impactedChannels || 'Todos los canales.' },
@@ -87,7 +87,7 @@ export async function generateDocument(epic: Epic, docType: DocType): Promise<Ep
 
   return {
     id: `doc-ai-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
-    name: `${template.name} — ${epic.jiraKey}`,
+    name: `${template.name}${epic.jiraKey ? ` — ${epic.jiraKey}` : ''}`,
     type: 'other' as const,
     url: '#',
     uploadedBy: 'Agente IA',

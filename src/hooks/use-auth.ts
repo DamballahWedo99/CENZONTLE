@@ -1,39 +1,31 @@
 /**
  * useAuth Hook
  *
- * Authentication hook for user management
- * Mock implementation - replace with real auth logic when backend is ready
+ * Thin wrapper around AuthContext for backward compatibility.
+ * Components that only need user + logout can keep using this hook.
  */
 
 'use client';
 
-import { useState } from 'react';
-
-interface User {
-  name: string;
-  email: string;
-  avatar?: string;
-}
+import { useAuthContext } from '@/context/AuthContext';
 
 export function useAuth() {
-  // Mock user data - replace with real authentication
-  const [user] = useState<User>({
-    name: 'Usuario Aeroméxico',
-    email: 'usuario@aeromexico.com',
-    avatar: '/avatars/user.jpg'
-  });
+  const { currentUser, logout } = useAuthContext();
 
-  const logout = () => {
-    // Mock logout - replace with real logout logic
-    console.log('Logging out...');
-    // In a real implementation, this would:
-    // - Clear auth tokens
-    // - Redirect to login page
-    // - Clear user session
-  };
+  const user = currentUser
+    ? {
+        name: currentUser.name,
+        email: currentUser.email,
+        avatar: currentUser.avatarUrl || '/avatars/user.jpg',
+      }
+    : {
+        name: 'Usuario',
+        email: 'user@aeromexico.com',
+        avatar: '/avatars/user.jpg',
+      };
 
   return {
     user,
-    logout
+    logout,
   };
 }

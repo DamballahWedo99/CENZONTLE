@@ -36,6 +36,7 @@ import {
   generateAnalysisFromPrompt,
 } from '@/lib/economic-analysis-agent';
 import { AnalysisChartSelector } from './AnalysisChartSelector';
+import { InlineEpicCreator } from './InlineEpicCreator';
 import {
   Calendar,
   Pencil,
@@ -49,6 +50,7 @@ import {
   ChevronRight,
   Sparkles,
   Loader2,
+  Plus,
   BriefcaseBusiness,
   Brain,
   Paperclip,
@@ -121,6 +123,7 @@ function InitiativeFullPageInner({ initiativeId }: InitiativeFullPageProps) {
   const [editTargetDate, setEditTargetDate] = useState('');
   const [activeTab, setActiveTab] = useState('descripcion');
   const [isGeneratingEpics, setIsGeneratingEpics] = useState(false);
+  const [isCreatingEpic, setIsCreatingEpic] = useState(false);
   const [copilotOpen, setCopilotOpen] = useState(false);
   const [copilotWidth, setCopilotWidth] = useState(420);
 
@@ -542,22 +545,36 @@ function InitiativeFullPageInner({ initiativeId }: InitiativeFullPageProps) {
 
             {/* ── Tab: Épicas ── */}
             <TabsContent value="epicas" className="mt-8 space-y-4">
-              {/* AI Generate button — shown when no epics exist */}
-              {epics.length === 0 && !isGeneratingEpics && (
-                <div className="flex items-center justify-between">
-                  <div />
+              {/* Header with count + action buttons */}
+              <div className="flex items-center justify-between">
+                <p className="text-sm text-muted-foreground">
+                  {epics.length} {epics.length === 1 ? 'épica' : 'épicas'}
+                </p>
+                <div className="flex gap-2">
+                  {epics.length === 0 && !isGeneratingEpics && (
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      onClick={handleGenerateEpics}
+                      disabled={isGeneratingEpics}
+                      className="gap-1.5 text-xs"
+                    >
+                      <Sparkles className="h-3.5 w-3.5" />
+                      Generar con IA
+                    </Button>
+                  )}
                   <Button
-                    variant="outline"
                     size="sm"
-                    onClick={handleGenerateEpics}
-                    disabled={isGeneratingEpics}
-                    className="gap-2"
+                    variant="outline"
+                    onClick={() => setIsCreatingEpic(true)}
+                    disabled={isCreatingEpic}
+                    className="gap-1.5 text-xs"
                   >
-                    <Sparkles className="h-3.5 w-3.5" />
-                    Generar Épicas con IA
+                    <Plus className="h-3.5 w-3.5" />
+                    Agregar épica
                   </Button>
                 </div>
-              )}
+              </div>
 
               {isGeneratingEpics && (
                 <div className="flex items-center gap-3 rounded-lg bg-muted/50 px-4 py-3 text-sm">
@@ -568,52 +585,74 @@ function InitiativeFullPageInner({ initiativeId }: InitiativeFullPageProps) {
                 </div>
               )}
 
-              <div className="space-y-2">
-                {epics.length === 0 && !isGeneratingEpics ? (
-                  <div className="rounded-xl border-2 border-dashed py-12 flex flex-col items-center gap-3 text-center">
-                    <Layers className="h-8 w-8 text-muted-foreground/30" />
-                    <p className="text-sm text-muted-foreground">No hay épicas asociadas a esta iniciativa</p>
-                    <p className="text-xs text-muted-foreground max-w-sm">
-                      Usa el botón &quot;Generar Épicas con IA&quot; para crear épicas automáticamente basadas en la descripción de la iniciativa
-                    </p>
-                  </div>
-                ) : epics.length === 0 ? null : (
-                  epics.map((epic) => {
-                    const epicStories = state.stories.filter((s) => s.epicId === epic.id);
-                    const epicDone = epicStories.filter((s) => s.status === StoryStatus.Done).length;
-                    const epicProgress = epicStories.length > 0 ? Math.round((epicDone / epicStories.length) * 100) : 0;
-                    const epicPods = state.pods.filter((p) => epic.podIds.includes(p.id));
-                    const epicPoints = epicStories.reduce((sum, s) => sum + s.storyPoints, 0);
+              {/* Epic list */}
+              {!isCreatingEpic && (
+                <div className="space-y-2">
+                  {epics.length === 0 && !isGeneratingEpics ? (
+                    <div className="rounded-xl border-2 border-dashed py-12 flex flex-col items-center gap-3 text-center">
+                      <Layers className="h-8 w-8 text-muted-foreground/30" />
+                      <p className="text-sm text-muted-foreground">No hay épicas asociadas a esta iniciativa</p>
+                      <p className="text-xs text-muted-foreground max-w-sm">
+                        Usa el botón &quot;Agregar épica&quot; para crear una nueva, o &quot;Generar con IA&quot; para crearlas automáticamente
+                      </p>
+                    </div>
+                  ) : epics.length === 0 ? null : (
+                    epics.map((epic) => {
+                      const epicStories = state.stories.filter((s) => s.epicId === epic.id);
+                      const epicDone = epicStories.filter((s) => s.status === StoryStatus.Done).length;
+                      const epicProgress = epicStories.length > 0 ? Math.round((epicDone / epicStories.length) * 100) : 0;
+                      const epicPods = state.pods.filter((p) => epic.podIds.includes(p.id));
+                      const epicPoints = epicStories.reduce((sum, s) => sum + s.storyPoints, 0);
 
-                    return (
-                      <div
-                        key={epic.id}
-                        className="rounded-lg border hover:bg-muted/30 transition-colors cursor-pointer"
-                        onClick={() => router.push(`/proyectos/epicas/${epic.id}`)}
-                      >
-                        <div className="flex items-center gap-3 px-4 py-3">
-                          <span className="font-mono text-xs text-muted-foreground w-20 shrink-0">{epic.jiraKey}</span>
-                          <span className="truncate flex-1 text-sm font-medium">{epic.title}</span>
-                          <div className="flex gap-1 shrink-0">
-                            {epicPods.map((pod) => (
-                              <PodBadge key={pod.id} name={pod.name} color={pod.color} />
-                            ))}
+                      return (
+                        <div
+                          key={epic.id}
+                          className="rounded-lg border hover:bg-muted/30 transition-colors cursor-pointer"
+                          onClick={() => router.push(`/proyectos/epicas/${epic.id}`)}
+                        >
+                          <div className="flex items-center gap-3 px-4 py-3">
+                            <span className="font-mono text-xs text-muted-foreground w-20 shrink-0">{epic.jiraKey ?? '—'}</span>
+                            <span className="truncate flex-1 text-sm font-medium">{epic.title}</span>
+                            <div className="flex gap-1 shrink-0">
+                              {epicPods.slice(0, 2).map((pod) => (
+                                <PodBadge key={pod.id} name={pod.name} color={pod.color} />
+                              ))}
+                              {epicPods.length > 2 && (
+                                <span className="inline-flex items-center rounded-md bg-muted px-1.5 py-0.5 text-xs font-medium text-muted-foreground whitespace-nowrap">
+                                  +{epicPods.length - 2}
+                                </span>
+                              )}
+                            </div>
+                            <StatusBadge status={epic.status} type="epic" />
+                            <StoryPointsBadge points={epicPoints} />
+                            <div className="w-24 shrink-0">
+                              <ProgressBar progress={epicProgress} size="sm" showLabel={false} />
+                            </div>
+                            <span className="text-xs text-muted-foreground tabular-nums w-12 text-right shrink-0">
+                              {epicDone}/{epicStories.length}
+                            </span>
+                            <ChevronRight className="h-4 w-4 text-muted-foreground shrink-0" />
                           </div>
-                          <StatusBadge status={epic.status} type="epic" />
-                          <StoryPointsBadge points={epicPoints} />
-                          <div className="w-24 shrink-0">
-                            <ProgressBar progress={epicProgress} size="sm" showLabel={false} />
-                          </div>
-                          <span className="text-xs text-muted-foreground tabular-nums w-12 text-right shrink-0">
-                            {epicDone}/{epicStories.length}
-                          </span>
-                          <ChevronRight className="h-4 w-4 text-muted-foreground shrink-0" />
                         </div>
-                      </div>
-                    );
-                  })
-                )}
-              </div>
+                      );
+                    })
+                  )}
+                </div>
+              )}
+
+              {/* Inline epic creator — Notion-style */}
+              {isCreatingEpic && (
+                <InlineEpicCreator
+                  initiativeId={initiative.id}
+                  pods={state.pods}
+                  existingEpicCount={state.epics.length}
+                  onCreateEpic={(epic) => {
+                    dispatch({ type: 'CREATE_EPIC', payload: epic });
+                    setIsCreatingEpic(false);
+                  }}
+                  onCancel={() => setIsCreatingEpic(false)}
+                />
+              )}
             </TabsContent>
 
             {/* ── Tab: Resumen ── */}
@@ -704,7 +743,7 @@ function InitiativeFullPageInner({ initiativeId }: InitiativeFullPageProps) {
 
                       return (
                         <div key={epic.id} className="flex items-center gap-3">
-                          <span className="font-mono text-xs text-muted-foreground w-16 shrink-0">{epic.jiraKey}</span>
+                          <span className="font-mono text-xs text-muted-foreground w-16 shrink-0">{epic.jiraKey ?? '—'}</span>
                           <span className="text-sm truncate flex-1 min-w-0">{epic.title}</span>
                           <div className="w-32 shrink-0">
                             <ProgressBar progress={epicProgress} size="sm" />

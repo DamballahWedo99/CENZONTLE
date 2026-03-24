@@ -33,6 +33,8 @@ import { StoryPointsBadge } from '../shared/StoryPointsBadge';
 import { EpicDiagrams } from './EpicDiagrams';
 import { EpicQAMatrix } from './EpicQAMatrix';
 import { EpicDocuments } from './EpicDocuments';
+import { EpicDependencies } from './EpicDependencies';
+import { IntegrationSettingsDialog } from '../settings/IntegrationSettingsDialog';
 import { EpicStoryList } from './EpicStoryList';
 import { CopilotSidebar } from '../shared/CopilotSidebar';
 import { getSuggestedPrompts, type CopilotContext } from '@/lib/doc-copilot-agent';
@@ -59,6 +61,8 @@ import {
   ListChecks,
   ClipboardCheck,
   Brain,
+  GitBranch,
+  Upload,
 } from 'lucide-react';
 
 // --- Changelog helpers ---
@@ -266,6 +270,7 @@ function EpicFullPageInner({ epicId }: { epicId: string }) {
   }, [rawEpic, state.initiatives, state.pods, state.stories]);
 
   const [isEditing, setIsEditing] = useState(false);
+  const [showIntegrationDialog, setShowIntegrationDialog] = useState(false);
   const [editTitle, setEditTitle] = useState('');
   const [editDescription, setEditDescription] = useState('');
   const [editStatus, setEditStatus] = useState<EpicStatus>(EpicStatus.Draft);
@@ -319,7 +324,7 @@ function EpicFullPageInner({ epicId }: { epicId: string }) {
   const tlApproval = rawEpic?.tlApproval ?? null;
   const isTlApproved = tlApproval?.status === 'approved';
 
-  const hasQAMatrix = rawEpic?.qaMatrix != null;
+  const hasQAMatrix = rawEpic?.qaMatrix != null || rawEpic?.epicQAMatrix != null;
   const qaApproval = rawEpic?.qaApproval ?? null;
   const isQaApproved = qaApproval?.status === 'approved';
 
@@ -346,10 +351,10 @@ function EpicFullPageInner({ epicId }: { epicId: string }) {
     {
       id: 'diagram',
       label: 'Diagrama de negocio',
-      description: hasBusinessDiagram ? 'Diagrama generado' : definitionComplete ? 'Genera el diagrama con IA' : 'Requiere definición completa',
+      description: hasBusinessDiagram ? 'Diagrama generado' : 'Genera el diagrama con IA',
       completed: hasBusinessDiagram,
       active: activeTab === 'diagramas',
-      locked: !definitionComplete,
+      locked: false,
     },
     {
       id: 'tl-approval',
@@ -358,24 +363,20 @@ function EpicFullPageInner({ epicId }: { epicId: string }) {
         ? 'Diagrama aprobado por TL'
         : tlApproval?.status === 'rejected'
           ? 'Diagrama rechazado — edita y solicita nueva revisión'
-          : hasBusinessDiagram
-            ? 'Pendiente de aprobación del Technical Leader'
-            : 'Requiere diagrama de negocio',
+          : 'Pendiente de aprobación del Technical Leader',
       completed: isTlApproved,
       active: activeTab === 'diagramas',
-      locked: !hasBusinessDiagram,
+      locked: false,
     },
     {
       id: 'stories',
       label: 'Historias de usuario',
       description: hasStories
         ? `${epic?.stories.length} historias generadas`
-        : isTlApproved
-          ? 'Genera historias con el agente IA'
-          : 'Requiere aprobación del TL',
+        : 'Genera historias con el agente IA',
       completed: hasStories,
       active: activeTab === 'historias',
-      locked: !isTlApproved,
+      locked: false,
     },
     {
       id: 'approval',
@@ -384,38 +385,32 @@ function EpicFullPageInner({ epicId }: { epicId: string }) {
         ? 'Historias aprobadas'
         : poApproval?.status === 'rejected'
           ? 'Historias rechazadas — modifica y solicita nueva revisión'
-          : hasStories
-            ? 'Pendiente de aprobación'
-            : 'Requiere historias de usuario',
+          : 'Pendiente de aprobación',
       completed: isApproved,
       active: false,
-      locked: !hasStories,
+      locked: false,
     },
     {
       id: 'qa-matrix',
       label: 'Matriz de QA',
       description: hasQAMatrix
-        ? `${rawEpic!.qaMatrix!.rows.reduce((s, r) => s + r.testCases.length, 0)} casos de prueba`
-        : isApproved
-          ? 'Genera la matriz de trazabilidad QA con IA'
-          : 'Requiere aprobación del PO',
+        ? `${(rawEpic!.epicQAMatrix?.tests.length ?? 0)} tests sistémicos · ${(rawEpic!.qaMatrix?.rows.reduce((s, r) => s + r.testCases.length, 0) ?? 0)} funcionales`
+        : 'Genera las matrices de QA sistémico y funcional con IA',
       completed: hasQAMatrix,
       active: activeTab === 'matrices-qa',
-      locked: !isApproved,
+      locked: false,
     },
     {
       id: 'qa-approval',
       label: 'Visto bueno de QA',
       description: isQaApproved
-        ? 'Matriz QA aprobada'
+        ? 'QA aprobado'
         : qaApproval?.status === 'rejected'
-          ? 'Matriz rechazada — edita y solicita nueva revisión'
-          : hasQAMatrix
-            ? 'Pendiente de aprobación de QA'
-            : 'Requiere matriz de QA',
+          ? 'QA rechazado — edita y solicita nueva revisión'
+          : 'Pendiente de aprobación de QA',
       completed: isQaApproved,
       active: activeTab === 'matrices-qa',
-      locked: !hasQAMatrix,
+      locked: false,
     },
   ];
 
@@ -542,8 +537,12 @@ function EpicFullPageInner({ epicId }: { epicId: string }) {
           Proyectos
         </Link>
         <span className="text-muted-foreground/40">/</span>
-        <span className="font-mono text-xs rounded-md bg-muted px-2 py-0.5 text-muted-foreground">{epic.jiraKey}</span>
-        <span className="text-muted-foreground/40">/</span>
+        {epic.jiraKey && (
+          <>
+            <span className="font-mono text-xs rounded-md bg-muted px-2 py-0.5 text-muted-foreground">{epic.jiraKey}</span>
+            <span className="text-muted-foreground/40">/</span>
+          </>
+        )}
         <span className="text-foreground truncate max-w-[300px]">{epic.title}</span>
       </div>
     );
@@ -664,14 +663,28 @@ function EpicFullPageInner({ epicId }: { epicId: string }) {
           {showChecklist && (
             <div className="mt-4 animate-in slide-in-from-top-2 fade-in duration-200">
               <ProtocolChecklist steps={checklistSteps} onStepClick={handleChecklistClick} />
-              {isApproved && (
-                <div className="mt-3 rounded-xl border border-green-200 dark:border-green-800 bg-green-50 dark:bg-green-950/20 p-3 flex items-center gap-3">
-                  <ShieldCheck className="h-5 w-5 text-green-600 dark:text-green-400 shrink-0" />
-                  <div>
-                    <p className="text-xs font-semibold text-green-700 dark:text-green-400">Épica Lista</p>
-                    <p className="text-[11px] text-green-600/80 dark:text-green-400/60">Protocolo completo y aprobado</p>
+              {completedStepsCount === checklistSteps.length && (
+                <>
+                  <div className="mt-3 rounded-xl border border-green-200 dark:border-green-800 bg-green-50 dark:bg-green-950/20 p-3 flex items-center gap-3">
+                    <ShieldCheck className="h-5 w-5 text-green-600 dark:text-green-400 shrink-0" />
+                    <div className="flex-1">
+                      <p className="text-xs font-semibold text-green-700 dark:text-green-400">Épica Lista</p>
+                      <p className="text-[11px] text-green-600/80 dark:text-green-400/60">Protocolo completo y aprobado</p>
+                    </div>
+                    <Button
+                      size="sm"
+                      onClick={() => setShowIntegrationDialog(true)}
+                      className="gap-1.5 bg-green-600 hover:bg-green-700 text-white shrink-0"
+                    >
+                      <Upload className="h-3.5 w-3.5" />
+                      Subir tarjetas
+                    </Button>
                   </div>
-                </div>
+                  <IntegrationSettingsDialog
+                    open={showIntegrationDialog}
+                    onOpenChange={setShowIntegrationDialog}
+                  />
+                </>
               )}
             </div>
           )}
@@ -803,34 +816,32 @@ function EpicFullPageInner({ epicId }: { epicId: string }) {
                 </TabsTrigger>
                 <TabsTrigger
                   value="diagramas"
-                  disabled={!definitionComplete}
-                  className="gap-1.5 rounded-none border-b-2 border-transparent data-[state=active]:border-foreground data-[state=active]:shadow-none disabled:opacity-40"
+                  className="gap-1.5 rounded-none border-b-2 border-transparent data-[state=active]:border-foreground data-[state=active]:shadow-none"
                 >
                   <Network className="h-3.5 w-3.5" />
                   Diagrama
-                  {!definitionComplete && <Lock className="h-3 w-3 ml-0.5" />}
                 </TabsTrigger>
                 <TabsTrigger
                   value="historias"
-                  disabled={!isTlApproved}
-                  className="gap-1.5 rounded-none border-b-2 border-transparent data-[state=active]:border-foreground data-[state=active]:shadow-none disabled:opacity-40"
+                  className="gap-1.5 rounded-none border-b-2 border-transparent data-[state=active]:border-foreground data-[state=active]:shadow-none"
                 >
                   <BookOpen className="h-3.5 w-3.5" />
                   Historias ({epic.stories.length})
-                  {!isTlApproved && <Lock className="h-3 w-3 ml-0.5" />}
                 </TabsTrigger>
                 <TabsTrigger
                   value="matrices-qa"
-                  disabled={!isApproved}
-                  className="gap-1.5 rounded-none border-b-2 border-transparent data-[state=active]:border-foreground data-[state=active]:shadow-none disabled:opacity-40"
+                  className="gap-1.5 rounded-none border-b-2 border-transparent data-[state=active]:border-foreground data-[state=active]:shadow-none"
                 >
                   <ClipboardCheck className="h-3.5 w-3.5" />
                   Matrices QA
-                  {!isApproved && <Lock className="h-3 w-3 ml-0.5" />}
                 </TabsTrigger>
                 <TabsTrigger value="documentos" className="gap-1.5 rounded-none border-b-2 border-transparent data-[state=active]:border-foreground data-[state=active]:shadow-none">
                   <Paperclip className="h-3.5 w-3.5" />
                   Documentos ({epic.documents.length})
+                </TabsTrigger>
+                <TabsTrigger value="dependencias" className="gap-1.5 rounded-none border-b-2 border-transparent data-[state=active]:border-foreground data-[state=active]:shadow-none">
+                  <GitBranch className="h-3.5 w-3.5" />
+                  Dependencias ({(epic.dependencies ?? []).length})
                 </TabsTrigger>
                 <TabsTrigger value="changelog" className="gap-1.5 rounded-none border-b-2 border-transparent data-[state=active]:border-foreground data-[state=active]:shadow-none">
                   <History className="h-3.5 w-3.5" />
@@ -1091,6 +1102,13 @@ function EpicFullPageInner({ epicId }: { epicId: string }) {
                   onQaReject={(comment) =>
                     dispatch({ type: 'REJECT_EPIC_QA', payload: { epicId: rawEpic!.id, qaName: 'QA Lead', comment } })
                   }
+                  epicQAMatrix={rawEpic!.epicQAMatrix}
+                  onEpicMatrixGenerated={(matrix) =>
+                    dispatch({ type: 'SAVE_EPIC_QA_MATRIX', payload: { epicId: rawEpic!.id, matrix } })
+                  }
+                  onEpicMatrixEdited={(matrix) =>
+                    dispatch({ type: 'UPDATE_EPIC_QA_MATRIX', payload: { epicId: rawEpic!.id, matrix } })
+                  }
                 />
               </TabsContent>
 
@@ -1103,6 +1121,16 @@ function EpicFullPageInner({ epicId }: { epicId: string }) {
                   onDocumentUpdated={(doc) => dispatch({ type: 'UPDATE_EPIC_DOCUMENT', payload: { epicId: rawEpic!.id, document: doc } })}
                   onDocumentDeleted={(docId) => dispatch({ type: 'DELETE_EPIC_DOCUMENT', payload: { epicId: rawEpic!.id, documentId: docId } })}
                   onDocumentAdded={(doc) => dispatch({ type: 'ADD_EPIC_DOCUMENT', payload: { epicId: rawEpic!.id, document: doc } })}
+                />
+              </TabsContent>
+
+              {/* ── Dependencias ── */}
+              <TabsContent value="dependencias" className="mt-8">
+                <EpicDependencies
+                  epic={epic}
+                  onAddDependency={(dep) => dispatch({ type: 'ADD_EPIC_DEPENDENCY', payload: { epicId: rawEpic!.id, dependency: dep } })}
+                  onUpdateDependency={(dep) => dispatch({ type: 'UPDATE_EPIC_DEPENDENCY', payload: { epicId: rawEpic!.id, dependency: dep } })}
+                  onDeleteDependency={(depId) => dispatch({ type: 'DELETE_EPIC_DEPENDENCY', payload: { epicId: rawEpic!.id, dependencyId: depId } })}
                 />
               </TabsContent>
 
@@ -1190,7 +1218,7 @@ function EpicFullPageInner({ epicId }: { epicId: string }) {
         suggestedPrompts={getSuggestedPrompts('epic')}
         title="Copilot de Épica"
         description="Pregunta sobre historias, arquitectura, QA o genera documentación basada en el contexto completo de la épica."
-        contextLabel={`${rawEpic!.jiraKey} · ${rawEpic!.title}`}
+        contextLabel={rawEpic!.jiraKey ? `${rawEpic!.jiraKey} · ${rawEpic!.title}` : rawEpic!.title}
         onDocumentAccepted={(doc) =>
           dispatch({ type: 'ADD_EPIC_DOCUMENT', payload: { epicId: rawEpic!.id, document: doc } })
         }

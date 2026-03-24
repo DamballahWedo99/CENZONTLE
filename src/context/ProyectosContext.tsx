@@ -3,12 +3,13 @@
 import React, { createContext, useContext, useReducer, useMemo, ReactNode } from 'react';
 import {
   Initiative, Epic, UserStory, Pod, ProductOwner, Sprint, ChangelogEntry,
+  SprintCeremony,
   ProyectosFilters, DEFAULT_FILTERS, EpicWithRelations, MatrizRow, MatrizCell,
-  StoryStatus, EpicStatus, ChangelogAction, ChangelogEntityType, QAMatrix,
+  StoryStatus, EpicStatus, ChangelogAction, ChangelogEntityType, QAMatrix, EpicQAMatrix,
 } from '@/types/proyectos';
 import {
   mockInitiatives, mockEpics, mockStories, mockPods,
-  mockProductOwners, mockSprints, mockChangelog,
+  mockProductOwners, mockSprints, mockChangelog, mockCeremonies,
 } from '@/data/mock/proyectos';
 
 // === STATE ===
@@ -19,6 +20,7 @@ interface ProyectosState {
   pods: Pod[];
   productOwners: ProductOwner[];
   sprints: Sprint[];
+  ceremonies: SprintCeremony[];
   changelog: ChangelogEntry[];
   filters: ProyectosFilters;
   activeTab: 'overview' | 'epicas' | 'historias';
@@ -32,6 +34,7 @@ const initialState: ProyectosState = {
   pods: mockPods,
   productOwners: mockProductOwners,
   sprints: mockSprints,
+  ceremonies: mockCeremonies,
   changelog: mockChangelog,
   filters: DEFAULT_FILTERS,
   activeTab: 'overview',
@@ -86,12 +89,17 @@ type ProyectosAction =
   | { type: 'UPDATE_QA_MATRIX'; payload: { epicId: string; matrix: QAMatrix } }
   | { type: 'APPROVE_EPIC_QA'; payload: { epicId: string; qaName: string } }
   | { type: 'REJECT_EPIC_QA'; payload: { epicId: string; qaName: string; comment: string } }
+  | { type: 'SAVE_EPIC_QA_MATRIX'; payload: { epicId: string; matrix: EpicQAMatrix } }
+  | { type: 'UPDATE_EPIC_QA_MATRIX'; payload: { epicId: string; matrix: EpicQAMatrix } }
   | { type: 'ADD_EPIC_DOCUMENT'; payload: { epicId: string; document: import('@/types/proyectos').EpicDocument } }
   | { type: 'UPDATE_EPIC_DOCUMENT'; payload: { epicId: string; document: import('@/types/proyectos').EpicDocument } }
   | { type: 'DELETE_EPIC_DOCUMENT'; payload: { epicId: string; documentId: string } }
   | { type: 'ADD_INITIATIVE_DOCUMENT'; payload: { initiativeId: string; document: import('@/types/proyectos').EpicDocument } }
   | { type: 'UPDATE_INITIATIVE_DOCUMENT'; payload: { initiativeId: string; document: import('@/types/proyectos').EpicDocument } }
   | { type: 'DELETE_INITIATIVE_DOCUMENT'; payload: { initiativeId: string; documentId: string } }
+  | { type: 'ADD_EPIC_DEPENDENCY'; payload: { epicId: string; dependency: import('@/types/proyectos').EpicDependency } }
+  | { type: 'UPDATE_EPIC_DEPENDENCY'; payload: { epicId: string; dependency: import('@/types/proyectos').EpicDependency } }
+  | { type: 'DELETE_EPIC_DEPENDENCY'; payload: { epicId: string; dependencyId: string } }
   | { type: 'SET_CURRENT_USER'; payload: string };
 
 function proyectosReducer(state: ProyectosState, action: ProyectosAction): ProyectosState {
@@ -391,6 +399,24 @@ function proyectosReducer(state: ProyectosState, action: ProyectosAction): Proye
         changelog: [changelogEntry, ...state.changelog],
       };
     }
+    case 'SAVE_EPIC_QA_MATRIX': {
+      const { epicId, matrix } = action.payload;
+      return {
+        ...state,
+        epics: state.epics.map((e) =>
+          e.id === epicId ? { ...e, epicQAMatrix: matrix, updatedAt: new Date().toISOString() } : e
+        ),
+      };
+    }
+    case 'UPDATE_EPIC_QA_MATRIX': {
+      const { epicId, matrix } = action.payload;
+      return {
+        ...state,
+        epics: state.epics.map((e) =>
+          e.id === epicId ? { ...e, epicQAMatrix: matrix, qaApproval: null, updatedAt: new Date().toISOString() } : e
+        ),
+      };
+    }
     case 'ADD_EPIC_DOCUMENT': {
       const { epicId, document } = action.payload;
       const epic = state.epics.find((e) => e.id === epicId);
@@ -483,6 +509,59 @@ function proyectosReducer(state: ProyectosState, action: ProyectosAction): Proye
         changelog: [changelogEntry, ...state.changelog],
       };
     }
+    case 'ADD_EPIC_DEPENDENCY': {
+      const { epicId, dependency } = action.payload;
+      const epic = state.epics.find((e) => e.id === epicId);
+      if (!epic) return state;
+      const changelogEntry = createChangelogEntry(
+        ChangelogEntityType.Epic, epicId, epic.title,
+        ChangelogAction.Created, 'dependencia', null, dependency.targetEpicId,
+      );
+      return {
+        ...state,
+        epics: state.epics.map((e) =>
+          e.id === epicId ? { ...e, dependencies: [...e.dependencies, dependency], updatedAt: new Date().toISOString() } : e
+        ),
+        changelog: [changelogEntry, ...state.changelog],
+      };
+    }
+    case 'UPDATE_EPIC_DEPENDENCY': {
+      const { epicId, dependency } = action.payload;
+      const epic = state.epics.find((e) => e.id === epicId);
+      if (!epic) return state;
+      const changelogEntry = createChangelogEntry(
+        ChangelogEntityType.Epic, epicId, epic.title,
+        ChangelogAction.Updated, 'dependencia', null, dependency.targetEpicId,
+      );
+      return {
+        ...state,
+        epics: state.epics.map((e) =>
+          e.id === epicId
+            ? { ...e, dependencies: e.dependencies.map((d) => d.id === dependency.id ? dependency : d), updatedAt: new Date().toISOString() }
+            : e
+        ),
+        changelog: [changelogEntry, ...state.changelog],
+      };
+    }
+    case 'DELETE_EPIC_DEPENDENCY': {
+      const { epicId, dependencyId } = action.payload;
+      const epic = state.epics.find((e) => e.id === epicId);
+      if (!epic) return state;
+      const dep = epic.dependencies.find((d) => d.id === dependencyId);
+      const changelogEntry = createChangelogEntry(
+        ChangelogEntityType.Epic, epicId, epic.title,
+        ChangelogAction.Deleted, 'dependencia', dep?.targetEpicId ?? dependencyId, null,
+      );
+      return {
+        ...state,
+        epics: state.epics.map((e) =>
+          e.id === epicId
+            ? { ...e, dependencies: e.dependencies.filter((d) => d.id !== dependencyId), updatedAt: new Date().toISOString() }
+            : e
+        ),
+        changelog: [changelogEntry, ...state.changelog],
+      };
+    }
     case 'SET_CURRENT_USER':
       return { ...state, currentUserId: action.payload };
     default:
@@ -527,7 +606,7 @@ export function ProyectosProvider({ children }: { children: ReactNode }) {
         if (!epic || !filters.initiativeIds.includes(epic.initiativeId)) return false;
       }
       if (filters.podIds.length > 0 && !filters.podIds.includes(story.podId)) return false;
-      if (filters.productOwnerIds.length > 0 && !filters.productOwnerIds.includes(story.productOwnerId)) return false;
+      if (filters.productOwnerIds.length > 0 && (!story.productOwnerId || !filters.productOwnerIds.includes(story.productOwnerId))) return false;
       if (filters.statuses.length > 0 && !filters.statuses.includes(story.status)) return false;
       if (filters.priorities.length > 0) {
         const epic = state.epics.find((e) => e.id === story.epicId);
@@ -540,7 +619,7 @@ export function ProyectosProvider({ children }: { children: ReactNode }) {
         const q = filters.searchQuery.toLowerCase();
         if (!story.title.toLowerCase().includes(q) && !story.description.toLowerCase().includes(q)) return false;
       }
-      if (filters.jiraKey && !story.jiraKey.toLowerCase().includes(filters.jiraKey.toLowerCase())) return false;
+      if (filters.jiraKey && (!story.jiraKey || !story.jiraKey.toLowerCase().includes(filters.jiraKey.toLowerCase()))) return false;
       return true;
     });
   }, [state]);
@@ -556,7 +635,7 @@ export function ProyectosProvider({ children }: { children: ReactNode }) {
         const q = filters.searchQuery.toLowerCase();
         if (!epic.title.toLowerCase().includes(q) && !epic.description.toLowerCase().includes(q)) return false;
       }
-      if (filters.jiraKey && !epic.jiraKey.toLowerCase().includes(filters.jiraKey.toLowerCase())) return false;
+      if (filters.jiraKey && (!epic.jiraKey || !epic.jiraKey.toLowerCase().includes(filters.jiraKey.toLowerCase()))) return false;
       return true;
     });
   }, [state]);

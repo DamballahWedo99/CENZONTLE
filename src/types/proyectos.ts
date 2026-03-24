@@ -89,6 +89,38 @@ export interface EpicDiagram {
 
 export type TestCaseStatus = 'pending' | 'passed' | 'failed' | 'blocked' | 'skipped';
 export type TestCasePriority = 'critical' | 'high' | 'medium' | 'low';
+export type AutomationStatus = 'manual' | 'automated' | 'to_automate';
+
+export type TestEnvironment = 'development' | 'staging' | 'production';
+
+export interface TestExecution {
+  id: string;
+  executedAt: string; // ISO datetime
+  environment: TestEnvironment;
+  status: TestCaseStatus;
+  duration: number; // milliseconds
+  executedBy: string | null;
+  notes: string;
+}
+
+export interface TestTrend {
+  passRate: number; // 0-100, rolling average of last N executions
+  flakyScore: number; // 0-100, frequency of status flips
+  avgDuration: number; // milliseconds, average execution time
+  failureFrequency: number; // failures in last N executions
+  lastExecutions: TestExecution[];
+}
+
+export interface GherkinScenario {
+  id: string;
+  name: string;
+  given: string; // precondition
+  when: string; // action/trigger
+  then: string; // expected outcome
+  tags: string[]; // e.g. ['@smoke', '@regression', '@critical']
+}
+
+// --- Story-level (functional) QA types ---
 
 export interface QATestCase {
   id: string;
@@ -99,6 +131,10 @@ export interface QATestCase {
   status: TestCaseStatus;
   priority: TestCasePriority;
   assignedTo: string | null;
+  automationStatus: AutomationStatus;
+  linkedDefects: string[];
+  executionHistory: TestExecution[];
+  trend: TestTrend | null;
 }
 
 export interface QAMatrixRow {
@@ -116,6 +152,105 @@ export interface QAMatrix {
   rows: QAMatrixRow[];
   generatedAt: string; // ISO date
   generatedBy: 'ai' | 'manual';
+  updatedAt: string;
+}
+
+// --- Epic-level (systemic) QA types ---
+
+export type EpicQATestCategory =
+  | 'integration'
+  | 'e2e'
+  | 'performance'
+  | 'security'
+  | 'compatibility'
+  | 'reliability'
+  | 'safety'
+  | 'usability'
+  | 'maintainability';
+
+export const EPIC_QA_CATEGORY_LABELS: Record<EpicQATestCategory, string> = {
+  integration: 'Integración',
+  e2e: 'End-to-End',
+  performance: 'Performance',
+  security: 'Seguridad',
+  compatibility: 'Compatibilidad',
+  reliability: 'Fiabilidad',
+  safety: 'Seguridad Operativa',
+  usability: 'Usabilidad',
+  maintainability: 'Mantenibilidad',
+};
+
+export const EPIC_QA_CATEGORY_DESCRIPTIONS: Record<EpicQATestCategory, string> = {
+  integration: 'Interacción entre módulos y servicios de la épica',
+  e2e: 'Flujos completos de usuario de punta a punta',
+  performance: 'Tiempos de respuesta, carga y throughput',
+  security: 'Vulnerabilidades, acceso y encriptación',
+  compatibility: 'Cross-browser, cross-platform y API versioning',
+  reliability: 'Tolerancia a fallos y recuperación',
+  safety: 'Restricciones operativas, fail-safe y advertencias de riesgo',
+  usability: 'Accesibilidad, inclusividad y experiencia de interacción',
+  maintainability: 'Modularidad, testabilidad y facilidad de modificación',
+};
+
+export interface EpicQATest {
+  id: string;
+  category: EpicQATestCategory;
+  title: string;
+  description: string;
+  scenarios: string[];
+  gherkinScenarios: GherkinScenario[];
+  dependencies: string[];
+  status: TestCaseStatus;
+  priority: TestCasePriority;
+  assignedTo: string | null;
+  automationStatus: AutomationStatus;
+  linkedDefects: string[];
+  riskLikelihood: 1 | 2 | 3 | 4 | 5;
+  riskImpact: 1 | 2 | 3 | 4 | 5;
+  executionHistory: TestExecution[];
+  trend: TestTrend | null;
+}
+
+export interface EpicQAMatrix {
+  id: string;
+  epicId: string;
+  tests: EpicQATest[];
+  nfrCoverage: Record<EpicQATestCategory, number>; // category → 0-100%
+  generatedAt: string;
+  generatedBy: 'ai' | 'manual';
+  updatedAt: string;
+}
+
+export type QAApproval = {
+  status: 'pending' | 'approved' | 'rejected';
+  approvedBy: string | null;
+  approvedAt: string | null;
+  comment: string | null;
+};
+
+// === DEPENDENCY TYPES ===
+
+export type DependencyType = 'technical' | 'resource' | 'knowledge' | 'external' | 'cross-team';
+export type DependencyDirection = 'depends_on' | 'depended_on_by';
+export type DependencyStatus = 'identified' | 'in_progress' | 'resolved' | 'blocked' | 'mitigated';
+export type DependencyScheduling = 'finish-to-start' | 'start-to-start' | 'finish-to-finish' | 'start-to-finish';
+
+export interface EpicDependency {
+  id: string;
+  title: string;
+  description: string;
+  type: DependencyType;
+  direction: DependencyDirection;
+  scheduling: DependencyScheduling;
+  status: DependencyStatus;
+  severity: Priority; // reuse Priority enum: critical, high, medium, low
+  isBlocking: boolean;
+  targetEpicId: string | null; // null for external dependencies
+  targetExternalName: string | null; // for external deps: team/vendor name
+  owner: string; // person responsible for resolution
+  dueDate: string | null; // ISO date
+  resolutionNotes: string;
+  createdAt: string;
   updatedAt: string;
 }
 
@@ -177,11 +312,12 @@ export interface Epic {
   priority: Priority;
   initiativeId: string;
   podIds: string[]; // many-to-many: epic can belong to multiple PODs
-  jiraKey: string; // e.g. "GAM-123"
+  jiraKey: string | null;
   startDate: string;
   targetDate: string;
   documents: EpicDocument[];
   diagrams: EpicDiagram[];
+  dependencies: EpicDependency[];
   poApproval: {
     status: 'pending' | 'approved' | 'rejected';
     approvedBy: string | null; // PO id
@@ -195,12 +331,8 @@ export interface Epic {
     comment: string | null;
   } | null;
   qaMatrix: QAMatrix | null;
-  qaApproval: {
-    status: 'pending' | 'approved' | 'rejected';
-    approvedBy: string | null;
-    approvedAt: string | null;
-    comment: string | null;
-  } | null;
+  qaApproval: QAApproval | null;
+  epicQAMatrix: EpicQAMatrix | null;
   createdAt: string;
   updatedAt: string;
 }
@@ -237,9 +369,9 @@ export interface UserStory {
   storyPoints: number; // fibonacci: 1, 2, 3, 5, 8, 13
   epicId: string;
   podId: string; // each story belongs to ONE pod
-  productOwnerId: string;
+  productOwnerId: string | null;
   sprintId: string | null;
-  jiraKey: string; // e.g. "GAM-456"
+  jiraKey: string | null; // e.g. "GAM-456"
   labels: string[];
   // Structured sections
   po: StoryPOFields;
@@ -292,6 +424,29 @@ export interface ChangelogEntry {
   changeReason: string | null;
 }
 
+// === SPRINT CEREMONY TYPES ===
+
+export type CeremonyType =
+  | 'planning'
+  | 'review'
+  | 'retro'
+  | 'release'
+  | 'pi_planning'
+  | 'e2e'
+  | 'cvt'
+  | 'integration';
+
+export interface SprintCeremony {
+  id: string;
+  sprintId: string | null;   // null for PI-level ceremonies
+  type: CeremonyType;
+  date: string;               // ISO date
+  endDate?: string;           // For multi-day ceremonies (CVT, e2e)
+  label?: string;             // Override default label
+  podId?: string;             // Optional: pod-specific ceremony
+  scope: 'sprint' | 'pi';    // Sprint-level or PI-level
+}
+
 // === COMPUTED / HELPER TYPES ===
 
 export interface EpicWithRelations extends Epic {
@@ -304,7 +459,7 @@ export interface EpicWithRelations extends Epic {
 export interface StoryWithRelations extends UserStory {
   epic: Epic;
   pod: Pod;
-  productOwner: ProductOwner;
+  productOwner: ProductOwner | null;
   sprint: Sprint | null;
 }
 

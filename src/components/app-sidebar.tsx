@@ -4,13 +4,22 @@ import * as React from "react"
 import Link from "next/link"
 import Image from "next/image"
 import { usePathname } from "next/navigation"
+import { useState } from "react"
 import {
-  FileCheck,
-  FileText,
   FolderKanban,
   Grid3X3,
-  History,
   LogOut,
+  Settings,
+  Users,
+  GitBranch,
+  Bot,
+  GitPullRequest,
+  TestTube2,
+  DollarSign,
+  ScrollText,
+  Brain,
+  Rocket,
+  Server,
 } from "lucide-react"
 
 import {
@@ -39,21 +48,12 @@ import { useAuth } from "@/hooks/use-auth"
 import { CaretSortIcon } from "@radix-ui/react-icons"
 import { useSidebar } from "@/components/ui/sidebar"
 import { SidebarLogo } from "@/components/sidebar-logo"
+import { IntegrationSettingsDialog } from "@/components/proyectos/settings/IntegrationSettingsDialog"
 
-const navigationItems = [
-  {
-    title: "Aprobaciones",
-    url: "/aprobacion",
-    icon: FileCheck,
-    description: "Dashboard de aprobaciones",
-  },
-  {
-    title: "Reportes",
-    url: "/reportes",
-    icon: FileText,
-    description: "Reportes y análisis",
-  },
-]
+import { useAuthContext } from "@/context/AuthContext"
+import { Permission } from "@/types/auth"
+import { USER_ROLE_LABELS } from "@/types/auth"
+import { Badge } from "@/components/ui/badge"
 
 const proyectosItems = [
   {
@@ -68,18 +68,27 @@ const proyectosItems = [
     icon: Grid3X3,
     description: "Matriz de proyectos",
   },
-  {
-    title: "Changelog",
-    url: "/proyectos/changelog",
-    icon: History,
-    description: "Historial de cambios",
-  },
+]
+
+const factoryItems = [
+  { title: "Overview", url: "/factory", icon: GitBranch },
+  { title: "Agents", url: "/factory/agents", icon: Bot },
+  { title: "Pull Requests", url: "/factory/prs", icon: GitPullRequest },
+  { title: "Tests", url: "/factory/tests", icon: TestTube2 },
+  { title: "Release Board", url: "/factory/release-board", icon: Rocket },
+  { title: "Cost", url: "/factory/cost", icon: DollarSign },
+  { title: "Logs", url: "/factory/logs", icon: ScrollText },
+  { title: "Evolution", url: "/factory/evolution", icon: Brain },
+  { title: "Compute Nodes", url: "/factory/nodes", icon: Server },
 ]
 
 export function AppSidebar({ ...props }: React.ComponentProps<typeof Sidebar>) {
   const pathname = usePathname()
   const { user, logout } = useAuth()
   const { state, isMobile } = useSidebar()
+  const [showIntegrations, setShowIntegrations] = useState(false)
+
+  const { currentUser, hasPermission } = useAuthContext()
 
   // Prepare user data
   const userData = {
@@ -134,29 +143,6 @@ export function AppSidebar({ ...props }: React.ComponentProps<typeof Sidebar>) {
 
       <SidebarContent>
         <SidebarGroup>
-          <SidebarGroupLabel>Navigation</SidebarGroupLabel>
-          <SidebarGroupContent>
-            <SidebarMenu>
-              {navigationItems.map((item) => (
-                <SidebarMenuItem key={item.url}>
-                  <SidebarMenuButton
-                    asChild
-                    isActive={pathname === item.url}
-                    className="transition-all duration-300 hover:scale-105 hover:bg-accent/50"
-                    tooltip={item.title}
-                  >
-                    <Link href={item.url}>
-                      <item.icon className="h-4 w-4" />
-                      <span className="flex-1">{item.title}</span>
-                    </Link>
-                  </SidebarMenuButton>
-                </SidebarMenuItem>
-              ))}
-            </SidebarMenu>
-          </SidebarGroupContent>
-        </SidebarGroup>
-
-        <SidebarGroup>
           <SidebarGroupLabel>Proyectos</SidebarGroupLabel>
           <SidebarGroupContent>
             <SidebarMenu>
@@ -178,6 +164,52 @@ export function AppSidebar({ ...props }: React.ComponentProps<typeof Sidebar>) {
             </SidebarMenu>
           </SidebarGroupContent>
         </SidebarGroup>
+
+        <SidebarGroup>
+          <SidebarGroupLabel>Factory</SidebarGroupLabel>
+          <SidebarGroupContent>
+            <SidebarMenu>
+              {factoryItems.map((item) => (
+                <SidebarMenuItem key={item.url}>
+                  <SidebarMenuButton
+                    asChild
+                    isActive={pathname === item.url || pathname?.startsWith(item.url + '/')}
+                    className="transition-all duration-300 hover:scale-105 hover:bg-accent/50"
+                    tooltip={item.title}
+                  >
+                    <Link href={item.url}>
+                      <item.icon className="h-4 w-4" />
+                      <span className="flex-1">{item.title}</span>
+                    </Link>
+                  </SidebarMenuButton>
+                </SidebarMenuItem>
+              ))}
+            </SidebarMenu>
+          </SidebarGroupContent>
+        </SidebarGroup>
+
+        {hasPermission(Permission.MANAGE_USERS) && (
+          <SidebarGroup>
+            <SidebarGroupLabel>Configuración</SidebarGroupLabel>
+            <SidebarGroupContent>
+              <SidebarMenu>
+                <SidebarMenuItem>
+                  <SidebarMenuButton
+                    asChild
+                    isActive={pathname === "/equipo"}
+                    className="transition-all duration-300 hover:scale-105 hover:bg-accent/50"
+                    tooltip="Equipo"
+                  >
+                    <Link href="/equipo">
+                      <Users className="h-4 w-4" />
+                      <span className="flex-1">Equipo</span>
+                    </Link>
+                  </SidebarMenuButton>
+                </SidebarMenuItem>
+              </SidebarMenu>
+            </SidebarGroupContent>
+          </SidebarGroup>
+        )}
       </SidebarContent>
 
       <SidebarFooter>
@@ -195,7 +227,7 @@ export function AppSidebar({ ...props }: React.ComponentProps<typeof Sidebar>) {
                   </Avatar>
                   <div className="grid flex-1 text-left text-sm leading-tight">
                     <span className="truncate font-semibold">{userData.name}</span>
-                    <span className="truncate text-xs">{userData.email}</span>
+                    <span className="truncate text-xs">{currentUser ? USER_ROLE_LABELS[currentUser.role] : userData.email}</span>
                   </div>
                   <CaretSortIcon className="ml-auto size-4" />
                 </SidebarMenuButton>
@@ -219,6 +251,11 @@ export function AppSidebar({ ...props }: React.ComponentProps<typeof Sidebar>) {
                   </div>
                 </DropdownMenuLabel>
                 <DropdownMenuSeparator />
+                <DropdownMenuItem className="cursor-pointer" onClick={() => setShowIntegrations(true)}>
+                  <Settings />
+                  Integraciones
+                </DropdownMenuItem>
+                <DropdownMenuSeparator />
                 <DropdownMenuItem className="cursor-pointer" onClick={() => logout()}>
                   <LogOut />
                   Log out
@@ -230,6 +267,12 @@ export function AppSidebar({ ...props }: React.ComponentProps<typeof Sidebar>) {
       </SidebarFooter>
 
       <SidebarRail />
+
+      <IntegrationSettingsDialog
+        open={showIntegrations}
+        onOpenChange={setShowIntegrations}
+      />
+
     </Sidebar>
   )
 }

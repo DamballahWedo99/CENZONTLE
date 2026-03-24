@@ -7,6 +7,7 @@ import {
   QATestCase,
   TestCaseStatus,
   TestCasePriority,
+  TestExecution,
 } from '@/types/proyectos';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -35,6 +36,8 @@ import {
   MousePointer2,
   ClipboardCheck,
   Shield,
+  Bug,
+  Cog,
 } from 'lucide-react';
 
 // --- Labels ---
@@ -71,6 +74,18 @@ const priorityColors: Record<TestCasePriority, string> = {
   high: 'bg-orange-500/10 text-orange-700 dark:text-orange-300 border-orange-500/30',
   medium: 'bg-yellow-500/10 text-yellow-700 dark:text-yellow-300 border-yellow-500/30',
   low: 'bg-muted text-muted-foreground',
+};
+
+const automationLabels: Record<import('@/types/proyectos').AutomationStatus, string> = {
+  manual: 'Manual',
+  automated: 'Automatizado',
+  to_automate: 'Por automatizar',
+};
+
+const automationColors: Record<import('@/types/proyectos').AutomationStatus, string> = {
+  manual: 'bg-muted text-muted-foreground',
+  automated: 'bg-cyan-500/10 text-cyan-700 dark:text-cyan-300 border-cyan-500/30',
+  to_automate: 'bg-violet-500/10 text-violet-700 dark:text-violet-300 border-violet-500/30',
 };
 
 // --- Coverage helpers ---
@@ -214,6 +229,10 @@ export function QAMatrixViewer({ matrix, editable = false, onMatrixChange }: QAM
       status: 'pending',
       priority: 'medium',
       assignedTo: null,
+      automationStatus: 'manual',
+      linkedDefects: [],
+      executionHistory: [],
+      trend: null,
     };
     setEditableRows((rows) =>
       rows.map((row) =>
@@ -382,7 +401,7 @@ export function QAMatrixViewer({ matrix, editable = false, onMatrixChange }: QAM
 
       {/* Table */}
       <div className={`rounded-xl border overflow-x-auto ${isEditing ? 'border-indigo-500/50' : 'border-border'}`}>
-        <Table className="min-w-[900px]">
+        <Table className="min-w-[1100px]">
           <TableHeader>
             <TableRow className="border-border hover:bg-transparent">
               <TableHead className="text-[11px] text-muted-foreground font-semibold uppercase tracking-wider bg-muted/80 w-8" />
@@ -401,8 +420,14 @@ export function QAMatrixViewer({ matrix, editable = false, onMatrixChange }: QAM
               <TableHead className="text-[11px] text-muted-foreground font-semibold uppercase tracking-wider bg-muted/80 w-24 text-center">
                 Estado
               </TableHead>
+              <TableHead className="text-[11px] text-muted-foreground font-semibold uppercase tracking-wider bg-muted/80 w-24 text-center">
+                Automatización
+              </TableHead>
               <TableHead className="text-[11px] text-muted-foreground font-semibold uppercase tracking-wider bg-muted/80 w-32">
                 Asignado
+              </TableHead>
+              <TableHead className="text-[11px] text-muted-foreground font-semibold uppercase tracking-wider bg-muted/80 w-16 text-center">
+                Defectos
               </TableHead>
               <TableHead className="text-[11px] text-muted-foreground font-semibold uppercase tracking-wider bg-muted/80 w-32 text-center">
                 Cobertura
@@ -439,7 +464,7 @@ export function QAMatrixViewer({ matrix, editable = false, onMatrixChange }: QAM
 
             {currentRows.length === 0 && (
               <TableRow className="border-border">
-                <TableCell colSpan={isEditing ? 9 : 8} className="text-center py-8">
+                <TableCell colSpan={isEditing ? 11 : 10} className="text-center py-8">
                   <p className="text-xs text-muted-foreground">No hay historias de usuario en la matriz</p>
                 </TableCell>
               </TableRow>
@@ -528,6 +553,8 @@ function StoryRowGroup({
         <TableCell />
         <TableCell />
         <TableCell />
+        <TableCell />
+        <TableCell />
         <TableCell className="px-3">
           <div className="flex items-center gap-2">
             <div className="flex-1 h-1.5 bg-muted rounded-full overflow-hidden">
@@ -579,7 +606,7 @@ function StoryRowGroup({
       {/* Empty state inside expanded story */}
       {isExpanded && row.testCases.length === 0 && (
         <TableRow className="border-border/50">
-          <TableCell colSpan={isEditing ? 9 : 8} className="pl-10 py-3">
+          <TableCell colSpan={isEditing ? 11 : 10} className="pl-10 py-3">
             <p className="text-[11px] text-muted-foreground italic">Sin casos de prueba</p>
           </TableCell>
         </TableRow>
@@ -672,6 +699,11 @@ function TestCaseRow({
                   ({testCase.steps.length} {testCase.steps.length === 1 ? 'paso' : 'pasos'})
                 </button>
               )}
+              {testCase.executionHistory.length > 0 && (
+                <span className="text-[9px] text-muted-foreground ml-1" title={`${testCase.executionHistory.length} ejecuciones`}>
+                  ({testCase.executionHistory.length} runs)
+                </span>
+              )}
             </div>
           )}
         </TableCell>
@@ -729,6 +761,31 @@ function TestCaseRow({
           )}
         </TableCell>
 
+        {/* Automation status */}
+        <TableCell className="text-center">
+          {isEditing ? (
+            <Select
+              value={testCase.automationStatus}
+              onValueChange={(value) => onUpdate({ automationStatus: value as import('@/types/proyectos').AutomationStatus })}
+            >
+              <SelectTrigger className="h-6 w-full text-[10px] px-1.5 [&>svg]:h-3 [&>svg]:w-3">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                {(Object.keys(automationLabels) as import('@/types/proyectos').AutomationStatus[]).map((key) => (
+                  <SelectItem key={key} value={key} className="text-xs">
+                    {automationLabels[key]}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+          ) : (
+            <span className={`inline-flex text-[10px] font-medium px-1.5 py-0.5 rounded border ${automationColors[testCase.automationStatus]}`}>
+              {automationLabels[testCase.automationStatus]}
+            </span>
+          )}
+        </TableCell>
+
         {/* Assigned to */}
         <TableCell>
           {isEditing ? (
@@ -742,6 +799,18 @@ function TestCaseRow({
             <span className="text-[11px] text-muted-foreground">
               {testCase.assignedTo || 'Sin asignar'}
             </span>
+          )}
+        </TableCell>
+
+        {/* Linked defects */}
+        <TableCell className="text-center">
+          {testCase.linkedDefects.length > 0 ? (
+            <span className="inline-flex items-center gap-0.5 text-[10px] font-medium text-red-600 dark:text-red-400">
+              <Bug className="h-3 w-3" />
+              {testCase.linkedDefects.length}
+            </span>
+          ) : (
+            <span className="text-[10px] text-muted-foreground">—</span>
           )}
         </TableCell>
 
@@ -771,7 +840,7 @@ function TestCaseRow({
       {showSteps && (
         <TableRow className={`border-border/30 ${isEven ? 'bg-muted/30' : 'bg-muted/10'}`}>
           <TableCell />
-          <TableCell colSpan={isEditing ? 8 : 7} className="pl-6 py-2">
+          <TableCell colSpan={isEditing ? 10 : 9} className="pl-6 py-2">
             <div className="space-y-1">
               <p className="text-[10px] text-muted-foreground uppercase tracking-wider font-semibold mb-1.5">
                 Pasos del caso de prueba

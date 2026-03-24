@@ -5,3 +5,4 @@ export { mockPods } from './pods';
 export { mockProductOwners } from './productOwners';
 export { mockSprints } from './sprints';
 export { mockChangelog } from './changelog';
+export { mockCeremonies } from './ceremonies';

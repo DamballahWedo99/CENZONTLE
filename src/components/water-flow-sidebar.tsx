@@ -1,13 +1,13 @@
 "use client"
 
 import * as React from "react"
+import { useState } from "react"
 import Link from "next/link"
 import { usePathname } from "next/navigation"
 import {
-  FileCheck,
-  FileText,
   LogOut,
   Brain,
+  Settings,
 } from "lucide-react"
 
 import {
@@ -38,21 +38,8 @@ import { useSidebar } from "@/components/ui/sidebar"
 import { EcosystemSwitcher } from "@/components/ecosystem-switcher"
 import { ecosystems } from "@/config/ecosystems"
 import { SidebarLogo } from "@/components/sidebar-logo"
+import { IntegrationSettingsDialog } from "@/components/proyectos/settings/IntegrationSettingsDialog"
 
-const navigationItems = [
-  {
-    title: "Aprobaciones",
-    url: "/aprobacion",
-    icon: FileCheck,
-    description: "Dashboard de aprobaciones",
-  },
-  {
-    title: "Reportes",
-    url: "/reportes",
-    icon: FileText,
-    description: "Reportes y análisis",
-  },
-]
 
 interface WaterFlowSidebarProps extends React.ComponentProps<typeof Sidebar> {
   onOpenChatbot?: () => void;
@@ -62,6 +49,7 @@ export function WaterFlowSidebar({ onOpenChatbot, ...props }: WaterFlowSidebarPr
   const pathname = usePathname()
   const { user, logout } = useAuth()
   const { state, isMobile } = useSidebar()
+  const [showIntegrations, setShowIntegrations] = useState(false)
 
   // Prepare user data
   const userData = {
@@ -107,29 +95,6 @@ export function WaterFlowSidebar({ onOpenChatbot, ...props }: WaterFlowSidebarPr
       </SidebarHeader>
 
       <SidebarContent>
-        <SidebarGroup>
-          <SidebarGroupLabel>Navigation</SidebarGroupLabel>
-          <SidebarGroupContent>
-            <SidebarMenu>
-              {navigationItems.map((item) => (
-                <SidebarMenuItem key={item.url}>
-                  <SidebarMenuButton
-                    asChild
-                    isActive={pathname === item.url}
-                    className="transition-all duration-300 hover:scale-105 hover:bg-accent/50"
-                    tooltip={item.title}
-                  >
-                    <Link href={item.url}>
-                      <item.icon className="h-4 w-4" />
-                      <span className="flex-1">{item.title}</span>
-                    </Link>
-                  </SidebarMenuButton>
-                </SidebarMenuItem>
-              ))}
-            </SidebarMenu>
-          </SidebarGroupContent>
-        </SidebarGroup>
-
         <SidebarGroup>
           <SidebarGroupLabel>Asistencia</SidebarGroupLabel>
           <SidebarGroupContent>
@@ -188,6 +153,11 @@ export function WaterFlowSidebar({ onOpenChatbot, ...props }: WaterFlowSidebarPr
                   </div>
                 </DropdownMenuLabel>
                 <DropdownMenuSeparator />
+                <DropdownMenuItem className="cursor-pointer" onClick={() => setShowIntegrations(true)}>
+                  <Settings />
+                  Integraciones
+                </DropdownMenuItem>
+                <DropdownMenuSeparator />
                 <DropdownMenuItem className="cursor-pointer" onClick={() => logout()}>
                   <LogOut />
                   Log out
@@ -199,6 +169,11 @@ export function WaterFlowSidebar({ onOpenChatbot, ...props }: WaterFlowSidebarPr
       </SidebarFooter>
 
       <SidebarRail />
+
+      <IntegrationSettingsDialog
+        open={showIntegrations}
+        onOpenChange={setShowIntegrations}
+      />
     </Sidebar>
   )
 }

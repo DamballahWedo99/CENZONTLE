@@ -1,6 +1,7 @@
 'use client';
 
 import { useState, useMemo, useCallback } from 'react';
+import { useRouter } from 'next/navigation';
 import { useProyectos } from '@/context/ProyectosContext';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -17,13 +18,11 @@ import { StoryPointsBadge } from '../shared/StoryPointsBadge';
 import { PodBadge } from '../shared/PodBadge';
 import {
   ArrowUpDown,
-  ChevronDown,
   ChevronRight,
   Pencil,
   Trash2,
   X,
   Check,
-  User,
   Plus,
   ClipboardList,
   Code2,
@@ -63,7 +62,7 @@ interface StoryFormData {
   storyPoints: number;
   status: StoryStatus;
   podId: string;
-  productOwnerId: string;
+  productOwnerId: string | null;
   labels: string[];
   po: StoryPOFields;
   technical: StoryTechnicalFields;
@@ -174,6 +173,7 @@ function ReadOnlyList({ items, emptyText }: { items: string[]; emptyText?: strin
 // --- Component ---
 
 export function HistoriasList() {
+  const router = useRouter();
   const { filteredStories, state, dispatch } = useProyectos();
 
   const [sortField, setSortField] = useState<SortField>('jiraKey');
@@ -233,7 +233,7 @@ export function HistoriasList() {
       let cmp = 0;
       switch (sortField) {
         case 'jiraKey':
-          cmp = a.jiraKey.localeCompare(b.jiraKey);
+          cmp = (a.jiraKey ?? '').localeCompare(b.jiraKey ?? '');
           break;
         case 'title':
           cmp = a.title.localeCompare(b.title);
@@ -274,7 +274,7 @@ export function HistoriasList() {
       storyPoints: story.storyPoints,
       status: story.status,
       podId: story.podId,
-      productOwnerId: story.productOwnerId,
+      productOwnerId: story.productOwnerId ?? '',
       labels: [...story.labels],
       po: {
         ...story.po,
@@ -311,7 +311,7 @@ export function HistoriasList() {
           storyPoints: formData.storyPoints,
           status: formData.status,
           podId: formData.podId,
-          productOwnerId: formData.productOwnerId,
+          productOwnerId: formData.productOwnerId || null,
           labels: formData.labels,
           po: {
             ...formData.po,
@@ -428,7 +428,7 @@ export function HistoriasList() {
       <div className="space-y-1.5">
         <label className="text-xs font-medium text-muted-foreground">Product Owner</label>
         <Select
-          value={formData.productOwnerId}
+          value={formData.productOwnerId ?? undefined}
           onValueChange={(v) => setFormData((prev) => ({ ...prev, productOwnerId: v }))}
         >
           <SelectTrigger className="text-sm">
@@ -820,34 +820,8 @@ export function HistoriasList() {
 
   return (
     <div className="space-y-3">
-      {/* Current user indicator */}
-      {currentUser && (
-        <div className="flex items-center gap-2 text-xs text-muted-foreground">
-          <User className="h-3.5 w-3.5" />
-          <span>
-            Sesión como <span className="font-medium text-foreground">{currentUser.name}</span>
-          </span>
-          <span className="text-muted-foreground/40">·</span>
-          <Select
-            value={state.currentUserId}
-            onValueChange={(v) => dispatch({ type: 'SET_CURRENT_USER', payload: v })}
-          >
-            <SelectTrigger className="h-6 w-auto text-xs border-dashed gap-1 px-2">
-              <SelectValue />
-            </SelectTrigger>
-            <SelectContent>
-              {state.productOwners.map((po) => (
-                <SelectItem key={po.id} value={po.id} className="text-xs">
-                  {po.name}
-                </SelectItem>
-              ))}
-            </SelectContent>
-          </Select>
-        </div>
-      )}
-
       {/* Header row */}
-      <div className="grid grid-cols-[80px_1fr_160px_140px_140px_auto_auto_100px_60px] gap-2 items-center px-4 py-2 text-xs font-medium text-muted-foreground border-b">
+      <div className="grid grid-cols-[60px_1fr_180px_160px_140px_90px_32px_100px_60px_28px] gap-2 items-center px-4 py-2 text-xs font-medium text-muted-foreground border-b">
         <SortHeader field="jiraKey">Key</SortHeader>
         <SortHeader field="title">Título</SortHeader>
         <div>Épica</div>
@@ -856,6 +830,7 @@ export function HistoriasList() {
         <SortHeader field="status">Status</SortHeader>
         <SortHeader field="storyPoints">SP</SortHeader>
         <div>Sprint</div>
+        <div></div>
         <div></div>
       </div>
 
@@ -887,30 +862,26 @@ export function HistoriasList() {
               >
                 {/* Row summary */}
                 <div
-                  className="grid grid-cols-[80px_1fr_160px_140px_140px_auto_auto_100px_60px] gap-2 items-center px-4 py-3 text-sm cursor-pointer"
+                  className="grid grid-cols-[60px_1fr_180px_160px_140px_90px_32px_100px_60px_28px] gap-2 items-center px-4 py-3 text-sm cursor-pointer"
                   onClick={() => {
                     if (!isEditing) {
-                      setExpandedStoryId(isExpanded ? null : story.id);
-                      setViewTab('po');
+                      router.push(`/proyectos/historias/${story.id}`);
                     }
                   }}
                 >
                   <div className="flex items-center gap-1.5">
-                    <span className="text-muted-foreground shrink-0">
-                      {isExpanded ? (
-                        <ChevronDown className="h-3.5 w-3.5" />
-                      ) : (
-                        <ChevronRight className="h-3.5 w-3.5" />
-                      )}
-                    </span>
-                    <span className="font-mono text-xs text-muted-foreground">{story.jiraKey}</span>
+                    {story.jiraKey ? (
+                      <span className="font-mono text-xs text-muted-foreground">{story.jiraKey}</span>
+                    ) : (
+                      <span className="text-xs text-muted-foreground/50">{'\u2014'}</span>
+                    )}
                   </div>
                   <span className="truncate font-medium">{story.title}</span>
                   <span className="text-xs text-muted-foreground truncate">{epic?.title}</span>
                   <div>{pod && <PodBadge name={pod.name} color={pod.color} />}</div>
-                  <span className="text-xs">{po?.name}</span>
-                  <StatusBadge status={story.status} />
-                  <StoryPointsBadge points={story.storyPoints} />
+                  <span className="text-xs">{po?.name ?? '\u2014'}</span>
+                  <div><StatusBadge status={story.status} /></div>
+                  <div><StoryPointsBadge points={story.storyPoints} /></div>
                   <span className="text-xs text-muted-foreground">{sprint?.name ?? '\u2014'}</span>
                   <div className="flex items-center gap-0.5 justify-end" onClick={(e) => e.stopPropagation()}>
                     {userCanEdit && (
@@ -973,6 +944,7 @@ export function HistoriasList() {
                       </>
                     )}
                   </div>
+                  <ChevronRight className="h-4 w-4 text-muted-foreground" />
                 </div>
 
                 {/* Expanded read-only view */}
@@ -991,7 +963,7 @@ export function HistoriasList() {
                       )}
                       {epic && (
                         <span>
-                          Épica: <span className="text-foreground">{epic.jiraKey}</span>
+                          Épica: <span className="text-foreground">{epic?.jiraKey ?? epic?.title}</span>
                         </span>
                       )}
                       <span>

@@ -1,6 +1,7 @@
 'use client';
 
 import { useState, useCallback, useRef, useEffect } from 'react';
+import { useRouter } from 'next/navigation';
 import {
   UserStory,
   StoryStatus,
@@ -30,12 +31,12 @@ import {
   X,
   Check,
   User,
-  ChevronDown,
   ChevronRight,
   ClipboardList,
   Code2,
   TestTube2,
   Link2,
+
 } from 'lucide-react';
 
 // --- Labels ---
@@ -83,7 +84,7 @@ interface StoryFormData {
   storyPoints: number;
   status: StoryStatus;
   podId: string;
-  productOwnerId: string;
+  productOwnerId: string | null;
   labels: string[];
   po: StoryPOFields;
   technical: StoryTechnicalFields;
@@ -95,7 +96,7 @@ const emptyForm: StoryFormData = {
   storyPoints: 3,
   status: StoryStatus.Backlog,
   podId: '',
-  productOwnerId: '',
+  productOwnerId: null,
   labels: [],
   po: emptyPO,
   technical: emptyTechnical,
@@ -204,6 +205,7 @@ export function EpicStoryList({
   onUpdateStory,
   onDeleteStory,
 }: EpicStoryListProps) {
+  const router = useRouter();
   const [isCreating, setIsCreating] = useState(false);
   const [editingStoryId, setEditingStoryId] = useState<string | null>(null);
   const [expandedStoryId, setExpandedStoryId] = useState<string | null>(null);
@@ -214,7 +216,7 @@ export function EpicStoryList({
   const [newLabel, setNewLabel] = useState('');
   const [deleteConfirmId, setDeleteConfirmId] = useState<string | null>(null);
 
-  const nextJiraKey = `GAM-${1100 + stories.length}`;
+  // jiraKey is assigned externally (e.g. via Jira integration), not at creation time
 
   // --- QA matrix rows mapped by storyId ---
   const qaRowsByStoryId = new Map(qaMatrix?.rows.map((r) => [r.storyId, r]) ?? []);
@@ -257,11 +259,10 @@ export function EpicStoryList({
     setFormData({
       ...emptyForm,
       podId: pods[0]?.id ?? '',
-      productOwnerId: productOwners[0]?.id ?? '',
     });
     setFormTab('po');
     setIsCreating(true);
-  }, [pods, productOwners]);
+  }, [pods]);
 
   const cancelCreating = useCallback(() => {
     setIsCreating(false);
@@ -279,9 +280,9 @@ export function EpicStoryList({
       status: formData.status,
       epicId,
       podId: formData.podId,
-      productOwnerId: formData.productOwnerId,
+      productOwnerId: null,
       sprintId: null,
-      jiraKey: nextJiraKey,
+      jiraKey: null,
       labels: formData.labels,
       po: {
         ...formData.po,
@@ -300,7 +301,7 @@ export function EpicStoryList({
     onCreateStory(story);
     setIsCreating(false);
     setFormData(emptyForm);
-  }, [formData, epicId, nextJiraKey, onCreateStory]);
+  }, [formData, epicId, onCreateStory]);
 
   // --- Edit ---
 
@@ -314,7 +315,7 @@ export function EpicStoryList({
       storyPoints: story.storyPoints,
       status: story.status,
       podId: story.podId,
-      productOwnerId: story.productOwnerId,
+      productOwnerId: story.productOwnerId ?? '',
       labels: [...story.labels],
       po: {
         ...story.po,
@@ -385,8 +386,8 @@ export function EpicStoryList({
 
   // --- Shared form sections ---
 
-  const renderMetaFields = () => (
-    <div className="grid grid-cols-2 gap-3 md:grid-cols-4 mb-4">
+  const renderMetaFields = (showProductOwner: boolean) => (
+    <div className={`grid grid-cols-2 gap-3 ${showProductOwner ? 'md:grid-cols-4' : 'md:grid-cols-3'} mb-4`}>
       <div className="min-w-0 space-y-1.5">
         <label className="text-xs font-medium text-muted-foreground">Story Points</label>
         <Select
@@ -441,24 +442,26 @@ export function EpicStoryList({
           </SelectContent>
         </Select>
       </div>
-      <div className="min-w-0 space-y-1.5">
-        <label className="text-xs font-medium text-muted-foreground">Product Owner</label>
-        <Select
-          value={formData.productOwnerId}
-          onValueChange={(v) => setFormData((prev) => ({ ...prev, productOwnerId: v }))}
-        >
-          <SelectTrigger className="w-full text-sm">
-            <SelectValue placeholder="Seleccionar" />
-          </SelectTrigger>
-          <SelectContent>
-            {productOwners.map((po) => (
-              <SelectItem key={po.id} value={po.id}>
-                {po.name}
-              </SelectItem>
-            ))}
-          </SelectContent>
-        </Select>
-      </div>
+      {showProductOwner && (
+        <div className="min-w-0 space-y-1.5">
+          <label className="text-xs font-medium text-muted-foreground">Product Owner</label>
+          <Select
+            value={formData.productOwnerId ?? undefined}
+            onValueChange={(v) => setFormData((prev) => ({ ...prev, productOwnerId: v }))}
+          >
+            <SelectTrigger className="w-full text-sm">
+              <SelectValue placeholder="Seleccionar" />
+            </SelectTrigger>
+            <SelectContent>
+              {productOwners.map((po) => (
+                <SelectItem key={po.id} value={po.id}>
+                  {po.name}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+        </div>
+      )}
     </div>
   );
 
@@ -664,7 +667,7 @@ export function EpicStoryList({
         />
       </div>
 
-      {renderMetaFields()}
+      {renderMetaFields(!isCreating)}
 
       {/* Labels */}
       <div className="mb-4 space-y-1.5">
@@ -898,20 +901,12 @@ export function EpicStoryList({
                 className="flex items-center gap-3 px-4 py-3 text-sm cursor-pointer"
                 onClick={() => {
                   if (!isEditing) {
-                    setExpandedStoryId(isExpanded ? null : story.id);
-                    setViewTab('po');
+                    router.push(`/proyectos/historias/${story.id}`);
                   }
                 }}
               >
-                <span className="text-muted-foreground shrink-0">
-                  {isExpanded ? (
-                    <ChevronDown className="h-3.5 w-3.5" />
-                  ) : (
-                    <ChevronRight className="h-3.5 w-3.5" />
-                  )}
-                </span>
                 <span className="font-mono text-xs text-muted-foreground w-20 shrink-0">
-                  {story.jiraKey}
+                  {story.jiraKey ?? '—'}
                 </span>
                 <span className="truncate flex-1">{story.title}</span>
                 <StoryPointsBadge points={story.storyPoints} />
@@ -988,6 +983,7 @@ export function EpicStoryList({
                     </Button>
                   )}
                 </div>
+                <ChevronRight className="h-4 w-4 text-muted-foreground" />
               </div>
 
               {/* Expanded read-only view */}
@@ -1107,7 +1103,7 @@ export function EpicStoryList({
               </div>
               <span className="text-xs font-semibold text-foreground">Nueva Historia</span>
               <span className="font-mono text-[10px] bg-muted px-1.5 py-0.5 rounded text-muted-foreground">
-                {nextJiraKey}
+                Sin clave
               </span>
             </div>
             <button

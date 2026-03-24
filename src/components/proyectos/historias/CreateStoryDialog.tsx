@@ -33,7 +33,6 @@ export function CreateStoryDialog({ open, onOpenChange }: CreateStoryDialogProps
   const [description, setDescription] = useState('');
   const [epicId, setEpicId] = useState('');
   const [podId, setPodId] = useState('');
-  const [productOwnerId, setProductOwnerId] = useState('');
   const [storyPoints, setStoryPoints] = useState('3');
   const [sprintId, setSprintId] = useState('');
 
@@ -49,11 +48,6 @@ export function CreateStoryDialog({ open, onOpenChange }: CreateStoryDialogProps
       )
     : [];
 
-  // Filter POs by selected pod
-  const availablePOs = podId
-    ? state.productOwners.filter((po) => po.podIds.includes(podId))
-    : state.productOwners;
-
   // Filter sprints by selected pod
   const availableSprints = podId
     ? state.sprints.filter((s) => s.podId === podId)
@@ -62,7 +56,6 @@ export function CreateStoryDialog({ open, onOpenChange }: CreateStoryDialogProps
   const handleSubmit = () => {
     if (!canSubmit) return;
 
-    const nextKey = state.stories.length + 201;
     const now = new Date().toISOString();
 
     const newStory: UserStory = {
@@ -73,9 +66,9 @@ export function CreateStoryDialog({ open, onOpenChange }: CreateStoryDialogProps
       storyPoints: Number(storyPoints),
       epicId,
       podId,
-      productOwnerId: productOwnerId || state.currentUserId,
+      productOwnerId: null,
       sprintId: sprintId || null,
-      jiraKey: `GAM-${nextKey}`,
+      jiraKey: null,
       labels: [],
       po: {
         background: '',
@@ -110,7 +103,6 @@ export function CreateStoryDialog({ open, onOpenChange }: CreateStoryDialogProps
     setDescription('');
     setEpicId('');
     setPodId('');
-    setProductOwnerId('');
     setStoryPoints('3');
     setSprintId('');
   };
@@ -159,7 +151,7 @@ export function CreateStoryDialog({ open, onOpenChange }: CreateStoryDialogProps
                 <SelectContent>
                   {availableEpics.map((epic) => (
                     <SelectItem key={epic.id} value={epic.id}>
-                      {epic.jiraKey} — {epic.title}
+                      {epic.jiraKey ? `${epic.jiraKey} — ` : ''}{epic.title}
                     </SelectItem>
                   ))}
                 </SelectContent>
@@ -167,7 +159,7 @@ export function CreateStoryDialog({ open, onOpenChange }: CreateStoryDialogProps
             </div>
             <div>
               <label className="text-sm font-medium mb-1.5 block">POD</label>
-              <Select value={podId} onValueChange={(v) => { setPodId(v); setProductOwnerId(''); setSprintId(''); }}>
+              <Select value={podId} onValueChange={(v) => { setPodId(v); setSprintId(''); }}>
                 <SelectTrigger className="w-full">
                   <SelectValue placeholder="Seleccionar..." />
                 </SelectTrigger>
@@ -182,7 +174,7 @@ export function CreateStoryDialog({ open, onOpenChange }: CreateStoryDialogProps
             </div>
           </div>
 
-          <div className="grid grid-cols-3 gap-3">
+          <div className="grid grid-cols-2 gap-3">
             <div>
               <label className="text-sm font-medium mb-1.5 block">Story Points</label>
               <Select value={storyPoints} onValueChange={setStoryPoints}>
@@ -192,21 +184,6 @@ export function CreateStoryDialog({ open, onOpenChange }: CreateStoryDialogProps
                 <SelectContent>
                   {FIBONACCI.map((n) => (
                     <SelectItem key={n} value={String(n)}>{n}</SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
-            </div>
-            <div>
-              <label className="text-sm font-medium mb-1.5 block">Product Owner</label>
-              <Select value={productOwnerId} onValueChange={setProductOwnerId}>
-                <SelectTrigger className="w-full">
-                  <SelectValue placeholder="Opcional" />
-                </SelectTrigger>
-                <SelectContent>
-                  {availablePOs.map((po) => (
-                    <SelectItem key={po.id} value={po.id}>
-                      {po.name}
-                    </SelectItem>
                   ))}
                 </SelectContent>
               </Select>

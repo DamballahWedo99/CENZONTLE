@@ -246,9 +246,9 @@ export async function generateStories(epic: Epic, podIds: string[]): Promise<Use
           storyPoints: story.points,
           epicId: epic.id,
           podId,
-          productOwnerId: '', // Will be set by the caller
+          productOwnerId: null,
           sprintId: null,
-          jiraKey: `GAM-${900 + storyIdx}`,
+          jiraKey: null,
           labels: story.labels,
           po: {
             background: '',
@@ -292,9 +292,9 @@ export async function generateStories(epic: Epic, podIds: string[]): Promise<Use
         storyPoints: story.points,
         epicId: epic.id,
         podId,
-        productOwnerId: '',
+        productOwnerId: null,
         sprintId: null,
-        jiraKey: `GAM-${900 + storyIdx}`,
+        jiraKey: null,
         labels: story.labels,
         po: {
           background: '',
