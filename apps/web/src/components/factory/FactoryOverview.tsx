@@ -148,11 +148,11 @@ function SectionHeader({
 }) {
   return (
     <div className="flex items-center gap-2.5 mb-4">
-      <div className="flex items-center justify-center w-8 h-8 rounded-lg bg-[#1E1E28]">
-        <Icon className="w-4 h-4 text-[#8B8B9A]" />
+      <div className="flex items-center justify-center w-8 h-8 rounded-lg bg-muted">
+        <Icon className="w-4 h-4 text-muted-foreground" />
       </div>
-      <h2 className="text-[15px] font-semibold text-[#EDEDF0] tracking-tight">{title}</h2>
-      <span className="ml-1 px-2 py-0.5 rounded-full text-xs font-medium bg-[#1E1E28] text-[#8B8B9A]">
+      <h2 className="text-[15px] font-semibold text-foreground tracking-tight">{title}</h2>
+      <span className="ml-1 px-2 py-0.5 rounded-full text-xs font-medium bg-muted text-muted-foreground">
         {count}
       </span>
     </div>
@@ -218,8 +218,8 @@ function BatchCard({ batch, allStories }: { batch: SprintBatch; allStories: impo
     <Link
       href={`/factory/batch/${batch.id}`}
       className={cn(
-        'group relative flex flex-col rounded-xl border-l-[3px] border border-[#2A2A35] bg-[#141419] p-5 transition-all duration-200',
-        'hover:bg-[#1A1A22] hover:border-[#3A3A48] hover:shadow-lg hover:shadow-black/20',
+        'group relative flex flex-col rounded-xl border-l-[3px] border border-border bg-card p-5 transition-all duration-200',
+        'hover:bg-muted hover:border-[#3A3A48] hover:shadow-lg hover:shadow-black/20',
         'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500/40 focus-visible:ring-offset-2 focus-visible:ring-offset-[#0A0A0F]',
         layerCfg.border,
       )}
@@ -237,12 +237,12 @@ function BatchCard({ batch, allStories }: { batch: SprintBatch; allStories: impo
       {/* Header: Title + Jira Key */}
       <div className="flex items-start justify-between gap-3 mb-3">
         <div className="min-w-0 flex-1">
-          <h3 className="text-[15px] font-bold text-[#EDEDF0] truncate group-hover:text-white transition-colors">
+          <h3 className="text-[15px] font-bold text-foreground truncate group-hover:text-foreground transition-colors">
             {batch.epicTitle}
           </h3>
-          <span className="text-xs font-mono text-[#6B6B7A] mt-0.5 block">{batch.jiraKey}</span>
+          <span className="text-xs font-mono text-muted-foreground mt-0.5 block">{batch.jiraKey}</span>
         </div>
-        <ChevronRight className="w-4 h-4 text-[#4A4A58] group-hover:text-[#8B8B9A] transition-colors flex-shrink-0 mt-1" />
+        <ChevronRight className="w-4 h-4 text-muted-foreground/70 group-hover:text-muted-foreground transition-colors flex-shrink-0 mt-1" />
       </div>
 
       {/* Badges */}
@@ -256,12 +256,12 @@ function BatchCard({ batch, allStories }: { batch: SprintBatch; allStories: impo
         {isForge && totalStories > 0 ? (
           <div>
             <div className="flex items-center justify-between mb-1.5">
-              <span className="text-xs text-[#8B8B9A]">
+              <span className="text-xs text-muted-foreground">
                 {completedStories}/{totalStories} stories
               </span>
-              <span className="text-xs font-semibold text-[#EDEDF0]">{progressPercent}%</span>
+              <span className="text-xs font-semibold text-foreground">{progressPercent}%</span>
             </div>
-            <div className="h-1.5 w-full rounded-full bg-[#1E1E28] overflow-hidden">
+            <div className="h-1.5 w-full rounded-full bg-muted overflow-hidden">
               <div
                 className="h-full rounded-full transition-all duration-500 ease-out"
                 style={{
@@ -272,21 +272,21 @@ function BatchCard({ batch, allStories }: { batch: SprintBatch; allStories: impo
             </div>
           </div>
         ) : isWaiting ? (
-          <div className="flex items-center gap-2 px-3 py-2 rounded-lg bg-[#1E1E28]">
+          <div className="flex items-center gap-2 px-3 py-2 rounded-lg bg-muted">
             <AlertCircle className="w-3.5 h-3.5 flex-shrink-0" style={{ color: layerCfg.color }} />
             <span className="text-xs font-medium" style={{ color: layerCfg.color }}>
               Awaiting approval
             </span>
           </div>
         ) : (
-          <div className="flex items-center gap-2 px-3 py-2 rounded-lg bg-[#1E1E28]">
-            <span className="text-xs text-[#8B8B9A]">In progress</span>
+          <div className="flex items-center gap-2 px-3 py-2 rounded-lg bg-muted">
+            <span className="text-xs text-muted-foreground">In progress</span>
           </div>
         )}
       </div>
 
       {/* Metrics row */}
-      <div className="flex items-center gap-4 text-xs text-[#6B6B7A]">
+      <div className="flex items-center gap-4 text-xs text-muted-foreground">
         <div className="flex items-center gap-1.5">
           <Users className="w-3.5 h-3.5" />
           <span>
@@ -314,25 +314,25 @@ function QueueRow({ batch, position }: { batch: QueuedBatch; position: number })
   return (
     <div
       className={cn(
-        'flex items-center gap-4 px-4 py-3 rounded-lg bg-[#141419] border border-[#2A2A35]',
-        'transition-colors hover:bg-[#1A1A22] hover:border-[#3A3A48]',
+        'flex items-center gap-4 px-4 py-3 rounded-lg bg-card border border-border',
+        'transition-colors hover:bg-muted hover:border-[#3A3A48]',
       )}
     >
       {/* Position */}
-      <span className="flex items-center justify-center w-7 h-7 rounded-lg bg-[#1E1E28] text-xs font-bold text-[#6B6B7A] flex-shrink-0">
+      <span className="flex items-center justify-center w-7 h-7 rounded-lg bg-muted text-xs font-bold text-muted-foreground flex-shrink-0">
         {position}
       </span>
 
       {/* Title + Key */}
       <div className="min-w-0 flex-1">
         <div className="flex items-center gap-2">
-          <span className="text-sm font-semibold text-[#EDEDF0] truncate">{batch.epicTitle}</span>
-          <span className="text-[11px] font-mono text-[#6B6B7A] flex-shrink-0">{batch.jiraKey}</span>
+          <span className="text-sm font-semibold text-foreground truncate">{batch.epicTitle}</span>
+          <span className="text-[11px] font-mono text-muted-foreground flex-shrink-0">{batch.jiraKey}</span>
         </div>
       </div>
 
       {/* Story count */}
-      <span className="text-xs text-[#8B8B9A] flex-shrink-0">
+      <span className="text-xs text-muted-foreground flex-shrink-0">
         {batch.stories} {batch.stories === 1 ? 'story' : 'stories'}
       </span>
 
@@ -340,13 +340,13 @@ function QueueRow({ batch, position }: { batch: QueuedBatch; position: number })
       <PriorityBadge priority={batch.priority} />
 
       {/* ETA */}
-      <div className="flex items-center gap-1.5 text-xs text-[#6B6B7A] flex-shrink-0">
+      <div className="flex items-center gap-1.5 text-xs text-muted-foreground flex-shrink-0">
         <Zap className="w-3 h-3" />
         <span>ETA {formatTimeUntil(batch.estimatedStartAt)}</span>
       </div>
 
       {/* Queued time */}
-      <span className="text-[11px] text-[#4A4A58] flex-shrink-0 w-16 text-right">
+      <span className="text-[11px] text-muted-foreground/70 flex-shrink-0 w-16 text-right">
         {formatTimeAgo(batch.queuedAt)}
       </span>
     </div>
@@ -382,16 +382,16 @@ function MachineSlotGrid({ machine }: { machine: ComputeNode }) {
   }
 
   return (
-    <div className="flex flex-col gap-2.5 rounded-lg border border-[#2A2A35] bg-[#141419] p-4">
+    <div className="flex flex-col gap-2.5 rounded-lg border border-border bg-card p-4">
       {/* Machine header */}
       <div className="flex items-center justify-between">
         <div className="flex items-center gap-2">
-          <Cpu className="w-3.5 h-3.5 text-[#6B6B7A]" />
-          <span className="text-xs font-semibold text-[#EDEDF0]">{machine.name}</span>
+          <Cpu className="w-3.5 h-3.5 text-muted-foreground" />
+          <span className="text-xs font-semibold text-foreground">{machine.name}</span>
         </div>
         <div className="flex items-center gap-1.5">
           <span className={cn('w-2 h-2 rounded-full', statusCfg.color)} />
-          <span className="text-[11px] text-[#6B6B7A]">{statusCfg.label}</span>
+          <span className="text-[11px] text-muted-foreground">{statusCfg.label}</span>
         </div>
       </div>
 
@@ -404,7 +404,7 @@ function MachineSlotGrid({ machine }: { machine: ComputeNode }) {
               'w-8 h-8 rounded-md border transition-colors',
               slot.filled
                 ? 'border-transparent shadow-sm'
-                : 'border-[#2A2A35] bg-[#1E1E28]',
+                : 'border-border bg-muted',
             )}
             style={slot.filled ? { backgroundColor: `${slot.color}20`, borderColor: `${slot.color}40` } : undefined}
             title={slot.filled ? slot.batchName : 'Available'}
@@ -422,7 +422,7 @@ function MachineSlotGrid({ machine }: { machine: ComputeNode }) {
       </div>
 
       {/* Agent count */}
-      <span className="text-[11px] text-[#4A4A58]">
+      <span className="text-[11px] text-muted-foreground/70">
         {machine.agents.length}/{machine.totalSlots} slots used
       </span>
     </div>
@@ -448,15 +448,15 @@ function ResourcePoolSection({ pool }: { pool: ResourcePool }) {
       </div>
 
       {/* Total capacity bar */}
-      <div className="rounded-lg border border-[#2A2A35] bg-[#141419] px-5 py-4">
+      <div className="rounded-lg border border-border bg-card px-5 py-4">
         <div className="flex items-center justify-between mb-2">
-          <span className="text-sm font-medium text-[#EDEDF0]">Total Capacity</span>
-          <span className="text-sm text-[#8B8B9A]">
-            <span className="font-semibold text-[#EDEDF0]">{pool.usedSlots}</span>
+          <span className="text-sm font-medium text-foreground">Total Capacity</span>
+          <span className="text-sm text-muted-foreground">
+            <span className="font-semibold text-foreground">{pool.usedSlots}</span>
             /{pool.totalSlots} agents active ({usagePercent}%)
           </span>
         </div>
-        <div className="h-2 w-full rounded-full bg-[#1E1E28] overflow-hidden">
+        <div className="h-2 w-full rounded-full bg-muted overflow-hidden">
           <div
             className={cn(
               'h-full rounded-full transition-all duration-700 ease-out',
@@ -499,8 +499,8 @@ export function FactoryOverview() {
         <SectionHeader icon={Layers} title="Active Batches" count={activeBatches.length} />
 
         {activeBatches.length === 0 ? (
-          <div className="rounded-xl border border-dashed border-[#2A2A35] bg-[#141419]/50 py-12 text-center">
-            <p className="text-sm text-[#6B6B7A]">No active batches</p>
+          <div className="rounded-xl border border-dashed border-border bg-card/50 py-12 text-center">
+            <p className="text-sm text-muted-foreground">No active batches</p>
           </div>
         ) : (
           <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4">
@@ -516,8 +516,8 @@ export function FactoryOverview() {
         <SectionHeader icon={ListOrdered} title="Queue" count={queuedBatches.length} />
 
         {queuedBatches.length === 0 ? (
-          <div className="rounded-xl border border-dashed border-[#2A2A35] bg-[#141419]/50 py-8 text-center">
-            <p className="text-sm text-[#6B6B7A]">Queue is empty</p>
+          <div className="rounded-xl border border-dashed border-border bg-card/50 py-8 text-center">
+            <p className="text-sm text-muted-foreground">Queue is empty</p>
           </div>
         ) : (
           <div className="flex flex-col gap-2">

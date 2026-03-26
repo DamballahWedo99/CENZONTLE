@@ -41,7 +41,7 @@ interface StatusStyle {
 
 const STATUS_STYLES: Record<string, StatusStyle> = {
   [LayerStatus.Idle]: {
-    borderColor: 'border-[#2A2A35]',
+    borderColor: 'border-border',
     dotColor: 'bg-[#6B7280]',
     textColor: 'text-[#6B7280]',
     label: 'Idle',
@@ -132,7 +132,7 @@ function LayerCard({ layer }: LayerCardProps) {
     <div
       className={cn(
         'relative flex flex-col items-center gap-2 rounded-lg border p-3 md:p-4',
-        'bg-[#141419] transition-all duration-300 min-w-[120px] md:min-w-[140px]',
+        'bg-card transition-all duration-300 min-w-[120px] md:min-w-[140px]',
         style.borderColor,
         style.opacity,
         isActive && 'shadow-[0_0_20px_-4px_rgba(59,130,246,0.3)]',
@@ -163,7 +163,7 @@ function LayerCard({ layer }: LayerCardProps) {
             className="absolute -top-1 -right-1.5 flex h-3.5 w-3.5 items-center justify-center rounded-full bg-[#22C55E]"
             aria-hidden="true"
           >
-            <Check className="h-2 w-2 text-[#0A0A0F]" strokeWidth={3} />
+            <Check className="h-2 w-2 text-background" strokeWidth={3} />
           </span>
         )}
       </div>
@@ -172,7 +172,7 @@ function LayerCard({ layer }: LayerCardProps) {
       <span
         className={cn(
           'text-xs font-medium text-center leading-tight',
-          isCompleted ? 'text-[#EDEDF0]' : isActive ? 'text-[#EDEDF0]' : 'text-[#6B7280]',
+          isCompleted ? 'text-foreground' : isActive ? 'text-foreground' : 'text-[#6B7280]',
         )}
       >
         {layer.label}
@@ -209,7 +209,7 @@ export function PipelineFlow() {
   return (
     <section aria-label="Pipeline flow visualization">
       <div className="mb-3 px-1">
-        <h2 className="text-sm font-semibold text-[#EDEDF0]">Pipeline</h2>
+        <h2 className="text-sm font-semibold text-foreground">Pipeline</h2>
         <p className="text-[11px] text-[#6B7280] mt-0.5">
           6-layer flow from requirements to release
         </p>

@@ -78,6 +78,44 @@ export const DEFAULT_INTEGRATION_CONFIG: IntegrationConfig = {
   jira: null,
 };
 
+// === GITHUB / REPOSITORY CONFIGURATION ===
+
+export interface GitHubConfig {
+  owner: string;           // GitHub org or user, e.g. "DamballahWedo99"
+  repo: string;            // Repository name, e.g. "CENZONTLE"
+  personalAccessToken: string; // GitHub PAT with repo scope
+}
+
+export interface BranchStrategy {
+  devBranch: string;          // Target for consolidated PRs from Forge, e.g. "dev" or "develop"
+  mainBranch: string;         // Production branch, e.g. "main" or "master"
+  forgeBranchPrefix: string;  // Prefix for batch branches, e.g. "forge/sprint-batch-"
+  autoDeleteForgeBranch: boolean; // Delete forge branch after merge to DEV
+}
+
+export interface FactoryConfig {
+  github: GitHubConfig | null;
+  branchStrategy: BranchStrategy;
+  maxConcurrentAgents: number;    // Semaphore limit (default: 6)
+  maxRetriesPerStory: number;     // Max reject loops before escalation (default: 3)
+  connectionStatus: ConnectionStatus; // reuse from existing type
+}
+
+export const DEFAULT_BRANCH_STRATEGY: BranchStrategy = {
+  devBranch: 'dev',
+  mainBranch: 'main',
+  forgeBranchPrefix: 'forge/sprint-batch-',
+  autoDeleteForgeBranch: true,
+};
+
+export const DEFAULT_FACTORY_CONFIG: FactoryConfig = {
+  github: null,
+  branchStrategy: DEFAULT_BRANCH_STRATEGY,
+  maxConcurrentAgents: 6,
+  maxRetriesPerStory: 3,
+  connectionStatus: 'disconnected',
+};
+
 // Mask a key for display: show first 3 and last 4 chars
 export function maskApiKey(key: string): string {
   if (key.length <= 8) return '****';

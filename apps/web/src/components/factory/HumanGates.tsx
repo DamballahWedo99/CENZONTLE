@@ -146,13 +146,13 @@ function TestSuiteSummary({
 }) {
   return (
     <div className="flex items-center justify-between gap-3 py-2">
-      <div className="flex items-center gap-2 text-[#8B8B9A] text-sm">
+      <div className="flex items-center gap-2 text-muted-foreground text-sm">
         <Icon className="h-4 w-4 shrink-0" aria-hidden="true" />
         <span>{label}</span>
       </div>
       <span className={cn('text-sm font-mono font-medium', testColor(suite))}>
         {testRatio(suite)}
-        <span className="text-[#8B8B9A] font-normal ml-1">passed</span>
+        <span className="text-muted-foreground font-normal ml-1">passed</span>
       </span>
     </div>
   );
@@ -168,7 +168,7 @@ function LogAnalysisSummary({ analysis }: { analysis: LogAnalysis }) {
 
   return (
     <div className="space-y-3">
-      <h4 className="text-xs font-semibold uppercase tracking-wider text-[#8B8B9A]">
+      <h4 className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">
         Log Analysis
       </h4>
       <div className="grid grid-cols-2 gap-2">
@@ -179,7 +179,7 @@ function LogAnalysisSummary({ analysis }: { analysis: LogAnalysis }) {
           return (
             <div
               key={m.label}
-              className="flex items-center gap-2 rounded-md px-3 py-2 text-sm border bg-[#0A0A0F] border-[#2A2A35]"
+              className="flex items-center gap-2 rounded-md px-3 py-2 text-sm border bg-background border-border"
             >
               <MetricIcon
                 className={cn(
@@ -192,7 +192,7 @@ function LogAnalysisSummary({ analysis }: { analysis: LogAnalysis }) {
                 )}
                 aria-hidden="true"
               />
-              <span className="text-[#8B8B9A] truncate">{m.label}</span>
+              <span className="text-muted-foreground truncate">{m.label}</span>
               <span
                 className={cn(
                   'ml-auto font-mono font-medium',
@@ -210,12 +210,12 @@ function LogAnalysisSummary({ analysis }: { analysis: LogAnalysis }) {
         })}
       </div>
       <div className="flex items-center justify-between pt-1">
-        <span className="text-xs text-[#8B8B9A]">Anomaly Score</span>
+        <span className="text-xs text-muted-foreground">Anomaly Score</span>
         <span className={cn('text-sm font-mono font-medium', anomalyColor(analysis.anomalyScore))}>
           {analysis.anomalyScore}/100
         </span>
       </div>
-      <p className="text-xs text-[#8B8B9A] leading-relaxed">{analysis.summary}</p>
+      <p className="text-xs text-muted-foreground leading-relaxed">{analysis.summary}</p>
     </div>
   );
 }
@@ -226,8 +226,8 @@ function QAReportSection({ report }: { report: QAReport }) {
   return (
     <div className="space-y-4 mt-4">
       <div className="flex items-center gap-3">
-        <FileText className="h-4 w-4 text-[#8B8B9A]" aria-hidden="true" />
-        <h3 className="text-sm font-semibold text-[#EDEDF0]">QA Report</h3>
+        <FileText className="h-4 w-4 text-muted-foreground" aria-hidden="true" />
+        <h3 className="text-sm font-semibold text-foreground">QA Report</h3>
       </div>
 
       <div className="grid grid-cols-2 gap-3">
@@ -240,7 +240,7 @@ function QAReportSection({ report }: { report: QAReport }) {
               : 'bg-red-500/5 border-red-500/20',
           )}
         >
-          <p className="text-xs text-[#8B8B9A] mb-1">Recommendation</p>
+          <p className="text-xs text-muted-foreground mb-1">Recommendation</p>
           <span
             className={cn(
               'text-sm font-semibold uppercase tracking-wide',
@@ -252,8 +252,8 @@ function QAReportSection({ report }: { report: QAReport }) {
         </div>
 
         {/* Confidence */}
-        <div className="rounded-lg border border-[#2A2A35] bg-[#0A0A0F] px-4 py-3">
-          <p className="text-xs text-[#8B8B9A] mb-1">Confidence</p>
+        <div className="rounded-lg border border-border bg-background px-4 py-3">
+          <p className="text-xs text-muted-foreground mb-1">Confidence</p>
           <div className="flex items-baseline gap-1">
             <span
               className={cn(
@@ -281,19 +281,19 @@ function QAReportSection({ report }: { report: QAReport }) {
       </div>
 
       {/* Test Results */}
-      <div className="rounded-lg border border-[#2A2A35] bg-[#0A0A0F] px-4 py-3 space-y-1">
-        <h4 className="text-xs font-semibold uppercase tracking-wider text-[#8B8B9A] mb-2">
+      <div className="rounded-lg border border-border bg-background px-4 py-3 space-y-1">
+        <h4 className="text-xs font-semibold uppercase tracking-wider text-muted-foreground mb-2">
           Test Summary
         </h4>
         <TestSuiteSummary label="E2E" icon={Activity} suite={report.e2eResults} />
-        <div className="border-t border-[#2A2A35]" />
+        <div className="border-t border-border" />
         <TestSuiteSummary label="Integration" icon={BarChart3} suite={report.integrationResults} />
-        <div className="border-t border-[#2A2A35]" />
+        <div className="border-t border-border" />
         <TestSuiteSummary label="Performance" icon={Gauge} suite={report.performanceResults} />
       </div>
 
       {/* Log Analysis */}
-      <div className="rounded-lg border border-[#2A2A35] bg-[#0A0A0F] px-4 py-3">
+      <div className="rounded-lg border border-border bg-background px-4 py-3">
         <LogAnalysisSummary analysis={report.logAnalysis} />
       </div>
     </div>
@@ -336,7 +336,7 @@ function GateCard({ gate }: { gate: HumanGate }) {
     <div
       className={cn(
         'rounded-xl border p-5 transition-all duration-300',
-        'bg-[#141419]',
+        'bg-card',
         isPending
           ? 'border-pink-500/40 shadow-[0_0_20px_-5px_rgba(236,72,153,0.15)]'
           : config.border,
@@ -362,10 +362,10 @@ function GateCard({ gate }: { gate: HumanGate }) {
             />
           </div>
           <div>
-            <h3 className="text-sm font-semibold text-[#EDEDF0]">
+            <h3 className="text-sm font-semibold text-foreground">
               {isStagingGate ? 'Staging Gate' : 'Release Gate'}
             </h3>
-            <p className="text-xs text-[#8B8B9A]">
+            <p className="text-xs text-muted-foreground">
               Requested {formatTimestamp(gate.requestedAt)}
             </p>
           </div>
@@ -375,18 +375,18 @@ function GateCard({ gate }: { gate: HumanGate }) {
 
       {/* Decided state */}
       {!isPending && gate.reviewer && (
-        <div className="rounded-lg border border-[#2A2A35] bg-[#0A0A0F] p-3 mb-4">
+        <div className="rounded-lg border border-border bg-background p-3 mb-4">
           <div className="flex items-center gap-2 text-sm">
-            <User className="h-3.5 w-3.5 text-[#8B8B9A]" aria-hidden="true" />
-            <span className="text-[#EDEDF0] font-medium">{gate.reviewer}</span>
+            <User className="h-3.5 w-3.5 text-muted-foreground" aria-hidden="true" />
+            <span className="text-foreground font-medium">{gate.reviewer}</span>
             {gate.decidedAt && (
-              <span className="text-[#8B8B9A] text-xs ml-auto">
+              <span className="text-muted-foreground text-xs ml-auto">
                 {formatTimestamp(gate.decidedAt)}
               </span>
             )}
           </div>
           {gate.notes && (
-            <p className="text-xs text-[#8B8B9A] mt-2 leading-relaxed">{gate.notes}</p>
+            <p className="text-xs text-muted-foreground mt-2 leading-relaxed">{gate.notes}</p>
           )}
         </div>
       )}
@@ -398,11 +398,11 @@ function GateCard({ gate }: { gate: HumanGate }) {
             <div
               className={cn(
                 'rounded-lg border p-4 space-y-3',
-                'bg-[#0A0A0F]',
+                'bg-background',
                 DECISION_CONFIG[confirmAction].border,
               )}
             >
-              <p className="text-sm text-[#EDEDF0]">
+              <p className="text-sm text-foreground">
                 Confirm{' '}
                 <span className={cn('font-semibold', DECISION_CONFIG[confirmAction].color)}>
                   {DECISION_CONFIG[confirmAction].label}
@@ -414,8 +414,8 @@ function GateCard({ gate }: { gate: HumanGate }) {
                 onChange={(e) => setNotes(e.target.value)}
                 placeholder="Add notes (optional)..."
                 className={cn(
-                  'w-full rounded-md border bg-[#141419] border-[#2A2A35] px-3 py-2',
-                  'text-sm text-[#EDEDF0] placeholder:text-[#8B8B9A]/50',
+                  'w-full rounded-md border bg-card border-border px-3 py-2',
+                  'text-sm text-foreground placeholder:text-muted-foreground/50',
                   'focus:outline-none focus:ring-1 focus:ring-pink-500/50 focus:border-pink-500/50',
                   'resize-none',
                 )}
@@ -430,7 +430,7 @@ function GateCard({ gate }: { gate: HumanGate }) {
                     setConfirmAction(null);
                     setNotes('');
                   }}
-                  className="text-[#8B8B9A] hover:text-[#EDEDF0] hover:bg-[#2A2A35]/50"
+                  className="text-muted-foreground hover:text-foreground hover:bg-[#2A2A35]/50"
                 >
                   Cancel
                 </Button>
@@ -501,9 +501,9 @@ export function HumanGates() {
 
   if (!stagingGate && !releaseGate) {
     return (
-      <div className="rounded-xl border border-[#2A2A35] bg-[#141419] p-8 text-center">
-        <ShieldCheck className="h-8 w-8 text-[#8B8B9A] mx-auto mb-3" aria-hidden="true" />
-        <p className="text-sm text-[#8B8B9A]">No human gates are active for the current batch.</p>
+      <div className="rounded-xl border border-border bg-card p-8 text-center">
+        <ShieldCheck className="h-8 w-8 text-muted-foreground mx-auto mb-3" aria-hidden="true" />
+        <p className="text-sm text-muted-foreground">No human gates are active for the current batch.</p>
       </div>
     );
   }
@@ -521,8 +521,8 @@ export function HumanGates() {
           <AlertTriangle className="h-4 w-4 text-pink-400" />
         </div>
         <div>
-          <h2 className="text-base font-semibold text-[#EDEDF0]">Human Approval Gates</h2>
-          <p className="text-xs text-[#8B8B9A]">
+          <h2 className="text-base font-semibold text-foreground">Human Approval Gates</h2>
+          <p className="text-xs text-muted-foreground">
             {pendingCount > 0
               ? `${pendingCount} gate${pendingCount > 1 ? 's' : ''} awaiting human decision`
               : 'All gates resolved'}

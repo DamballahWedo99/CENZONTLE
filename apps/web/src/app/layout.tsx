@@ -2,8 +2,7 @@ import type { Metadata } from "next";
 import { Geist, Geist_Mono } from "next/font/google";
 import "./globals.css";
 import { SidebarProvider } from "@/components/ui/sidebar";
-import { ConditionalSidebar } from "@/components/conditional-sidebar";
-import { DashboardHeader } from "@/components/dashboard-header";
+import { FullscreenOrChrome } from "@/components/fullscreen-or-chrome";
 import { ThemeProvider } from "@/components/theme-provider";
 import { BreadcrumbProvider } from "@/context/BreadcrumbContext";
 import { HeaderActionsProvider } from "@/context/HeaderActionsContext";
@@ -46,13 +45,9 @@ export default function RootLayout({
             <HeaderActionsProvider>
               <IntegrationsProvider>
                 <SidebarProvider defaultOpen={false}>
-                  <ConditionalSidebar />
-                  <div className="flex flex-1 flex-col w-full h-screen overflow-hidden">
-                    <DashboardHeader />
-                    <main className="flex-1 w-full overflow-x-hidden overflow-y-auto">
-                      {children}
-                    </main>
-                  </div>
+                  <FullscreenOrChrome>
+                    {children}
+                  </FullscreenOrChrome>
                 </SidebarProvider>
               </IntegrationsProvider>
             </HeaderActionsProvider>

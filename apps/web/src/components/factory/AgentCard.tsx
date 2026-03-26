@@ -27,9 +27,9 @@ interface StatusConfig {
 const STATUS_MAP: Record<AgentStatus, StatusConfig> = {
   [AgentStatus.Idle]: {
     label: 'Idle',
-    bg: 'bg-zinc-700/40',
-    text: 'text-zinc-400',
-    border: 'border-zinc-600',
+    bg: 'bg-muted',
+    text: 'text-muted-foreground',
+    border: 'border-border',
     pulse: false,
   },
   [AgentStatus.Coding]: {
@@ -150,8 +150,8 @@ function MetricItem({
 }) {
   return (
     <div className="flex items-center gap-1" aria-label={`${label}: ${value}`}>
-      <Icon className="h-3 w-3 shrink-0 text-zinc-500" aria-hidden="true" />
-      <span className="text-xs text-zinc-300">{value}</span>
+      <Icon className="h-3 w-3 shrink-0 text-muted-foreground/70" aria-hidden="true" />
+      <span className="text-xs text-foreground">{value}</span>
     </div>
   );
 }
@@ -161,11 +161,11 @@ function MiniTerminal({ lines }: { lines: string[] }) {
   if (visibleLines.length === 0) {
     return (
       <div
-        className="mt-2 rounded bg-[#0A0A0F] px-2.5 py-2 font-mono text-xs text-zinc-600"
+        className="mt-2 rounded bg-muted px-2.5 py-2 font-mono text-xs text-muted-foreground/50"
         aria-label="Agent terminal output: no output"
         role="log"
       >
-        <span className="select-none text-zinc-700">&gt; </span>
+        <span className="select-none text-muted-foreground/40">&gt; </span>
         <span className="italic">awaiting output...</span>
       </div>
     );
@@ -173,7 +173,7 @@ function MiniTerminal({ lines }: { lines: string[] }) {
 
   return (
     <div
-      className="mt-2 overflow-hidden rounded bg-[#0A0A0F] px-2.5 py-2"
+      className="mt-2 overflow-hidden rounded bg-muted px-2.5 py-2"
       role="log"
       aria-label="Agent terminal output"
     >
@@ -182,7 +182,7 @@ function MiniTerminal({ lines }: { lines: string[] }) {
           key={`${i}-${line.slice(0, 20)}`}
           className="truncate font-mono text-xs leading-relaxed text-green-400"
         >
-          <span className="select-none text-zinc-600" aria-hidden="true">&gt; </span>
+          <span className="select-none text-muted-foreground/50" aria-hidden="true">&gt; </span>
           {line}
         </div>
       ))}
@@ -213,12 +213,12 @@ export function AgentCard({ agent, isSelected = false, onClick }: AgentCardProps
   return (
     <div
       className={cn(
-        'group relative flex flex-col rounded-lg border bg-[#141419] p-3.5 transition-all duration-200',
-        'border-[#2A2A35]',
-        'hover:border-zinc-600 hover:shadow-[0_0_12px_rgba(255,255,255,0.03)]',
-        isSelected && 'scale-[1.02] border-opacity-100 shadow-[0_0_16px_rgba(255,255,255,0.05)]',
+        'group relative flex flex-col rounded-lg border bg-card p-3.5 transition-all duration-200',
+        'border-border',
+        'hover:border-border hover:shadow-sm',
+        isSelected && 'scale-[1.02] border-opacity-100 shadow-md',
         isSelected && config.border,
-        isActive && !isSelected && 'border-[#2A2A35]',
+        isActive && !isSelected && 'border-border',
         onClick && 'cursor-pointer',
       )}
       onClick={handleClick}
@@ -230,21 +230,21 @@ export function AgentCard({ agent, isSelected = false, onClick }: AgentCardProps
     >
       {/* Header: name + status pill */}
       <div className="flex items-center justify-between gap-2">
-        <h3 className="truncate text-sm font-medium text-zinc-100">{agent.name}</h3>
+        <h3 className="truncate text-sm font-medium text-foreground">{agent.name}</h3>
         <StatusPill status={agent.status} />
       </div>
 
       {/* Assignment */}
       <div className="mt-1.5 min-h-[20px]">
         {agent.storyKey ? (
-          <p className="truncate text-xs text-zinc-400">
-            <span className="font-medium text-zinc-300">{agent.storyKey}</span>
+          <p className="truncate text-xs text-muted-foreground">
+            <span className="font-medium text-foreground">{agent.storyKey}</span>
             {agent.currentFile && (
-              <span className="text-zinc-500"> &middot; {agent.currentFile.split('/').pop()}</span>
+              <span className="text-muted-foreground/70"> &middot; {agent.currentFile.split('/').pop()}</span>
             )}
           </p>
         ) : (
-          <p className="text-xs italic text-zinc-600">Idle</p>
+          <p className="text-xs italic text-muted-foreground/50">Idle</p>
         )}
       </div>
 
@@ -258,29 +258,29 @@ export function AgentCard({ agent, isSelected = false, onClick }: AgentCardProps
       {/* Progress indicators */}
       <div className="mt-2.5 flex items-center gap-3">
         <div className="flex items-center gap-1" aria-label={`Lines written: ${agent.linesWritten}`}>
-          <FileCode2 className="h-3 w-3 shrink-0 text-zinc-500" aria-hidden="true" />
-          <span className="text-xs text-zinc-400">
-            {agent.linesWritten} <span className="text-zinc-600">lines</span>
+          <FileCode2 className="h-3 w-3 shrink-0 text-muted-foreground/70" aria-hidden="true" />
+          <span className="text-xs text-foreground">
+            {agent.linesWritten} <span className="text-muted-foreground/70">lines</span>
           </span>
         </div>
         <div
           className="flex items-center gap-1"
           aria-label={`Tests: ${agent.testsPassed} passed of ${agent.testsRun} run`}
         >
-          <TestTube2 className="h-3 w-3 shrink-0 text-zinc-500" aria-hidden="true" />
-          <span className="text-xs text-zinc-400">
+          <TestTube2 className="h-3 w-3 shrink-0 text-muted-foreground/70" aria-hidden="true" />
+          <span className="text-xs text-foreground">
             <span
               className={cn(
                 agent.testsRun > 0 && agent.testsPassed === agent.testsRun
                   ? 'text-green-400'
                   : agent.testsRun > 0 && agent.testsPassed < agent.testsRun
                     ? 'text-amber-400'
-                    : 'text-zinc-400',
+                    : 'text-muted-foreground',
               )}
             >
               {agent.testsPassed}/{agent.testsRun}
             </span>{' '}
-            <span className="text-zinc-600">tests</span>
+            <span className="text-muted-foreground/70">tests</span>
           </span>
         </div>
       </div>

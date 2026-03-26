@@ -358,3 +358,17 @@ export type FactoryEvent =
   | { type: 'log:entry'; data: LogEntry }
   | { type: 'cost:update'; data: CostBreakdown }
   | { type: 'pipeline:update'; data: PipelineLayerState[] };
+
+// === TERMINAL / PTY TYPES ===
+
+/** Configuration to spawn a Claude Code PTY session for an agent */
+export interface PtySessionConfig {
+  agentId: string;
+  /** Initial prompt to send after spawning (optional — user can type directly) */
+  initialPrompt?: string;
+  /** Working directory for the Claude Code process */
+  workdir: string;
+  /** Terminal dimensions */
+  cols?: number;
+  rows?: number;
+}

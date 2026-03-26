@@ -5,7 +5,6 @@ import { Monitor, Cpu, Server, Layers } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { useFactory } from '@/context/FactoryContext';
 import { AgentCard } from '@/components/factory/AgentCard';
-import { AgentTerminal } from '@/components/factory/AgentTerminal';
 import { AgentStatus } from '@cenzontle/shared';
 import type { FactoryAgent, ComputeNode } from '@cenzontle/shared';
 
@@ -52,11 +51,11 @@ function CapacityBar({ used, total }: { used: number; total: number }) {
 
   return (
     <div className="flex items-center gap-3">
-      <div className="flex-1 h-2 rounded-full bg-[#2A2A35] overflow-hidden">
+      <div className="flex-1 h-2 rounded-full bg-muted overflow-hidden">
         <div className={cn('h-full rounded-full transition-all', color)} style={{ width: `${pct}%` }} />
       </div>
       <span className={cn('text-xs font-mono font-medium tabular-nums whitespace-nowrap', textColor)}>
-        {used}/{total} <span className="text-[#6B7280]">({pct.toFixed(0)}%)</span>
+        {used}/{total} <span className="text-muted-foreground/70">({pct.toFixed(0)}%)</span>
       </span>
     </div>
   );
@@ -73,8 +72,8 @@ function MachineStatusDot({ status }: { status: ComputeNode['status'] }) {
 
 function EmptySlot() {
   return (
-    <div className="rounded-lg border border-dashed border-[#2A2A35] bg-[#0A0A0F]/50 p-3.5 flex items-center justify-center min-h-[140px]">
-      <span className="text-[10px] text-[#3A3A45]">Available</span>
+    <div className="rounded-lg border border-dashed border-border bg-background/50 p-3.5 flex items-center justify-center min-h-[140px]">
+      <span className="text-[10px] text-muted-foreground/50">Available</span>
     </div>
   );
 }
@@ -98,22 +97,22 @@ function MachineGroup({ machine, agents, selectedAgentId, onSelectAgent, filter 
   const emptySlots = machine.totalSlots - machine.agents.length;
 
   return (
-    <div className="rounded-xl border border-[#2A2A35] bg-[#141419] p-5">
+    <div className="rounded-xl border border-border bg-card p-5">
       {/* Machine header */}
       <div className="flex items-center justify-between mb-4">
         <div className="flex items-center gap-2.5">
-          <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-[#2A2A35]">
-            <Cpu className="h-4 w-4 text-[#8B8B9A]" />
+          <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-muted">
+            <Cpu className="h-4 w-4 text-muted-foreground" />
           </div>
           <div>
             <div className="flex items-center gap-2">
               <MachineStatusDot status={machine.status} />
-              <span className="text-sm font-semibold text-[#EDEDF0]">{machine.name}</span>
+              <span className="text-sm font-semibold text-foreground">{machine.name}</span>
               {machine.type === 'local' && (
                 <span className="text-[9px] font-medium px-1.5 py-0.5 rounded bg-[#3B82F6]/10 text-[#3B82F6] border border-[#3B82F6]/20">THIS MACHINE</span>
               )}
             </div>
-            <span className="text-[10px] text-[#5A5A6E]">
+            <span className="text-[10px] text-muted-foreground/70">
               {machine.os} · {machine.location}
             </span>
           </div>
@@ -128,14 +127,14 @@ function MachineGroup({ machine, agents, selectedAgentId, onSelectAgent, filter 
                 key={i}
                 className={cn(
                   'h-3 w-3 rounded-sm transition-colors',
-                  slotAgent ? '' : 'bg-[#2A2A35]'
+                  slotAgent ? '' : 'bg-muted'
                 )}
                 style={slotAgent ? { backgroundColor: batchColor(slotAgent.batchId) } : undefined}
                 title={slotAgent ? slotAgent.batchName : 'Empty'}
               />
             );
           })}
-          <span className="text-[10px] text-[#5A5A6E] ml-1.5 font-mono">
+          <span className="text-[10px] text-muted-foreground/70 ml-1.5 font-mono">
             {machine.agents.length}/{machine.totalSlots}
           </span>
         </div>
@@ -144,7 +143,7 @@ function MachineGroup({ machine, agents, selectedAgentId, onSelectAgent, filter 
       {/* Agents grid */}
       {machineAgents.length === 0 && emptySlots === machine.totalSlots ? (
         <div className="text-center py-4">
-          <p className="text-xs text-[#5A5A6E]">All {machine.totalSlots} slots available</p>
+          <p className="text-xs text-muted-foreground/70">All {machine.totalSlots} slots available</p>
         </div>
       ) : (
         <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-3">
@@ -160,8 +159,8 @@ function MachineGroup({ machine, agents, selectedAgentId, onSelectAgent, filter 
             <EmptySlot key={`empty-${i}`} />
           ))}
           {filter === 'all' && emptySlots > 3 && (
-            <div className="rounded-lg border border-dashed border-[#2A2A35] bg-[#0A0A0F]/50 p-3.5 flex items-center justify-center min-h-[140px]">
-              <span className="text-[10px] text-[#3A3A45]">+{emptySlots - 3} more slots</span>
+            <div className="rounded-lg border border-dashed border-border bg-background/50 p-3.5 flex items-center justify-center min-h-[140px]">
+              <span className="text-[10px] text-muted-foreground/50">+{emptySlots - 3} more slots</span>
             </div>
           )}
         </div>
@@ -196,11 +195,11 @@ function BatchGroup({ batchId, batchName, agents, machines, selectedAgentId, onS
   }, [machines]);
 
   return (
-    <div className="rounded-xl border bg-[#141419] p-5" style={{ borderColor: `${color}30` }}>
+    <div className="rounded-xl border bg-card p-5" style={{ borderColor: `${color}30` }}>
       <div className="flex items-center gap-2.5 mb-4">
         <div className="h-3 w-3 rounded-full shrink-0" style={{ backgroundColor: color }} />
-        <span className="text-sm font-semibold text-[#EDEDF0]">{batchName}</span>
-        <span className="rounded-md bg-zinc-800 px-2 py-0.5 text-[10px] font-medium text-zinc-400">
+        <span className="text-sm font-semibold text-foreground">{batchName}</span>
+        <span className="rounded-md bg-muted px-2 py-0.5 text-[10px] font-medium text-muted-foreground">
           {agents.length} agent{agents.length !== 1 ? 's' : ''}
         </span>
       </div>
@@ -285,31 +284,26 @@ export function AgentGrid({ initialAgentId }: AgentGridProps = {}) {
 
   const handleSelectAgent = useCallback(
     (agentId: string) => {
-      const nextId = selectedAgentId === agentId ? null : agentId;
-      dispatch({ type: 'SELECT_AGENT', payload: nextId });
+      window.open(`/factory/agents/${agentId}/terminal`, '_blank');
     },
-    [dispatch, selectedAgentId],
+    [],
   );
-
-  const handleCloseTerminal = useCallback(() => {
-    dispatch({ type: 'SELECT_AGENT', payload: null });
-  }, [dispatch]);
 
   return (
     <section className="flex flex-col gap-5">
       {/* Header */}
       <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
         <div className="flex items-center gap-2">
-          <Monitor className="h-5 w-5 text-zinc-400" />
-          <h2 className="text-base font-semibold text-zinc-100">Fleet Monitor</h2>
-          <span className="rounded-md bg-zinc-800 px-2 py-0.5 text-xs font-medium text-zinc-400">
+          <Monitor className="h-5 w-5 text-muted-foreground" />
+          <h2 className="text-base font-semibold text-foreground">Fleet Monitor</h2>
+          <span className="rounded-md bg-muted px-2 py-0.5 text-xs font-medium text-muted-foreground">
             {activeCount} of {agents.length} active
           </span>
         </div>
 
         <div className="flex items-center gap-2">
           {/* View mode */}
-          <div className="flex items-center gap-0.5 bg-[#141419] rounded-lg p-0.5 border border-[#2A2A35]">
+          <div className="flex items-center gap-0.5 bg-card rounded-lg p-0.5 border border-border">
             {([
               { value: 'machine' as ViewMode, label: 'By Machine', icon: Cpu },
               { value: 'batch' as ViewMode, label: 'By Batch', icon: Layers },
@@ -322,8 +316,8 @@ export function AgentGrid({ initialAgentId }: AgentGridProps = {}) {
                 className={cn(
                   'flex items-center gap-1.5 rounded-md px-2.5 py-1.5 text-xs font-medium transition-colors',
                   viewMode === value
-                    ? 'bg-[#2A2A35] text-[#EDEDF0]'
-                    : 'text-[#6B7280] hover:text-[#8B8B9A]',
+                    ? 'bg-muted text-foreground'
+                    : 'text-muted-foreground/70 hover:text-muted-foreground',
                 )}
               >
                 <Icon className="h-3 w-3" />
@@ -341,7 +335,7 @@ export function AgentGrid({ initialAgentId }: AgentGridProps = {}) {
                 onClick={() => setFilter(f)}
                 className={cn(
                   'rounded-md px-2.5 py-1.5 text-xs font-medium transition-colors capitalize',
-                  filter === f ? 'bg-zinc-700 text-zinc-100' : 'text-zinc-500 hover:text-zinc-300',
+                  filter === f ? 'bg-muted text-foreground' : 'text-muted-foreground/70 hover:text-foreground',
                 )}
               >
                 {f}
@@ -352,10 +346,10 @@ export function AgentGrid({ initialAgentId }: AgentGridProps = {}) {
       </div>
 
       {/* Capacity bar */}
-      <div className="rounded-xl border border-[#2A2A35] bg-[#141419] px-5 py-3">
+      <div className="rounded-xl border border-border bg-card px-5 py-3">
         <div className="flex items-center justify-between mb-2">
-          <span className="text-xs text-[#8B8B9A]">Factory Capacity</span>
-          <span className="text-[10px] text-[#5A5A6E]">{machines.length} node{machines.length !== 1 ? 's' : ''}</span>
+          <span className="text-xs text-muted-foreground">Factory Capacity</span>
+          <span className="text-[10px] text-muted-foreground/70">{machines.length} node{machines.length !== 1 ? 's' : ''}</span>
         </div>
         <CapacityBar used={usedSlots} total={totalSlots} />
       </div>
@@ -390,9 +384,9 @@ export function AgentGrid({ initialAgentId }: AgentGridProps = {}) {
             />
           ))}
           {batchGroups.size === 0 && (
-            <div className="rounded-xl border border-dashed border-[#2A2A35] bg-[#141419] p-12 text-center">
-              <Monitor className="h-8 w-8 text-[#6B7280] mx-auto mb-2" />
-              <p className="text-sm text-[#5A5A6E]">No agents match the current filter</p>
+            <div className="rounded-xl border border-dashed border-border bg-card p-12 text-center">
+              <Monitor className="h-8 w-8 text-muted-foreground/70 mx-auto mb-2" />
+              <p className="text-sm text-muted-foreground/70">No agents match the current filter</p>
             </div>
           )}
         </div>
@@ -410,9 +404,9 @@ export function AgentGrid({ initialAgentId }: AgentGridProps = {}) {
               />
             ))
           ) : (
-            <div className="col-span-full flex flex-col items-center justify-center rounded-lg border border-dashed border-zinc-800 py-12 text-center">
-              <Monitor className="mb-2 h-8 w-8 text-zinc-700" />
-              <p className="text-sm text-zinc-500">
+            <div className="col-span-full flex flex-col items-center justify-center rounded-lg border border-dashed border-border py-12 text-center">
+              <Monitor className="mb-2 h-8 w-8 text-muted-foreground/50" />
+              <p className="text-sm text-muted-foreground/70">
                 {filter === 'all' ? 'No agents registered' : `No ${filter} agents`}
               </p>
             </div>
@@ -420,10 +414,6 @@ export function AgentGrid({ initialAgentId }: AgentGridProps = {}) {
         </div>
       )}
 
-      {/* Terminal panel */}
-      {selectedAgent && (
-        <AgentTerminal agent={selectedAgent} onClose={handleCloseTerminal} />
-      )}
     </section>
   );
 }
