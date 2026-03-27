@@ -22,6 +22,9 @@ const geistMono = Geist_Mono({
 export const metadata: Metadata = {
   title: "Aeroméxico - Dashboard",
   description: "Sistema de gestión Aeroméxico",
+  icons: {
+    icon: "/Imagotipo.svg",
+  },
 };
 
 export default function RootLayout({

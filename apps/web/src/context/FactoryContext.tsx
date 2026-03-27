@@ -81,6 +81,8 @@ const mockAgents: FactoryAgent[] = [
   { id: 'agent-1', name: 'Forge-Alpha', storyId: 's-3', storyKey: 'CZ-142', status: AgentStatus.Coding, worktree: '/worktrees/cz-142', tmuxSession: 'forge-alpha', startedAt: '2026-03-23T09:35:00Z', duration: 1200, tokens: 320_000, cost: 1.92, lastOutput: ['Writing auth middleware...', 'Generated 3 files'], currentFile: 'src/middleware/auth.ts', linesWritten: 247, testsRun: 0, testsPassed: 0 },
   { id: 'agent-2', name: 'Forge-Beta', storyId: 's-4', storyKey: 'CZ-143', status: AgentStatus.Testing, worktree: '/worktrees/cz-143', tmuxSession: 'forge-beta', startedAt: '2026-03-23T09:35:00Z', duration: 1180, tokens: 280_000, cost: 1.68, lastOutput: ['Running test suite...', '12/15 passed'], currentFile: 'tests/api.test.ts', linesWritten: 189, testsRun: 15, testsPassed: 12 },
   { id: 'agent-3', name: 'Forge-Gamma', storyId: 's-5', storyKey: 'CZ-144', status: AgentStatus.CreatingPR, worktree: '/worktrees/cz-144', tmuxSession: 'forge-gamma', startedAt: '2026-03-23T09:36:00Z', duration: 1140, tokens: 410_000, cost: 2.46, lastOutput: ['Creating pull request...', 'PR #89 opened'], currentFile: null, linesWritten: 312, testsRun: 22, testsPassed: 22 },
+  { id: 'agent-4', name: 'Forge-Delta', storyId: 's-7', storyKey: 'CZ-146', status: AgentStatus.Coding, worktree: '/worktrees/cz-146', tmuxSession: 'forge-delta', startedAt: '2026-03-23T09:40:00Z', duration: 980, tokens: 195_000, cost: 1.17, lastOutput: ['Generating gateway routes...', 'Added 5 endpoints'], currentFile: 'src/gateway/routes.ts', linesWritten: 178, testsRun: 0, testsPassed: 0 },
+  { id: 'agent-5', name: 'Forge-Epsilon', storyId: 's-8', storyKey: 'CZ-147', status: AgentStatus.Testing, worktree: '/worktrees/cz-147', tmuxSession: 'forge-epsilon', startedAt: '2026-03-23T09:42:00Z', duration: 860, tokens: 165_000, cost: 0.99, lastOutput: ['Running integration tests...', '8/10 passed'], currentFile: 'tests/gateway.test.ts', linesWritten: 142, testsRun: 10, testsPassed: 8 },
 ];
 
 const mockStories: FactoryStory[] = [
@@ -90,6 +92,8 @@ const mockStories: FactoryStory[] = [
   { id: 's-4', jiraKey: 'CZ-143', title: 'API rate limiter', description: 'Token-bucket rate limiter', waveNumber: 2, dependsOn: ['s-1'], agentId: 'agent-2', prNumber: null, status: AgentStatus.Testing, storyPoints: 3, startedAt: '2026-03-23T09:35:00Z', completedAt: null, retryCount: 0, maxRetries: 3, tokens: 210_000, cost: 1.26 },
   { id: 's-5', jiraKey: 'CZ-144', title: 'Dashboard analytics', description: 'Aggregate metrics dashboard', waveNumber: 2, dependsOn: ['s-2'], agentId: 'agent-3', prNumber: 89, status: AgentStatus.CreatingPR, storyPoints: 5, startedAt: '2026-03-23T09:36:00Z', completedAt: null, retryCount: 0, maxRetries: 3, tokens: 410_000, cost: 2.46 },
   { id: 's-6', jiraKey: 'CZ-145', title: 'Admin RBAC guard', description: 'Role-based access control', waveNumber: 3, dependsOn: ['s-3', 's-4'], agentId: null, prNumber: null, status: AgentStatus.Idle, storyPoints: 3, startedAt: null, completedAt: null, retryCount: 0, maxRetries: 3, tokens: 0, cost: 0 },
+  { id: 's-7', jiraKey: 'CZ-146', title: 'Gateway route generator', description: 'Auto-generate API gateway routes from OpenAPI spec', waveNumber: 1, dependsOn: [], agentId: 'agent-4', prNumber: null, status: AgentStatus.Coding, storyPoints: 5, startedAt: '2026-03-23T09:40:00Z', completedAt: null, retryCount: 0, maxRetries: 3, tokens: 195_000, cost: 1.17 },
+  { id: 's-8', jiraKey: 'CZ-147', title: 'Gateway rate limiter', description: 'Distributed rate limiting for gateway endpoints', waveNumber: 1, dependsOn: [], agentId: 'agent-5', prNumber: null, status: AgentStatus.Testing, storyPoints: 3, startedAt: '2026-03-23T09:42:00Z', completedAt: null, retryCount: 0, maxRetries: 3, tokens: 165_000, cost: 0.99 },
 ];
 
 const mockPRs: FactoryPR[] = mockFactoryPRs;
@@ -105,6 +109,8 @@ const mockCost: CostBreakdown = {
     { agentId: 'agent-1', agentName: 'Forge-Alpha', cost: 5.12, tokens: 850_000 },
     { agentId: 'agent-2', agentName: 'Forge-Beta', cost: 4.93, tokens: 820_000 },
     { agentId: 'agent-3', agentName: 'Forge-Gamma', cost: 4.82, tokens: 780_000 },
+    { agentId: 'agent-4', agentName: 'Forge-Delta', cost: 1.17, tokens: 195_000 },
+    { agentId: 'agent-5', agentName: 'Forge-Epsilon', cost: 0.99, tokens: 165_000 },
   ],
   storyCosts: [
     { storyId: 's-1', storyKey: 'CZ-140', cost: 1.92, tokens: 320_000 },
@@ -113,6 +119,8 @@ const mockCost: CostBreakdown = {
     { storyId: 's-4', storyKey: 'CZ-143', cost: 1.26, tokens: 210_000 },
     { storyId: 's-5', storyKey: 'CZ-144', cost: 2.46, tokens: 410_000 },
     { storyId: 's-6', storyKey: 'CZ-145', cost: 0, tokens: 0 },
+    { storyId: 's-7', storyKey: 'CZ-146', cost: 1.17, tokens: 195_000 },
+    { storyId: 's-8', storyKey: 'CZ-147', cost: 0.99, tokens: 165_000 },
   ],
   totalCost: 14.87,
   totalTokens: 2_450_000,

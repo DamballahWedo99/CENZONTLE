@@ -22,7 +22,6 @@ import {
   Target,
   TrendingUp,
   Activity,
-  Terminal,
   Cpu,
   BookOpen,
   Hash,
@@ -259,10 +258,10 @@ function CriteriaItem({
 }
 
 // =============================================================================
-// Success criteria derivation helpers
+// DoD: Definition of Done — automatic technical criteria based on agent state
 // =============================================================================
 
-export function deriveSuccessCriteria(agent: FactoryAgent): { text: string; done: boolean }[] {
+export function deriveDod(agent: FactoryAgent): { text: string; done: boolean }[] {
   const isDone = agent.status === AgentStatus.Done;
   const isAtLeastPR =
     agent.status === AgentStatus.CreatingPR ||
@@ -276,20 +275,58 @@ export function deriveSuccessCriteria(agent: FactoryAgent): { text: string; done
   const testsPassed = isAtLeastTesting && testPassRate >= 0.9;
 
   return [
+    { text: 'Code written', done: agent.linesWritten > 0 && isAtLeastTesting },
+    { text: 'Tests ≥ 90%', done: testsPassed },
+    { text: 'PR merged', done: isAtLeastPR && isDone },
+    { text: 'No errors', done: isDone },
+  ];
+}
+
+// =============================================================================
+// Milestones: task-specific steps derived from the story the agent is working on
+// =============================================================================
+
+export function deriveMilestones(
+  story: FactoryStory | null,
+  agent: FactoryAgent,
+): { text: string; done: boolean }[] {
+  if (!story) {
+    return [{ text: 'Awaiting task assignment', done: false }];
+  }
+
+  // Generate milestones based on the story title + description.
+  // In production, the agent itself would set these. For now we derive
+  // reasonable defaults from the story metadata.
+  const isAtLeastTesting =
+    agent.status === AgentStatus.Testing ||
+    agent.status === AgentStatus.CreatingPR ||
+    agent.status === AgentStatus.InReview ||
+    agent.status === AgentStatus.Done;
+  const isAtLeastPR =
+    agent.status === AgentStatus.CreatingPR ||
+    agent.status === AgentStatus.InReview ||
+    agent.status === AgentStatus.Done;
+  const isDone = agent.status === AgentStatus.Done;
+
+  return [
     {
-      text: 'All code written and files created',
+      text: `Analyze requirements for ${story.title}`,
+      done: agent.status !== AgentStatus.Idle,
+    },
+    {
+      text: `Implement ${story.description || story.title}`,
       done: agent.linesWritten > 0 && isAtLeastTesting,
     },
     {
-      text: 'Tests passing (≥ 90% coverage)',
-      done: testsPassed,
+      text: 'Write and run tests',
+      done: isAtLeastTesting && agent.testsRun > 0,
     },
     {
-      text: 'PR created and approved',
-      done: isAtLeastPR && isDone,
+      text: 'Create pull request',
+      done: isAtLeastPR,
     },
     {
-      text: 'No lint/typecheck errors',
+      text: 'Pass code review',
       done: isDone,
     },
   ];
@@ -339,7 +376,7 @@ export function AgentDetailDrawer({
 
   // Derived values
   const statusCfg = STATUS_MAP[agent.status];
-  const criteria = deriveSuccessCriteria(agent);
+  const criteria = deriveDod(agent);
   const mission = deriveMission(story, agent);
 
   const testPassRate =
@@ -385,20 +422,21 @@ export function AgentDetailDrawer({
           'fixed inset-0 z-40 bg-black/50 backdrop-blur-[2px] transition-opacity duration-300',
           open ? 'opacity-100' : 'pointer-events-none opacity-0',
         )}
-        onClick={onClose}
+        onClick={(e) => { e.stopPropagation(); onClose(); }}
         aria-hidden="true"
       />
 
       {/* Drawer panel */}
       <div
         className={cn(
-          'fixed inset-y-0 right-0 z-50 flex w-[420px] flex-col bg-card border-l border-border shadow-2xl',
+          'fixed inset-y-0 right-0 z-50 flex w-[420px] flex-col bg-card border-l border-border shadow-2xl cursor-default',
           'transform transition-transform duration-300 ease-in-out',
           open ? 'translate-x-0' : 'translate-x-full',
         )}
         role="dialog"
         aria-modal="true"
         aria-label={`Agent details: ${agent.name}`}
+        onClick={(e) => e.stopPropagation()}
       >
         {/* ----------------------------------------------------------------- */}
         {/* Header                                                              */}
@@ -430,7 +468,7 @@ export function AgentDetailDrawer({
               size="sm"
               variant="ghost"
               className="h-7 w-7 shrink-0 p-0 text-muted-foreground hover:text-foreground"
-              onClick={onClose}
+              onClick={(e) => { e.stopPropagation(); onClose(); }}
               aria-label="Close agent details"
             >
               <X className="h-3.5 w-3.5" />
@@ -475,9 +513,15 @@ export function AgentDetailDrawer({
                     <GitBranch className="h-3 w-3" aria-hidden="true" />
                     Branch
                   </span>
-                  <span className="font-mono text-[11px] text-foreground/80 text-right break-all">
+                  <a
+                    href={`https://github.com/DamballahWedo99/CENZONTLE/tree/${branchName}`}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="font-mono text-[11px] text-blue-400 hover:text-blue-300 hover:underline text-right break-all transition-colors"
+                    onClick={(e) => e.stopPropagation()}
+                  >
                     {branchName}
-                  </span>
+                  </a>
                 </div>
 
                 {/* Worktree */}
@@ -508,31 +552,39 @@ export function AgentDetailDrawer({
               <div className="rounded-lg border border-border bg-muted/20 divide-y divide-border">
                 {/* Epic */}
                 {batch && (
-                  <div className="flex items-center justify-between gap-3 px-3.5 py-2.5">
+                  <a
+                    href={`/proyectos/epicas/${batch.jiraKey}`}
+                    onClick={(e) => e.stopPropagation()}
+                    className="flex items-center justify-between gap-3 px-3.5 py-2.5 hover:bg-muted/40 transition-colors group/epic"
+                  >
                     <div className="flex items-center gap-1.5 text-xs text-muted-foreground min-w-0">
                       <Layers className="h-3 w-3 shrink-0" aria-hidden="true" />
                       <span className="shrink-0">Epic</span>
                     </div>
                     <div className="flex items-center gap-1.5 min-w-0 justify-end">
-                      <span className="text-xs text-foreground/85 truncate">
+                      <span className="text-xs text-foreground/85 truncate group-hover/epic:text-blue-400 transition-colors">
                         {batch.epicTitle}
                       </span>
                       <span className="shrink-0 rounded bg-muted px-1.5 py-0.5 font-mono text-[10px] text-muted-foreground">
                         {batch.jiraKey}
                       </span>
                     </div>
-                  </div>
+                  </a>
                 )}
 
                 {/* Story */}
                 {story && (
-                  <div className="flex items-center justify-between gap-3 px-3.5 py-2.5">
+                  <a
+                    href={`/proyectos/historias/${story.id}`}
+                    onClick={(e) => e.stopPropagation()}
+                    className="flex items-center justify-between gap-3 px-3.5 py-2.5 hover:bg-muted/40 transition-colors group/story"
+                  >
                     <div className="flex items-center gap-1.5 text-xs text-muted-foreground min-w-0">
                       <ChevronRight className="h-3 w-3 shrink-0" aria-hidden="true" />
                       <span className="shrink-0">Story</span>
                     </div>
                     <div className="flex items-center gap-1.5 min-w-0 justify-end">
-                      <span className="text-xs text-foreground/85 truncate">
+                      <span className="text-xs text-foreground/85 truncate group-hover/story:text-blue-400 transition-colors">
                         {story.title}
                       </span>
                       <span className="shrink-0 rounded bg-muted px-1.5 py-0.5 font-mono text-[10px] text-muted-foreground">
@@ -542,7 +594,7 @@ export function AgentDetailDrawer({
                         {story.storyPoints} pts
                       </span>
                     </div>
-                  </div>
+                  </a>
                 )}
 
                 {/* Wave */}
@@ -646,18 +698,6 @@ export function AgentDetailDrawer({
                   label="Test Pass Rate"
                   value={agent.testsRun > 0 ? `${testPassRate}%` : '—'}
                   valueClass={agent.testsRun > 0 ? testPassRateClass : undefined}
-                />
-                <MetricCard
-                  icon={FileCode2}
-                  label="Current File"
-                  value={agent.currentFile ? agent.currentFile.split('/').pop() ?? '—' : 'none'}
-                  sub={agent.currentFile ?? undefined}
-                />
-                <MetricCard
-                  icon={Bot}
-                  label="Status"
-                  value={STATUS_MAP[agent.status].label}
-                  valueClass={STATUS_MAP[agent.status].text}
                 />
               </div>
             </section>

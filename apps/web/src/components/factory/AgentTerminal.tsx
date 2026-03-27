@@ -9,7 +9,7 @@ import { Button } from '@/components/ui/button';
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip';
 import { useAgentTerminal } from '@/hooks/use-agent-terminal';
 import { useFactory } from '@/context/FactoryContext';
-import { AgentDetailDrawer, deriveSuccessCriteria } from './AgentDetailDrawer';
+import { AgentDetailDrawer, deriveDod, deriveMilestones } from './AgentDetailDrawer';
 
 const API_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:3001';
 
@@ -49,7 +49,11 @@ export function AgentTerminal({ agent, onClose }: AgentTerminalProps) {
   const batch = state.factory.currentBatch;
 
   const [detailOpen, setDetailOpen] = useState(false);
-  const [progressOpen, setProgressOpen] = useState(false);
+  const [activeBar, setActiveBar] = useState<'dod' | 'milestones' | null>(null);
+
+  function toggleBar(bar: 'dod' | 'milestones') {
+    setActiveBar((prev) => (prev === bar ? null : bar));
+  }
 
   // ---------------------------------------------------------------------------
   // Copy-mode polling (scroll-to-bottom button)
@@ -109,8 +113,9 @@ export function AgentTerminal({ agent, onClose }: AgentTerminalProps) {
 
       if (res.ok) {
         const data = await res.json();
-        // Send the file path as literal text — Claude Code detects
-        // image extensions (.png, .jpg, etc.) in pasted text
+        // Exit copy-mode first (in case user scrolled up), then send the path
+        await sendKeys('q');
+        await new Promise((r) => setTimeout(r, 200));
         sendKeys(' ' + data.filepath);
       }
     } catch {
@@ -183,21 +188,40 @@ export function AgentTerminal({ agent, onClose }: AgentTerminalProps) {
                 {batch.branch}
               </a>
             )}
-            {/* Milestones pill */}
+            {/* DoD pill */}
             {(() => {
-              const criteria = deriveSuccessCriteria(agent);
-              const doneCount = criteria.filter((c) => c.done).length;
+              const dod = deriveDod(agent);
+              const dodDone = dod.filter((c) => c.done).length;
               return (
                 <button
-                  onClick={() => setProgressOpen(!progressOpen)}
+                  onClick={() => toggleBar('dod')}
                   className={cn(
                     'flex items-center gap-1.5 rounded-full border px-2 py-0.5 text-[10px] transition-colors shrink-0',
-                    progressOpen
+                    activeBar === 'dod'
+                      ? 'border-purple-500/50 bg-purple-500/10 text-purple-400'
+                      : 'border-border bg-muted/50 text-muted-foreground hover:text-foreground hover:bg-muted',
+                  )}
+                >
+                  <span className="font-medium">{dodDone}/{dod.length}</span>
+                  <span>DoD</span>
+                </button>
+              );
+            })()}
+            {/* Milestones pill */}
+            {(() => {
+              const milestones = deriveMilestones(story, agent);
+              const msDone = milestones.filter((c) => c.done).length;
+              return (
+                <button
+                  onClick={() => toggleBar('milestones')}
+                  className={cn(
+                    'flex items-center gap-1.5 rounded-full border px-2 py-0.5 text-[10px] transition-colors shrink-0',
+                    activeBar === 'milestones'
                       ? 'border-blue-500/50 bg-blue-500/10 text-blue-400'
                       : 'border-border bg-muted/50 text-muted-foreground hover:text-foreground hover:bg-muted',
                   )}
                 >
-                  <span className="font-medium">{doneCount}/{criteria.length}</span>
+                  <span className="font-medium">{msDone}/{milestones.length}</span>
                   <span>milestones</span>
                 </button>
               );
@@ -292,17 +316,21 @@ export function AgentTerminal({ agent, onClose }: AgentTerminalProps) {
             title={`Terminal — ${agent.name}`}
           />
 
-          {/* Expanded checkpoints bar — shown when pill in header is clicked */}
-          {progressOpen && (() => {
-            const criteria = deriveSuccessCriteria(agent);
-            const doneCount = criteria.filter((c) => c.done).length;
+          {/* Bottom bar — DoD or Milestones (mutually exclusive) */}
+          {activeBar && (() => {
+            const items = activeBar === 'dod'
+              ? deriveDod(agent)
+              : deriveMilestones(story, agent);
+            const doneCount = items.filter((c) => c.done).length;
+            const label = activeBar === 'dod' ? 'Definition of Done' : 'Milestones';
+            const accentColor = activeBar === 'dod' ? 'text-purple-400' : 'text-blue-400';
             return (
               <div className="absolute bottom-0 left-0 right-0 z-10 flex items-center gap-3 px-4 py-2 bg-card/90 backdrop-blur-sm border-t border-border">
-                <span className="text-[10px] font-medium uppercase tracking-wider text-muted-foreground/60 shrink-0">
-                  Milestones
+                <span className={cn('text-[10px] font-medium uppercase tracking-wider shrink-0', accentColor)}>
+                  {label}
                 </span>
                 <div className="flex items-center gap-2.5 flex-1 min-w-0">
-                  {criteria.map((c, i) => (
+                  {items.map((c, i) => (
                     <div key={i} className="flex items-center gap-1.5 min-w-0">
                       {c.done ? (
                         <svg className="h-3 w-3 shrink-0 text-green-500" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={3}><path strokeLinecap="round" strokeLinejoin="round" d="M5 13l4 4L19 7" /></svg>
@@ -316,7 +344,7 @@ export function AgentTerminal({ agent, onClose }: AgentTerminalProps) {
                   ))}
                 </div>
                 <span className="text-[11px] font-mono text-muted-foreground/50 shrink-0">
-                  {doneCount}/{criteria.length}
+                  {doneCount}/{items.length}
                 </span>
               </div>
             );
@@ -328,7 +356,7 @@ export function AgentTerminal({ agent, onClose }: AgentTerminalProps) {
               onClick={scrollToBottom}
               className={cn(
                 'absolute right-4 z-10 flex items-center justify-center h-8 w-8 rounded-full bg-foreground/90 text-background shadow-lg hover:bg-foreground transition-colors',
-                progressOpen ? 'bottom-12' : 'bottom-4',
+                activeBar ? 'bottom-12' : 'bottom-4',
               )}
               title="Scroll to bottom"
             >
