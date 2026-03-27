@@ -6,6 +6,7 @@ import { Monitor, Cpu, Layers, ChevronRight } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { useFactory } from '@/context/FactoryContext';
 import { AgentCard } from '@/components/factory/AgentCard';
+import { AgentDetailDrawer } from '@/components/factory/AgentDetailDrawer';
 import { AgentStatus } from '@cenzontle/shared';
 import type { FactoryAgent, ComputeNode } from '@cenzontle/shared';
 
@@ -43,6 +44,19 @@ function batchColor(batchId: string): string {
   return BATCH_COLORS[Math.abs(hash) % BATCH_COLORS.length];
 }
 
+// === SEEDED PRNG (deterministic across SSR + client) ===
+
+/** Simple mulberry32 PRNG — same seed always produces the same sequence */
+function createSeededRandom(seed: number) {
+  let s = seed | 0;
+  return () => {
+    s = (s + 0x6D2B79F5) | 0;
+    let t = Math.imul(s ^ (s >>> 15), 1 | s);
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+
 // === CAPACITY HISTORY CHART (D3) ===
 
 interface CapacitySnapshot {
@@ -53,20 +67,19 @@ interface CapacitySnapshot {
 /** Generate mock hourly snapshots for the last 24h */
 function generateCapacityHistory(currentUsed: number, total: number): CapacitySnapshot[] {
   const now = new Date();
+  now.setMinutes(0, 0, 0);
+  const rand = createSeededRandom(total * 1000 + now.getHours());
   const points: CapacitySnapshot[] = [];
-  // Build 24 hourly snapshots ending at current hour
   for (let i = 23; i >= 0; i--) {
     const time = new Date(now);
-    time.setMinutes(0, 0, 0);
     time.setHours(time.getHours() - i);
     if (i === 0) {
       points.push({ time, used: currentUsed });
     } else {
-      // Simulate realistic usage: lower at night, higher during work hours
       const hour = time.getHours();
       const isWorkHours = hour >= 9 && hour <= 18;
       const base = isWorkHours ? total * 0.5 : total * 0.15;
-      const jitter = Math.floor(Math.random() * (total * 0.35));
+      const jitter = Math.floor(rand() * (total * 0.35));
       points.push({ time, used: Math.min(total, Math.max(0, Math.round(base + jitter))) });
     }
   }
@@ -98,7 +111,8 @@ function CapacityChart({ used, total, nodeCount }: { used: number; total: number
   const svgRef = useRef<SVGSVGElement>(null);
   const width = useContainerWidth(containerRef);
 
-  const history = useMemo(() => generateCapacityHistory(used, total), [used, total]);
+  // useState initializer runs once — avoids hydration mismatch from Math.random()
+  const [history] = useState(() => generateCapacityHistory(used, total));
 
   const pct = total > 0 ? (used / total) * 100 : 0;
   const textColor = pct < 50 ? 'text-green-400' : pct < 80 ? 'text-amber-400' : 'text-red-400';
@@ -293,17 +307,16 @@ interface TokenSnapshot {
 /** Generate mock hourly token consumption for last 24h */
 function generateTokenHistory(totalTokens: number): TokenSnapshot[] {
   const now = new Date();
+  now.setMinutes(0, 0, 0);
+  const rand = createSeededRandom(totalTokens + now.getHours() * 7);
   const points: TokenSnapshot[] = [];
-  // Distribute totalTokens roughly across work hours with realistic variation
   for (let i = 23; i >= 0; i--) {
     const time = new Date(now);
-    time.setMinutes(0, 0, 0);
     time.setHours(time.getHours() - i);
     const hour = time.getHours();
     const isWorkHours = hour >= 9 && hour <= 18;
-    // Work hours: higher burn, night: minimal
     const base = isWorkHours ? totalTokens * 0.06 : totalTokens * 0.008;
-    const jitter = (Math.random() - 0.3) * base * 0.6;
+    const jitter = (rand() - 0.3) * base * 0.6;
     points.push({ time, tokens: Math.max(0, Math.round(base + jitter)) });
   }
   return points;
@@ -322,7 +335,8 @@ function TokenBurnChart({ totalTokens }: { totalTokens: number }) {
   const svgRef = useRef<SVGSVGElement>(null);
   const width = useContainerWidth(containerRef);
 
-  const history = useMemo(() => generateTokenHistory(totalTokens), [totalTokens]);
+  // useState initializer runs once — avoids hydration mismatch from Math.random()
+  const [history] = useState(() => generateTokenHistory(totalTokens));
 
   const currentHourTokens = history[history.length - 1].tokens;
   const avgTokens = Math.round(history.reduce((s, d) => s + d.tokens, 0) / history.length);
@@ -477,10 +491,11 @@ interface MachineGroupProps {
   agents: FactoryAgent[];
   selectedAgentId: string | null;
   onSelectAgent: (id: string) => void;
+  onInfoClick: (agentId: string) => void;
   filter: StatusFilter;
 }
 
-function MachineGroup({ machine, agents, selectedAgentId, onSelectAgent, filter }: MachineGroupProps) {
+function MachineGroup({ machine, agents, selectedAgentId, onSelectAgent, onInfoClick, filter }: MachineGroupProps) {
   const [expanded, setExpanded] = useState(false);
 
   const machineAgents = useMemo(() => {
@@ -558,6 +573,7 @@ function MachineGroup({ machine, agents, selectedAgentId, onSelectAgent, filter 
                   agent={agent}
                   isSelected={selectedAgentId === agent.id}
                   onClick={() => onSelectAgent(agent.id)}
+                  onInfoClick={() => onInfoClick(agent.id)}
                 />
               ))}
               {filter === 'all' && Array.from({ length: Math.min(emptySlots, 3) }).map((_, i) => (
@@ -582,24 +598,13 @@ interface BatchGroupProps {
   batchId: string;
   batchName: string;
   agents: FactoryAgent[];
-  machines: ComputeNode[];
   selectedAgentId: string | null;
   onSelectAgent: (id: string) => void;
+  onInfoClick: (agentId: string) => void;
 }
 
-function BatchGroup({ batchId, batchName, agents, machines, selectedAgentId, onSelectAgent }: BatchGroupProps) {
+function BatchGroup({ batchId, batchName, agents, selectedAgentId, onSelectAgent, onInfoClick }: BatchGroupProps) {
   const color = batchColor(batchId);
-
-  // Find which machines these agents run on
-  const machineMap = useMemo(() => {
-    const map = new Map<string, string>();
-    for (const m of machines) {
-      for (const a of m.agents) {
-        map.set(a.agentId, m.name);
-      }
-    }
-    return map;
-  }, [machines]);
 
   return (
     <div className="rounded-xl border bg-card p-5" style={{ borderColor: `${color}30` }}>
@@ -618,6 +623,7 @@ function BatchGroup({ batchId, batchName, agents, machines, selectedAgentId, onS
             agent={agent}
             isSelected={selectedAgentId === agent.id}
             onClick={() => onSelectAgent(agent.id)}
+            onInfoClick={() => onInfoClick(agent.id)}
           />
         ))}
       </div>
@@ -632,9 +638,10 @@ interface AgentGridProps {
 }
 
 export function AgentGrid({ initialAgentId }: AgentGridProps = {}) {
-  const { state, dispatch, computed } = useFactory();
+  const { state, dispatch, computed, getStoryById } = useFactory();
   const [viewMode, setViewMode] = useState<ViewMode>('machine');
   const filter: StatusFilter = 'all';
+  const [drawerAgentId, setDrawerAgentId] = useState<string | null>(null);
 
   useEffect(() => {
     if (initialAgentId) {
@@ -752,6 +759,7 @@ export function AgentGrid({ initialAgentId }: AgentGridProps = {}) {
               agents={agents}
               selectedAgentId={selectedAgentId}
               onSelectAgent={handleSelectAgent}
+              onInfoClick={setDrawerAgentId}
               filter={filter}
             />
           ))}
@@ -766,9 +774,9 @@ export function AgentGrid({ initialAgentId }: AgentGridProps = {}) {
               batchId={batchId}
               batchName={group.batchName}
               agents={group.agents}
-              machines={machines}
               selectedAgentId={selectedAgentId}
               onSelectAgent={handleSelectAgent}
+              onInfoClick={setDrawerAgentId}
             />
           ))}
           {batchGroups.size === 0 && (
@@ -789,6 +797,7 @@ export function AgentGrid({ initialAgentId }: AgentGridProps = {}) {
                 agent={agent}
                 isSelected={selectedAgentId === agent.id}
                 onClick={() => handleSelectAgent(agent.id)}
+                onInfoClick={() => setDrawerAgentId(agent.id)}
               />
             ))
           ) : (
@@ -801,6 +810,22 @@ export function AgentGrid({ initialAgentId }: AgentGridProps = {}) {
           )}
         </div>
       )}
+
+      {/* Single shared drawer instance */}
+      {(() => {
+        const drawerAgent = drawerAgentId ? agents.find((a) => a.id === drawerAgentId) : null;
+        if (!drawerAgent) return null;
+        const drawerStory = drawerAgent.storyId ? getStoryById(drawerAgent.storyId) ?? null : null;
+        return (
+          <AgentDetailDrawer
+            agent={drawerAgent}
+            story={drawerStory}
+            batch={state.factory.currentBatch}
+            open={!!drawerAgentId}
+            onClose={() => setDrawerAgentId(null)}
+          />
+        );
+      })()}
 
     </section>
   );

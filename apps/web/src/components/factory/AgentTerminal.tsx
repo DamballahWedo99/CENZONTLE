@@ -113,9 +113,17 @@ export function AgentTerminal({ agent, onClose }: AgentTerminalProps) {
 
       if (res.ok) {
         const data = await res.json();
-        // Exit copy-mode first (in case user scrolled up), then send the path
-        await sendKeys('q');
-        await new Promise((r) => setTimeout(r, 200));
+        // Exit copy-mode only if actually in copy-mode, to avoid injecting a stray 'q'
+        try {
+          const cmRes = await fetch(`${API_URL}/api/factory/terminal/copy-mode/${agent.id}`);
+          if (cmRes.ok) {
+            const cm = await cmRes.json();
+            if (cm.inCopyMode) {
+              sendKeys('q');
+              await new Promise((r) => setTimeout(r, 200));
+            }
+          }
+        } catch { /* best-effort */ }
         sendKeys(' ' + data.filepath);
       }
     } catch {

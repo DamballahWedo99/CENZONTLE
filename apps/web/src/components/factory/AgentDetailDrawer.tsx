@@ -550,26 +550,22 @@ export function AgentDetailDrawer({
               </h3>
 
               <div className="rounded-lg border border-border bg-muted/20 divide-y divide-border">
-                {/* Epic */}
+                {/* Epic — no link: SprintBatch lacks epicId, jiraKey doesn't match route param */}
                 {batch && (
-                  <a
-                    href={`/proyectos/epicas/${batch.jiraKey}`}
-                    onClick={(e) => e.stopPropagation()}
-                    className="flex items-center justify-between gap-3 px-3.5 py-2.5 hover:bg-muted/40 transition-colors group/epic"
-                  >
+                  <div className="flex items-center justify-between gap-3 px-3.5 py-2.5">
                     <div className="flex items-center gap-1.5 text-xs text-muted-foreground min-w-0">
                       <Layers className="h-3 w-3 shrink-0" aria-hidden="true" />
                       <span className="shrink-0">Epic</span>
                     </div>
                     <div className="flex items-center gap-1.5 min-w-0 justify-end">
-                      <span className="text-xs text-foreground/85 truncate group-hover/epic:text-blue-400 transition-colors">
+                      <span className="text-xs text-foreground/85 truncate">
                         {batch.epicTitle}
                       </span>
                       <span className="shrink-0 rounded bg-muted px-1.5 py-0.5 font-mono text-[10px] text-muted-foreground">
                         {batch.jiraKey}
                       </span>
                     </div>
-                  </a>
+                  </div>
                 )}
 
                 {/* Story */}

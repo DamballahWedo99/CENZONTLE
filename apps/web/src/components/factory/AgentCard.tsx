@@ -1,13 +1,11 @@
 'use client';
 
-import { useState, useCallback } from 'react';
+import { useCallback } from 'react';
 import { Clock, Zap, DollarSign, FileCode2, TestTube2, Info } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import type { FactoryAgent } from '@cenzontle/shared';
 import { AgentStatus } from '@cenzontle/shared';
-import { useFactory } from '@/context/FactoryContext';
 import { deriveDod } from './AgentDetailDrawer';
-import { AgentDetailDrawer } from './AgentDetailDrawer';
 
 // === PROPS ===
 
@@ -15,6 +13,7 @@ export interface AgentCardProps {
   agent: FactoryAgent;
   isSelected?: boolean;
   onClick?: () => void;
+  onInfoClick?: () => void;
 }
 
 // === STATUS CONFIG ===
@@ -159,49 +158,11 @@ function MetricItem({
   );
 }
 
-function MiniTerminal({ lines }: { lines: string[] }) {
-  const visibleLines = lines.slice(-3);
-  if (visibleLines.length === 0) {
-    return (
-      <div
-        className="mt-2 rounded bg-muted px-2.5 py-2 font-mono text-xs text-muted-foreground/50"
-        aria-label="Agent terminal output: no output"
-        role="log"
-      >
-        <span className="select-none text-muted-foreground/40">&gt; </span>
-        <span className="italic">awaiting output...</span>
-      </div>
-    );
-  }
-
-  return (
-    <div
-      className="mt-2 overflow-hidden rounded bg-muted px-2.5 py-2"
-      role="log"
-      aria-label="Agent terminal output"
-    >
-      {visibleLines.map((line, i) => (
-        <div
-          key={`${i}-${line.slice(0, 20)}`}
-          className="truncate font-mono text-xs leading-relaxed text-green-400"
-        >
-          <span className="select-none text-muted-foreground/50" aria-hidden="true">&gt; </span>
-          {line}
-        </div>
-      ))}
-    </div>
-  );
-}
-
 // === MAIN COMPONENT ===
 
-export function AgentCard({ agent, isSelected = false, onClick }: AgentCardProps) {
+export function AgentCard({ agent, isSelected = false, onClick, onInfoClick }: AgentCardProps) {
   const config = STATUS_MAP[agent.status];
   const isActive = agent.status !== AgentStatus.Idle && agent.status !== AgentStatus.Done;
-  const { state, getStoryById } = useFactory();
-  const story = agent.storyId ? getStoryById(agent.storyId) ?? null : null;
-  const batch = state.factory.currentBatch;
-  const [detailOpen, setDetailOpen] = useState(false);
 
   const handleClick = useCallback(() => {
     onClick?.();
@@ -240,7 +201,7 @@ export function AgentCard({ agent, isSelected = false, onClick }: AgentCardProps
         <div className="flex items-center gap-1.5 min-w-0">
           <h3 className="truncate text-sm font-medium text-foreground">{agent.name}</h3>
           <button
-            onClick={(e) => { e.stopPropagation(); setDetailOpen(true); }}
+            onClick={(e) => { e.stopPropagation(); onInfoClick?.(); }}
             className="shrink-0 text-muted-foreground/40 hover:text-muted-foreground transition-colors"
             title="Agent details"
           >
@@ -289,14 +250,6 @@ export function AgentCard({ agent, isSelected = false, onClick }: AgentCardProps
         ))}
       </div>
 
-      {/* Agent detail drawer */}
-      <AgentDetailDrawer
-        agent={agent}
-        story={story}
-        batch={batch}
-        open={detailOpen}
-        onClose={() => setDetailOpen(false)}
-      />
     </div>
   );
 }
