@@ -37,7 +37,7 @@ export default function AgentTerminalPage() {
   }
 
   return (
-    <div className="terminal-page h-full w-full bg-background">
+    <div className="terminal-page h-full w-full bg-background dark">
       <AgentTerminal agent={agent} onClose={() => window.close()} />
     </div>
   );

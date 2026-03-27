@@ -7,11 +7,19 @@ import {
   NotFoundException,
   Param,
   Post,
+  UploadedFile,
+  UseInterceptors,
   UsePipes,
   ValidationPipe,
 } from '@nestjs/common';
+import { FileInterceptor } from '@nestjs/platform-express';
 import { IsNotEmpty, IsOptional, IsString } from 'class-validator';
+import { writeFileSync, mkdirSync, existsSync } from 'fs';
+import { join } from 'path';
+import { randomUUID } from 'crypto';
 import { TerminalService } from './terminal.service';
+
+const UPLOAD_DIR = '/tmp/cenzontle-uploads';
 
 // ---------------------------------------------------------------------------
 // DTOs
@@ -81,6 +89,28 @@ export class TerminalController {
   @HttpCode(HttpStatus.NO_CONTENT)
   sendKeys(@Body() body: SendKeysDto): void {
     this.terminalService.sendKeys(body.agentId, body.keys);
+  }
+
+  @Post('upload/:agentId')
+  @UseInterceptors(FileInterceptor('file', { limits: { fileSize: 10 * 1024 * 1024 } })) // 10MB max
+  uploadFile(
+    @Param('agentId') agentId: string,
+    @UploadedFile() file: Express.Multer.File,
+  ) {
+    if (!file) return { error: 'No file uploaded' };
+
+    if (!existsSync(UPLOAD_DIR)) mkdirSync(UPLOAD_DIR, { recursive: true });
+
+    const filename = `${randomUUID()}-${file.originalname}`;
+    const filepath = join(UPLOAD_DIR, filename);
+    writeFileSync(filepath, file.buffer);
+
+    return { filepath, filename, agentId };
+  }
+
+  @Get('copy-mode/:agentId')
+  getCopyMode(@Param('agentId') agentId: string) {
+    return { inCopyMode: this.terminalService.isInCopyMode(agentId) };
   }
 
   @Get('session/:agentId')

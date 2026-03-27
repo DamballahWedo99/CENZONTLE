@@ -139,6 +139,8 @@ export class TerminalService implements OnModuleDestroy {
       `${TMUX_BIN} set -g terminal-overrides ',*:smcup@:rmcup@'`,
       `${TMUX_BIN} set-option -t ${tmuxSessionName} mouse on`,
       `${TMUX_BIN} set-option -t ${tmuxSessionName} status off`,
+      `${TMUX_BIN} set-option -t ${tmuxSessionName} display-panes-time 0`,
+      `${TMUX_BIN} set -g display-time 0`,
       // Respawn the pane so it inherits the new history-limit
       `${TMUX_BIN} respawn-pane -k -t ${tmuxSessionName} '${CLAUDE_BIN}'`,
       // Attach
@@ -150,6 +152,7 @@ export class TerminalService implements OnModuleDestroy {
       '-p', String(port),
       '-t', 'titleFixed=Claude Code',
       '-t', 'fontSize=13',
+      '-t', 'disableResizeOverlay=true',
       '/bin/bash', '-c', tmuxCmd,
     ];
 
@@ -175,6 +178,9 @@ export class TerminalService implements OnModuleDestroy {
     };
 
     this.sessions.set(agentId, session);
+
+    // Wait for ttyd to be ready before returning the port to the frontend
+    await this.waitForTtyd(port);
 
     child.stdout?.on('data', (chunk: Buffer) => {
       this.logger.debug(`ttyd[${agentId}] stdout: ${chunk.toString().trim()}`);
@@ -225,6 +231,44 @@ export class TerminalService implements OnModuleDestroy {
   }
 
   // -------------------------------------------------------------------------
+  // Wait for ttyd to be ready (HTTP 200)
+  // -------------------------------------------------------------------------
+
+  private async waitForTtyd(port: number, timeoutMs = 8000): Promise<void> {
+    const start = Date.now();
+    while (Date.now() - start < timeoutMs) {
+      try {
+        const res = await fetch(`http://127.0.0.1:${port}`, { method: 'HEAD' });
+        if (res.ok) return;
+      } catch {
+        // Not ready yet
+      }
+      await new Promise((r) => setTimeout(r, 300));
+    }
+    this.logger.warn(`ttyd on port ${port} did not become ready within ${timeoutMs}ms`);
+  }
+
+  // -------------------------------------------------------------------------
+  // Check if tmux pane is in copy-mode (user scrolled up)
+  // -------------------------------------------------------------------------
+
+  isInCopyMode(agentId: string): boolean {
+    const session = this.sessions.get(agentId);
+    if (!session) return false;
+
+    const tmuxSessionName = `forge-${agentId}`;
+    try {
+      const result = execSync(
+        `${TMUX_BIN} display-message -t ${tmuxSessionName} -p "#{pane_in_mode}"`,
+        { encoding: 'utf8', timeout: 2000 },
+      ).trim();
+      return result === '1';
+    } catch {
+      return false;
+    }
+  }
+
+  // -------------------------------------------------------------------------
   // Send keys to the tmux session (e.g. Escape to interrupt auto mode)
   // -------------------------------------------------------------------------
 
@@ -236,12 +280,15 @@ export class TerminalService implements OnModuleDestroy {
     }
 
     const tmuxSessionName = `forge-${agentId}`;
+    const env = { ...process.env, PATH: `/opt/homebrew/bin:${process.env.PATH}` } as NodeJS.ProcessEnv;
+
     try {
-      spawn(TMUX_BIN, ['send-keys', '-t', tmuxSessionName, keys], {
+      // Use -l (literal) flag for text containing paths/special chars
+      spawn(TMUX_BIN, ['send-keys', '-l', '-t', tmuxSessionName, keys], {
         stdio: 'ignore',
-        env: process.env as NodeJS.ProcessEnv,
+        env,
       });
-      this.logger.debug(`Sent keys to agent ${agentId}: ${JSON.stringify(keys)}`);
+      this.logger.debug(`Sent keys to agent ${agentId}: ${JSON.stringify(keys).slice(0, 80)}`);
     } catch (err) {
       this.logger.error(`Error sending keys to agent ${agentId}: ${(err as Error).message}`);
     }
