@@ -271,7 +271,7 @@ function StoryNode({
 
       {/* Header: key + status */}
       <div className="flex items-center justify-between mb-1 relative z-10">
-        <span className="font-mono text-xs font-semibold text-[#EDEDF0]">{story.jiraKey}</span>
+        <span className="font-mono text-xs font-semibold text-foreground">{story.jiraKey}</span>
         <span className={cn('text-[11px] font-medium flex items-center gap-1', cfg.color)}>
           {StatusIcon && (
             <StatusIcon
@@ -284,17 +284,17 @@ function StoryNode({
       </div>
 
       {/* Title */}
-      <p className="text-[#8B8B9A] text-xs truncate relative z-10">{story.title}</p>
+      <p className="text-muted-foreground text-xs truncate relative z-10">{story.title}</p>
 
       {/* Footer: agent + retry */}
       <div className="flex items-center justify-between mt-1.5 relative z-10">
         {agentName ? (
-          <span className="flex items-center gap-1 text-[10px] text-[#5A5A6E]">
+          <span className="flex items-center gap-1 text-[10px] text-muted-foreground/70">
             <Bot className="h-3 w-3" aria-hidden="true" />
             {agentName}
           </span>
         ) : (
-          <span className="text-[10px] text-[#3B3B4F]">unassigned</span>
+          <span className="text-[10px] text-muted-foreground/70">unassigned</span>
         )}
         {story.retryCount > 0 && (
           <span className="flex items-center gap-0.5 text-[10px] text-amber-400 font-medium">
@@ -329,7 +329,7 @@ function WaveColumn({ wave, agents }: { wave: WaveGroup; agents: { id: string; n
         >
           Wave {wave.number}
         </span>
-        <span className="text-[#5A5A6E] text-xs">
+        <span className="text-muted-foreground/70 text-xs">
           {wave.stories.length} {wave.stories.length === 1 ? 'story' : 'stories'}
         </span>
       </div>
@@ -408,9 +408,9 @@ export function WaveDAG({ stories: propStories, batchName, batchBranch, batchWav
 
   if (waves.length === 0) {
     return (
-      <div className="rounded-xl border border-[#2A2A35] bg-[#141419] p-8 text-center">
-        <GitBranch className="h-8 w-8 text-[#8B8B9A] mx-auto mb-3" aria-hidden="true" />
-        <p className="text-sm text-[#8B8B9A]">No active batch to visualize.</p>
+      <div className="rounded-xl border border-border bg-card p-8 text-center">
+        <GitBranch className="h-8 w-8 text-muted-foreground mx-auto mb-3" aria-hidden="true" />
+        <p className="text-sm text-muted-foreground">No active batch to visualize.</p>
       </div>
     );
   }
@@ -423,13 +423,13 @@ export function WaveDAG({ stories: propStories, batchName, batchBranch, batchWav
           <GitBranch className="h-4 w-4 text-blue-400" />
         </div>
         <div>
-          <h2 className="text-base font-semibold text-[#EDEDF0]">Wave Execution DAG</h2>
+          <h2 className="text-base font-semibold text-foreground">Wave Execution DAG</h2>
           {displayName && (
-            <p className="text-xs text-[#8B8B9A]">
+            <p className="text-xs text-muted-foreground">
               {displayName}
               {displayBranch && (
                 <>
-                  <span className="mx-1.5 text-[#2A2A35]">|</span>
+                  <span className="mx-1.5 text-border">|</span>
                   <span className="font-mono">{displayBranch}</span>
                 </>
               )}
@@ -451,7 +451,7 @@ export function WaveDAG({ stories: propStories, batchName, batchBranch, batchWav
       </div>
 
       {/* DAG container */}
-      <div className="rounded-xl border border-[#2A2A35] bg-[#141419] p-5 overflow-x-auto">
+      <div className="rounded-xl border border-border bg-card p-5 overflow-x-auto">
         <div
           ref={containerRef}
           className="relative flex gap-6 min-w-max pb-2"

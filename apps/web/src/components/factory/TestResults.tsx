@@ -33,7 +33,7 @@ const resultConfig: Record<
   pending: {
     label: 'Pending',
     dot: 'bg-[#8B8B9A]',
-    textClass: 'text-[#8B8B9A]',
+    textClass: 'text-muted-foreground',
   },
   running: {
     label: 'Running',
@@ -53,7 +53,7 @@ const resultConfig: Record<
   skipped: {
     label: 'Skipped',
     dot: 'bg-[#8B8B9A]',
-    textClass: 'text-[#8B8B9A] italic',
+    textClass: 'text-muted-foreground italic',
   },
 };
 
@@ -101,17 +101,17 @@ function SummaryCard({ summary }: { summary: CategorySummary }) {
         : 'text-red-400';
 
   return (
-    <div className="rounded-lg border border-[#2A2A35] bg-[#0A0A0F] p-4">
+    <div className="rounded-lg border border-border bg-background p-4">
       <div className="flex items-center gap-2 mb-3">
-        <Icon className="h-4 w-4 text-[#8B8B9A]" />
-        <span className="text-xs font-medium text-[#8B8B9A]">{meta.label}</span>
+        <Icon className="h-4 w-4 text-muted-foreground" />
+        <span className="text-xs font-medium text-muted-foreground">{meta.label}</span>
       </div>
 
       <div className="flex items-end justify-between mb-3">
         <div>
-          <div className="text-2xl font-semibold tabular-nums text-[#EDEDF0]">
+          <div className="text-2xl font-semibold tabular-nums text-foreground">
             {summary.passed}
-            <span className="text-sm text-[#8B8B9A] font-normal">/{summary.total}</span>
+            <span className="text-sm text-muted-foreground font-normal">/{summary.total}</span>
           </div>
           {summary.failed > 0 && (
             <span className="text-[11px] text-red-400 tabular-nums">
@@ -155,17 +155,17 @@ function ResultBadge({ result }: { result: TestResult }) {
 function SuiteRow({ suite }: { suite: TestSuite }) {
   const meta = categoryMeta[suite.category];
   return (
-    <tr className="border-b border-[#2A2A35] hover:bg-[#1A1A22] transition-colors">
+    <tr className="border-b border-border hover:bg-muted transition-colors">
       {/* Category */}
       <td className="px-3 py-2.5">
-        <span className="inline-flex items-center gap-1.5 text-[11px] text-[#8B8B9A]">
+        <span className="inline-flex items-center gap-1.5 text-[11px] text-muted-foreground">
           <meta.icon className="h-3 w-3" />
           {meta.label}
         </span>
       </td>
 
       {/* Name */}
-      <td className="px-3 py-2.5 text-sm text-[#EDEDF0] max-w-[280px] truncate">
+      <td className="px-3 py-2.5 text-sm text-foreground max-w-[280px] truncate">
         {suite.name}
       </td>
 
@@ -175,14 +175,14 @@ function SuiteRow({ suite }: { suite: TestSuite }) {
       </td>
 
       {/* Passed / Total */}
-      <td className="px-3 py-2.5 text-xs tabular-nums text-[#8B8B9A] text-center">
+      <td className="px-3 py-2.5 text-xs tabular-nums text-muted-foreground text-center">
         <span className="text-emerald-400">{suite.passed}</span>
         <span className="mx-0.5">/</span>
         <span>{suite.total}</span>
       </td>
 
       {/* Duration */}
-      <td className="px-3 py-2.5 text-xs tabular-nums text-[#8B8B9A] text-right">
+      <td className="px-3 py-2.5 text-xs tabular-nums text-muted-foreground text-right">
         <span className="inline-flex items-center gap-1">
           <Clock className="h-3 w-3" />
           {formatDuration(suite.duration)}
@@ -204,7 +204,7 @@ function SuiteRow({ suite }: { suite: TestSuite }) {
             {suite.coverage.toFixed(0)}%
           </span>
         ) : (
-          <span className="text-[#2A2A35]">--</span>
+          <span className="text-muted-foreground/50">--</span>
         )}
       </td>
     </tr>
@@ -244,11 +244,11 @@ export function TestResults() {
       </div>
 
       {/* Test suite table */}
-      <div className="rounded-xl border border-[#2A2A35] bg-[#141419] overflow-hidden">
-        <div className="flex items-center gap-2 px-4 py-3 border-b border-[#2A2A35]">
-          <ShieldCheck className="h-4 w-4 text-[#8B8B9A]" />
-          <h2 className="text-sm font-semibold text-[#EDEDF0]">Test Suites</h2>
-          <span className="inline-flex items-center justify-center rounded-full bg-[#2A2A35] px-2 py-0.5 text-[11px] font-medium text-[#8B8B9A] tabular-nums">
+      <div className="rounded-xl border border-border bg-card overflow-hidden">
+        <div className="flex items-center gap-2 px-4 py-3 border-b border-border">
+          <ShieldCheck className="h-4 w-4 text-muted-foreground" />
+          <h2 className="text-sm font-semibold text-foreground">Test Suites</h2>
+          <span className="inline-flex items-center justify-center rounded-full bg-[#2A2A35] px-2 py-0.5 text-[11px] font-medium text-muted-foreground tabular-nums">
             {tests.length}
           </span>
         </div>
@@ -256,23 +256,23 @@ export function TestResults() {
         <div className="overflow-x-auto">
           <table className="w-full text-left" role="grid" aria-label="Test suite results">
             <thead>
-              <tr className="border-b border-[#2A2A35] bg-[#0A0A0F]">
-                <th scope="col" className="px-3 py-2 text-[11px] font-medium text-[#8B8B9A] uppercase tracking-wider">
+              <tr className="border-b border-border bg-background">
+                <th scope="col" className="px-3 py-2 text-[11px] font-medium text-muted-foreground uppercase tracking-wider">
                   Category
                 </th>
-                <th scope="col" className="px-3 py-2 text-[11px] font-medium text-[#8B8B9A] uppercase tracking-wider">
+                <th scope="col" className="px-3 py-2 text-[11px] font-medium text-muted-foreground uppercase tracking-wider">
                   Suite
                 </th>
-                <th scope="col" className="px-3 py-2 text-[11px] font-medium text-[#8B8B9A] uppercase tracking-wider">
+                <th scope="col" className="px-3 py-2 text-[11px] font-medium text-muted-foreground uppercase tracking-wider">
                   Result
                 </th>
-                <th scope="col" className="px-3 py-2 text-[11px] font-medium text-[#8B8B9A] uppercase tracking-wider text-center">
+                <th scope="col" className="px-3 py-2 text-[11px] font-medium text-muted-foreground uppercase tracking-wider text-center">
                   Passed
                 </th>
-                <th scope="col" className="px-3 py-2 text-[11px] font-medium text-[#8B8B9A] uppercase tracking-wider text-right">
+                <th scope="col" className="px-3 py-2 text-[11px] font-medium text-muted-foreground uppercase tracking-wider text-right">
                   Duration
                 </th>
-                <th scope="col" className="px-3 py-2 text-[11px] font-medium text-[#8B8B9A] uppercase tracking-wider text-right">
+                <th scope="col" className="px-3 py-2 text-[11px] font-medium text-muted-foreground uppercase tracking-wider text-right">
                   Coverage
                 </th>
               </tr>
@@ -280,7 +280,7 @@ export function TestResults() {
             <tbody>
               {sorted.length === 0 ? (
                 <tr>
-                  <td colSpan={6} className="px-4 py-8 text-center text-sm text-[#8B8B9A]">
+                  <td colSpan={6} className="px-4 py-8 text-center text-sm text-muted-foreground">
                     No test results available.
                   </td>
                 </tr>

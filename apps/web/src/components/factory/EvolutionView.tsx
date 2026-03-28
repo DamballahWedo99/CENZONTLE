@@ -52,13 +52,13 @@ function trend(current: number, previous: number, lowerIsBetter: boolean): Trend
 function trendColor(dir: TrendDirection): string {
   if (dir === 'improving') return 'text-emerald-400';
   if (dir === 'worsening') return 'text-red-400';
-  return 'text-[#8B8B9A]';
+  return 'text-muted-foreground';
 }
 
 function trendBg(dir: TrendDirection): string {
   if (dir === 'improving') return 'bg-emerald-500/10 border-emerald-500/20';
   if (dir === 'worsening') return 'bg-red-500/10 border-red-500/20';
-  return 'bg-[#2A2A35]/30 border-[#2A2A35]';
+  return 'bg-[#2A2A35]/30 border-border';
 }
 
 function TrendArrow({ direction }: { direction: TrendDirection }) {
@@ -90,25 +90,25 @@ function deltaPct(current: number, previous: number): string {
 
 function CurrentVersionCard({ version }: { version: PromptVersion }) {
   return (
-    <div className="rounded-xl border border-[#2A2A35] bg-[#141419] p-5">
+    <div className="rounded-xl border border-border bg-card p-5">
       <div className="flex items-center gap-3 mb-3">
         <div className="flex h-9 w-9 items-center justify-center rounded-lg bg-violet-500/10">
           <Tag className="h-4 w-4 text-violet-400" aria-hidden="true" />
         </div>
         <div>
-          <h3 className="text-sm font-semibold text-[#EDEDF0]">Current Prompt Version</h3>
-          <p className="text-xs text-[#8B8B9A]">Active across all forge agents</p>
+          <h3 className="text-sm font-semibold text-foreground">Current Prompt Version</h3>
+          <p className="text-xs text-muted-foreground">Active across all forge agents</p>
         </div>
         <span className="ml-auto inline-flex items-center gap-1.5 rounded-full bg-violet-500/10 border border-violet-500/20 px-3 py-1 text-xs font-mono font-semibold text-violet-400">
           {version.version}
         </span>
       </div>
-      <div className="rounded-lg bg-[#0A0A0F] border border-[#2A2A35] px-4 py-3">
-        <div className="flex items-center gap-2 text-xs text-[#8B8B9A] mb-2">
+      <div className="rounded-lg bg-background border border-border px-4 py-3">
+        <div className="flex items-center gap-2 text-xs text-muted-foreground mb-2">
           <Calendar className="h-3.5 w-3.5" aria-hidden="true" />
           <span>{formatDate(version.createdAt)}</span>
         </div>
-        <p className="text-sm text-[#EDEDF0] leading-relaxed">{version.changes}</p>
+        <p className="text-sm text-foreground leading-relaxed">{version.changes}</p>
       </div>
     </div>
   );
@@ -136,17 +136,17 @@ function MetricCard({
       : delta(currentValue, previousValue);
 
   return (
-    <div className={cn('rounded-xl border p-4 transition-colors', 'bg-[#141419]', trendBg(dir))}>
+    <div className={cn('rounded-xl border p-4 transition-colors', 'bg-card', trendBg(dir))}>
       <div className="flex items-center gap-2 mb-3">
-        <Icon className="h-4 w-4 text-[#8B8B9A]" aria-hidden="true" />
-        <span className="text-xs font-medium text-[#8B8B9A] uppercase tracking-wider">{label}</span>
+        <Icon className="h-4 w-4 text-muted-foreground" aria-hidden="true" />
+        <span className="text-xs font-medium text-muted-foreground uppercase tracking-wider">{label}</span>
       </div>
       <div className="flex items-end justify-between">
         <div>
           <p className={cn('text-2xl font-bold font-mono', trendColor(dir))}>
             {formatter(currentValue)}
           </p>
-          <p className="text-xs text-[#8B8B9A] mt-1">
+          <p className="text-xs text-muted-foreground mt-1">
             prev: {formatter(previousValue)}
             <span className={cn('ml-1.5 font-mono', trendColor(dir))}>{diff}</span>
           </p>
@@ -161,40 +161,40 @@ function BatchHistoryTable({ batches }: { batches: BatchMetrics[] }) {
   if (batches.length === 0) return null;
 
   return (
-    <div className="rounded-xl border border-[#2A2A35] bg-[#141419] overflow-hidden">
-      <div className="flex items-center gap-3 px-5 py-4 border-b border-[#2A2A35]">
-        <History className="h-4 w-4 text-[#8B8B9A]" aria-hidden="true" />
-        <h3 className="text-sm font-semibold text-[#EDEDF0]">Batch History</h3>
+    <div className="rounded-xl border border-border bg-card overflow-hidden">
+      <div className="flex items-center gap-3 px-5 py-4 border-b border-border">
+        <History className="h-4 w-4 text-muted-foreground" aria-hidden="true" />
+        <h3 className="text-sm font-semibold text-foreground">Batch History</h3>
       </div>
       <div className="overflow-x-auto">
         <table className="w-full text-sm" role="table" aria-label="Batch execution history">
           <thead>
-            <tr className="border-b border-[#2A2A35] bg-[#0A0A0F]/50">
-              <th scope="col" className="text-left px-4 py-3 text-xs font-medium text-[#8B8B9A] uppercase tracking-wider">
+            <tr className="border-b border-border bg-background/50">
+              <th scope="col" className="text-left px-4 py-3 text-xs font-medium text-muted-foreground uppercase tracking-wider">
                 Batch
               </th>
-              <th scope="col" className="text-left px-4 py-3 text-xs font-medium text-[#8B8B9A] uppercase tracking-wider">
+              <th scope="col" className="text-left px-4 py-3 text-xs font-medium text-muted-foreground uppercase tracking-wider">
                 Prompt
               </th>
-              <th scope="col" className="text-center px-4 py-3 text-xs font-medium text-[#8B8B9A] uppercase tracking-wider">
+              <th scope="col" className="text-center px-4 py-3 text-xs font-medium text-muted-foreground uppercase tracking-wider">
                 Stories
               </th>
-              <th scope="col" className="text-left px-4 py-3 text-xs font-medium text-[#8B8B9A] uppercase tracking-wider">
+              <th scope="col" className="text-left px-4 py-3 text-xs font-medium text-muted-foreground uppercase tracking-wider">
                 Completed
               </th>
-              <th scope="col" className="text-right px-4 py-3 text-xs font-medium text-[#8B8B9A] uppercase tracking-wider">
+              <th scope="col" className="text-right px-4 py-3 text-xs font-medium text-muted-foreground uppercase tracking-wider">
                 Cost
               </th>
-              <th scope="col" className="text-right px-4 py-3 text-xs font-medium text-[#8B8B9A] uppercase tracking-wider">
+              <th scope="col" className="text-right px-4 py-3 text-xs font-medium text-muted-foreground uppercase tracking-wider">
                 Rej. Rate
               </th>
-              <th scope="col" className="text-right px-4 py-3 text-xs font-medium text-[#8B8B9A] uppercase tracking-wider">
+              <th scope="col" className="text-right px-4 py-3 text-xs font-medium text-muted-foreground uppercase tracking-wider">
                 Avg Retries
               </th>
-              <th scope="col" className="text-right px-4 py-3 text-xs font-medium text-[#8B8B9A] uppercase tracking-wider">
+              <th scope="col" className="text-right px-4 py-3 text-xs font-medium text-muted-foreground uppercase tracking-wider">
                 Avg Duration
               </th>
-              <th scope="col" className="text-right px-4 py-3 text-xs font-medium text-[#8B8B9A] uppercase tracking-wider">
+              <th scope="col" className="text-right px-4 py-3 text-xs font-medium text-muted-foreground uppercase tracking-wider">
                 Test Pass
               </th>
             </tr>
@@ -212,12 +212,12 @@ function BatchHistoryTable({ batches }: { batches: BatchMetrics[] }) {
                 <tr
                   key={batch.batchId}
                   className={cn(
-                    'border-b border-[#2A2A35]/50 transition-colors hover:bg-[#0A0A0F]/40',
-                    idx === 0 && 'bg-[#0A0A0F]/20',
+                    'border-b border-border/50 transition-colors hover:bg-background/40',
+                    idx === 0 && 'bg-background/20',
                   )}
                 >
                   <td className="px-4 py-3">
-                    <span className="text-[#EDEDF0] font-medium">{batch.batchName}</span>
+                    <span className="text-foreground font-medium">{batch.batchName}</span>
                   </td>
                   <td className="px-4 py-3">
                     <span className="font-mono text-xs text-violet-400 bg-violet-500/10 border border-violet-500/20 rounded px-1.5 py-0.5">
@@ -225,10 +225,10 @@ function BatchHistoryTable({ batches }: { batches: BatchMetrics[] }) {
                     </span>
                   </td>
                   <td className="px-4 py-3 text-center">
-                    <span className="text-[#EDEDF0] font-mono">{batch.stories}</span>
+                    <span className="text-foreground font-mono">{batch.stories}</span>
                   </td>
                   <td className="px-4 py-3">
-                    <span className="text-[#8B8B9A] text-xs">{formatDate(batch.completedAt)}</span>
+                    <span className="text-muted-foreground text-xs">{formatDate(batch.completedAt)}</span>
                   </td>
                   <td className="px-4 py-3 text-right">
                     <span className={cn('font-mono', trendColor(costTrend))}>
@@ -269,10 +269,10 @@ function PromptVersionHistory({ versions }: { versions: PromptVersion[] }) {
   if (versions.length <= 1) return null;
 
   return (
-    <div className="rounded-xl border border-[#2A2A35] bg-[#141419] p-5">
+    <div className="rounded-xl border border-border bg-card p-5">
       <div className="flex items-center gap-3 mb-4">
-        <FileCode className="h-4 w-4 text-[#8B8B9A]" aria-hidden="true" />
-        <h3 className="text-sm font-semibold text-[#EDEDF0]">Prompt Version History</h3>
+        <FileCode className="h-4 w-4 text-muted-foreground" aria-hidden="true" />
+        <h3 className="text-sm font-semibold text-foreground">Prompt Version History</h3>
       </div>
 
       <div className="space-y-0">
@@ -292,7 +292,7 @@ function PromptVersionHistory({ versions }: { versions: PromptVersion[] }) {
                     'h-3 w-3 rounded-full border-2 mt-1.5 shrink-0',
                     isCurrent
                       ? 'border-violet-400 bg-violet-400'
-                      : 'border-[#2A2A35] bg-[#0A0A0F]',
+                      : 'border-border bg-background',
                   )}
                   aria-hidden="true"
                 />
@@ -307,39 +307,39 @@ function PromptVersionHistory({ versions }: { versions: PromptVersion[] }) {
                   <span
                     className={cn(
                       'font-mono text-sm font-semibold',
-                      isCurrent ? 'text-violet-400' : 'text-[#EDEDF0]',
+                      isCurrent ? 'text-violet-400' : 'text-foreground',
                     )}
                   >
                     {v.version}
                   </span>
-                  <span className="text-xs text-[#8B8B9A]">{formatDate(v.createdAt)}</span>
+                  <span className="text-xs text-muted-foreground">{formatDate(v.createdAt)}</span>
                   {isCurrent && (
                     <span className="text-[10px] font-medium uppercase tracking-wider text-violet-400 bg-violet-500/10 border border-violet-500/20 rounded-full px-2 py-0.5">
                       current
                     </span>
                   )}
                 </div>
-                <p className="text-xs text-[#8B8B9A] leading-relaxed mb-2">{v.changes}</p>
+                <p className="text-xs text-muted-foreground leading-relaxed mb-2">{v.changes}</p>
 
                 {/* Metrics row */}
                 <div className="flex gap-4 text-xs flex-wrap">
                   <div className="flex items-center gap-1">
-                    <Hash className="h-3 w-3 text-[#8B8B9A]" aria-hidden="true" />
-                    <span className="text-[#8B8B9A]">Rej:</span>
+                    <Hash className="h-3 w-3 text-muted-foreground" aria-hidden="true" />
+                    <span className="text-muted-foreground">Rej:</span>
                     <span className={cn('font-mono font-medium', trendColor(rejDir))}>
                       {formatPct(v.rejectionRate)}
                     </span>
                   </div>
                   <div className="flex items-center gap-1">
-                    <RotateCcw className="h-3 w-3 text-[#8B8B9A]" aria-hidden="true" />
-                    <span className="text-[#8B8B9A]">Retries:</span>
+                    <RotateCcw className="h-3 w-3 text-muted-foreground" aria-hidden="true" />
+                    <span className="text-muted-foreground">Retries:</span>
                     <span className={cn('font-mono font-medium', trendColor(retryDir))}>
                       {v.avgRetries.toFixed(1)}
                     </span>
                   </div>
                   <div className="flex items-center gap-1">
-                    <DollarSign className="h-3 w-3 text-[#8B8B9A]" aria-hidden="true" />
-                    <span className="text-[#8B8B9A]">Cost/story:</span>
+                    <DollarSign className="h-3 w-3 text-muted-foreground" aria-hidden="true" />
+                    <span className="text-muted-foreground">Cost/story:</span>
                     <span className={cn('font-mono font-medium', trendColor(costDir))}>
                       {formatCost(v.avgCostPerStory)}
                     </span>
@@ -379,9 +379,9 @@ export function EvolutionView() {
 
   if (!currentVersion) {
     return (
-      <div className="rounded-xl border border-[#2A2A35] bg-[#141419] p-8 text-center">
-        <Dna className="h-8 w-8 text-[#8B8B9A] mx-auto mb-3" aria-hidden="true" />
-        <p className="text-sm text-[#8B8B9A]">No evolution data available.</p>
+      <div className="rounded-xl border border-border bg-card p-8 text-center">
+        <Dna className="h-8 w-8 text-muted-foreground mx-auto mb-3" aria-hidden="true" />
+        <p className="text-sm text-muted-foreground">No evolution data available.</p>
       </div>
     );
   }
@@ -394,8 +394,8 @@ export function EvolutionView() {
           <Dna className="h-4 w-4 text-violet-400" />
         </div>
         <div>
-          <h2 className="text-base font-semibold text-[#EDEDF0]">Self-Evolution</h2>
-          <p className="text-xs text-[#8B8B9A]">
+          <h2 className="text-base font-semibold text-foreground">Self-Evolution</h2>
+          <p className="text-xs text-muted-foreground">
             Factory prompt performance over time
           </p>
         </div>

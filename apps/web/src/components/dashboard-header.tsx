@@ -1,6 +1,7 @@
 "use client"
 
-import { PanelLeft } from "lucide-react"
+import Link from "next/link"
+import { PanelLeft, Settings } from "lucide-react"
 import { useSidebar } from "@/components/ui/sidebar"
 import { Button } from "@/components/ui/button"
 import { ThemeToggle } from "@/components/theme-toggle"
@@ -34,6 +35,12 @@ export function DashboardHeader() {
         {/* Right: Page-injected actions + Theme Toggle */}
         <div className="flex items-center gap-1">
           {actions}
+          <Button variant="ghost" size="icon" asChild className="hover:bg-accent shrink-0">
+            <Link href="/factory/settings">
+              <Settings className="h-5 w-5" />
+              <span className="sr-only">Configuración</span>
+            </Link>
+          </Button>
           <ThemeToggle />
         </div>
       </div>

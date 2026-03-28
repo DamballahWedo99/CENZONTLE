@@ -1,14 +1,14 @@
 'use client';
 
-import { useMemo } from 'react';
+import { useCallback, useMemo, useState } from 'react';
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 import { cn } from '@/lib/utils';
 import { useFactory } from '@/context/FactoryContext';
 import { WaveDAG } from '@/components/factory/WaveDAG';
 import { AgentCard } from '@/components/factory/AgentCard';
-import { AgentStatus, PipelineLayer, WaveStatus } from '@cenzontle/shared';
-import type { FactoryAgent, FactoryStory, SprintBatch, Wave } from '@cenzontle/shared';
+import { AgentStatus, GateDecision, PipelineLayer, WaveStatus } from '@cenzontle/shared';
+import type { FactoryAgent, FactoryStory, HumanGate, SprintBatch, Wave } from '@cenzontle/shared';
 import {
   ArrowLeft,
   Bot,
@@ -28,6 +28,11 @@ import {
   Timer,
   AlertCircle,
   Layers,
+  ShieldAlert,
+  CheckCircle,
+  XCircle,
+  Pause,
+  User,
 } from 'lucide-react';
 
 // ---------------------------------------------------------------------------
@@ -108,12 +113,12 @@ function BatchPipeline({ currentLayer }: { currentLayer: PipelineLayer }) {
   const currentIdx = LAYER_ORDER[currentLayer];
 
   return (
-    <section aria-label="Batch Pipeline Progress" className="rounded-xl border border-[#2A2A35] bg-[#141419] p-5">
+    <section aria-label="Batch Pipeline Progress" className="rounded-xl border border-border bg-card p-5">
       <div className="flex items-center gap-2 mb-4">
         <div className="flex h-7 w-7 items-center justify-center rounded-lg bg-indigo-500/10" aria-hidden="true">
           <Layers className="h-3.5 w-3.5 text-indigo-400" />
         </div>
-        <h2 className="text-sm font-semibold text-[#EDEDF0]">Pipeline Progress</h2>
+        <h2 className="text-sm font-semibold text-foreground">Pipeline Progress</h2>
       </div>
 
       <div className="flex items-center gap-1 sm:gap-2 overflow-x-auto pb-1">
@@ -137,7 +142,7 @@ function BatchPipeline({ currentLayer }: { currentLayer: PipelineLayer }) {
                     'flex h-9 w-9 items-center justify-center rounded-full border-2 transition-all',
                     isCompleted && 'border-[#22C55E] bg-[#22C55E]/15',
                     isCurrent && 'border-[#3B82F6] bg-[#3B82F6]/15 shadow-[0_0_12px_-2px_rgba(59,130,246,0.4)]',
-                    isFuture && 'border-[#2A2A35] bg-[#141419]',
+                    isFuture && 'border-border bg-card',
                   )}
                 >
                   {isCompleted ? (
@@ -147,7 +152,7 @@ function BatchPipeline({ currentLayer }: { currentLayer: PipelineLayer }) {
                       className={cn(
                         'h-4 w-4',
                         isCurrent && 'text-[#3B82F6]',
-                        isFuture && 'text-[#5A5A6E]',
+                        isFuture && 'text-muted-foreground/70',
                       )}
                       aria-hidden="true"
                     />
@@ -158,7 +163,7 @@ function BatchPipeline({ currentLayer }: { currentLayer: PipelineLayer }) {
                     'text-[10px] font-medium text-center leading-tight',
                     isCompleted && 'text-[#22C55E]',
                     isCurrent && 'text-[#3B82F6]',
-                    isFuture && 'text-[#5A5A6E]',
+                    isFuture && 'text-muted-foreground/70',
                   )}
                 >
                   {layerDef.label}
@@ -201,26 +206,26 @@ function WaveList({ waves, stories, agents }: WaveDisplayProps) {
 
   if (sortedWaves.length === 0) {
     return (
-      <section aria-label="Waves" className="rounded-xl border border-[#2A2A35] bg-[#141419] p-5">
+      <section aria-label="Waves" className="rounded-xl border border-border bg-card p-5">
         <div className="flex items-center gap-2 mb-4">
           <div className="flex h-7 w-7 items-center justify-center rounded-lg bg-blue-500/10" aria-hidden="true">
             <GitBranch className="h-3.5 w-3.5 text-blue-400" />
           </div>
-          <h2 className="text-sm font-semibold text-[#EDEDF0]">Waves</h2>
+          <h2 className="text-sm font-semibold text-foreground">Waves</h2>
         </div>
-        <p className="text-sm text-[#5A5A6E]">No waves defined for this batch.</p>
+        <p className="text-sm text-muted-foreground/70">No waves defined for this batch.</p>
       </section>
     );
   }
 
   return (
-    <section aria-label="Wave Execution" className="rounded-xl border border-[#2A2A35] bg-[#141419] p-5">
+    <section aria-label="Wave Execution" className="rounded-xl border border-border bg-card p-5">
       <div className="flex items-center gap-2 mb-4">
         <div className="flex h-7 w-7 items-center justify-center rounded-lg bg-blue-500/10" aria-hidden="true">
           <GitBranch className="h-3.5 w-3.5 text-blue-400" />
         </div>
-        <h2 className="text-sm font-semibold text-[#EDEDF0]">Waves</h2>
-        <span className="text-xs text-[#5A5A6E] ml-1">{sortedWaves.length} total</span>
+        <h2 className="text-sm font-semibold text-foreground">Waves</h2>
+        <span className="text-xs text-muted-foreground/70 ml-1">{sortedWaves.length} total</span>
       </div>
 
       <div className="space-y-3">
@@ -231,7 +236,7 @@ function WaveList({ waves, stories, agents }: WaveDisplayProps) {
             .filter((s): s is FactoryStory => s !== undefined);
 
           return (
-            <div key={wave.id} className="rounded-lg border border-[#2A2A35] bg-[#0F0F14] p-3">
+            <div key={wave.id} className="rounded-lg border border-border bg-card p-3">
               {/* Wave header */}
               <div className="flex items-center gap-2 mb-2">
                 <span
@@ -247,7 +252,7 @@ function WaveList({ waves, stories, agents }: WaveDisplayProps) {
                 <span className={cn('text-[11px] font-medium capitalize', waveStyle.text)}>
                   {wave.status}
                 </span>
-                <span className="text-[11px] text-[#5A5A6E] ml-auto">
+                <span className="text-[11px] text-muted-foreground/70 ml-auto">
                   {waveStories.length} {waveStories.length === 1 ? 'story' : 'stories'}
                 </span>
               </div>
@@ -287,15 +292,15 @@ function WaveList({ waves, stories, agents }: WaveDisplayProps) {
                         />
                         <div className="flex-1 min-w-0">
                           <div className="flex items-center gap-2">
-                            <span className="font-mono text-xs font-semibold text-[#EDEDF0]">
+                            <span className="font-mono text-xs font-semibold text-foreground">
                               {story.jiraKey}
                             </span>
-                            <span className="text-xs text-[#8B8B9A] truncate">{story.title}</span>
+                            <span className="text-xs text-muted-foreground truncate">{story.title}</span>
                           </div>
                         </div>
                         <div className="flex items-center gap-2 flex-shrink-0">
                           {agent && (
-                            <span className="flex items-center gap-1 text-[10px] text-[#5A5A6E]">
+                            <span className="flex items-center gap-1 text-[10px] text-muted-foreground/70">
                               <Bot className="h-3 w-3" aria-hidden="true" />
                               {agent.name}
                             </span>
@@ -343,17 +348,17 @@ function AgentList({ agents }: AgentListProps) {
         <div className="flex h-7 w-7 items-center justify-center rounded-lg bg-purple-500/10" aria-hidden="true">
           <Bot className="h-3.5 w-3.5 text-purple-400" />
         </div>
-        <h2 className="text-sm font-semibold text-[#EDEDF0]">Assigned Agents</h2>
+        <h2 className="text-sm font-semibold text-foreground">Assigned Agents</h2>
         <span className="rounded-md bg-zinc-800 px-2 py-0.5 text-xs font-medium text-zinc-400">
           {agents.length} active
         </span>
-        <span className="text-[10px] text-[#5A5A6E] ml-auto">Click to open terminal</span>
+        <span className="text-[10px] text-muted-foreground/70 ml-auto">Click to open terminal</span>
       </div>
 
       {agents.length === 0 ? (
-        <div className="rounded-xl border border-dashed border-[#2A2A35] bg-[#141419] p-8 text-center">
+        <div className="rounded-xl border border-dashed border-border bg-card p-8 text-center">
           <Bot className="h-8 w-8 text-[#6B7280] mx-auto mb-2" />
-          <p className="text-sm text-[#5A5A6E]">No agents currently assigned to this batch.</p>
+          <p className="text-sm text-muted-foreground/70">No agents currently assigned to this batch.</p>
         </div>
       ) : (
         <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-3">
@@ -438,7 +443,7 @@ function MetricsCards({ batch, stories, agents, testPassRate }: MetricsCardsProp
         <div
           key={card.label}
           role="listitem"
-          className="rounded-xl border border-[#2A2A35] bg-[#141419] p-4"
+          className="rounded-xl border border-border bg-card p-4"
         >
           <div className="flex items-center gap-2 mb-2">
             <div
@@ -450,13 +455,179 @@ function MetricsCards({ batch, stories, agents, testPassRate }: MetricsCardsProp
             >
               <card.Icon className={cn('h-3 w-3', card.accent)} />
             </div>
-            <span className="text-[11px] font-medium text-[#8B8B9A]">{card.label}</span>
+            <span className="text-[11px] font-medium text-muted-foreground">{card.label}</span>
           </div>
-          <p className="text-lg font-bold text-[#EDEDF0] leading-tight">{card.value}</p>
-          <p className="text-[11px] text-[#5A5A6E] mt-0.5">{card.sub}</p>
+          <p className="text-lg font-bold text-foreground leading-tight">{card.value}</p>
+          <p className="text-[11px] text-muted-foreground/70 mt-0.5">{card.sub}</p>
         </div>
       ))}
     </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// ApprovalSection: human gate approval cards for the batch
+// ---------------------------------------------------------------------------
+
+const GATE_DECISION_CONFIG: Record<GateDecision, { label: string; color: string; bg: string; border: string; Icon: typeof CheckCircle }> = {
+  [GateDecision.Pending]: { label: 'Awaiting Approval', color: 'text-pink-400', bg: 'bg-pink-500/10', border: 'border-pink-500/30', Icon: ShieldAlert },
+  [GateDecision.Approved]: { label: 'Approved', color: 'text-emerald-400', bg: 'bg-emerald-500/10', border: 'border-emerald-500/30', Icon: CheckCircle },
+  [GateDecision.Rejected]: { label: 'Rejected', color: 'text-red-400', bg: 'bg-red-500/10', border: 'border-red-500/30', Icon: XCircle },
+  [GateDecision.Deferred]: { label: 'Deferred', color: 'text-amber-400', bg: 'bg-amber-500/10', border: 'border-amber-500/30', Icon: Pause },
+};
+
+function formatGateTimestamp(iso: string): string {
+  const d = new Date(iso);
+  return d.toLocaleString('en-US', {
+    month: 'short',
+    day: 'numeric',
+    hour: '2-digit',
+    minute: '2-digit',
+    hour12: false,
+  });
+}
+
+function PendingGateCard({ gate, batchBranch, onDecision }: { gate: HumanGate; batchBranch: string; onDecision: (gateId: string, decision: GateDecision, notes: string) => void }) {
+  const [notes, setNotes] = useState('');
+  const [isExpanded, setIsExpanded] = useState(true);
+  const cfg = GATE_DECISION_CONFIG[gate.decision];
+  const GateIcon = cfg.Icon;
+
+  return (
+    <div className={cn('rounded-lg border p-4', cfg.border, cfg.bg)}>
+      <div className="flex items-center justify-between mb-3">
+        <div className="flex items-center gap-2">
+          <GateIcon className={cn('h-4 w-4 animate-pulse', cfg.color)} aria-hidden="true" />
+          <span className={cn('text-sm font-semibold', cfg.color)}>{cfg.label}</span>
+        </div>
+        <span className="inline-flex items-center gap-1 rounded-full bg-card px-2.5 py-1 text-[10px] font-medium text-muted-foreground border border-border">
+          {gate.type === 'staging' ? 'Staging Gate' : 'Release Gate'}
+        </span>
+      </div>
+
+      {/* Consolidated PR info */}
+      <div className="rounded-md border border-border bg-card px-3 py-2.5 mb-3">
+        <div className="flex items-center gap-2 mb-1.5">
+          <GitBranch className="h-3 w-3 text-muted-foreground" aria-hidden="true" />
+          <span className="text-[11px] font-medium text-muted-foreground">Consolidated PR</span>
+        </div>
+        <p className="font-mono text-xs text-foreground mb-2">{batchBranch} → DEV</p>
+        <p className="text-xs text-muted-foreground leading-relaxed">
+          Review the consolidated PR for business intent. This is not about bugs or code quality — agents already handled that. Focus on: business logic correctness, UX alignment, and strategic fit.
+        </p>
+      </div>
+
+      <div className="flex items-center gap-4 text-xs text-muted-foreground/70 mb-3">
+        <span className="flex items-center gap-1">
+          <Clock className="h-3 w-3" aria-hidden="true" />
+          Requested {formatGateTimestamp(gate.requestedAt)}
+        </span>
+      </div>
+
+      {/* Review form */}
+      <div className="space-y-3 rounded-lg border border-border bg-card p-4">
+        <label className="block">
+          <span className="text-xs font-medium text-muted-foreground mb-1.5 block">Review Notes</span>
+          <textarea
+            value={notes}
+            onChange={(e) => setNotes(e.target.value)}
+            placeholder="Review notes — describe business intent concerns, UX issues, or strategic misalignment..."
+            rows={3}
+            className="w-full rounded-lg border border-border bg-card px-3 py-2 text-sm text-foreground placeholder:text-muted-foreground/70 focus:outline-none focus:ring-1 focus:ring-pink-500/50 focus:border-pink-500/50 resize-none"
+          />
+        </label>
+
+        <div className="flex items-center gap-2">
+          <button
+            onClick={() => onDecision(gate.id, GateDecision.Approved, notes)}
+            className="flex-1 inline-flex items-center justify-center gap-2 rounded-lg bg-emerald-500/15 border border-emerald-500/30 px-4 py-2.5 text-sm font-medium text-emerald-400 hover:bg-emerald-500/25 transition-colors"
+          >
+            <CheckCircle className="h-4 w-4" aria-hidden="true" />
+            Approve & Merge to DEV
+          </button>
+          <button
+            onClick={() => {
+              if (!notes.trim()) {
+                alert('Please provide notes explaining why changes are needed.');
+                return;
+              }
+              onDecision(gate.id, GateDecision.Rejected, notes);
+            }}
+            className="flex-1 inline-flex items-center justify-center gap-2 rounded-lg bg-red-500/15 border border-red-500/30 px-4 py-2.5 text-sm font-medium text-red-400 hover:bg-red-500/25 transition-colors"
+          >
+            <XCircle className="h-4 w-4" aria-hidden="true" />
+            Request Changes
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function ApprovalSection({ gates, batchBranch, onDecision }: { gates: HumanGate[]; batchBranch: string; onDecision: (gateId: string, decision: GateDecision, notes: string) => void }) {
+  if (gates.length === 0) return null;
+
+  const pendingGates = gates.filter((g) => g.decision === GateDecision.Pending);
+  const resolvedGates = gates.filter((g) => g.decision !== GateDecision.Pending);
+
+  return (
+    <section aria-label="Human Gate Approvals" className="rounded-xl border border-border bg-card p-5">
+      <div className="flex items-center gap-2 mb-4">
+        <div className="flex h-7 w-7 items-center justify-center rounded-lg bg-pink-500/10" aria-hidden="true">
+          <ShieldAlert className="h-3.5 w-3.5 text-pink-400" />
+        </div>
+        <h2 className="text-sm font-semibold text-foreground">Human Gate Approvals</h2>
+        {pendingGates.length > 0 && (
+          <span className="rounded-full bg-pink-500/15 border border-pink-500/30 px-2 py-0.5 text-[10px] font-semibold text-pink-400 animate-pulse">
+            {pendingGates.length} pending
+          </span>
+        )}
+      </div>
+
+      <div className="space-y-3">
+        {pendingGates.map((gate) => (
+          <PendingGateCard key={gate.id} gate={gate} batchBranch={batchBranch} onDecision={onDecision} />
+        ))}
+
+        {resolvedGates.map((gate) => {
+          const cfg = GATE_DECISION_CONFIG[gate.decision];
+          const GateIcon = cfg.Icon;
+          return (
+            <div
+              key={gate.id}
+              className="rounded-lg border border-border bg-card p-4"
+            >
+              <div className="flex items-center justify-between mb-2">
+                <div className="flex items-center gap-2">
+                  <GateIcon className={cn('h-4 w-4', cfg.color)} aria-hidden="true" />
+                  <span className={cn('text-sm font-medium', cfg.color)}>{cfg.label}</span>
+                </div>
+                <span className="inline-flex items-center gap-1 rounded-full bg-card px-2.5 py-1 text-[10px] font-medium text-muted-foreground/70 border border-border">
+                  {gate.type === 'staging' ? 'Staging Gate' : 'Release Gate'}
+                </span>
+              </div>
+              <div className="flex flex-wrap items-center gap-4 text-xs text-muted-foreground/70">
+                {gate.reviewer && (
+                  <span className="flex items-center gap-1">
+                    <User className="h-3 w-3" aria-hidden="true" />
+                    {gate.reviewer}
+                  </span>
+                )}
+                {gate.decidedAt && (
+                  <span className="flex items-center gap-1">
+                    <Clock className="h-3 w-3" aria-hidden="true" />
+                    {formatGateTimestamp(gate.decidedAt)}
+                  </span>
+                )}
+              </div>
+              {gate.notes && (
+                <p className="text-xs text-muted-foreground mt-2">{gate.notes}</p>
+              )}
+            </div>
+          );
+        })}
+      </div>
+    </section>
   );
 }
 
@@ -469,7 +640,22 @@ interface BatchDetailProps {
 }
 
 export function BatchDetail({ batchId }: BatchDetailProps) {
-  const { state, computed } = useFactory();
+  const { state, dispatch, computed } = useFactory();
+
+  const handleGateDecision = useCallback((gateId: string, decision: GateDecision, notes: string) => {
+    const gate = state.gates.find((g) => g.id === gateId);
+    if (!gate) return;
+    dispatch({
+      type: 'UPDATE_GATE',
+      payload: {
+        ...gate,
+        decision,
+        notes: notes || null,
+        reviewer: 'Director General',
+        decidedAt: new Date().toISOString(),
+      },
+    });
+  }, [state.gates, dispatch]);
 
   const batch = useMemo(
     () => state.factory.activeBatches.find((b) => b.id === batchId) ?? null,
@@ -523,19 +709,24 @@ export function BatchDetail({ batchId }: BatchDetailProps) {
     return totalCases > 0 ? Math.round((passedCases / totalCases) * 100) : 0;
   }, [state.tests, batchStories]);
 
+  // Filter human gates belonging to this batch
+  const batchGates = useMemo<HumanGate[]>(() => {
+    return state.gates.filter((g) => g.batchId === batchId);
+  }, [state.gates, batchId]);
+
   if (!fullBatch) {
     return (
       <div className="flex flex-col items-center justify-center py-32 gap-4">
-        <div className="flex h-14 w-14 items-center justify-center rounded-xl bg-[#141419] border border-[#2A2A35]">
-          <PackageOpen className="h-7 w-7 text-[#5A5A6E]" aria-hidden="true" />
+        <div className="flex h-14 w-14 items-center justify-center rounded-xl bg-card border border-border">
+          <PackageOpen className="h-7 w-7 text-muted-foreground/70" aria-hidden="true" />
         </div>
-        <h1 className="text-lg font-semibold text-[#EDEDF0]">Batch not found</h1>
-        <p className="text-sm text-[#8B8B9A]">
-          Could not locate batch <span className="font-mono text-[#EDEDF0]">{batchId}</span>.
+        <h1 className="text-lg font-semibold text-foreground">Batch not found</h1>
+        <p className="text-sm text-muted-foreground">
+          Could not locate batch <span className="font-mono text-foreground">{batchId}</span>.
         </p>
         <Link
           href="/factory"
-          className="mt-2 inline-flex items-center gap-2 rounded-lg bg-[#141419] border border-[#2A2A35] px-4 py-2 text-sm text-[#EDEDF0] hover:bg-[#1A1A22] transition-colors"
+          className="mt-2 inline-flex items-center gap-2 rounded-lg bg-card border border-border px-4 py-2 text-sm text-foreground hover:bg-muted transition-colors"
         >
           <ArrowLeft className="h-4 w-4" aria-hidden="true" />
           Back to Factory
@@ -553,16 +744,16 @@ export function BatchDetail({ batchId }: BatchDetailProps) {
         <div className="flex items-start gap-3">
           <Link
             href="/factory"
-            className="mt-1 flex h-8 w-8 items-center justify-center rounded-lg border border-[#2A2A35] bg-[#141419] hover:bg-[#1A1A22] transition-colors"
+            className="mt-1 flex h-8 w-8 items-center justify-center rounded-lg border border-border bg-card hover:bg-muted transition-colors"
             aria-label="Back to Factory"
           >
-            <ArrowLeft className="h-4 w-4 text-[#8B8B9A]" />
+            <ArrowLeft className="h-4 w-4 text-muted-foreground" />
           </Link>
           <div className="min-w-0">
-            <h1 className="text-lg font-bold text-[#EDEDF0] truncate">{fullBatch.epicTitle}</h1>
+            <h1 className="text-lg font-bold text-foreground truncate">{fullBatch.epicTitle}</h1>
             <div className="flex flex-wrap items-center gap-2 mt-1">
-              <span className="font-mono text-xs text-[#8B8B9A]">{fullBatch.jiraKey}</span>
-              <span className="text-[#2A2A35]" aria-hidden="true">|</span>
+              <span className="font-mono text-xs text-muted-foreground">{fullBatch.jiraKey}</span>
+              <span className="text-border" aria-hidden="true">|</span>
               <span
                 className={cn(
                   'inline-flex items-center rounded-full px-2 py-0.5 text-[10px] font-semibold border',
@@ -573,7 +764,7 @@ export function BatchDetail({ batchId }: BatchDetailProps) {
               >
                 {fullBatch.priority}
               </span>
-              <span className="text-[#2A2A35]" aria-hidden="true">|</span>
+              <span className="text-border" aria-hidden="true">|</span>
               <span
                 className={cn(
                   'inline-flex items-center rounded-full px-2 py-0.5 text-[10px] font-semibold border',
@@ -587,9 +778,9 @@ export function BatchDetail({ batchId }: BatchDetailProps) {
         </div>
 
         {/* Branch badge */}
-        <div className="flex items-center gap-2 rounded-lg border border-[#2A2A35] bg-[#0F0F14] px-3 py-2 self-start">
-          <GitBranch className="h-3.5 w-3.5 text-[#5A5A6E]" aria-hidden="true" />
-          <span className="font-mono text-xs text-[#8B8B9A]">{fullBatch.branch}</span>
+        <div className="flex items-center gap-2 rounded-lg border border-border bg-card px-3 py-2 self-start">
+          <GitBranch className="h-3.5 w-3.5 text-muted-foreground/70" aria-hidden="true" />
+          <span className="font-mono text-xs text-muted-foreground">{fullBatch.branch}</span>
         </div>
       </header>
 
@@ -603,6 +794,9 @@ export function BatchDetail({ batchId }: BatchDetailProps) {
 
       {/* ---- Pipeline ---- */}
       <BatchPipeline currentLayer={fullBatch.currentLayer} />
+
+      {/* ---- Human Gate Approvals ---- */}
+      <ApprovalSection gates={batchGates} batchBranch={fullBatch.branch} onDecision={handleGateDecision} />
 
       {/* ---- Wave DAG ---- */}
       <WaveDAG

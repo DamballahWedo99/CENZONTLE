@@ -15,17 +15,17 @@ export default function BatchDetailPage({ params }: { params: Promise<{ id: stri
   if (!batch) {
     return (
       <div className="flex flex-col items-center justify-center py-32 gap-4">
-        <div className="flex h-14 w-14 items-center justify-center rounded-xl bg-[#141419] border border-[#2A2A35]">
-          <PackageOpen className="h-7 w-7 text-[#5A5A6E]" aria-hidden="true" />
+        <div className="flex h-14 w-14 items-center justify-center rounded-xl bg-card border border-border">
+          <PackageOpen className="h-7 w-7 text-muted-foreground/70" aria-hidden="true" />
         </div>
-        <h1 className="text-lg font-semibold text-[#EDEDF0]">Batch not found</h1>
-        <p className="text-sm text-[#8B8B9A] max-w-sm text-center">
-          The batch <span className="font-mono text-[#EDEDF0]">{id}</span> does not exist
+        <h1 className="text-lg font-semibold text-foreground">Batch not found</h1>
+        <p className="text-sm text-muted-foreground max-w-sm text-center">
+          The batch <span className="font-mono text-foreground">{id}</span> does not exist
           in active batches or may have been completed.
         </p>
         <Link
           href="/factory"
-          className="mt-2 inline-flex items-center gap-2 rounded-lg bg-[#141419] border border-[#2A2A35] px-4 py-2 text-sm text-[#EDEDF0] hover:bg-[#1A1A22] transition-colors"
+          className="mt-2 inline-flex items-center gap-2 rounded-lg bg-card border border-border px-4 py-2 text-sm text-foreground hover:bg-muted transition-colors"
         >
           <ArrowLeft className="h-4 w-4" aria-hidden="true" />
           Back to Factory

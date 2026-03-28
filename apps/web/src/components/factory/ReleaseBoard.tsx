@@ -44,17 +44,17 @@ function EpicCard({ epic }: { epic: ReleaseBoardEpic }) {
   const pCfg = priorityConfig[epic.priority];
 
   return (
-    <div className="rounded-xl border border-[#2A2A35] bg-[#141419] p-5 hover:border-[#3A3A45] transition-colors">
+    <div className="rounded-xl border border-border bg-card p-5 hover:border-[#3A3A45] transition-colors">
       {/* Header */}
       <div className="flex items-start justify-between gap-3 mb-3">
         <div className="flex-1 min-w-0">
           <div className="flex items-center gap-2 mb-1">
-            <span className="font-mono text-xs text-[#8B8B9A]">{epic.jiraKey}</span>
+            <span className="font-mono text-xs text-muted-foreground">{epic.jiraKey}</span>
             <span className={cn('text-[10px] font-medium px-2 py-0.5 rounded-full border', pCfg.bg, pCfg.border, pCfg.color)}>
               {pCfg.label}
             </span>
           </div>
-          <h3 className="text-[#EDEDF0] font-semibold text-sm truncate">{epic.title}</h3>
+          <h3 className="text-foreground font-semibold text-sm truncate">{epic.title}</h3>
         </div>
         <CheckCircle2 className="h-5 w-5 text-emerald-400 shrink-0 mt-0.5" />
       </div>
@@ -63,7 +63,7 @@ function EpicCard({ epic }: { epic: ReleaseBoardEpic }) {
       <div className="grid grid-cols-2 gap-3 mb-3">
         <div className="flex items-center gap-2 text-xs">
           <FileCode2 className="h-3.5 w-3.5 text-[#6B7280]" />
-          <span className="text-[#8B8B9A]">Changes</span>
+          <span className="text-muted-foreground">Changes</span>
           <span className="ml-auto font-mono">
             <span className="text-emerald-400">+{epic.totalAdditions}</span>
             <span className="text-[#6B7280]"> / </span>
@@ -72,25 +72,25 @@ function EpicCard({ epic }: { epic: ReleaseBoardEpic }) {
         </div>
         <div className="flex items-center gap-2 text-xs">
           <TestTube2 className="h-3.5 w-3.5 text-[#6B7280]" />
-          <span className="text-[#8B8B9A]">Tests</span>
+          <span className="text-muted-foreground">Tests</span>
           <span className={cn('ml-auto font-mono font-medium', epic.testPassRate >= 0.95 ? 'text-emerald-400' : 'text-amber-400')}>
             {(epic.testPassRate * 100).toFixed(0)}%
           </span>
         </div>
         <div className="flex items-center gap-2 text-xs">
           <Package className="h-3.5 w-3.5 text-[#6B7280]" />
-          <span className="text-[#8B8B9A]">Stories</span>
-          <span className="ml-auto font-mono text-[#EDEDF0]">{epic.storiesCompleted}/{epic.storiesTotal}</span>
+          <span className="text-muted-foreground">Stories</span>
+          <span className="ml-auto font-mono text-foreground">{epic.storiesCompleted}/{epic.storiesTotal}</span>
         </div>
         <div className="flex items-center gap-2 text-xs">
           <DollarSign className="h-3.5 w-3.5 text-[#6B7280]" />
-          <span className="text-[#8B8B9A]">Cost</span>
-          <span className="ml-auto font-mono text-[#EDEDF0]">${epic.cost.toFixed(2)}</span>
+          <span className="text-muted-foreground">Cost</span>
+          <span className="ml-auto font-mono text-foreground">${epic.cost.toFixed(2)}</span>
         </div>
       </div>
 
       {/* Footer */}
-      <div className="flex items-center justify-between pt-3 border-t border-[#2A2A35]">
+      <div className="flex items-center justify-between pt-3 border-t border-border">
         <div className="flex items-center gap-1.5 text-[10px] text-[#6B7280]">
           <Clock className="h-3 w-3" />
           <span>Approved {timeAgo(epic.approvedAt)}</span>
@@ -122,15 +122,15 @@ export function ReleaseBoard() {
   return (
     <div className="space-y-6">
       {/* Header */}
-      <div className="rounded-xl border border-[#2A2A35] bg-[#141419] p-6">
+      <div className="rounded-xl border border-border bg-card p-6">
         <div className="flex items-start justify-between mb-4">
           <div className="flex items-center gap-3">
             <div className="flex h-10 w-10 items-center justify-center rounded-lg bg-violet-500/10">
               <Rocket className="h-5 w-5 text-violet-400" />
             </div>
             <div>
-              <h2 className="text-[#EDEDF0] font-semibold text-base">Release Board</h2>
-              <p className="text-[#8B8B9A] text-xs">
+              <h2 className="text-foreground font-semibold text-base">Release Board</h2>
+              <p className="text-muted-foreground text-xs">
                 {releaseBoard.epics.length} epic{releaseBoard.epics.length !== 1 ? 's' : ''} ready for production
               </p>
             </div>
@@ -147,15 +147,15 @@ export function ReleaseBoard() {
 
         {/* Summary bar */}
         <div className="grid grid-cols-2 sm:grid-cols-4 gap-4">
-          <div className="rounded-lg bg-[#0A0A0F] border border-[#2A2A35] p-3">
+          <div className="rounded-lg bg-background border border-border p-3">
             <p className="text-[10px] text-[#6B7280] uppercase tracking-wider mb-1">Epics</p>
-            <p className="text-xl font-bold text-[#EDEDF0] tabular-nums">{releaseBoard.epics.length}</p>
+            <p className="text-xl font-bold text-foreground tabular-nums">{releaseBoard.epics.length}</p>
           </div>
-          <div className="rounded-lg bg-[#0A0A0F] border border-[#2A2A35] p-3">
+          <div className="rounded-lg bg-background border border-border p-3">
             <p className="text-[10px] text-[#6B7280] uppercase tracking-wider mb-1">Stories</p>
-            <p className="text-xl font-bold text-[#EDEDF0] tabular-nums">{totals.stories}</p>
+            <p className="text-xl font-bold text-foreground tabular-nums">{totals.stories}</p>
           </div>
-          <div className="rounded-lg bg-[#0A0A0F] border border-[#2A2A35] p-3">
+          <div className="rounded-lg bg-background border border-border p-3">
             <p className="text-[10px] text-[#6B7280] uppercase tracking-wider mb-1">Changes</p>
             <p className="text-xl font-bold tabular-nums">
               <span className="text-emerald-400">+{totals.additions}</span>
@@ -163,9 +163,9 @@ export function ReleaseBoard() {
               <span className="text-red-400">-{totals.deletions}</span>
             </p>
           </div>
-          <div className="rounded-lg bg-[#0A0A0F] border border-[#2A2A35] p-3">
+          <div className="rounded-lg bg-background border border-border p-3">
             <p className="text-[10px] text-[#6B7280] uppercase tracking-wider mb-1">Total Cost</p>
-            <p className="text-xl font-bold text-[#EDEDF0] tabular-nums">${totals.cost.toFixed(2)}</p>
+            <p className="text-xl font-bold text-foreground tabular-nums">${totals.cost.toFixed(2)}</p>
           </div>
         </div>
 
@@ -181,12 +181,12 @@ export function ReleaseBoard() {
         <div className="flex items-center gap-4 mt-4 text-xs text-[#6B7280]">
           <div className="flex items-center gap-1.5">
             <Shield className="h-3.5 w-3.5" />
-            <span>Trigger: <span className="text-[#EDEDF0] capitalize">{releaseBoard.triggerMode}</span></span>
+            <span>Trigger: <span className="text-foreground capitalize">{releaseBoard.triggerMode}</span></span>
           </div>
           {releaseBoard.lastReleasedAt && (
             <div className="flex items-center gap-1.5">
               <Calendar className="h-3.5 w-3.5" />
-              <span>Last release: <span className="text-[#EDEDF0]">{formatDate(releaseBoard.lastReleasedAt)}</span></span>
+              <span>Last release: <span className="text-foreground">{formatDate(releaseBoard.lastReleasedAt)}</span></span>
             </div>
           )}
         </div>
@@ -194,9 +194,9 @@ export function ReleaseBoard() {
 
       {/* Epic cards */}
       {sortedEpics.length === 0 ? (
-        <div className="rounded-xl border border-dashed border-[#2A2A35] bg-[#141419] p-12 text-center">
+        <div className="rounded-xl border border-dashed border-border bg-card p-12 text-center">
           <Package className="h-8 w-8 text-[#6B7280] mx-auto mb-3" />
-          <p className="text-sm text-[#8B8B9A]">No epics waiting for release</p>
+          <p className="text-sm text-muted-foreground">No epics waiting for release</p>
           <p className="text-xs text-[#6B7280] mt-1">Epics will appear here after passing Staging approval</p>
         </div>
       ) : (

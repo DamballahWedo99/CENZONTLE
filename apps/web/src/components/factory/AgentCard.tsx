@@ -1,10 +1,11 @@
 'use client';
 
 import { useCallback } from 'react';
-import { Clock, Zap, DollarSign, FileCode2, TestTube2 } from 'lucide-react';
+import { Clock, Zap, DollarSign, FileCode2, TestTube2, Info } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import type { FactoryAgent } from '@cenzontle/shared';
 import { AgentStatus } from '@cenzontle/shared';
+import { deriveDod } from './AgentDetailDrawer';
 
 // === PROPS ===
 
@@ -12,6 +13,7 @@ export interface AgentCardProps {
   agent: FactoryAgent;
   isSelected?: boolean;
   onClick?: () => void;
+  onInfoClick?: () => void;
 }
 
 // === STATUS CONFIG ===
@@ -27,9 +29,9 @@ interface StatusConfig {
 const STATUS_MAP: Record<AgentStatus, StatusConfig> = {
   [AgentStatus.Idle]: {
     label: 'Idle',
-    bg: 'bg-zinc-700/40',
-    text: 'text-zinc-400',
-    border: 'border-zinc-600',
+    bg: 'bg-muted',
+    text: 'text-muted-foreground',
+    border: 'border-border',
     pulse: false,
   },
   [AgentStatus.Coding]: {
@@ -150,49 +152,15 @@ function MetricItem({
 }) {
   return (
     <div className="flex items-center gap-1" aria-label={`${label}: ${value}`}>
-      <Icon className="h-3 w-3 shrink-0 text-zinc-500" aria-hidden="true" />
-      <span className="text-xs text-zinc-300">{value}</span>
-    </div>
-  );
-}
-
-function MiniTerminal({ lines }: { lines: string[] }) {
-  const visibleLines = lines.slice(-3);
-  if (visibleLines.length === 0) {
-    return (
-      <div
-        className="mt-2 rounded bg-[#0A0A0F] px-2.5 py-2 font-mono text-xs text-zinc-600"
-        aria-label="Agent terminal output: no output"
-        role="log"
-      >
-        <span className="select-none text-zinc-700">&gt; </span>
-        <span className="italic">awaiting output...</span>
-      </div>
-    );
-  }
-
-  return (
-    <div
-      className="mt-2 overflow-hidden rounded bg-[#0A0A0F] px-2.5 py-2"
-      role="log"
-      aria-label="Agent terminal output"
-    >
-      {visibleLines.map((line, i) => (
-        <div
-          key={`${i}-${line.slice(0, 20)}`}
-          className="truncate font-mono text-xs leading-relaxed text-green-400"
-        >
-          <span className="select-none text-zinc-600" aria-hidden="true">&gt; </span>
-          {line}
-        </div>
-      ))}
+      <Icon className="h-3 w-3 shrink-0 text-muted-foreground/70" aria-hidden="true" />
+      <span className="text-xs text-foreground">{value}</span>
     </div>
   );
 }
 
 // === MAIN COMPONENT ===
 
-export function AgentCard({ agent, isSelected = false, onClick }: AgentCardProps) {
+export function AgentCard({ agent, isSelected = false, onClick, onInfoClick }: AgentCardProps) {
   const config = STATUS_MAP[agent.status];
   const isActive = agent.status !== AgentStatus.Idle && agent.status !== AgentStatus.Done;
 
@@ -213,12 +181,12 @@ export function AgentCard({ agent, isSelected = false, onClick }: AgentCardProps
   return (
     <div
       className={cn(
-        'group relative flex flex-col rounded-lg border bg-[#141419] p-3.5 transition-all duration-200',
-        'border-[#2A2A35]',
-        'hover:border-zinc-600 hover:shadow-[0_0_12px_rgba(255,255,255,0.03)]',
-        isSelected && 'scale-[1.02] border-opacity-100 shadow-[0_0_16px_rgba(255,255,255,0.05)]',
+        'group relative flex flex-col rounded-lg border bg-card p-3.5 transition-all duration-200',
+        'border-border',
+        'hover:border-border hover:shadow-sm',
+        isSelected && 'scale-[1.02] border-opacity-100 shadow-md',
         isSelected && config.border,
-        isActive && !isSelected && 'border-[#2A2A35]',
+        isActive && !isSelected && 'border-border',
         onClick && 'cursor-pointer',
       )}
       onClick={handleClick}
@@ -228,65 +196,60 @@ export function AgentCard({ agent, isSelected = false, onClick }: AgentCardProps
       aria-pressed={onClick ? isSelected : undefined}
       aria-label={`${agent.name}, status: ${config.label}${agent.storyKey ? `, working on ${agent.storyKey}` : ''}`}
     >
-      {/* Header: name + status pill */}
+      {/* Header: name + info button + status pill */}
       <div className="flex items-center justify-between gap-2">
-        <h3 className="truncate text-sm font-medium text-zinc-100">{agent.name}</h3>
+        <div className="flex items-center gap-1.5 min-w-0">
+          <h3 className="truncate text-sm font-medium text-foreground">{agent.name}</h3>
+          <button
+            onClick={(e) => { e.stopPropagation(); onInfoClick?.(); }}
+            className="shrink-0 text-muted-foreground/40 hover:text-muted-foreground transition-colors"
+            title="Agent details"
+          >
+            <Info className="h-3.5 w-3.5" />
+          </button>
+        </div>
         <StatusPill status={agent.status} />
       </div>
 
       {/* Assignment */}
       <div className="mt-1.5 min-h-[20px]">
         {agent.storyKey ? (
-          <p className="truncate text-xs text-zinc-400">
-            <span className="font-medium text-zinc-300">{agent.storyKey}</span>
+          <p className="truncate text-xs text-muted-foreground">
+            <span className="font-medium text-foreground">{agent.storyKey}</span>
             {agent.currentFile && (
-              <span className="text-zinc-500"> &middot; {agent.currentFile.split('/').pop()}</span>
+              <span className="text-muted-foreground/70"> &middot; {agent.currentFile.split('/').pop()}</span>
             )}
           </p>
         ) : (
-          <p className="text-xs italic text-zinc-600">Idle</p>
+          <p className="text-xs italic text-muted-foreground/50">Idle</p>
         )}
       </div>
 
-      {/* Metrics row */}
-      <div className="mt-3 flex items-center gap-3">
+      {/* Metrics row — all in one line */}
+      <div className="mt-3 flex items-center gap-3 flex-wrap">
         <MetricItem icon={Clock} value={formatDuration(agent.duration)} label="Duration" />
         <MetricItem icon={Zap} value={formatTokens(agent.tokens)} label="Tokens" />
         <MetricItem icon={DollarSign} value={formatCost(agent.cost)} label="Cost" />
+        <MetricItem icon={FileCode2} value={`${agent.linesWritten}`} label="lines" />
+        <MetricItem icon={TestTube2} value={`${agent.testsPassed}/${agent.testsRun}`} label="tests" />
       </div>
 
-      {/* Progress indicators */}
-      <div className="mt-2.5 flex items-center gap-3">
-        <div className="flex items-center gap-1" aria-label={`Lines written: ${agent.linesWritten}`}>
-          <FileCode2 className="h-3 w-3 shrink-0 text-zinc-500" aria-hidden="true" />
-          <span className="text-xs text-zinc-400">
-            {agent.linesWritten} <span className="text-zinc-600">lines</span>
-          </span>
-        </div>
-        <div
-          className="flex items-center gap-1"
-          aria-label={`Tests: ${agent.testsPassed} passed of ${agent.testsRun} run`}
-        >
-          <TestTube2 className="h-3 w-3 shrink-0 text-zinc-500" aria-hidden="true" />
-          <span className="text-xs text-zinc-400">
-            <span
-              className={cn(
-                agent.testsRun > 0 && agent.testsPassed === agent.testsRun
-                  ? 'text-green-400'
-                  : agent.testsRun > 0 && agent.testsPassed < agent.testsRun
-                    ? 'text-amber-400'
-                    : 'text-zinc-400',
-              )}
-            >
-              {agent.testsPassed}/{agent.testsRun}
-            </span>{' '}
-            <span className="text-zinc-600">tests</span>
-          </span>
-        </div>
+      {/* DoD checkpoints */}
+      <div className="mt-2 flex items-center gap-2">
+        {deriveDod(agent).map((c, i) => (
+          <div key={i} className="flex items-center gap-1 min-w-0">
+            {c.done ? (
+              <svg className="h-2.5 w-2.5 shrink-0 text-green-500" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={3}><path strokeLinecap="round" strokeLinejoin="round" d="M5 13l4 4L19 7" /></svg>
+            ) : (
+              <div className="h-2.5 w-2.5 shrink-0 rounded-full border border-muted-foreground/30" />
+            )}
+            <span className={cn('text-[10px] truncate', c.done ? 'text-muted-foreground' : 'text-muted-foreground/40')}>
+              {c.text}
+            </span>
+          </div>
+        ))}
       </div>
 
-      {/* Mini terminal */}
-      <MiniTerminal lines={agent.lastOutput} />
     </div>
   );
 }

@@ -1,21 +1,17 @@
 'use client';
 
-import { useState, useEffect, useRef } from 'react';
+import { useState, useEffect, useRef, useCallback } from 'react';
 import { cn } from '@/lib/utils';
 import type { FactoryAgent } from '@cenzontle/shared';
 import { AgentStatus } from '@cenzontle/shared';
-import {
-  X,
-  Maximize2,
-  Minimize2,
-  Circle,
-  Clock,
-  Zap,
-  DollarSign,
-  FileCode2,
-  TestTube2,
-} from 'lucide-react';
+import { X, Circle, AlertTriangle, Loader2, ArrowDown, ImagePlus, Info } from 'lucide-react';
 import { Button } from '@/components/ui/button';
+import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip';
+import { useAgentTerminal } from '@/hooks/use-agent-terminal';
+import { useFactory } from '@/context/FactoryContext';
+import { AgentDetailDrawer, deriveDod, deriveMilestones } from './AgentDetailDrawer';
+
+const API_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:3001';
 
 interface AgentTerminalProps {
   agent: FactoryAgent;
@@ -23,7 +19,7 @@ interface AgentTerminalProps {
 }
 
 const statusColors: Record<AgentStatus, string> = {
-  [AgentStatus.Idle]: 'text-zinc-500',
+  [AgentStatus.Idle]: 'text-muted-foreground/70',
   [AgentStatus.Coding]: 'text-blue-400',
   [AgentStatus.Testing]: 'text-amber-400',
   [AgentStatus.CreatingPR]: 'text-purple-400',
@@ -44,229 +40,277 @@ const statusLabels: Record<AgentStatus, string> = {
   [AgentStatus.Error]: 'Error',
 };
 
-// Simulated terminal output for demo — in production this comes from WebSocket/tmux
-function generateSimulatedOutput(agent: FactoryAgent): string[] {
-  const base = [
-    `\x1b[90m$ claude --print --output-format stream-json\x1b[0m`,
-    `\x1b[36m[${agent.tmuxSession}]\x1b[0m Connected to worktree: \x1b[33m${agent.worktree}\x1b[0m`,
-    ``,
-    `\x1b[90m──────────────────────────────────────────────\x1b[0m`,
-    `\x1b[1m Story: ${agent.storyKey || 'unassigned'}\x1b[0m`,
-    `\x1b[90m──────────────────────────────────────────────\x1b[0m`,
-    ``,
-  ];
-
-  const codingLines = [
-    `\x1b[34m⠋\x1b[0m Reading story context from Linear...`,
-    `\x1b[32m✓\x1b[0m Story context loaded (${Math.floor(Math.random() * 500 + 200)} tokens)`,
-    `\x1b[34m⠋\x1b[0m Analyzing existing codebase...`,
-    `\x1b[32m✓\x1b[0m Found 12 relevant files in \x1b[33msrc/\x1b[0m`,
-    `\x1b[34m⠋\x1b[0m Planning implementation...`,
-    `\x1b[32m✓\x1b[0m Plan: 4 files to create, 2 files to modify`,
-    ``,
-    `\x1b[90m> Creating\x1b[0m \x1b[33msrc/middleware/auth.ts\x1b[0m`,
-    `  \x1b[32m+\x1b[0m JWT verification middleware`,
-    `  \x1b[32m+\x1b[0m Token refresh logic`,
-    `  \x1b[32m+\x1b[0m Rate limiting per user`,
-    `\x1b[90m> Creating\x1b[0m \x1b[33msrc/middleware/auth.test.ts\x1b[0m`,
-    `  \x1b[32m+\x1b[0m 8 test cases for auth flow`,
-    `  \x1b[32m+\x1b[0m Mock JWT provider`,
-    `\x1b[90m> Modifying\x1b[0m \x1b[33msrc/routes/index.ts\x1b[0m`,
-    `  \x1b[33m~\x1b[0m Added auth middleware to protected routes`,
-    `\x1b[90m> Creating\x1b[0m \x1b[33msrc/utils/token.ts\x1b[0m`,
-    `  \x1b[32m+\x1b[0m Token generation utility`,
-    `  \x1b[32m+\x1b[0m HMAC-SHA256 signing`,
-  ];
-
-  const testingLines = [
-    ``,
-    `\x1b[34m⠋\x1b[0m Running test suite...`,
-    `\x1b[90m  PASS\x1b[0m \x1b[32m✓\x1b[0m verifies JWT token (23ms)`,
-    `\x1b[90m  PASS\x1b[0m \x1b[32m✓\x1b[0m rejects expired token (12ms)`,
-    `\x1b[90m  PASS\x1b[0m \x1b[32m✓\x1b[0m handles missing authorization header (8ms)`,
-    `\x1b[90m  PASS\x1b[0m \x1b[32m✓\x1b[0m refreshes token before expiry (45ms)`,
-    `\x1b[90m  PASS\x1b[0m \x1b[32m✓\x1b[0m rate limits after 100 requests (102ms)`,
-    `\x1b[90m  FAIL\x1b[0m \x1b[31m✗\x1b[0m handles concurrent refresh (67ms)`,
-    `    \x1b[31mExpected: token to be refreshed once\x1b[0m`,
-    `    \x1b[31mReceived: token refreshed 3 times\x1b[0m`,
-    ``,
-    `\x1b[34m⠋\x1b[0m Fixing concurrent refresh issue...`,
-    `\x1b[90m> Modifying\x1b[0m \x1b[33msrc/middleware/auth.ts\x1b[0m`,
-    `  \x1b[33m~\x1b[0m Added mutex lock for token refresh`,
-    ``,
-    `\x1b[34m⠋\x1b[0m Re-running failed tests...`,
-    `\x1b[90m  PASS\x1b[0m \x1b[32m✓\x1b[0m handles concurrent refresh (54ms)`,
-    ``,
-    `\x1b[32m✓ All 6 tests passed\x1b[0m`,
-    `\x1b[90m  Coverage: 94.2% statements, 88.7% branches\x1b[0m`,
-  ];
-
-  const prLines = [
-    ``,
-    `\x1b[34m⠋\x1b[0m Creating pull request...`,
-    `\x1b[32m✓\x1b[0m PR #89 opened: \x1b[36m"feat: Add JWT auth middleware with rate limiting"\x1b[0m`,
-    `  \x1b[32m+247\x1b[0m \x1b[31m-12\x1b[0m across 4 files`,
-    `\x1b[34m⠋\x1b[0m Awaiting Claude Review...`,
-  ];
-
-  let lines = [...base];
-  if (agent.status === AgentStatus.Coding || agent.status === AgentStatus.Testing || agent.status === AgentStatus.CreatingPR || agent.status === AgentStatus.Done) {
-    lines = [...lines, ...codingLines];
-  }
-  if (agent.status === AgentStatus.Testing || agent.status === AgentStatus.CreatingPR || agent.status === AgentStatus.Done) {
-    lines = [...lines, ...testingLines];
-  }
-  if (agent.status === AgentStatus.CreatingPR || agent.status === AgentStatus.Done) {
-    lines = [...lines, ...prLines];
-  }
-  if (agent.status === AgentStatus.Done) {
-    lines.push(`\x1b[32m✓\x1b[0m Claude Review: \x1b[32mApproved\x1b[0m`);
-    lines.push(`\x1b[32m✓\x1b[0m PR merged to \x1b[33mforge/sprint-batch-47\x1b[0m`);
-  }
-
-  return lines;
-}
-
-// Simple ANSI to HTML parser for display
-function ansiToHtml(text: string): string {
-  return text
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;')
-    .replace(/\x1b\[0m/g, '</span>')
-    .replace(/\x1b\[1m/g, '<span class="font-bold text-zinc-100">')
-    .replace(/\x1b\[31m/g, '<span class="text-red-400">')
-    .replace(/\x1b\[32m/g, '<span class="text-green-400">')
-    .replace(/\x1b\[33m/g, '<span class="text-amber-400">')
-    .replace(/\x1b\[34m/g, '<span class="text-blue-400">')
-    .replace(/\x1b\[36m/g, '<span class="text-cyan-400">')
-    .replace(/\x1b\[90m/g, '<span class="text-zinc-500">');
-}
-
-function formatDuration(seconds: number): string {
-  if (seconds < 60) return `${seconds}s`;
-  const mins = Math.floor(seconds / 60);
-  const secs = seconds % 60;
-  return `${mins}m ${secs.toString().padStart(2, '0')}s`;
-}
-
-function formatTokens(tokens: number): string {
-  if (tokens < 1000) return String(tokens);
-  if (tokens < 1_000_000) return `${(tokens / 1000).toFixed(1).replace(/\.0$/, '')}K`;
-  return `${(tokens / 1_000_000).toFixed(1).replace(/\.0$/, '')}M`;
-}
-
 export function AgentTerminal({ agent, onClose }: AgentTerminalProps) {
-  const [expanded, setExpanded] = useState(false);
-  const [lines, setLines] = useState<string[]>([]);
-  const [streamIndex, setStreamIndex] = useState(0);
-  const terminalRef = useRef<HTMLDivElement>(null);
+  const { ttydUrl, sessionActive, loading, error, worktreePath, startSession, sendKeys } = useAgentTerminal(agent.id);
+  const { state, getStoryById } = useFactory();
 
-  const allLines = generateSimulatedOutput(agent);
+  // Lookup related data for the detail drawer
+  const story = agent.storyId ? getStoryById(agent.storyId) ?? null : null;
+  const batch = state.factory.currentBatch;
 
-  // Simulate streaming effect — lines appear one by one
+  const [detailOpen, setDetailOpen] = useState(false);
+  const [activeBar, setActiveBar] = useState<'dod' | 'milestones' | null>(null);
+
+  function toggleBar(bar: 'dod' | 'milestones') {
+    setActiveBar((prev) => (prev === bar ? null : bar));
+  }
+
+  // ---------------------------------------------------------------------------
+  // Copy-mode polling (scroll-to-bottom button)
+  // ---------------------------------------------------------------------------
+  const [inCopyMode, setInCopyMode] = useState(false);
+
   useEffect(() => {
-    setLines([]);
-    setStreamIndex(0);
-  }, [agent.id]);
+    if (!ttydUrl) return;
+    const interval = setInterval(async () => {
+      try {
+        const res = await fetch(`${API_URL}/api/factory/terminal/copy-mode/${agent.id}`);
+        if (res.ok) {
+          const data = await res.json();
+          setInCopyMode(data.inCopyMode);
+        }
+      } catch { /* ignore */ }
+    }, 2000);
+    return () => clearInterval(interval);
+  }, [ttydUrl, agent.id]);
 
-  useEffect(() => {
-    if (streamIndex >= allLines.length) return;
-    const timer = setTimeout(() => {
-      setLines((prev) => [...prev, allLines[streamIndex]]);
-      setStreamIndex((prev) => prev + 1);
-    }, streamIndex < 7 ? 80 : 150 + Math.random() * 200);
-    return () => clearTimeout(timer);
-  }, [streamIndex, allLines]);
+  async function scrollToBottom() {
+    try {
+      const res = await fetch(`${API_URL}/api/factory/terminal/copy-mode/${agent.id}`);
+      const data = await res.json();
+      if (data.inCopyMode) {
+        sendKeys('q');
+      }
+    } catch { /* best-effort */ }
+    setInCopyMode(false);
+  }
 
-  // Auto-scroll to bottom
-  useEffect(() => {
-    if (terminalRef.current) {
-      terminalRef.current.scrollTop = terminalRef.current.scrollHeight;
+  // ---------------------------------------------------------------------------
+  // Image upload via file picker
+  // ---------------------------------------------------------------------------
+  const fileInputRef = useRef<HTMLInputElement>(null);
+  const [uploading, setUploading] = useState(false);
+  const [isDragging, setIsDragging] = useState(false);
+  const [tooltipOpen, setTooltipOpen] = useState(false);
+  const tooltipTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  function showTooltip() {
+    if (tooltipTimer.current) clearTimeout(tooltipTimer.current);
+    setTooltipOpen(true);
+    // Auto-close after 2s to prevent it from sticking when mouse goes to iframe
+    tooltipTimer.current = setTimeout(() => setTooltipOpen(false), 2000);
+  }
+
+  function hideTooltip() {
+    if (tooltipTimer.current) clearTimeout(tooltipTimer.current);
+    setTooltipOpen(false);
+  }
+
+  const handleImageUpload = useCallback(async (file: File) => {
+    setUploading(true);
+    try {
+      const formData = new FormData();
+      formData.append('file', file);
+
+      const res = await fetch(`${API_URL}/api/factory/terminal/upload/${agent.id}`, {
+        method: 'POST',
+        body: formData,
+      });
+
+      if (res.ok) {
+        const data = await res.json();
+        // Exit copy-mode only if actually in copy-mode, to avoid injecting a stray 'q'
+        try {
+          const cmRes = await fetch(`${API_URL}/api/factory/terminal/copy-mode/${agent.id}`);
+          if (cmRes.ok) {
+            const cm = await cmRes.json();
+            if (cm.inCopyMode) {
+              sendKeys('q');
+              await new Promise((r) => setTimeout(r, 200));
+            }
+          }
+        } catch { /* best-effort */ }
+        sendKeys(' ' + data.filepath);
+      }
+    } catch {
+      // Best-effort
+    } finally {
+      setUploading(false);
     }
-  }, [lines]);
+  }, [agent.id, sendKeys]);
 
+  function handleFileChange(e: React.ChangeEvent<HTMLInputElement>) {
+    const file = e.target.files?.[0];
+    if (!file || !file.type.startsWith('image/')) return;
+    handleImageUpload(file);
+    // Reset after a delay so we don't trigger re-render loops
+    setTimeout(() => {
+      if (fileInputRef.current) fileInputRef.current.value = '';
+    }, 500);
+  }
+
+  // ---------------------------------------------------------------------------
+  // Auto-start with worktree isolation
+  // ---------------------------------------------------------------------------
+  // Resolve workdir: real paths pass through, mock paths (/worktrees/...) use PROJECT_ROOT.
+  // Never send '.' — it resolves to the API server's CWD, not the project root.
+  const projectRoot = process.env.NEXT_PUBLIC_PROJECT_ROOT || '/Users/damballahwedo911/Desktop/GAM/CENZONTLE';
+  const defaultWorkdir = agent.worktree.startsWith('/worktrees/') || agent.worktree.startsWith('/forge/')
+    ? projectRoot
+    : agent.worktree;
+
+  // Derive branch from story key (e.g. "CENZ-42" → "feat/CENZ-42")
+  const agentBranch = agent.storyKey ? `feat/${agent.storyKey}` : undefined;
+
+  useEffect(() => {
+    if (!sessionActive && !loading && !ttydUrl) {
+      startSession(defaultWorkdir, undefined, agentBranch);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // ---------------------------------------------------------------------------
+  // Render
+  // ---------------------------------------------------------------------------
   return (
-    <div
-      className={cn(
-        'rounded-xl border border-[#2A2A35] bg-[#0A0A0F] overflow-hidden flex flex-col transition-all duration-300',
-        expanded ? 'fixed inset-4 z-50' : 'h-[420px]'
-      )}
-    >
-      {/* Terminal header */}
-      <div className="flex items-center justify-between px-4 py-2.5 bg-[#141419] border-b border-[#2A2A35] shrink-0">
-        <div className="flex items-center gap-3">
-          {/* Traffic light dots */}
-          <div className="flex items-center gap-1.5">
-            <button
-              onClick={onClose}
-              className="h-3 w-3 rounded-full bg-[#FF5F56] hover:bg-[#FF5F56]/80 transition-colors"
-              aria-label="Close terminal"
+    <div className="relative overflow-hidden flex flex-col h-full bg-card">
+      {/* Header */}
+      <div className="shrink-0 border-b border-border bg-card">
+        <div className="flex items-center justify-between px-5 py-3">
+          <div className="flex items-center gap-3 min-w-0">
+            <Circle
+              className={cn('h-2.5 w-2.5 fill-current shrink-0', statusColors[agent.status])}
             />
-            <div className="h-3 w-3 rounded-full bg-[#FFBD2E]" />
-            <button
-              onClick={() => setExpanded(!expanded)}
-              className="h-3 w-3 rounded-full bg-[#27C93F] hover:bg-[#27C93F]/80 transition-colors"
-              aria-label={expanded ? 'Minimize terminal' : 'Maximize terminal'}
-            />
-          </div>
-
-          {/* Agent info */}
-          <div className="flex items-center gap-2 ml-2">
-            <Circle className={cn('h-2 w-2 fill-current', statusColors[agent.status])} />
-            <span className="text-zinc-200 text-sm font-medium">{agent.name}</span>
-            <span className="text-zinc-500 text-xs">—</span>
-            <span className={cn('text-xs font-medium', statusColors[agent.status])}>
+            <h3 className="text-sm font-semibold text-foreground truncate">{agent.name}</h3>
+            <span
+              className={cn(
+                'text-xs font-medium shrink-0 rounded-full px-2 py-0.5',
+                statusColors[agent.status],
+                'bg-current/10',
+              )}
+            >
               {statusLabels[agent.status]}
             </span>
             {agent.storyKey && (
-              <>
-                <span className="text-zinc-600 text-xs">·</span>
-                <span className="text-zinc-400 text-xs font-mono">{agent.storyKey}</span>
-              </>
+              <span className="text-xs font-mono text-muted-foreground shrink-0">
+                {agent.storyKey}
+              </span>
             )}
+            {batch?.branch && (
+              <a
+                href={`https://github.com/DamballahWedo99/CENZONTLE/tree/${batch.branch}`}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="flex items-center gap-1 text-[11px] font-mono text-muted-foreground hover:text-foreground transition-colors shrink-0"
+                title={`Open branch ${batch.branch} on GitHub`}
+              >
+                <svg className="h-3 w-3" viewBox="0 0 16 16" fill="currentColor"><path d="M5 5.372v.878c0 .414.336.75.75.75h4.5a.75.75 0 0 0 .75-.75v-.878a2.25 2.25 0 1 1 1.5 0v.878a2.25 2.25 0 0 1-2.25 2.25h-1.5v2.128a2.251 2.251 0 1 1-1.5 0V8.5h-1.5A2.25 2.25 0 0 1 3.5 6.25v-.878a2.25 2.25 0 1 1 1.5 0ZM5 3.25a.75.75 0 1 0-1.5 0 .75.75 0 0 0 1.5 0Zm6.75.75a.75.75 0 1 0 0-1.5.75.75 0 0 0 0 1.5Zm-3 8.75a.75.75 0 1 0-1.5 0 .75.75 0 0 0 1.5 0Z"/></svg>
+                {batch.branch}
+              </a>
+            )}
+            {/* DoD pill */}
+            {(() => {
+              const dod = deriveDod(agent);
+              const dodDone = dod.filter((c) => c.done).length;
+              return (
+                <button
+                  onClick={() => toggleBar('dod')}
+                  className={cn(
+                    'flex items-center gap-1.5 rounded-full border px-2 py-0.5 text-[10px] transition-colors shrink-0',
+                    activeBar === 'dod'
+                      ? 'border-purple-500/50 bg-purple-500/10 text-purple-400'
+                      : 'border-border bg-muted/50 text-muted-foreground hover:text-foreground hover:bg-muted',
+                  )}
+                >
+                  <span className="font-medium">{dodDone}/{dod.length}</span>
+                  <span>DoD</span>
+                </button>
+              );
+            })()}
+            {/* Milestones pill */}
+            {(() => {
+              const milestones = deriveMilestones(story, agent);
+              const msDone = milestones.filter((c) => c.done).length;
+              return (
+                <button
+                  onClick={() => toggleBar('milestones')}
+                  className={cn(
+                    'flex items-center gap-1.5 rounded-full border px-2 py-0.5 text-[10px] transition-colors shrink-0',
+                    activeBar === 'milestones'
+                      ? 'border-blue-500/50 bg-blue-500/10 text-blue-400'
+                      : 'border-border bg-muted/50 text-muted-foreground hover:text-foreground hover:bg-muted',
+                  )}
+                >
+                  <span className="font-medium">{msDone}/{milestones.length}</span>
+                  <span>milestones</span>
+                </button>
+              );
+            })()}
           </div>
-        </div>
 
-        <div className="flex items-center gap-4">
-          {/* Metrics in header */}
-          <div className="hidden sm:flex items-center gap-3 text-xs text-zinc-500">
-            <span className="flex items-center gap-1">
-              <Clock className="h-3 w-3" />
-              {formatDuration(agent.duration)}
-            </span>
-            <span className="flex items-center gap-1">
-              <Zap className="h-3 w-3" />
-              {formatTokens(agent.tokens)}
-            </span>
-            <span className="flex items-center gap-1">
-              <DollarSign className="h-3 w-3" />
-              ${agent.cost.toFixed(2)}
-            </span>
-            <span className="flex items-center gap-1">
-              <FileCode2 className="h-3 w-3" />
-              {agent.linesWritten}
-            </span>
-            <span className="flex items-center gap-1">
-              <TestTube2 className="h-3 w-3" />
-              {agent.testsPassed}/{agent.testsRun}
-            </span>
-          </div>
+          <div className="flex items-center gap-1 shrink-0 ml-3">
+            {/* Upload image button — also accepts drag-and-drop */}
+            <TooltipProvider delayDuration={200}>
+              <Tooltip open={tooltipOpen}>
+                <TooltipTrigger asChild>
+                  <Button
+                    size="sm"
+                    variant="ghost"
+                    className={cn(
+                      'h-7 w-7 p-0 text-muted-foreground hover:text-foreground transition-colors',
+                      isDragging && 'ring-2 ring-blue-500 text-blue-400',
+                    )}
+                    onClick={() => fileInputRef.current?.click()}
+                    onMouseEnter={showTooltip}
+                    onMouseLeave={hideTooltip}
+                    onDragOver={(e) => { e.preventDefault(); setIsDragging(true); }}
+                    onDragLeave={() => setIsDragging(false)}
+                    onDrop={(e) => {
+                      e.preventDefault();
+                      setIsDragging(false);
+                      const file = Array.from(e.dataTransfer.files).find((f) => f.type.startsWith('image/'));
+                      if (file) handleImageUpload(file);
+                    }}
+                    disabled={uploading || !ttydUrl}
+                  >
+                    {uploading ? (
+                      <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                    ) : (
+                      <ImagePlus className="h-3.5 w-3.5" />
+                    )}
+                  </Button>
+                </TooltipTrigger>
+                <TooltipContent side="left" sideOffset={8} className="text-xs">
+                  Upload image — click or drag & drop
+                </TooltipContent>
+              </Tooltip>
+            </TooltipProvider>
+            <input
+              ref={fileInputRef}
+              type="file"
+              accept="image/*"
+              className="hidden"
+              onChange={handleFileChange}
+            />
 
-          <div className="flex items-center gap-1">
+            {/* Agent detail */}
             <Button
               size="sm"
               variant="ghost"
-              className="h-6 w-6 p-0 text-zinc-500 hover:text-zinc-300 hover:bg-zinc-800"
-              onClick={() => setExpanded(!expanded)}
+              className="h-7 w-7 p-0 text-muted-foreground hover:text-foreground"
+              onClick={() => setDetailOpen(true)}
+              title="Agent details"
             >
-              {expanded ? <Minimize2 className="h-3.5 w-3.5" /> : <Maximize2 className="h-3.5 w-3.5" />}
+              <Info className="h-3.5 w-3.5" />
             </Button>
+
+            {/* Close */}
             <Button
               size="sm"
               variant="ghost"
-              className="h-6 w-6 p-0 text-zinc-500 hover:text-zinc-300 hover:bg-zinc-800"
+              className="h-7 w-7 p-0 text-muted-foreground hover:text-foreground"
               onClick={onClose}
+              aria-label="Close terminal"
             >
               <X className="h-3.5 w-3.5" />
             </Button>
@@ -274,40 +318,100 @@ export function AgentTerminal({ agent, onClose }: AgentTerminalProps) {
         </div>
       </div>
 
-      {/* Terminal body */}
-      <div
-        ref={terminalRef}
-        className="flex-1 overflow-y-auto px-4 py-3 font-mono text-sm leading-relaxed"
-      >
-        {lines.map((line, i) => (
-          <div
-            key={i}
-            className={cn(
-              'text-zinc-300 min-h-[1.375rem]',
-              i === lines.length - 1 && streamIndex < allLines.length && 'animate-pulse'
-            )}
-            dangerouslySetInnerHTML={{ __html: ansiToHtml(line) || '&nbsp;' }}
+      {/* Error banner */}
+      {error && (
+        <div className="flex items-center gap-2 px-4 py-2 bg-red-950/50 border-b border-red-800/40 text-xs text-red-300 shrink-0">
+          <AlertTriangle className="h-3.5 w-3.5 shrink-0 text-red-400" />
+          {error}
+        </div>
+      )}
+
+      {/* Terminal */}
+      {ttydUrl ? (
+        <div className="relative flex-1 min-h-0">
+          <iframe
+            src={ttydUrl}
+            className="absolute inset-0 w-full h-full border-0 bg-[#0d1117]"
+            allow="clipboard-read; clipboard-write"
+            title={`Terminal — ${agent.name}`}
           />
-        ))}
 
-        {/* Cursor blink */}
-        {streamIndex < allLines.length && (
-          <div className="flex items-center gap-1 mt-1">
-            <span className="inline-block h-4 w-2 bg-green-400 animate-[blink_1s_steps(1)_infinite]" />
-          </div>
-        )}
-        {streamIndex >= allLines.length && (
-          <div className="flex items-center gap-1 mt-1 text-zinc-600">
-            <span className="inline-block h-4 w-2 bg-zinc-600 animate-[blink_1s_steps(1)_infinite]" />
-          </div>
-        )}
-      </div>
+          {/* Bottom bar — DoD or Milestones (mutually exclusive) */}
+          {activeBar && (() => {
+            const items = activeBar === 'dod'
+              ? deriveDod(agent)
+              : deriveMilestones(story, agent);
+            const doneCount = items.filter((c) => c.done).length;
+            const label = activeBar === 'dod' ? 'Definition of Done' : 'Milestones';
+            const accentColor = activeBar === 'dod' ? 'text-purple-400' : 'text-blue-400';
+            return (
+              <div className="absolute bottom-0 left-0 right-0 z-10 flex items-center gap-3 px-4 py-2 bg-card/90 backdrop-blur-sm border-t border-border">
+                <span className={cn('text-[10px] font-medium uppercase tracking-wider shrink-0', accentColor)}>
+                  {label}
+                </span>
+                <div className="flex items-center gap-2.5 flex-1 min-w-0">
+                  {items.map((c, i) => (
+                    <div key={i} className="flex items-center gap-1.5 min-w-0">
+                      {c.done ? (
+                        <svg className="h-3 w-3 shrink-0 text-green-500" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={3}><path strokeLinecap="round" strokeLinejoin="round" d="M5 13l4 4L19 7" /></svg>
+                      ) : (
+                        <div className="h-3 w-3 shrink-0 rounded-full border border-muted-foreground/30" />
+                      )}
+                      <span className={cn('text-[11px] truncate', c.done ? 'text-foreground/70' : 'text-muted-foreground/40')}>
+                        {c.text}
+                      </span>
+                    </div>
+                  ))}
+                </div>
+                <span className="text-[11px] font-mono text-muted-foreground/50 shrink-0">
+                  {doneCount}/{items.length}
+                </span>
+              </div>
+            );
+          })()}
 
-      {/* Status bar */}
-      <div className="flex items-center justify-between px-4 py-1.5 bg-[#141419] border-t border-[#2A2A35] text-[10px] text-zinc-600 shrink-0">
-        <span>tmux: {agent.tmuxSession} · worktree: {agent.worktree}</span>
-        <span>{lines.length} lines · {streamIndex >= allLines.length ? 'stream ended' : 'streaming...'}</span>
-      </div>
+          {/* Scroll to bottom */}
+          {inCopyMode && (
+            <button
+              onClick={scrollToBottom}
+              className={cn(
+                'absolute right-4 z-10 flex items-center justify-center h-8 w-8 rounded-full bg-foreground/90 text-background shadow-lg hover:bg-foreground transition-colors',
+                activeBar ? 'bottom-12' : 'bottom-4',
+              )}
+              title="Scroll to bottom"
+            >
+              <ArrowDown className="h-4 w-4" />
+            </button>
+          )}
+        </div>
+      ) : (
+        <div className="flex-1 min-h-0 flex flex-col items-center justify-center gap-3 bg-[#0d1117]">
+          {error ? (
+            <>
+              <AlertTriangle className="h-5 w-5 text-red-400" />
+              <p className="text-xs text-red-400/80 max-w-sm text-center px-4">{error}</p>
+              <button
+                onClick={() => startSession(defaultWorkdir, undefined, agentBranch)}
+                className="text-xs text-muted-foreground hover:text-foreground transition-colors"
+              >
+                Retry
+              </button>
+            </>
+          ) : (
+            <Loader2 className="h-6 w-6 animate-spin text-[#484f58]" />
+          )}
+        </div>
+      )}
+
+      {/* Agent detail drawer */}
+      <AgentDetailDrawer
+        agent={agent}
+        story={story}
+        batch={batch}
+        open={detailOpen}
+        onClose={() => setDetailOpen(false)}
+        worktreePath={worktreePath}
+      />
     </div>
   );
 }

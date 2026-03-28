@@ -88,11 +88,27 @@ export interface FactoryState {
   uptime: number; // seconds
 }
 
+export interface TrackerReference {
+  provider: 'jira' | 'linear';
+  externalId: string;
+  externalKey: string;
+  externalUrl: string;
+}
+
+export interface QueuedStory {
+  key: string;
+  title: string;
+  pod: string | null;
+  productOwner: string | null;
+  storyPoints: number;
+}
+
 export interface QueuedBatch {
   id: string;
   epicTitle: string;
-  jiraKey: string;
+  tracker: TrackerReference;
   stories: number;
+  storyDetails?: QueuedStory[];
   priority: 'critical' | 'high' | 'medium' | 'low';
   queuedAt: string;
   estimatedStartAt: string | null;
@@ -135,8 +151,8 @@ export interface SprintBatch {
   id: string;
   name: string;
   epicTitle: string;
-  jiraKey: string;
-  linearProjectId: string;
+  epicId?: string;
+  tracker: TrackerReference;
   stories: FactoryStory[];
   waves: Wave[];
   branch: string;
@@ -161,7 +177,7 @@ export interface Wave {
 
 export interface FactoryStory {
   id: string;
-  jiraKey: string;
+  tracker: TrackerReference;
   title: string;
   description: string;
   waveNumber: number;
@@ -324,7 +340,7 @@ export enum ReleaseTriggerMode {
 export interface ReleaseBoardEpic {
   id: string;
   title: string;
-  jiraKey: string;
+  tracker: TrackerReference;
   storiesCompleted: number;
   storiesTotal: number;
   batchId: string;
@@ -358,3 +374,19 @@ export type FactoryEvent =
   | { type: 'log:entry'; data: LogEntry }
   | { type: 'cost:update'; data: CostBreakdown }
   | { type: 'pipeline:update'; data: PipelineLayerState[] };
+
+// === TERMINAL / PTY TYPES ===
+
+/** Configuration to spawn a Claude Code PTY session for an agent */
+export interface PtySessionConfig {
+  agentId: string;
+  /** Initial prompt to send after spawning (optional — user can type directly) */
+  initialPrompt?: string;
+  /** Working directory for the Claude Code process (repo root — used to derive worktree) */
+  workdir: string;
+  /** Git branch name. When provided, the backend creates an isolated worktree for this agent. */
+  branch?: string;
+  /** Terminal dimensions */
+  cols?: number;
+  rows?: number;
+}
