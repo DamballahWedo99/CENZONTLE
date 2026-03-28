@@ -5,8 +5,10 @@ import {
   Get,
   HttpCode,
   HttpStatus,
+  Injectable,
   NotFoundException,
   Param,
+  PipeTransform,
   Post,
   UploadedFile,
   UseInterceptors,
@@ -14,6 +16,7 @@ import {
   ValidationPipe,
 } from '@nestjs/common';
 import { FileInterceptor } from '@nestjs/platform-express';
+import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
 import { IsNotEmpty, IsOptional, IsString, Matches, MaxLength } from 'class-validator';
 import { writeFileSync, mkdirSync, existsSync } from 'fs';
 import { join, basename, resolve } from 'path';
@@ -28,24 +31,42 @@ const AGENT_ID_PATTERN = /^[a-zA-Z0-9][a-zA-Z0-9\-_]*$/;
 const BRANCH_PATTERN = /^[a-zA-Z0-9][a-zA-Z0-9\-_./]*$/;
 
 // ---------------------------------------------------------------------------
+// Param Pipe
+// ---------------------------------------------------------------------------
+
+@Injectable()
+class ParseAgentIdPipe implements PipeTransform {
+  transform(value: string) {
+    if (!/^[a-zA-Z0-9][a-zA-Z0-9\-_]*$/.test(value) || value.length > 128) {
+      throw new BadRequestException('Invalid agentId parameter');
+    }
+    return value;
+  }
+}
+
+// ---------------------------------------------------------------------------
 // DTOs
 // ---------------------------------------------------------------------------
 
 class StartSessionDto {
+  @ApiProperty({ description: 'Agent identifier (alphanumeric, hyphens, underscores)', example: 'agent-01' })
   @IsString()
   @IsNotEmpty()
   @Matches(AGENT_ID_PATTERN, { message: 'agentId must contain only alphanumeric, hyphens, and underscores' })
   @MaxLength(128)
   agentId!: string;
 
+  @ApiProperty({ description: 'Working directory for the terminal session', example: '/home/user/project' })
   @IsString()
   @IsNotEmpty()
   workdir!: string;
 
+  @ApiPropertyOptional({ description: 'Initial prompt to send after session starts' })
   @IsOptional()
   @IsString()
   initialPrompt?: string;
 
+  @ApiPropertyOptional({ description: 'Git branch to checkout (alphanumeric, hyphens, underscores, dots, slashes)', example: 'feat/my-branch' })
   @IsOptional()
   @IsString()
   @Matches(BRANCH_PATTERN, { message: 'branch must contain only alphanumeric, hyphens, underscores, dots, and slashes' })
@@ -53,6 +74,7 @@ class StartSessionDto {
 }
 
 class StopSessionDto {
+  @ApiProperty({ description: 'Agent identifier to stop', example: 'agent-01' })
   @IsString()
   @IsNotEmpty()
   @Matches(AGENT_ID_PATTERN, { message: 'agentId must contain only alphanumeric, hyphens, and underscores' })
@@ -60,11 +82,13 @@ class StopSessionDto {
 }
 
 class SendKeysDto {
+  @ApiProperty({ description: 'Agent identifier to send keys to', example: 'agent-01' })
   @IsString()
   @IsNotEmpty()
   @Matches(AGENT_ID_PATTERN, { message: 'agentId must contain only alphanumeric, hyphens, and underscores' })
   agentId!: string;
 
+  @ApiProperty({ description: 'Keys to send to the terminal session', example: 'ls -la' })
   @IsString()
   @IsNotEmpty()
   keys!: string;
@@ -112,7 +136,7 @@ export class TerminalController {
   @Post('upload/:agentId')
   @UseInterceptors(FileInterceptor('file', { limits: { fileSize: 10 * 1024 * 1024 } }))
   uploadFile(
-    @Param('agentId') agentId: string,
+    @Param('agentId', ParseAgentIdPipe) agentId: string,
     @UploadedFile() file: Express.Multer.File,
   ) {
     if (!file) throw new BadRequestException('No file uploaded');
@@ -135,12 +159,12 @@ export class TerminalController {
   }
 
   @Get('copy-mode/:agentId')
-  getCopyMode(@Param('agentId') agentId: string) {
+  getCopyMode(@Param('agentId', ParseAgentIdPipe) agentId: string) {
     return { inCopyMode: this.terminalService.isInCopyMode(agentId) };
   }
 
   @Get('session/:agentId')
-  getSession(@Param('agentId') agentId: string) {
+  getSession(@Param('agentId', ParseAgentIdPipe) agentId: string) {
     const session = this.terminalService.getSession(agentId);
     if (!session) {
       throw new NotFoundException('No active terminal session found');

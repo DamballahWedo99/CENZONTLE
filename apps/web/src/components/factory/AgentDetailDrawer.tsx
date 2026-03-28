@@ -39,6 +39,8 @@ export interface AgentDetailDrawerProps {
   batch: SprintBatch | null;
   open: boolean;
   onClose: () => void;
+  /** Real worktree path from the backend terminal session, if available. */
+  worktreePath?: string | null;
 }
 
 // =============================================================================
@@ -360,6 +362,7 @@ export function AgentDetailDrawer({
   batch,
   open,
   onClose,
+  worktreePath: externalWorktreePath,
 }: AgentDetailDrawerProps) {
   // Close on Escape key
   const handleKeyDown = useCallback(
@@ -405,13 +408,14 @@ export function AgentDetailDrawer({
   // Gauge: speed — normalise against 10 lines/min as a good pace
   const speedPct = Math.min(100, (linesPerMinute / 10) * 100);
 
-  const worktreePath = agent.worktree.startsWith('/worktrees/')
-    ? agent.worktree
-    : `/worktrees/${agent.storyKey?.toLowerCase() ?? agent.id}`;
+  const worktreePath = externalWorktreePath
+    ?? (agent.worktree.startsWith('/worktrees/')
+      ? agent.worktree
+      : `/worktrees/${agent.storyKey?.toLowerCase() ?? agent.id}`);
 
   const branchName = batch?.branch ?? `forge/${agent.id}`;
 
-  // Dependencies: get jiraKeys from dependsOn story IDs when possible
+  // Dependencies: get tracker keys from dependsOn story IDs when possible
   const dependencyLabels: string[] = story?.dependsOn ?? [];
 
   return (
@@ -450,9 +454,9 @@ export function AgentDetailDrawer({
                   <h2 className="text-sm font-semibold text-foreground">{agent.name}</h2>
                 </div>
                 <StatusPill status={agent.status} />
-                {(agent.storyKey ?? story?.jiraKey) && (
+                {(agent.storyKey ?? story?.tracker.externalKey) && (
                   <span className="rounded bg-muted px-1.5 py-0.5 font-mono text-[11px] text-muted-foreground">
-                    {agent.storyKey ?? story?.jiraKey}
+                    {agent.storyKey ?? story?.tracker.externalKey}
                   </span>
                 )}
               </div>
@@ -550,7 +554,7 @@ export function AgentDetailDrawer({
               </h3>
 
               <div className="rounded-lg border border-border bg-muted/20 divide-y divide-border">
-                {/* Epic — no link: SprintBatch lacks epicId, jiraKey doesn't match route param */}
+                {/* Epic — no link: SprintBatch lacks epicId, tracker key doesn't match route param */}
                 {batch && (
                   <div className="flex items-center justify-between gap-3 px-3.5 py-2.5">
                     <div className="flex items-center gap-1.5 text-xs text-muted-foreground min-w-0">
@@ -562,7 +566,7 @@ export function AgentDetailDrawer({
                         {batch.epicTitle}
                       </span>
                       <span className="shrink-0 rounded bg-muted px-1.5 py-0.5 font-mono text-[10px] text-muted-foreground">
-                        {batch.jiraKey}
+                        {batch.tracker.externalKey}
                       </span>
                     </div>
                   </div>
@@ -584,7 +588,7 @@ export function AgentDetailDrawer({
                         {story.title}
                       </span>
                       <span className="shrink-0 rounded bg-muted px-1.5 py-0.5 font-mono text-[10px] text-muted-foreground">
-                        {story.jiraKey}
+                        {story.tracker.externalKey}
                       </span>
                       <span className="shrink-0 rounded bg-blue-500/10 px-1.5 py-0.5 text-[10px] font-medium text-blue-400">
                         {story.storyPoints} pts

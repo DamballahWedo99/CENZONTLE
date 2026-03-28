@@ -189,7 +189,7 @@ export class TerminalService implements OnModuleDestroy {
     // git worktree add [-b branch] <path> [<branch>]
     const args = branchExists
       ? ['worktree', 'add', worktreePath, branch]
-      : ['worktree', 'add', '-b', branch, worktreePath];
+      : ['worktree', 'add', '-b', branch, worktreePath, 'main'];
 
     execFileSync(GIT_BIN, args, {
       cwd: repoRoot,

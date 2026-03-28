@@ -74,8 +74,14 @@ export function AgentTerminal({ agent, onClose }: AgentTerminalProps) {
     return () => clearInterval(interval);
   }, [ttydUrl, agent.id]);
 
-  function scrollToBottom() {
-    sendKeys('q');
+  async function scrollToBottom() {
+    try {
+      const res = await fetch(`${API_URL}/api/factory/terminal/copy-mode/${agent.id}`);
+      const data = await res.json();
+      if (data.inCopyMode) {
+        sendKeys('q');
+      }
+    } catch { /* best-effort */ }
     setInCopyMode(false);
   }
 
@@ -402,6 +408,7 @@ export function AgentTerminal({ agent, onClose }: AgentTerminalProps) {
         batch={batch}
         open={detailOpen}
         onClose={() => setDetailOpen(false)}
+        worktreePath={worktreePath}
       />
     </div>
   );
