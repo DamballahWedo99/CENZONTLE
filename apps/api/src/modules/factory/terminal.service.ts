@@ -144,13 +144,13 @@ export class TerminalService implements OnModuleDestroy {
   }
 
   private async findFreePort(): Promise<number> {
-    let candidate = this.nextPort;
-    while (candidate <= PORT_MAX) {
+    const totalPorts = PORT_MAX - PORT_START + 1;
+    for (let i = 0; i < totalPorts; i++) {
+      const candidate = PORT_START + ((this.nextPort - PORT_START + i) % totalPorts);
       if (await this.isPortFree(candidate)) {
-        this.nextPort = candidate + 1;
+        this.nextPort = PORT_START + ((candidate - PORT_START + 1) % totalPorts);
         return candidate;
       }
-      candidate++;
     }
     throw new Error(`No free ports available in range ${PORT_START}–${PORT_MAX}`);
   }

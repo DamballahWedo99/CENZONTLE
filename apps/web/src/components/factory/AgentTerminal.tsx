@@ -152,8 +152,10 @@ export function AgentTerminal({ agent, onClose }: AgentTerminalProps) {
   // ---------------------------------------------------------------------------
   // Auto-start with worktree isolation
   // ---------------------------------------------------------------------------
-  const projectRoot = process.env.NEXT_PUBLIC_PROJECT_ROOT || '.';
-  const defaultWorkdir = agent.worktree.startsWith('/worktrees/')
+  // Resolve workdir: real paths pass through, mock paths (/worktrees/...) use PROJECT_ROOT.
+  // Never send '.' — it resolves to the API server's CWD, not the project root.
+  const projectRoot = process.env.NEXT_PUBLIC_PROJECT_ROOT || '/Users/damballahwedo911/Desktop/GAM/CENZONTLE';
+  const defaultWorkdir = agent.worktree.startsWith('/worktrees/') || agent.worktree.startsWith('/forge/')
     ? projectRoot
     : agent.worktree;
 
