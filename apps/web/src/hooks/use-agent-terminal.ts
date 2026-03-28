@@ -13,8 +13,10 @@ export interface UseAgentTerminalReturn {
   loading: boolean;
   /** Error message */
   error: string | null;
+  /** The worktree path created by the backend (null if no branch was specified) */
+  worktreePath: string | null;
   /** Start a ttyd+tmux+claude session for this agent */
-  startSession: (workdir: string, initialPrompt?: string) => Promise<void>;
+  startSession: (workdir: string, initialPrompt?: string, branch?: string) => Promise<void>;
   /** Stop the current session */
   stopSession: () => Promise<void>;
   /** Send keys to the tmux session (e.g. Escape to interrupt) */
@@ -26,6 +28,7 @@ export function useAgentTerminal(agentId: string): UseAgentTerminalReturn {
   const [sessionActive, setSessionActive] = useState(false);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [worktreePath, setWorktreePath] = useState<string | null>(null);
 
   // Check for existing session on mount
   useEffect(() => {
@@ -37,10 +40,13 @@ export function useAgentTerminal(agentId: string): UseAgentTerminalReturn {
         const res = await fetch(`${API_URL}/api/factory/terminal/session/${agentId}`);
         if (cancelled) return;
         if (res.ok) {
-          const data = (await res.json()) as { url?: string };
+          const data = (await res.json()) as {
+            url?: string; worktreePath?: string | null; branch?: string | null;
+          };
           if (data.url) {
             setTtydUrl(data.url);
             setSessionActive(true);
+            if (data.worktreePath !== undefined) setWorktreePath(data.worktreePath);
           }
         }
       } catch {
@@ -56,19 +62,18 @@ export function useAgentTerminal(agentId: string): UseAgentTerminalReturn {
     setTtydUrl(null);
     setSessionActive(false);
     setError(null);
+    setWorktreePath(null);
   }, [agentId]);
 
   const startSession = useCallback(
-    async (workdir: string, initialPrompt?: string) => {
+    async (workdir: string, initialPrompt?: string, branch?: string) => {
       setLoading(true);
       setError(null);
 
       try {
-        const body: { agentId: string; workdir: string; initialPrompt?: string } = {
-          agentId,
-          workdir,
-        };
+        const body: Record<string, string> = { agentId, workdir };
         if (initialPrompt) body.initialPrompt = initialPrompt;
+        if (branch) body.branch = branch;
 
         const res = await fetch(`${API_URL}/api/factory/terminal/start`, {
           method: 'POST',
@@ -81,9 +86,13 @@ export function useAgentTerminal(agentId: string): UseAgentTerminalReturn {
           throw new Error(`Terminal start failed (${res.status}): ${text}`);
         }
 
-        const data = (await res.json()) as { agentId: string; port: number; url: string };
+        const data = (await res.json()) as {
+          agentId: string; port: number; url: string;
+          worktreePath: string | null; branch: string | null;
+        };
         setTtydUrl(data.url);
         setSessionActive(true);
+        setWorktreePath(data.worktreePath);
       } catch (err) {
         setError(err instanceof Error ? err.message : String(err));
       } finally {
@@ -111,6 +120,7 @@ export function useAgentTerminal(agentId: string): UseAgentTerminalReturn {
 
       setTtydUrl(null);
       setSessionActive(false);
+      setWorktreePath(null);
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
     } finally {
@@ -133,5 +143,5 @@ export function useAgentTerminal(agentId: string): UseAgentTerminalReturn {
     [agentId],
   );
 
-  return { ttydUrl, sessionActive, loading, error, startSession, stopSession, sendKeys };
+  return { ttydUrl, sessionActive, loading, error, worktreePath, startSession, stopSession, sendKeys };
 }

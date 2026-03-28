@@ -1,4 +1,5 @@
 import {
+  BadRequestException,
   Body,
   Controller,
   Get,
@@ -13,13 +14,18 @@ import {
   ValidationPipe,
 } from '@nestjs/common';
 import { FileInterceptor } from '@nestjs/platform-express';
-import { IsNotEmpty, IsOptional, IsString } from 'class-validator';
+import { IsNotEmpty, IsOptional, IsString, Matches, MaxLength } from 'class-validator';
 import { writeFileSync, mkdirSync, existsSync } from 'fs';
-import { join } from 'path';
+import { join, basename, resolve } from 'path';
 import { randomUUID } from 'crypto';
 import { TerminalService } from './terminal.service';
 
 const UPLOAD_DIR = '/tmp/cenzontle-uploads';
+
+// Agent ID pattern: alphanumeric, hyphens, underscores only
+const AGENT_ID_PATTERN = /^[a-zA-Z0-9][a-zA-Z0-9\-_]*$/;
+// Branch pattern: alphanumeric, hyphens, underscores, dots, slashes
+const BRANCH_PATTERN = /^[a-zA-Z0-9][a-zA-Z0-9\-_./]*$/;
 
 // ---------------------------------------------------------------------------
 // DTOs
@@ -28,6 +34,8 @@ const UPLOAD_DIR = '/tmp/cenzontle-uploads';
 class StartSessionDto {
   @IsString()
   @IsNotEmpty()
+  @Matches(AGENT_ID_PATTERN, { message: 'agentId must contain only alphanumeric, hyphens, and underscores' })
+  @MaxLength(128)
   agentId!: string;
 
   @IsString()
@@ -37,17 +45,24 @@ class StartSessionDto {
   @IsOptional()
   @IsString()
   initialPrompt?: string;
+
+  @IsOptional()
+  @IsString()
+  @Matches(BRANCH_PATTERN, { message: 'branch must contain only alphanumeric, hyphens, underscores, dots, and slashes' })
+  branch?: string;
 }
 
 class StopSessionDto {
   @IsString()
   @IsNotEmpty()
+  @Matches(AGENT_ID_PATTERN, { message: 'agentId must contain only alphanumeric, hyphens, and underscores' })
   agentId!: string;
 }
 
 class SendKeysDto {
   @IsString()
   @IsNotEmpty()
+  @Matches(AGENT_ID_PATTERN, { message: 'agentId must contain only alphanumeric, hyphens, and underscores' })
   agentId!: string;
 
   @IsString()
@@ -67,15 +82,18 @@ export class TerminalController {
   @Post('start')
   @HttpCode(HttpStatus.OK)
   async startSession(@Body() body: StartSessionDto) {
-    const { port } = await this.terminalService.startSession(
+    const { port, worktreePath, branch } = await this.terminalService.startSession(
       body.agentId,
       body.workdir,
       body.initialPrompt,
+      body.branch,
     );
     return {
       agentId: body.agentId,
       port,
       url: `http://localhost:${port}`,
+      worktreePath,
+      branch,
     };
   }
 
@@ -92,17 +110,25 @@ export class TerminalController {
   }
 
   @Post('upload/:agentId')
-  @UseInterceptors(FileInterceptor('file', { limits: { fileSize: 10 * 1024 * 1024 } })) // 10MB max
+  @UseInterceptors(FileInterceptor('file', { limits: { fileSize: 10 * 1024 * 1024 } }))
   uploadFile(
     @Param('agentId') agentId: string,
     @UploadedFile() file: Express.Multer.File,
   ) {
-    if (!file) return { error: 'No file uploaded' };
+    if (!file) throw new BadRequestException('No file uploaded');
 
     if (!existsSync(UPLOAD_DIR)) mkdirSync(UPLOAD_DIR, { recursive: true });
 
-    const filename = `${randomUUID()}-${file.originalname}`;
+    // Sanitize originalname — strip path components and dangerous characters
+    const safeName = basename(file.originalname).replace(/[^a-zA-Z0-9._-]/g, '_');
+    const filename = `${randomUUID()}-${safeName}`;
     const filepath = join(UPLOAD_DIR, filename);
+
+    // Verify resolved path stays inside upload dir (defense in depth)
+    if (!resolve(filepath).startsWith(resolve(UPLOAD_DIR))) {
+      throw new BadRequestException('Invalid filename');
+    }
+
     writeFileSync(filepath, file.buffer);
 
     return { filepath, filename, agentId };
@@ -117,7 +143,7 @@ export class TerminalController {
   getSession(@Param('agentId') agentId: string) {
     const session = this.terminalService.getSession(agentId);
     if (!session) {
-      throw new NotFoundException(`No active terminal session for agent ${agentId}`);
+      throw new NotFoundException('No active terminal session found');
     }
     return { agentId, ...session };
   }

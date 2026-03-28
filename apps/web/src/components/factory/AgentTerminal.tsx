@@ -41,7 +41,7 @@ const statusLabels: Record<AgentStatus, string> = {
 };
 
 export function AgentTerminal({ agent, onClose }: AgentTerminalProps) {
-  const { ttydUrl, sessionActive, loading, error, startSession, sendKeys } = useAgentTerminal(agent.id);
+  const { ttydUrl, sessionActive, loading, error, worktreePath, startSession, sendKeys } = useAgentTerminal(agent.id);
   const { state, getStoryById } = useFactory();
 
   // Lookup related data for the detail drawer
@@ -144,15 +144,19 @@ export function AgentTerminal({ agent, onClose }: AgentTerminalProps) {
   }
 
   // ---------------------------------------------------------------------------
-  // Auto-start
+  // Auto-start with worktree isolation
   // ---------------------------------------------------------------------------
+  const projectRoot = process.env.NEXT_PUBLIC_PROJECT_ROOT || '.';
   const defaultWorkdir = agent.worktree.startsWith('/worktrees/')
-    ? process.env.NEXT_PUBLIC_PROJECT_ROOT || '.'
+    ? projectRoot
     : agent.worktree;
+
+  // Derive branch from story key (e.g. "CENZ-42" → "feat/CENZ-42")
+  const agentBranch = agent.storyKey ? `feat/${agent.storyKey}` : undefined;
 
   useEffect(() => {
     if (!sessionActive && !loading && !ttydUrl) {
-      startSession(defaultWorkdir);
+      startSession(defaultWorkdir, undefined, agentBranch);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
@@ -373,8 +377,21 @@ export function AgentTerminal({ agent, onClose }: AgentTerminalProps) {
           )}
         </div>
       ) : (
-        <div className="flex-1 min-h-0 flex items-center justify-center bg-[#0d1117]">
-          <Loader2 className="h-6 w-6 animate-spin text-[#484f58]" />
+        <div className="flex-1 min-h-0 flex flex-col items-center justify-center gap-3 bg-[#0d1117]">
+          {error ? (
+            <>
+              <AlertTriangle className="h-5 w-5 text-red-400" />
+              <p className="text-xs text-red-400/80 max-w-sm text-center px-4">{error}</p>
+              <button
+                onClick={() => startSession(defaultWorkdir, undefined, agentBranch)}
+                className="text-xs text-muted-foreground hover:text-foreground transition-colors"
+              >
+                Retry
+              </button>
+            </>
+          ) : (
+            <Loader2 className="h-6 w-6 animate-spin text-[#484f58]" />
+          )}
         </div>
       )}
 
