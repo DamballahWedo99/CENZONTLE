@@ -37,7 +37,7 @@ const fieldLabels: Record<string, string> = {
   updatedAt: 'última actualización',
   createdAt: 'fecha de creación',
   epicId: 'épica',
-  jiraKey: 'clave Jira',
+  trackerKey: 'clave externa',
   labels: 'etiquetas',
   acceptanceCriteria: 'criterios de aceptación',
 };

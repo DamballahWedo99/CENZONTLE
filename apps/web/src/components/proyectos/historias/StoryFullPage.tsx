@@ -215,32 +215,23 @@ function StoryFullPageInner({ storyId }: StoryFullPageProps) {
           Proyectos
         </Link>
         <span className="text-muted-foreground/40">/</span>
-        {epic.jiraKey ? (
+        {initiative && (
           <>
-            <Link href={`/proyectos/epicas/${epic.id}`} className="text-muted-foreground hover:text-foreground transition-colors">
-              <span className="font-mono text-xs rounded-md bg-muted px-2 py-0.5">{epic.jiraKey}</span>
-            </Link>
-            <span className="text-muted-foreground/40">/</span>
-          </>
-        ) : (
-          <>
-            <Link href={`/proyectos/epicas/${epic.id}`} className="text-muted-foreground hover:text-foreground transition-colors truncate max-w-[200px]">
-              {epic.title}
+            <Link href={`/proyectos/iniciativas/${initiative.id}`} className="text-muted-foreground hover:text-foreground transition-colors truncate max-w-[180px]">
+              {initiative.name}
             </Link>
             <span className="text-muted-foreground/40">/</span>
           </>
         )}
-        {story.jiraKey && (
-          <>
-            <span className="font-mono text-xs rounded-md bg-muted px-2 py-0.5 text-muted-foreground">{story.jiraKey}</span>
-            <span className="text-muted-foreground/40">/</span>
-          </>
-        )}
-        <span className="text-foreground truncate max-w-[300px]">{story.title}</span>
+        <Link href={`/proyectos/epicas/${epic.id}`} className="text-muted-foreground hover:text-foreground transition-colors truncate max-w-[180px]">
+          {epic.title}
+        </Link>
+        <span className="text-muted-foreground/40">/</span>
+        <span className="text-foreground truncate max-w-[250px]">{story.title}</span>
       </div>
     );
     return () => setBreadcrumb(null);
-  }, [story, epic, setBreadcrumb]);
+  }, [story, epic, initiative, setBreadcrumb]);
 
   // --- Edit handlers ---
 
@@ -456,8 +447,8 @@ function StoryFullPageInner({ storyId }: StoryFullPageProps) {
                 <div className="flex flex-wrap items-center gap-3 mt-4">
                   <StatusBadge status={story.status} />
                   <StoryPointsBadge points={story.storyPoints} />
-                  {story.jiraKey && (
-                    <span className="font-mono text-xs rounded-md bg-muted px-2 py-0.5 text-muted-foreground">{story.jiraKey}</span>
+                  {story.tracker?.externalKey && (
+                    <span className="font-mono text-xs rounded-md bg-muted px-2 py-0.5 text-muted-foreground">{story.tracker.externalKey}</span>
                   )}
                   {sprint && (
                     <span className="text-sm text-muted-foreground flex items-center gap-1.5">
@@ -481,7 +472,7 @@ function StoryFullPageInner({ storyId }: StoryFullPageProps) {
                       className="inline-flex items-center gap-1.5 rounded-md bg-muted px-2 py-0.5 text-xs font-medium hover:bg-muted/80 transition-colors"
                     >
                       <Layers className="h-3 w-3 text-muted-foreground" />
-                      {epic.jiraKey ? `${epic.jiraKey} · ` : ''}{epic.title}
+                      {epic.tracker?.externalKey ? `${epic.tracker.externalKey} · ` : ''}{epic.title}
                     </Link>
                   )}
                 </div>

@@ -49,7 +49,7 @@ function EpicCard({ epic }: { epic: ReleaseBoardEpic }) {
       <div className="flex items-start justify-between gap-3 mb-3">
         <div className="flex-1 min-w-0">
           <div className="flex items-center gap-2 mb-1">
-            <span className="font-mono text-xs text-muted-foreground">{epic.jiraKey}</span>
+            <span className="font-mono text-xs text-muted-foreground">{epic.tracker.externalKey}</span>
             <span className={cn('text-[10px] font-medium px-2 py-0.5 rounded-full border', pCfg.bg, pCfg.border, pCfg.color)}>
               {pCfg.label}
             </span>

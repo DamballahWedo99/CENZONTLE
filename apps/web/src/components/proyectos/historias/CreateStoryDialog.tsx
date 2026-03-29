@@ -68,7 +68,6 @@ export function CreateStoryDialog({ open, onOpenChange }: CreateStoryDialogProps
       podId,
       productOwnerId: null,
       sprintId: sprintId || null,
-      jiraKey: null,
       labels: [],
       po: {
         background: '',
@@ -151,7 +150,7 @@ export function CreateStoryDialog({ open, onOpenChange }: CreateStoryDialogProps
                 <SelectContent>
                   {availableEpics.map((epic) => (
                     <SelectItem key={epic.id} value={epic.id}>
-                      {epic.jiraKey ? `${epic.jiraKey} — ` : ''}{epic.title}
+                      {epic.tracker?.externalKey ? `${epic.tracker.externalKey} — ` : ''}{epic.title}
                     </SelectItem>
                   ))}
                 </SelectContent>

@@ -114,8 +114,8 @@ export function InlineEpicCreator({
   const [showDefinition, setShowDefinition] = useState(false);
   const formRef = useRef<HTMLDivElement>(null);
 
-  // jiraKey is nullable — will be assigned when synced with Jira
-  const _nextJiraKeyPlaceholder = `GAM-${existingEpicCount + 101}`;
+  // tracker is optional — assigned when synced with external tracker
+  const _nextTrackerKeyPlaceholder = `GAM-${existingEpicCount + 101}`;
 
   // Auto-scroll into view
   useEffect(() => {
@@ -175,7 +175,6 @@ export function InlineEpicCreator({
       priority: formData.priority,
       initiativeId,
       podIds: formData.selectedPodIds,
-      jiraKey: null,
       startDate: formData.startDate || now.split('T')[0],
       targetDate: formData.targetDate || '',
       createdAt: now,
@@ -200,7 +199,7 @@ export function InlineEpicCreator({
           </div>
           <span className="text-xs font-semibold text-foreground">Nueva Épica</span>
           <span className="font-mono text-[10px] bg-muted px-1.5 py-0.5 rounded text-muted-foreground">
-            {_nextJiraKeyPlaceholder}
+            {_nextTrackerKeyPlaceholder}
           </span>
         </div>
         <button

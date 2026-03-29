@@ -319,7 +319,6 @@ export async function generateEpics(
       priority: template.priority,
       initiativeId: initiative.id,
       podIds,
-      jiraKey: null,
       startDate: startDate.toISOString().split('T')[0],
       targetDate: targetDate.toISOString().split('T')[0],
       documents: [],

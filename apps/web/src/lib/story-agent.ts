@@ -248,7 +248,6 @@ export async function generateStories(epic: Epic, podIds: string[]): Promise<Use
           podId,
           productOwnerId: null,
           sprintId: null,
-          jiraKey: null,
           labels: story.labels,
           po: {
             background: '',
@@ -294,7 +293,6 @@ export async function generateStories(epic: Epic, podIds: string[]): Promise<Use
         podId,
         productOwnerId: null,
         sprintId: null,
-        jiraKey: null,
         labels: story.labels,
         po: {
           background: '',

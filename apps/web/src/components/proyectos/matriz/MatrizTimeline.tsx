@@ -865,7 +865,7 @@ export const MatrizTimeline = forwardRef<MatrizTimelineHandle, MatrizTimelinePro
                           style={{ isolation: 'isolate', width: `${FROZEN_WIDTH}px`, minWidth: `${FROZEN_WIDTH}px`, boxShadow: '0 1px 0 var(--background)' }}
                           onClick={() => toggleEpic(epic.id)}
                           aria-expanded={!isCollapsed}
-                          aria-label={`${isCollapsed ? 'Expandir' : 'Colapsar'} epica ${epic.jiraKey ?? epic.title}`}
+                          aria-label={`${isCollapsed ? 'Expandir' : 'Colapsar'} epica ${epic.tracker?.externalKey ?? epic.title}`}
                           role="rowheader"
                         >
                           {isCollapsed
@@ -873,7 +873,7 @@ export const MatrizTimeline = forwardRef<MatrizTimelineHandle, MatrizTimelinePro
                             : <ChevronDown className="h-3.5 w-3.5 text-muted-foreground shrink-0" aria-hidden="true" />
                           }
                           <span className="font-mono text-[10px] text-muted-foreground shrink-0">
-                            {epic.jiraKey ?? '\u2014'}
+                            {epic.tracker?.externalKey ?? '\u2014'}
                           </span>
                           <span className="text-xs font-medium truncate flex-1 text-left">
                             {epic.title}
@@ -953,13 +953,13 @@ export const MatrizTimeline = forwardRef<MatrizTimelineHandle, MatrizTimelinePro
                               style={{ isolation: 'isolate', boxShadow: '0 1px 0 var(--background)' }}
                               onClick={() => navigateToEpic(story.epicId)}
                               role="rowheader"
-                              aria-label={`${story.jiraKey ?? story.title}: ${story.title}`}
+                              aria-label={`${story.tracker?.externalKey ?? story.title}: ${story.title}`}
                               tabIndex={0}
                               onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); navigateToEpic(story.epicId); } }}
                             >
                               <span className={`h-1.5 w-1.5 rounded-full shrink-0 ${barColors.dot}`} aria-hidden="true" />
                               <span className="font-mono text-[10px] text-muted-foreground/70 shrink-0 w-[60px]">
-                                {story.jiraKey ?? '\u2014'}
+                                {story.tracker?.externalKey ?? '\u2014'}
                               </span>
                               <span className="text-xs truncate flex-1 text-foreground/80">{story.title}</span>
                               <StoryPointsBadge points={story.storyPoints} className="shrink-0 h-4 min-w-4 text-[9px]" />
@@ -999,7 +999,7 @@ export const MatrizTimeline = forwardRef<MatrizTimelineHandle, MatrizTimelinePro
                                       style={{ left: `${barPos.left}px`, width: `${barPos.width}px` }}
                                       onClick={() => navigateToEpic(story.epicId)}
                                       role="gridcell"
-                                      aria-label={`${story.jiraKey ?? story.title}: ${getStatusLabel(story.status)}, ${story.storyPoints} SP, Sprint ${sprint?.name ?? ''}`}
+                                      aria-label={`${story.tracker?.externalKey ?? story.title}: ${getStatusLabel(story.status)}, ${story.storyPoints} SP, Sprint ${sprint?.name ?? ''}`}
                                       tabIndex={0}
                                       onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); navigateToEpic(story.epicId); } }}
                                     >

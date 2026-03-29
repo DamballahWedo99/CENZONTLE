@@ -73,6 +73,104 @@ export enum Permission {
   VIEW_ALL = 'view:all',
 }
 
+export const PERMISSION_LABELS: Record<Permission, string> = {
+  [Permission.CREATE_INITIATIVE]: 'Crear Iniciativas',
+  [Permission.EDIT_INITIATIVE]: 'Editar Iniciativas',
+  [Permission.DELETE_INITIATIVE]: 'Eliminar Iniciativas',
+  [Permission.CREATE_EPIC]: 'Crear Épicas',
+  [Permission.EDIT_EPIC]: 'Editar Épicas',
+  [Permission.DELETE_EPIC]: 'Eliminar Épicas',
+  [Permission.APPROVE_EPIC_PO]: 'VoBo Product Owner',
+  [Permission.APPROVE_EPIC_TL]: 'VoBo Tech Lead',
+  [Permission.CREATE_STORY]: 'Crear Historias',
+  [Permission.EDIT_STORY]: 'Editar Historias',
+  [Permission.DELETE_STORY]: 'Eliminar Historias',
+  [Permission.CREATE_DIAGRAM]: 'Crear Diagramas',
+  [Permission.EDIT_DIAGRAM]: 'Editar Diagramas',
+  [Permission.CREATE_QA_MATRIX]: 'Crear Matriz QA',
+  [Permission.EDIT_QA_MATRIX]: 'Editar Matriz QA',
+  [Permission.APPROVE_QA]: 'VoBo QA',
+  [Permission.MANAGE_DOCUMENTS]: 'Gestionar Documentos',
+  [Permission.MANAGE_DEPENDENCIES]: 'Gestionar Dependencias',
+  [Permission.MANAGE_USERS]: 'Gestionar Usuarios',
+  [Permission.MANAGE_INTEGRATIONS]: 'Gestionar Integraciones',
+  [Permission.VIEW_ALL]: 'Ver Todo',
+};
+
+export interface PermissionCategory {
+  label: string;
+  permissions: Permission[];
+}
+
+export const PERMISSION_CATEGORIES: PermissionCategory[] = [
+  {
+    label: 'Iniciativas',
+    permissions: [Permission.CREATE_INITIATIVE, Permission.EDIT_INITIATIVE, Permission.DELETE_INITIATIVE],
+  },
+  {
+    label: 'Épicas',
+    permissions: [Permission.CREATE_EPIC, Permission.EDIT_EPIC, Permission.DELETE_EPIC, Permission.APPROVE_EPIC_PO, Permission.APPROVE_EPIC_TL],
+  },
+  {
+    label: 'Historias',
+    permissions: [Permission.CREATE_STORY, Permission.EDIT_STORY, Permission.DELETE_STORY],
+  },
+  {
+    label: 'Diagramas',
+    permissions: [Permission.CREATE_DIAGRAM, Permission.EDIT_DIAGRAM],
+  },
+  {
+    label: 'QA',
+    permissions: [Permission.CREATE_QA_MATRIX, Permission.EDIT_QA_MATRIX, Permission.APPROVE_QA],
+  },
+  {
+    label: 'Gestión',
+    permissions: [Permission.MANAGE_DOCUMENTS, Permission.MANAGE_DEPENDENCIES, Permission.MANAGE_USERS, Permission.MANAGE_INTEGRATIONS],
+  },
+  {
+    label: 'Acceso',
+    permissions: [Permission.VIEW_ALL],
+  },
+];
+
+export const DEFAULT_ROLE_PERMISSIONS: Record<UserRole, Permission[]> = {
+  [UserRole.AltaGerencia]: [
+    Permission.CREATE_INITIATIVE, Permission.EDIT_INITIATIVE, Permission.DELETE_INITIATIVE,
+    Permission.CREATE_EPIC, Permission.EDIT_EPIC, Permission.DELETE_EPIC,
+    Permission.CREATE_STORY, Permission.EDIT_STORY, Permission.DELETE_STORY,
+    Permission.CREATE_DIAGRAM, Permission.EDIT_DIAGRAM,
+    Permission.CREATE_QA_MATRIX, Permission.EDIT_QA_MATRIX,
+    Permission.MANAGE_DOCUMENTS, Permission.MANAGE_DEPENDENCIES,
+    Permission.MANAGE_USERS, Permission.MANAGE_INTEGRATIONS,
+    Permission.VIEW_ALL,
+  ],
+  [UserRole.ProductOwner]: [
+    Permission.CREATE_EPIC, Permission.EDIT_EPIC,
+    Permission.CREATE_STORY, Permission.EDIT_STORY, Permission.DELETE_STORY,
+    Permission.APPROVE_EPIC_PO,
+    Permission.CREATE_DIAGRAM, Permission.EDIT_DIAGRAM,
+    Permission.MANAGE_DOCUMENTS, Permission.MANAGE_DEPENDENCIES,
+    Permission.VIEW_ALL,
+  ],
+  [UserRole.TechLead]: [
+    Permission.EDIT_EPIC,
+    Permission.CREATE_STORY, Permission.EDIT_STORY,
+    Permission.CREATE_DIAGRAM, Permission.EDIT_DIAGRAM,
+    Permission.APPROVE_EPIC_TL,
+    Permission.MANAGE_DOCUMENTS, Permission.MANAGE_DEPENDENCIES,
+    Permission.VIEW_ALL,
+  ],
+  [UserRole.QA]: [
+    Permission.CREATE_QA_MATRIX, Permission.EDIT_QA_MATRIX,
+    Permission.APPROVE_QA,
+    Permission.MANAGE_DOCUMENTS,
+    Permission.VIEW_ALL,
+  ],
+  [UserRole.Viewer]: [
+    Permission.VIEW_ALL,
+  ],
+};
+
 export const ROLE_PERMISSIONS: Record<UserRole, Permission[]> = {
   [UserRole.AltaGerencia]: [
     Permission.CREATE_INITIATIVE, Permission.EDIT_INITIATIVE, Permission.DELETE_INITIATIVE,

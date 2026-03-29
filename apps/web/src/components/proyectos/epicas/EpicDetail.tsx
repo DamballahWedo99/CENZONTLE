@@ -60,7 +60,7 @@ const fieldLabels: Record<string, string> = {
   updatedAt: 'última actualización',
   createdAt: 'fecha de creación',
   epicId: 'épica',
-  jiraKey: 'clave Jira',
+  trackerKey: 'clave externa',
   labels: 'etiquetas',
   acceptanceCriteria: 'criterios de aceptación',
   qualitativeBenefits: 'beneficios cualitativos',
@@ -434,7 +434,7 @@ export function EpicDetail({ epic, onClose }: EpicDetailProps) {
             <div className="flex items-center justify-between mb-3">
               <div className="flex items-center gap-2.5">
                 <span className="font-mono text-xs rounded-md bg-muted px-2 py-1 text-muted-foreground">
-                  {epic.jiraKey}
+                  {epic.tracker?.externalKey}
                 </span>
                 {!isEditing && (
                   <>
@@ -673,7 +673,7 @@ export function EpicDetail({ epic, onClose }: EpicDetailProps) {
                       className="flex items-center gap-3 rounded-lg border px-4 py-3 text-sm transition-colors hover:bg-muted/30"
                     >
                       <span className="font-mono text-xs text-muted-foreground w-20 shrink-0">
-                        {story.jiraKey}
+                        {story.tracker?.externalKey}
                       </span>
                       <span className="truncate flex-1">{story.title}</span>
                       <StoryPointsBadge points={story.storyPoints} />
