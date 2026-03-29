@@ -37,7 +37,8 @@ const BRANCH_PATTERN = /^[a-zA-Z0-9][a-zA-Z0-9\-_./]*$/;
 
 @Injectable()
 class ParseAgentIdPipe implements PipeTransform {
-  transform(value: string) {
+  transform(value: string | undefined) {
+    if (value === undefined || value === '') return undefined;
     if (!/^[a-zA-Z0-9][a-zA-Z0-9\-_]*$/.test(value) || value.length > 128) {
       throw new BadRequestException('Invalid agentId parameter');
     }
@@ -180,7 +181,7 @@ export class TerminalController {
 
   @Get('audit-log')
   getAuditLog(
-    @Query('agentId') agentId?: string,
+    @Query('agentId', new ParseAgentIdPipe()) agentId?: string,
     @Query('limit') limit?: string,
   ) {
     const logPath = this.terminalService.getAuditLogPath();
