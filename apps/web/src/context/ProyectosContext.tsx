@@ -619,7 +619,7 @@ export function ProyectosProvider({ children }: { children: ReactNode }) {
         const q = filters.searchQuery.toLowerCase();
         if (!story.title.toLowerCase().includes(q) && !story.description.toLowerCase().includes(q)) return false;
       }
-      if (filters.jiraKey && (!story.jiraKey || !story.jiraKey.toLowerCase().includes(filters.jiraKey.toLowerCase()))) return false;
+      if (filters.trackerKey && (!story.tracker?.externalKey || !story.tracker.externalKey.toLowerCase().includes(filters.trackerKey.toLowerCase()))) return false;
       return true;
     });
   }, [state]);
@@ -635,7 +635,7 @@ export function ProyectosProvider({ children }: { children: ReactNode }) {
         const q = filters.searchQuery.toLowerCase();
         if (!epic.title.toLowerCase().includes(q) && !epic.description.toLowerCase().includes(q)) return false;
       }
-      if (filters.jiraKey && (!epic.jiraKey || !epic.jiraKey.toLowerCase().includes(filters.jiraKey.toLowerCase()))) return false;
+      if (filters.trackerKey && (!epic.tracker?.externalKey || !epic.tracker.externalKey.toLowerCase().includes(filters.trackerKey.toLowerCase()))) return false;
       return true;
     });
   }, [state]);

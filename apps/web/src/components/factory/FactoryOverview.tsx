@@ -1,6 +1,6 @@
 'use client';
 
-import { useMemo } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import Link from 'next/link';
 import {
   Layers,
@@ -8,15 +8,21 @@ import {
   DollarSign,
   Users,
   ChevronRight,
+  ChevronDown,
   AlertCircle,
   Cpu,
   ListOrdered,
   Zap,
+  ExternalLink,
+  Server,
+  X,
+  Plus,
 } from 'lucide-react';
 import { cn } from '@/lib/utils';
+import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip';
 import { useFactory } from '@/context/FactoryContext';
-import type { SprintBatch, QueuedBatch, ComputeNode, ResourcePool } from '@cenzontle/shared';
-import { PipelineLayer, AgentStatus } from '@cenzontle/shared';
+import type { SprintBatch, QueuedBatch, ComputeNode, ResourcePool, HumanGate } from '@cenzontle/shared';
+import { PipelineLayer, AgentStatus, GateDecision } from '@cenzontle/shared';
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -34,7 +40,7 @@ const LAYER_CONFIG: Record<
     textColor: 'text-blue-400',
   },
   [PipelineLayer.Staging]: {
-    label: 'Staging',
+    label: 'Staged',
     color: '#EC4899',
     bg: 'bg-pink-500/10',
     border: 'border-l-pink-500',
@@ -199,15 +205,14 @@ function LayerBadge({ layer }: { layer: PipelineLayer }) {
 // Active Batch Card
 // ---------------------------------------------------------------------------
 
-function BatchCard({ batch, allStories }: { batch: SprintBatch; allStories: import('@cenzontle/shared').FactoryStory[] }) {
+function BatchCard({ batch, allStories, gates }: { batch: SprintBatch; allStories: import('@cenzontle/shared').FactoryStory[]; gates: import('@cenzontle/shared').HumanGate[] }) {
   const layerCfg = LAYER_CONFIG[batch.currentLayer] ?? LAYER_CONFIG[PipelineLayer.Forge];
   const isForge = batch.currentLayer === PipelineLayer.Forge;
-  const isStaging = batch.currentLayer === PipelineLayer.Staging;
-  const isWaiting = isStaging || batch.currentLayer === PipelineLayer.ReleaseBoard || batch.currentLayer === PipelineLayer.QAGate;
+  const hasPendingGate = gates.some((g) => g.batchId === batch.id && g.decision === GateDecision.Pending);
 
   // Calculate progress from the stories embedded in the batch, or from the global stories list
   const batchStories = batch.stories.length > 0 ? batch.stories : allStories.filter((s) => {
-    // Match by jiraKey prefix from the batch's epic key
+    // Match by tracker key prefix from the batch's epic key
     return false; // stories are embedded in the batch
   });
   const totalStories = batchStories.length;
@@ -240,7 +245,7 @@ function BatchCard({ batch, allStories }: { batch: SprintBatch; allStories: impo
           <h3 className="text-[15px] font-bold text-foreground truncate group-hover:text-foreground transition-colors">
             {batch.epicTitle}
           </h3>
-          <span className="text-xs font-mono text-muted-foreground mt-0.5 block">{batch.jiraKey}</span>
+          <span className="text-xs font-mono text-muted-foreground mt-0.5 block">{batch.tracker.externalKey}</span>
         </div>
         <ChevronRight className="w-4 h-4 text-muted-foreground/70 group-hover:text-muted-foreground transition-colors flex-shrink-0 mt-1" />
       </div>
@@ -271,12 +276,25 @@ function BatchCard({ batch, allStories }: { batch: SprintBatch; allStories: impo
               />
             </div>
           </div>
-        ) : isWaiting ? (
+        ) : hasPendingGate ? (
           <div className="flex items-center gap-2 px-3 py-2 rounded-lg bg-muted">
             <AlertCircle className="w-3.5 h-3.5 flex-shrink-0" style={{ color: layerCfg.color }} />
             <span className="text-xs font-medium" style={{ color: layerCfg.color }}>
               Awaiting approval
             </span>
+          </div>
+        ) : batch.currentLayer === PipelineLayer.Staging ? (
+          <div>
+            <div className="flex items-center justify-between mb-1.5">
+              <span className="text-xs text-muted-foreground">Waiting for QA Testing</span>
+              <span className="text-xs font-semibold text-foreground">{progressPercent}%</span>
+            </div>
+            <div className="h-1.5 w-full rounded-full bg-muted overflow-hidden">
+              <div
+                className="h-full rounded-full transition-all duration-500 ease-out"
+                style={{ width: `${progressPercent}%`, backgroundColor: layerCfg.color }}
+              />
+            </div>
           </div>
         ) : (
           <div className="flex items-center gap-2 px-3 py-2 rounded-lg bg-muted">
@@ -311,44 +329,119 @@ function BatchCard({ batch, allStories }: { batch: SprintBatch; allStories: impo
 // ---------------------------------------------------------------------------
 
 function QueueRow({ batch, position }: { batch: QueuedBatch; position: number }) {
+  const [storiesOpen, setStoriesOpen] = useState(false);
+  const hasStories = batch.storyDetails && batch.storyDetails.length > 0;
+  const totalSP = hasStories ? batch.storyDetails!.reduce((s, d) => s + d.storyPoints, 0) : 0;
+
   return (
     <div
       className={cn(
-        'flex items-center gap-4 px-4 py-3 rounded-lg bg-card border border-border',
-        'transition-colors hover:bg-muted hover:border-[#3A3A48]',
+        'rounded-lg bg-card border border-border overflow-hidden transition-colors',
+        'hover:border-[#3A3A48]',
       )}
     >
-      {/* Position */}
-      <span className="flex items-center justify-center w-7 h-7 rounded-lg bg-muted text-xs font-bold text-muted-foreground flex-shrink-0">
-        {position}
-      </span>
+      {/* Main row — grid for vertical alignment across rows */}
+      <div className="grid grid-cols-[32px_1fr_32px_auto_72px_100px_56px] items-center gap-3 px-4 py-3">
+        {/* Position */}
+        <span className="flex items-center justify-center w-7 h-7 rounded-lg bg-muted text-xs font-bold text-muted-foreground">
+          {position}
+        </span>
 
-      {/* Title + Key */}
-      <div className="min-w-0 flex-1">
-        <div className="flex items-center gap-2">
+        {/* Title + Key */}
+        <div className="flex items-center gap-2 min-w-0">
           <span className="text-sm font-semibold text-foreground truncate">{batch.epicTitle}</span>
-          <span className="text-[11px] font-mono text-muted-foreground flex-shrink-0">{batch.jiraKey}</span>
+          <span className="text-[11px] font-mono text-muted-foreground shrink-0">{batch.tracker.externalKey}</span>
         </div>
+
+        {/* Open in tracker — hardcoded URL while backend is not ready */}
+        <TooltipProvider delayDuration={200}>
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <a
+                href={batch.tracker.externalUrl}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="flex items-center justify-center rounded-md p-1 text-muted-foreground hover:text-foreground hover:bg-muted transition-colors"
+              >
+                <ExternalLink className="h-3.5 w-3.5" />
+              </a>
+            </TooltipTrigger>
+            <TooltipContent side="top" className="text-xs">
+              Open in Linear
+            </TooltipContent>
+          </Tooltip>
+        </TooltipProvider>
+
+        {/* Story count — expandable toggle */}
+        <button
+          onClick={() => hasStories && setStoriesOpen(!storiesOpen)}
+          className={cn(
+            'flex items-center gap-1.5 rounded-md px-2 py-1 text-xs transition-colors',
+            hasStories
+              ? 'text-muted-foreground hover:text-foreground hover:bg-muted'
+              : 'text-muted-foreground cursor-default',
+          )}
+        >
+          <span>{batch.stories} {batch.stories === 1 ? 'story' : 'stories'}</span>
+          {hasStories && (
+            <ChevronDown className={cn('h-3 w-3 transition-transform duration-200', storiesOpen && 'rotate-180')} />
+          )}
+        </button>
+
+        {/* Priority */}
+        <div className="flex justify-center">
+          <PriorityBadge priority={batch.priority} />
+        </div>
+
+        {/* ETA */}
+        <div className="flex items-center gap-1.5 text-xs text-muted-foreground">
+          <Zap className="w-3 h-3 shrink-0" />
+          <span>ETA {formatTimeUntil(batch.estimatedStartAt)}</span>
+        </div>
+
+        {/* Queued time */}
+        <span className="text-[11px] text-muted-foreground/70 text-right">
+          {formatTimeAgo(batch.queuedAt)}
+        </span>
       </div>
 
-      {/* Story count */}
-      <span className="text-xs text-muted-foreground flex-shrink-0">
-        {batch.stories} {batch.stories === 1 ? 'story' : 'stories'}
-      </span>
-
-      {/* Priority */}
-      <PriorityBadge priority={batch.priority} />
-
-      {/* ETA */}
-      <div className="flex items-center gap-1.5 text-xs text-muted-foreground flex-shrink-0">
-        <Zap className="w-3 h-3" />
-        <span>ETA {formatTimeUntil(batch.estimatedStartAt)}</span>
-      </div>
-
-      {/* Queued time */}
-      <span className="text-[11px] text-muted-foreground/70 flex-shrink-0 w-16 text-right">
-        {formatTimeAgo(batch.queuedAt)}
-      </span>
+      {/* Inline expandable stories table */}
+      {storiesOpen && hasStories && (
+        <div className="border-t border-border bg-muted/10">
+          {/* Table header */}
+          <div className="grid grid-cols-[56px_1fr_130px_140px_48px] gap-2 px-4 pl-[60px] py-2 text-[10px] font-medium uppercase tracking-wider text-muted-foreground/60 border-b border-border/50">
+            <span>Key</span>
+            <span>Título</span>
+            <span>POD</span>
+            <span>Product Owner</span>
+            <span className="text-right">SP</span>
+          </div>
+          {/* Table rows */}
+          {batch.storyDetails!.map((story, i) => (
+            <div
+              key={story.key}
+              className={cn(
+                'grid grid-cols-[56px_1fr_130px_140px_48px] gap-2 px-4 pl-[60px] py-2 text-xs items-center',
+                i < batch.storyDetails!.length - 1 && 'border-b border-border/30',
+              )}
+            >
+              <span className="font-mono text-muted-foreground/70">{story.key}</span>
+              <span className="text-foreground truncate">{story.title}</span>
+              <span className="text-muted-foreground truncate">{story.pod ?? '—'}</span>
+              <span className="text-muted-foreground truncate">{story.productOwner ?? '—'}</span>
+              <span className="text-right font-semibold text-foreground">{story.storyPoints}</span>
+            </div>
+          ))}
+          {/* Total row */}
+          <div className="grid grid-cols-[56px_1fr_130px_140px_48px] gap-2 px-4 pl-[60px] py-2 text-xs border-t border-border/50 bg-muted/20">
+            <span />
+            <span className="text-muted-foreground/60">{batch.storyDetails!.length} stories</span>
+            <span />
+            <span />
+            <span className="text-right font-bold text-foreground">{totalSP}</span>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
@@ -365,24 +458,13 @@ function MachineSlotGrid({ machine }: { machine: ComputeNode }) {
   };
 
   const statusCfg = statusIndicator[machine.status] ?? statusIndicator.offline;
-
-  // Build the 6 slots
-  const slots: Array<{ filled: boolean; color: string; batchName: string }> = [];
-  for (let i = 0; i < machine.totalSlots; i++) {
-    const agent = machine.agents[i];
-    if (agent) {
-      slots.push({
-        filled: true,
-        color: batchColor(agent.batchId),
-        batchName: agent.batchName,
-      });
-    } else {
-      slots.push({ filled: false, color: '', batchName: '' });
-    }
-  }
+  const usedCount = machine.agents.length;
+  const totalCount = machine.totalSlots;
+  const pct = totalCount > 0 ? Math.round((usedCount / totalCount) * 100) : 0;
+  const barColor = pct > 80 ? '#EF4444' : pct > 50 ? '#F59E0B' : '#3B82F6';
 
   return (
-    <div className="flex flex-col gap-2.5 rounded-lg border border-border bg-card p-4">
+    <div className="flex flex-col gap-3 rounded-lg border border-border bg-card p-4">
       {/* Machine header */}
       <div className="flex items-center justify-between">
         <div className="flex items-center gap-2">
@@ -395,36 +477,25 @@ function MachineSlotGrid({ machine }: { machine: ComputeNode }) {
         </div>
       </div>
 
-      {/* Slot grid */}
-      <div className="flex items-center gap-1.5">
-        {slots.map((slot, i) => (
+      {/* Progress bar */}
+      <div>
+        <div className="flex items-center justify-between mb-1.5">
+          <span className="text-[11px] text-muted-foreground/70">{usedCount}/{totalCount} agents</span>
+          <span className="text-[11px] font-semibold text-foreground">{pct}%</span>
+        </div>
+        <div className="h-2 w-full rounded-full bg-muted overflow-hidden">
           <div
-            key={i}
-            className={cn(
-              'w-8 h-8 rounded-md border transition-colors',
-              slot.filled
-                ? 'border-transparent shadow-sm'
-                : 'border-border bg-muted',
-            )}
-            style={slot.filled ? { backgroundColor: `${slot.color}20`, borderColor: `${slot.color}40` } : undefined}
-            title={slot.filled ? slot.batchName : 'Available'}
-          >
-            {slot.filled && (
-              <div className="flex items-center justify-center w-full h-full">
-                <div
-                  className="w-3 h-3 rounded-sm"
-                  style={{ backgroundColor: slot.color }}
-                />
-              </div>
-            )}
-          </div>
-        ))}
+            className="h-full rounded-full transition-all duration-500"
+            style={{ width: `${pct}%`, backgroundColor: barColor }}
+          />
+        </div>
       </div>
 
-      {/* Agent count */}
-      <span className="text-[11px] text-muted-foreground/70">
-        {machine.agents.length}/{machine.totalSlots} slots used
-      </span>
+      {/* Location + OS */}
+      <div className="flex items-center justify-between">
+        <span className="text-[10px] text-muted-foreground/50">{machine.os}</span>
+        <span className="text-[10px] text-muted-foreground/50">{machine.location}</span>
+      </div>
     </div>
   );
 }
@@ -434,7 +505,7 @@ function MachineSlotGrid({ machine }: { machine: ComputeNode }) {
 // ---------------------------------------------------------------------------
 
 function ResourcePoolSection({ pool }: { pool: ResourcePool }) {
-  const usagePercent = pool.totalSlots > 0 ? Math.round((pool.usedSlots / pool.totalSlots) * 100) : 0;
+
 
   return (
     <div>
@@ -447,26 +518,256 @@ function ResourcePoolSection({ pool }: { pool: ResourcePool }) {
         ))}
       </div>
 
-      {/* Total capacity bar */}
-      <div className="rounded-lg border border-border bg-card px-5 py-4">
-        <div className="flex items-center justify-between mb-2">
-          <span className="text-sm font-medium text-foreground">Total Capacity</span>
-          <span className="text-sm text-muted-foreground">
-            <span className="font-semibold text-foreground">{pool.usedSlots}</span>
-            /{pool.totalSlots} agents active ({usagePercent}%)
-          </span>
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Main Component
+// ---------------------------------------------------------------------------
+
+// ---------------------------------------------------------------------------
+// Kanban Column
+// ---------------------------------------------------------------------------
+
+interface KanbanColumn {
+  id: string;
+  label: string;
+  color: string;
+  dotColor: string;
+}
+
+const KANBAN_COLUMNS: KanbanColumn[] = [
+  { id: 'queue', label: 'In Queue', color: 'text-muted-foreground', dotColor: '#6B7280' },
+  { id: PipelineLayer.Forge, label: 'Forge', color: 'text-blue-400', dotColor: '#3B82F6' },
+  { id: PipelineLayer.Staging, label: 'Staged', color: 'text-pink-400', dotColor: '#EC4899' },
+  { id: PipelineLayer.QAGate, label: 'QA Testing', color: 'text-green-400', dotColor: '#22C55E' },
+  { id: 'released', label: 'Released', color: 'text-violet-400', dotColor: '#A855F7' },
+];
+
+function KanbanColumnHeader({ column, count }: { column: KanbanColumn; count: number }) {
+  return (
+    <div className="flex items-center justify-between px-1 mb-3">
+      <div className="flex items-center gap-2">
+        <span className="h-2 w-2 rounded-full" style={{ backgroundColor: column.dotColor }} />
+        <span className={cn('text-xs font-semibold uppercase tracking-wider', column.color)}>
+          {column.label}
+        </span>
+      </div>
+      <span className="text-[10px] font-medium text-muted-foreground/60 bg-muted rounded-full px-1.5 py-0.5">
+        {count}
+      </span>
+    </div>
+  );
+}
+
+/** Compact card for batches inside kanban columns */
+function KanbanBatchCard({ batch, gates }: { batch: SprintBatch; gates: HumanGate[] }) {
+  const layerCfg = LAYER_CONFIG[batch.currentLayer] ?? LAYER_CONFIG[PipelineLayer.Forge];
+  const isForge = batch.currentLayer === PipelineLayer.Forge;
+  const hasPendingGate = gates.some((g) => g.batchId === batch.id && g.decision === GateDecision.Pending);
+
+  const totalStories = batch.stories.length;
+  const completedStories = batch.stories.filter((s) => s.status === AgentStatus.Done).length;
+  const progressPercent = totalStories > 0 ? Math.round((completedStories / totalStories) * 100) : 0;
+
+  return (
+    <Link
+      href={`/factory/batch/${batch.id}`}
+      className={cn(
+        'group flex flex-col rounded-lg border border-border bg-card p-3.5 transition-all duration-200',
+        'hover:bg-muted/50 hover:border-[#3A3A48] hover:shadow-md hover:shadow-black/10',
+      )}
+    >
+      {/* Title */}
+      <div className="flex items-start justify-between gap-2 mb-2">
+        <h4 className="text-sm font-semibold text-foreground truncate leading-snug">{batch.epicTitle}</h4>
+        <ChevronRight className="w-3.5 h-3.5 text-muted-foreground/40 group-hover:text-muted-foreground shrink-0 mt-0.5 transition-colors" />
+      </div>
+
+      {/* Key + Priority */}
+      <div className="flex items-center gap-2 mb-3">
+        <span className="font-mono text-[10px] text-muted-foreground/70">{batch.tracker.externalKey}</span>
+        <PriorityBadge priority={batch.priority} />
+      </div>
+
+      {/* Progress */}
+      {isForge && totalStories > 0 ? (
+        <div className="mb-3">
+          <div className="flex items-center justify-between mb-1">
+            <span className="text-[10px] text-muted-foreground">{completedStories}/{totalStories} stories</span>
+            <span className="text-[10px] font-semibold text-foreground">{progressPercent}%</span>
+          </div>
+          <div className="h-1 w-full rounded-full bg-muted overflow-hidden">
+            <div
+              className="h-full rounded-full transition-all duration-500"
+              style={{ width: `${progressPercent}%`, backgroundColor: layerCfg.color }}
+            />
+          </div>
         </div>
-        <div className="h-2 w-full rounded-full bg-muted overflow-hidden">
-          <div
-            className={cn(
-              'h-full rounded-full transition-all duration-700 ease-out',
-              usagePercent > 80 ? 'bg-red-500' : usagePercent > 50 ? 'bg-amber-500' : 'bg-blue-500',
-            )}
-            style={{ width: `${usagePercent}%` }}
-          />
+      ) : hasPendingGate ? (
+        <div className="flex items-center gap-1.5 mb-3 px-2 py-1.5 rounded bg-muted/80">
+          <AlertCircle className="w-3 h-3 shrink-0" style={{ color: layerCfg.color }} />
+          <span className="text-[10px] font-medium" style={{ color: layerCfg.color }}>Awaiting approval</span>
+        </div>
+      ) : batch.currentLayer === PipelineLayer.Staging ? (
+        <div className="mb-3">
+          <div className="flex items-center justify-between mb-1">
+            <span className="text-[10px] text-muted-foreground">Waiting for QA</span>
+            <span className="text-[10px] font-semibold text-foreground">{progressPercent}%</span>
+          </div>
+          <div className="h-1 w-full rounded-full bg-muted overflow-hidden">
+            <div
+              className="h-full rounded-full transition-all duration-500"
+              style={{ width: `${progressPercent}%`, backgroundColor: layerCfg.color }}
+            />
+          </div>
+        </div>
+      ) : null}
+
+      {/* Bottom metrics */}
+      <div className="flex items-center gap-3 text-[10px] text-muted-foreground/70">
+        <span className="flex items-center gap-1">
+          <Users className="w-3 h-3" />{batch.agentCount}
+        </span>
+        <span className="flex items-center gap-1">
+          <DollarSign className="w-3 h-3" />${batch.totalCost.toFixed(0)}
+        </span>
+        <span className="flex items-center gap-1 ml-auto">
+          <Clock className="w-3 h-3" />{formatElapsed(batch.startedAt)}
+        </span>
+      </div>
+    </Link>
+  );
+}
+
+/** Compact card for queued batches */
+function KanbanQueueCard({ batch }: { batch: QueuedBatch }) {
+  return (
+    <div className="flex flex-col rounded-lg border border-border bg-card p-3.5 transition-all hover:bg-muted/50 hover:border-[#3A3A48]">
+      {/* Title */}
+      <h4 className="text-sm font-semibold text-foreground truncate leading-snug mb-2">{batch.epicTitle}</h4>
+
+      {/* Key + Priority */}
+      <div className="flex items-center gap-2 mb-2">
+        <span className="font-mono text-[10px] text-muted-foreground/70">{batch.tracker.externalKey}</span>
+        <PriorityBadge priority={batch.priority} />
+      </div>
+
+      {/* Stories + ETA */}
+      <div className="flex items-center justify-between text-[10px] text-muted-foreground/70">
+        <span>{batch.stories} {batch.stories === 1 ? 'story' : 'stories'}</span>
+        <span className="flex items-center gap-1">
+          <Zap className="w-3 h-3" />ETA {formatTimeUntil(batch.estimatedStartAt)}
+        </span>
+      </div>
+
+      {/* External link */}
+      {batch.tracker.externalUrl && (
+        <a
+          href={batch.tracker.externalUrl}
+          target="_blank"
+          rel="noopener noreferrer"
+          className="mt-2 flex items-center gap-1 text-[10px] text-muted-foreground/50 hover:text-blue-400 transition-colors"
+          onClick={(e) => e.stopPropagation()}
+        >
+          <ExternalLink className="w-3 h-3" />Open in Linear
+        </a>
+      )}
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Resource Pool Drawer
+// ---------------------------------------------------------------------------
+
+function ResourcePoolDrawer({ pool, open, onClose }: { pool: ResourcePool; open: boolean; onClose: () => void }) {
+  useEffect(() => {
+    const handleKey = (e: KeyboardEvent) => { if (e.key === 'Escape' && open) onClose(); };
+    document.addEventListener('keydown', handleKey);
+    return () => document.removeEventListener('keydown', handleKey);
+  }, [open, onClose]);
+
+  const usagePercent = pool.totalSlots > 0 ? Math.round((pool.usedSlots / pool.totalSlots) * 100) : 0;
+
+  return (
+    <>
+      {/* Backdrop */}
+      <div
+        className={cn(
+          'fixed inset-0 z-40 bg-black/50 backdrop-blur-[2px] transition-opacity duration-300',
+          open ? 'opacity-100' : 'pointer-events-none opacity-0',
+        )}
+        onClick={onClose}
+        aria-hidden="true"
+      />
+
+      {/* Panel */}
+      <div
+        className={cn(
+          'fixed inset-y-0 right-0 z-50 flex w-[380px] flex-col bg-card border-l border-border shadow-2xl cursor-default',
+          'transform transition-transform duration-300 ease-in-out',
+          open ? 'translate-x-0' : 'translate-x-full',
+        )}
+        role="dialog"
+        aria-modal="true"
+        aria-label="Resource Pool"
+      >
+        {/* Header — h-14 matches the app navbar so border-b lines align */}
+        <div className="shrink-0 h-14 flex items-center justify-between border-b border-border px-5">
+          <div className="flex items-center gap-2">
+            <Server className="h-4 w-4 text-muted-foreground" />
+            <h2 className="text-sm font-semibold text-foreground">Resource Pool</h2>
+            <span className="rounded-full bg-muted px-2 py-0.5 text-[10px] font-medium text-muted-foreground">
+              {pool.nodes.length} nodes
+            </span>
+          </div>
+          <button
+            onClick={onClose}
+            className="h-7 w-7 flex items-center justify-center rounded-md text-muted-foreground hover:text-foreground hover:bg-muted transition-colors"
+            aria-label="Close"
+          >
+            <X className="h-3.5 w-3.5" />
+          </button>
+        </div>
+
+        {/* Body */}
+        <div className="flex-1 overflow-y-auto px-5 py-4 space-y-4">
+          {/* Capacity summary */}
+          <div className="rounded-lg border border-border bg-[#0d1117] p-4 space-y-3">
+            <div className="flex items-center justify-between">
+              <span className="text-xs text-muted-foreground/60">Total Capacity</span>
+              <span className="text-xs font-semibold text-foreground">{pool.usedSlots}/{pool.totalSlots} slots</span>
+            </div>
+            <div className="h-2 w-full rounded-full bg-muted overflow-hidden">
+              <div
+                className={cn(
+                  'h-full rounded-full transition-all duration-500',
+                  usagePercent > 80 ? 'bg-red-500' : usagePercent > 50 ? 'bg-amber-500' : 'bg-blue-500',
+                )}
+                style={{ width: `${usagePercent}%` }}
+              />
+            </div>
+            <span className="text-[10px] text-muted-foreground/50">{usagePercent}% utilization</span>
+          </div>
+
+          {/* Nodes */}
+          {pool.nodes.map((machine) => (
+            <MachineSlotGrid key={machine.id} machine={machine} />
+          ))}
+
+          {/* Add node CTA */}
+          <Link
+            href="/factory/settings?section=nodes"
+            className="flex flex-col items-center justify-center gap-2 rounded-lg border-2 border-dashed border-border/50 bg-card p-4 text-muted-foreground/40 hover:text-muted-foreground/70 hover:border-border transition-colors"
+          >
+            <Plus className="h-5 w-5" />
+            <span className="text-xs font-medium">Add Compute Node</span>
+          </Link>
         </div>
       </div>
-    </div>
+    </>
   );
 }
 
@@ -478,60 +779,102 @@ export function FactoryOverview() {
   const { state } = useFactory();
 
   const { activeBatches, queuedBatches, resourcePool } = state.factory;
+  const [poolOpen, setPoolOpen] = useState(false);
 
-  // Sort active batches: Forge first (most prominent), then by priority weight
-  const priorityWeight: Record<string, number> = { critical: 0, high: 1, medium: 2, low: 3 };
-  const sortedBatches = useMemo(() => {
-    return [...activeBatches].sort((a, b) => {
-      // Forge batches first
-      const aForge = a.currentLayer === PipelineLayer.Forge ? 0 : 1;
-      const bForge = b.currentLayer === PipelineLayer.Forge ? 0 : 1;
-      if (aForge !== bForge) return aForge - bForge;
-      // Then by priority
-      return (priorityWeight[a.priority] ?? 3) - (priorityWeight[b.priority] ?? 3);
-    });
-  }, [activeBatches]);
+  // Group batches by kanban column
+  const kanbanData = useMemo(() => {
+    const columns = new Map<string, { active: SprintBatch[]; queued: QueuedBatch[] }>();
+
+    for (const col of KANBAN_COLUMNS) {
+      columns.set(col.id, { active: [], queued: [] });
+    }
+
+    for (const q of queuedBatches) {
+      columns.get('queue')!.queued.push(q);
+    }
+
+    for (const batch of activeBatches) {
+      const layer = batch.currentLayer;
+      if (columns.has(layer)) {
+        columns.get(layer)!.active.push(batch);
+      } else {
+        columns.get(PipelineLayer.Forge)!.active.push(batch);
+      }
+    }
+
+    return columns;
+  }, [activeBatches, queuedBatches]);
+
+  const totalItems = activeBatches.length + queuedBatches.length;
 
   return (
-    <div className="space-y-8">
-      {/* Active Batches */}
-      <section>
-        <SectionHeader icon={Layers} title="Active Batches" count={activeBatches.length} />
-
-        {activeBatches.length === 0 ? (
-          <div className="rounded-xl border border-dashed border-border bg-card/50 py-12 text-center">
-            <p className="text-sm text-muted-foreground">No active batches</p>
+    <div>
+      {/* Header with resource pool button */}
+      <div className="flex items-center justify-between mb-4">
+        <div className="flex items-center gap-2.5">
+          <div className="flex items-center justify-center w-8 h-8 rounded-lg bg-muted">
+            <Layers className="w-4 h-4 text-muted-foreground" />
           </div>
-        ) : (
-          <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4">
-            {sortedBatches.map((batch) => (
-              <BatchCard key={batch.id} batch={batch} allStories={state.stories} />
-            ))}
-          </div>
-        )}
-      </section>
+          <h2 className="text-[15px] font-semibold text-foreground tracking-tight">Pipeline Board</h2>
+          <span className="ml-1 px-2 py-0.5 rounded-full text-xs font-medium bg-muted text-muted-foreground">
+            {totalItems}
+          </span>
+        </div>
 
-      {/* Queue */}
-      <section>
-        <SectionHeader icon={ListOrdered} title="Queue" count={queuedBatches.length} />
+        <button
+          onClick={() => setPoolOpen(true)}
+          className={cn(
+            'flex items-center gap-2 rounded-lg border border-border bg-card px-3 py-2 text-xs transition-colors',
+            'text-muted-foreground hover:text-foreground hover:bg-muted',
+          )}
+        >
+          <Server className="h-3.5 w-3.5" />
+          <span>Resource Pool</span>
+          <span className="rounded-full bg-muted px-1.5 py-0.5 text-[10px] font-medium">
+            {resourcePool.usedSlots}/{resourcePool.totalSlots}
+          </span>
+        </button>
+      </div>
 
-        {queuedBatches.length === 0 ? (
-          <div className="rounded-xl border border-dashed border-border bg-card/50 py-8 text-center">
-            <p className="text-sm text-muted-foreground">Queue is empty</p>
-          </div>
-        ) : (
-          <div className="flex flex-col gap-2">
-            {queuedBatches.map((batch, i) => (
-              <QueueRow key={batch.id} batch={batch} position={i + 1} />
-            ))}
-          </div>
-        )}
-      </section>
+      {/* Kanban board */}
+      <div className="grid grid-cols-5 gap-3 min-w-[900px]" style={{ minHeight: 'calc(100vh - 160px)' }}>
+        {KANBAN_COLUMNS.map((column) => {
+          const data = kanbanData.get(column.id);
+          const activeCards = data?.active ?? [];
+          const queuedCards = data?.queued ?? [];
+          const count = activeCards.length + queuedCards.length;
 
-      {/* Resource Pool */}
-      <section>
-        <ResourcePoolSection pool={resourcePool} />
-      </section>
+          return (
+            <div key={column.id} className="flex flex-col">
+              <KanbanColumnHeader column={column} count={count} />
+
+              <div
+                className={cn(
+                  'flex-1 flex flex-col gap-2 rounded-lg p-2 transition-colors',
+                  count > 0 ? 'bg-muted/10' : 'bg-muted/5 border border-dashed border-border/50',
+                )}
+              >
+                {queuedCards.map((q) => (
+                  <KanbanQueueCard key={q.id} batch={q} />
+                ))}
+
+                {activeCards.map((batch) => (
+                  <KanbanBatchCard key={batch.id} batch={batch} gates={state.gates} />
+                ))}
+
+                {count === 0 && (
+                  <div className="flex-1 flex items-center justify-center min-h-[120px]">
+                    <span className="text-[10px] text-muted-foreground/30">No batches</span>
+                  </div>
+                )}
+              </div>
+            </div>
+          );
+        })}
+      </div>
+
+      {/* Resource Pool Drawer */}
+      <ResourcePoolDrawer pool={resourcePool} open={poolOpen} onClose={() => setPoolOpen(false)} />
     </div>
   );
 }

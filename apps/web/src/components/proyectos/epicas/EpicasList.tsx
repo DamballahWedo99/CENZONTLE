@@ -8,7 +8,7 @@ import { PodBadge } from '../shared/PodBadge';
 import { ProgressBar } from '../shared/ProgressBar';
 import { ChevronRight } from 'lucide-react';
 
-const gridCols = 'grid-cols-[60px_1fr_200px_100px_80px_200px_120px_60px_28px]';
+const gridCols = 'grid-cols-[60px_1fr_260px_100px_80px_200px_120px_60px_28px]';
 
 export function EpicasList() {
   const { epicsWithRelations } = useProyectos();
@@ -46,14 +46,19 @@ export function EpicasList() {
                 onClick={() => router.push(`/proyectos/epicas/${epic.id}`)}
               >
                 <div className="flex items-center gap-1.5">
-                  {epic.jiraKey ? (
-                    <span className="font-mono text-xs text-muted-foreground">{epic.jiraKey}</span>
+                  {epic.tracker?.externalKey ? (
+                    <span className="font-mono text-xs text-muted-foreground">{epic.tracker.externalKey}</span>
                   ) : (
                     <span className="text-xs text-muted-foreground/50">{'\u2014'}</span>
                   )}
                 </div>
                 <span className="truncate font-medium">{epic.title}</span>
-                <span className="text-xs text-muted-foreground truncate">{epic.initiative.name}</span>
+                <span
+                  className="text-xs text-muted-foreground truncate hover:text-blue-400 transition-colors cursor-pointer"
+                  onClick={(e) => { e.stopPropagation(); router.push(`/proyectos/iniciativas/${epic.initiative.id}`); }}
+                >
+                  {epic.initiative.name}
+                </span>
                 <div>
                   <StatusBadge status={epic.status} type="epic" />
                 </div>

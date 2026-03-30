@@ -52,7 +52,7 @@ const storyStatusLabels: Record<StoryStatus, string> = {
 
 const FIBONACCI_POINTS = [1, 2, 3, 5, 8, 13] as const;
 
-type SortField = 'jiraKey' | 'title' | 'status' | 'storyPoints';
+type SortField = 'trackerKey' | 'title' | 'status' | 'storyPoints';
 type SortDir = 'asc' | 'desc';
 
 // --- Form state ---
@@ -176,7 +176,7 @@ export function HistoriasList() {
   const router = useRouter();
   const { filteredStories, state, dispatch } = useProyectos();
 
-  const [sortField, setSortField] = useState<SortField>('jiraKey');
+  const [sortField, setSortField] = useState<SortField>('trackerKey');
   const [sortDir, setSortDir] = useState<SortDir>('asc');
   const [expandedStoryId, setExpandedStoryId] = useState<string | null>(null);
   const [editingStoryId, setEditingStoryId] = useState<string | null>(null);
@@ -232,8 +232,8 @@ export function HistoriasList() {
     return [...filteredStories].sort((a, b) => {
       let cmp = 0;
       switch (sortField) {
-        case 'jiraKey':
-          cmp = (a.jiraKey ?? '').localeCompare(b.jiraKey ?? '');
+        case 'trackerKey':
+          cmp = (a.tracker?.externalKey ?? '').localeCompare(b.tracker?.externalKey ?? '');
           break;
         case 'title':
           cmp = a.title.localeCompare(b.title);
@@ -822,7 +822,7 @@ export function HistoriasList() {
     <div className="space-y-3">
       {/* Header row */}
       <div className="grid grid-cols-[60px_1fr_180px_160px_140px_90px_32px_100px_60px_28px] gap-2 items-center px-4 py-2 text-xs font-medium text-muted-foreground border-b">
-        <SortHeader field="jiraKey">Key</SortHeader>
+        <SortHeader field="trackerKey">Key</SortHeader>
         <SortHeader field="title">Título</SortHeader>
         <div>Épica</div>
         <div>POD</div>
@@ -870,8 +870,8 @@ export function HistoriasList() {
                   }}
                 >
                   <div className="flex items-center gap-1.5">
-                    {story.jiraKey ? (
-                      <span className="font-mono text-xs text-muted-foreground">{story.jiraKey}</span>
+                    {story.tracker?.externalKey ? (
+                      <span className="font-mono text-xs text-muted-foreground">{story.tracker.externalKey}</span>
                     ) : (
                       <span className="text-xs text-muted-foreground/50">{'\u2014'}</span>
                     )}
@@ -963,7 +963,7 @@ export function HistoriasList() {
                       )}
                       {epic && (
                         <span>
-                          Épica: <span className="text-foreground">{epic?.jiraKey ?? epic?.title}</span>
+                          Épica: <span className="text-foreground">{epic?.tracker?.externalKey ?? epic?.title}</span>
                         </span>
                       )}
                       <span>

@@ -218,7 +218,7 @@ export function EpicDependencies({
   const getEpicLabel = useCallback((epicId: string | null) => {
     if (!epicId) return null;
     const e = state.epics.find((ep) => ep.id === epicId);
-    return e ? (e.jiraKey ? `${e.jiraKey} · ${e.title}` : e.title) : epicId;
+    return e ? (e.tracker?.externalKey ? `${e.tracker.externalKey} · ${e.title}` : e.title) : epicId;
   }, [state.epics]);
 
   // --- Empty state ---
@@ -488,7 +488,7 @@ export function EpicDependencies({
                   <SelectContent>
                     <SelectItem value="__none__">Ninguna</SelectItem>
                     {allEpics.map((e) => (
-                      <SelectItem key={e.id} value={e.id}>{e.jiraKey ? `${e.jiraKey} · ` : ''}{e.title}</SelectItem>
+                      <SelectItem key={e.id} value={e.id}>{e.tracker?.externalKey ? `${e.tracker.externalKey} · ` : ''}{e.title}</SelectItem>
                     ))}
                   </SelectContent>
                 </Select>

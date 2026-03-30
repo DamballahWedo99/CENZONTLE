@@ -537,17 +537,15 @@ function EpicFullPageInner({ epicId }: { epicId: string }) {
           Proyectos
         </Link>
         <span className="text-muted-foreground/40">/</span>
-        {epic.jiraKey && (
-          <>
-            <span className="font-mono text-xs rounded-md bg-muted px-2 py-0.5 text-muted-foreground">{epic.jiraKey}</span>
-            <span className="text-muted-foreground/40">/</span>
-          </>
-        )}
+        <Link href={`/proyectos/iniciativas/${epic.initiative.id}`} className="text-muted-foreground hover:text-foreground transition-colors truncate max-w-[200px]">
+          {epic.initiative.name}
+        </Link>
+        <span className="text-muted-foreground/40">/</span>
         <span className="text-foreground truncate max-w-[300px]">{epic.title}</span>
       </div>
     );
     return () => setBreadcrumb(null);
-  }, [epic.jiraKey, epic.title, setBreadcrumb]);
+  }, [epic.title, epic.initiative.id, epic.initiative.name, setBreadcrumb]);
 
   // Inject copilot toggle into app header
   const { setActions } = useHeaderActions();
@@ -1193,7 +1191,7 @@ function EpicFullPageInner({ epicId }: { epicId: string }) {
           entityType: 'epic',
           entityTitle: rawEpic!.title,
           entityDescription: rawEpic!.description,
-          entityLabel: rawEpic!.jiraKey || '',
+          entityLabel: rawEpic!.tracker?.externalKey || '',
           fields: {
             scopeDescription: rawEpic!.scopeDescription || '',
             acceptanceCriteria: rawEpic!.acceptanceCriteria || '',
@@ -1209,7 +1207,7 @@ function EpicFullPageInner({ epicId }: { epicId: string }) {
             businessPriority: rawEpic!.businessPriority || '',
             startDate: rawEpic!.startDate || '',
             targetDate: rawEpic!.targetDate || '',
-            jiraKey: rawEpic!.jiraKey || '',
+            trackerKey: rawEpic!.tracker?.externalKey || '',
           },
           items: state.stories.filter((s) => s.epicId === rawEpic!.id).map((s) => s.title),
           diagramTypes: rawEpic!.diagrams?.map((d) => d.type) ?? [],
@@ -1218,7 +1216,7 @@ function EpicFullPageInner({ epicId }: { epicId: string }) {
         suggestedPrompts={getSuggestedPrompts('epic')}
         title="Copilot de Épica"
         description="Pregunta sobre historias, arquitectura, QA o genera documentación basada en el contexto completo de la épica."
-        contextLabel={rawEpic!.jiraKey ? `${rawEpic!.jiraKey} · ${rawEpic!.title}` : rawEpic!.title}
+        contextLabel={rawEpic!.tracker?.externalKey ? `${rawEpic!.tracker.externalKey} · ${rawEpic!.title}` : rawEpic!.title}
         onDocumentAccepted={(doc) =>
           dispatch({ type: 'ADD_EPIC_DOCUMENT', payload: { epicId: rawEpic!.id, document: doc } })
         }

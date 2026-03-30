@@ -2,7 +2,7 @@ import { BadRequestException, Injectable, Logger, OnModuleDestroy } from '@nestj
 import { spawn, ChildProcess, execSync, execFileSync } from 'child_process';
 import { createServer } from 'net';
 import { resolve, normalize } from 'path';
-import { existsSync } from 'fs';
+import { existsSync, appendFileSync, mkdirSync } from 'fs';
 
 // ---------------------------------------------------------------------------
 // Binary resolution — env var override > PATH lookup
@@ -48,12 +48,17 @@ const PORT_MAX = 7999;
 const WORKDIR_ROOT = process.env.AGENT_WORKDIR_ROOT ?? '/';
 const WORKTREE_ROOT = process.env.WORKTREE_ROOT ?? resolve(process.env.HOME ?? '/tmp', '.worktrees');
 
+// Audit log — JSONL file for terminal access tracking
+const AUDIT_LOG_DIR = process.env.TERMINAL_AUDIT_DIR ?? resolve(process.env.HOME ?? '/tmp', '.cenzontle');
+const AUDIT_LOG_PATH = resolve(AUDIT_LOG_DIR, 'terminal-audit.jsonl');
+
 // ---------------------------------------------------------------------------
 // Internal types
 // ---------------------------------------------------------------------------
 
 interface TtydSession {
   agentId: string;
+  tmuxSocket: string; // Per-agent isolated tmux server socket name
   port: number;
   process: ChildProcess;
   workdir: string;
@@ -126,6 +131,25 @@ export class TerminalService implements OnModuleDestroy {
       throw new BadRequestException('agentId must not exceed 128 characters');
     }
     return agentId;
+  }
+
+  // -------------------------------------------------------------------------
+  // Audit logging — structured JSONL for terminal access tracking
+  // -------------------------------------------------------------------------
+
+  auditLog(event: string, agentId: string, meta?: Record<string, unknown>): void {
+    const entry = { ts: new Date().toISOString(), event, agentId, ...meta };
+    try {
+      if (!existsSync(AUDIT_LOG_DIR)) mkdirSync(AUDIT_LOG_DIR, { recursive: true });
+      appendFileSync(AUDIT_LOG_PATH, JSON.stringify(entry) + '\n');
+    } catch (err) {
+      this.logger.warn(`Audit log write failed: ${(err as Error).message}`);
+    }
+    this.logger.log(`[AUDIT] ${event} agent=${agentId}`);
+  }
+
+  getAuditLogPath(): string {
+    return AUDIT_LOG_PATH;
   }
 
   // -------------------------------------------------------------------------
@@ -265,7 +289,9 @@ export class TerminalService implements OnModuleDestroy {
     }
 
     const port = await this.findFreePort();
-    const tmuxSessionName = `forge-${safeAgentId}`;
+    // Each agent gets its own isolated tmux server via -L <socket>.
+    // This prevents key binding changes from leaking across agents or the host.
+    const tmuxSocket = `forge-${safeAgentId}`;
 
     this.logger.log(
       `Starting ttyd+tmux session for agent ${safeAgentId} on port ${port} in ${effectiveWorkdir}` +
@@ -273,19 +299,40 @@ export class TerminalService implements OnModuleDestroy {
     );
 
     // ttyd → bash -c "tmux ... && ..."
-    // SAFETY: tmuxSessionName is interpolated into a bash -c string.
-    // agentId is sanitized to [a-zA-Z0-9\-_] only, making shell injection
+    // SAFETY: agentId is sanitized to [a-zA-Z0-9\-_] only, making shell injection
     // impossible. The tmux command chain requires bash because of &&.
+    //
+    // SECURITY HARDENING (3 layers):
+    //   1. Isolated tmux server (-L) — key binding changes are scoped to this agent
+    //   2. Prefix key set to C-] (unreachable from web terminal) + dangerous bindings
+    //      unbound (command-prompt, new-window, split-pane, break-pane)
+    //   3. default-command = claude — even if a new pane is somehow created, it runs
+    //      claude, never a shell. When claude exits, pane dies → session dies → ttyd exits.
     const tmuxCmd = [
-      `${TMUX_BIN} -u new-session -A -s ${tmuxSessionName} -d`,
-      `${TMUX_BIN} set -g history-limit 50000`,
-      `${TMUX_BIN} set -g terminal-overrides ',*:smcup@:rmcup@'`,
-      `${TMUX_BIN} set-option -t ${tmuxSessionName} mouse on`,
-      `${TMUX_BIN} set-option -t ${tmuxSessionName} status off`,
-      `${TMUX_BIN} set-option -t ${tmuxSessionName} display-panes-time 0`,
-      `${TMUX_BIN} set -g display-time 0`,
-      `${TMUX_BIN} respawn-pane -k -t ${tmuxSessionName} '${CLAUDE_BIN}'`,
-      `${TMUX_BIN} attach -t ${tmuxSessionName}`,
+      `${TMUX_BIN} -u -L ${tmuxSocket} new-session -A -s main -d`,
+      `${TMUX_BIN} -L ${tmuxSocket} set -g history-limit 50000`,
+      `${TMUX_BIN} -L ${tmuxSocket} set -g terminal-overrides ',*:smcup@:rmcup@'`,
+      // ── Security: prevent shell escape via tmux ──────────────────────
+      `${TMUX_BIN} -L ${tmuxSocket} set -g prefix C-]`,
+      `${TMUX_BIN} -L ${tmuxSocket} set -g prefix2 C-]`,
+      `${TMUX_BIN} -L ${tmuxSocket} set -g default-command '${CLAUDE_BIN}'`,
+      `${TMUX_BIN} -L ${tmuxSocket} unbind-key :`,
+      `${TMUX_BIN} -L ${tmuxSocket} unbind-key c`,
+      `${TMUX_BIN} -L ${tmuxSocket} unbind-key %`,
+      `${TMUX_BIN} -L ${tmuxSocket} unbind-key !`,
+      `${TMUX_BIN} -L ${tmuxSocket} unbind-key '"'`,
+      // ── Display ──────────────────────────────────────────────────────
+      `${TMUX_BIN} -L ${tmuxSocket} set-option -t main mouse on`,
+      `${TMUX_BIN} -L ${tmuxSocket} set-option -t main status off`,
+      `${TMUX_BIN} -L ${tmuxSocket} set-option -t main display-panes-time 1`,
+      `${TMUX_BIN} -L ${tmuxSocket} set -g display-time 0`,
+      `${TMUX_BIN} -L ${tmuxSocket} respawn-pane -k -t main '${CLAUDE_BIN}'`,
+      // ── Auto-destruct: when claude exits, kill the entire tmux server ─
+      // Order matters: set AFTER respawn-pane so the initial shell kill
+      // doesn't trigger the hook before claude starts.
+      `${TMUX_BIN} -L ${tmuxSocket} set-option -t main remain-on-exit on`,
+      `${TMUX_BIN} -L ${tmuxSocket} set-hook -g pane-died 'kill-server'`,
+      `${TMUX_BIN} -L ${tmuxSocket} attach -t main`,
     ].join(' && ');
 
     const ttydArgs = [
@@ -295,6 +342,7 @@ export class TerminalService implements OnModuleDestroy {
       '-t', 'titleFixed=Claude Code',
       '-t', 'fontSize=13',
       '-t', 'disableResizeOverlay=true',
+      '-t', 'disableReconnect=true',
       '/bin/bash', '-c', tmuxCmd,
     ];
 
@@ -313,6 +361,7 @@ export class TerminalService implements OnModuleDestroy {
 
     const session: TtydSession = {
       agentId: safeAgentId,
+      tmuxSocket,
       port,
       process: child,
       workdir: effectiveWorkdir,
@@ -332,6 +381,13 @@ export class TerminalService implements OnModuleDestroy {
       try { child.kill('SIGTERM'); } catch { /* best-effort */ }
       throw err;
     }
+
+    this.auditLog('SESSION_START', safeAgentId, {
+      port,
+      workdir: effectiveWorkdir,
+      branch: safeBranch,
+      worktreePath,
+    });
 
     child.stdout?.on('data', (chunk: Buffer) => {
       this.logger.debug(`ttyd[${safeAgentId}] stdout: ${chunk.toString().trim()}`);
@@ -370,6 +426,9 @@ export class TerminalService implements OnModuleDestroy {
     this.logger.log(`Stopping ttyd session for agent ${safeId} on port ${session.port}`);
     this.sessions.delete(agentId);
 
+    const durationMs = Date.now() - session.startedAt.getTime();
+    this.auditLog('SESSION_STOP', safeId, { port: session.port, durationMs });
+
     try {
       session.process.kill('SIGTERM');
     } catch (err) {
@@ -377,7 +436,8 @@ export class TerminalService implements OnModuleDestroy {
     }
 
     try {
-      spawn(TMUX_BIN, ['kill-session', '-t', `forge-${safeId}`], { stdio: 'ignore' });
+      // kill-server (not kill-session) because each agent has its own isolated tmux server
+      spawn(TMUX_BIN, ['-L', session.tmuxSocket, 'kill-server'], { stdio: 'ignore' });
     } catch {
       // best-effort
     }
@@ -418,11 +478,10 @@ export class TerminalService implements OnModuleDestroy {
     const session = this.sessions.get(agentId);
     if (!session) return false;
 
-    const tmuxSessionName = `forge-${session.agentId}`;
     try {
       const result = execFileSync(
         TMUX_BIN,
-        ['display-message', '-t', tmuxSessionName, '-p', '#{pane_in_mode}'],
+        ['-L', session.tmuxSocket, 'display-message', '-t', 'main', '-p', '#{pane_in_mode}'],
         { encoding: 'utf8', timeout: 2000 },
       ).toString().trim();
       return result === '1';
@@ -442,12 +501,10 @@ export class TerminalService implements OnModuleDestroy {
       return;
     }
 
-    // Use session.agentId (sanitized at startSession time)
-    const tmuxSessionName = `forge-${session.agentId}`;
     const env = { ...process.env, PATH: `/opt/homebrew/bin:${process.env.PATH}` } as NodeJS.ProcessEnv;
 
     try {
-      spawn(TMUX_BIN, ['send-keys', '-l', '-t', tmuxSessionName, keys], {
+      spawn(TMUX_BIN, ['-L', session.tmuxSocket, 'send-keys', '-l', '-t', 'main', keys], {
         stdio: 'ignore',
         env,
       });

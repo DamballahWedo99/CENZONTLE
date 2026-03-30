@@ -258,7 +258,7 @@ function StoryNode({
         isActive && 'shadow-[0_0_12px_-3px_rgba(59,130,246,0.2)]',
       )}
       role="listitem"
-      aria-label={`${story.jiraKey}: ${story.title}, status ${cfg.label}`}
+      aria-label={`${story.tracker.externalKey}: ${story.title}, status ${cfg.label}`}
     >
       {/* Pulse ring for active stories */}
       {isActive && (
@@ -271,7 +271,7 @@ function StoryNode({
 
       {/* Header: key + status */}
       <div className="flex items-center justify-between mb-1 relative z-10">
-        <span className="font-mono text-xs font-semibold text-foreground">{story.jiraKey}</span>
+        <span className="font-mono text-xs font-semibold text-foreground">{story.tracker.externalKey}</span>
         <span className={cn('text-[11px] font-medium flex items-center gap-1', cfg.color)}>
           {StatusIcon && (
             <StatusIcon
@@ -450,8 +450,14 @@ export function WaveDAG({ stories: propStories, batchName, batchBranch, batchWav
         </div>
       </div>
 
-      {/* DAG container */}
-      <div className="rounded-xl border border-border bg-card p-5 overflow-x-auto">
+      {/* DAG container — dotted background inspired by Supabase */}
+      <div
+        className="rounded-xl border border-border bg-card p-5 overflow-x-auto"
+        style={{
+          backgroundImage: 'radial-gradient(circle, rgba(148,163,184,0.15) 1px, transparent 1px)',
+          backgroundSize: '20px 20px',
+        }}
+      >
         <div
           ref={containerRef}
           className="relative flex gap-6 min-w-max pb-2"

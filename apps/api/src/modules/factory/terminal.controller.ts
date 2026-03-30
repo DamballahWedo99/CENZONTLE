@@ -10,6 +10,7 @@ import {
   Param,
   PipeTransform,
   Post,
+  Query,
   UploadedFile,
   UseInterceptors,
   UsePipes,
@@ -18,7 +19,7 @@ import {
 import { FileInterceptor } from '@nestjs/platform-express';
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
 import { IsNotEmpty, IsOptional, IsString, Matches, MaxLength } from 'class-validator';
-import { writeFileSync, mkdirSync, existsSync } from 'fs';
+import { writeFileSync, mkdirSync, existsSync, readFileSync } from 'fs';
 import { join, basename, resolve } from 'path';
 import { randomUUID } from 'crypto';
 import { TerminalService } from './terminal.service';
@@ -36,7 +37,8 @@ const BRANCH_PATTERN = /^[a-zA-Z0-9][a-zA-Z0-9\-_./]*$/;
 
 @Injectable()
 class ParseAgentIdPipe implements PipeTransform {
-  transform(value: string) {
+  transform(value: string | undefined) {
+    if (value === undefined || value === '') return undefined;
     if (!/^[a-zA-Z0-9][a-zA-Z0-9\-_]*$/.test(value) || value.length > 128) {
       throw new BadRequestException('Invalid agentId parameter');
     }
@@ -175,5 +177,32 @@ export class TerminalController {
   @Get('sessions')
   getSessions() {
     return this.terminalService.getSessions();
+  }
+
+  @Get('audit-log')
+  getAuditLog(
+    @Query('agentId', new ParseAgentIdPipe()) agentId?: string,
+    @Query('limit') limit?: string,
+  ) {
+    const logPath = this.terminalService.getAuditLogPath();
+    if (!existsSync(logPath)) return { entries: [], total: 0 };
+
+    const raw = readFileSync(logPath, 'utf-8').trim();
+    if (!raw) return { entries: [], total: 0 };
+
+    let entries = raw.split('\n').map((line) => {
+      try { return JSON.parse(line); } catch { return null; }
+    }).filter(Boolean);
+
+    if (agentId) {
+      entries = entries.filter((e: { agentId?: string }) => e.agentId === agentId);
+    }
+
+    const total = entries.length;
+    const cap = Math.min(parseInt(limit ?? '100', 10) || 100, 500);
+    // Return most recent entries first
+    entries = entries.slice(-cap).reverse();
+
+    return { entries, total };
   }
 }

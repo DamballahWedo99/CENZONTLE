@@ -92,7 +92,6 @@ export function CreateEpicDialog({ open, onOpenChange }: CreateEpicDialogProps) 
       priority,
       initiativeId,
       podIds: selectedPodIds,
-      jiraKey: null,
       startDate: startDate || now.split('T')[0],
       targetDate: targetDate || '',
       createdAt: now,

@@ -103,7 +103,7 @@ function buildContext(epic: Epic, stories: UserStory[], documents: EpicDocument[
     entityType: 'epic',
     entityTitle: epic.title,
     entityDescription: epic.description,
-    entityLabel: epic.jiraKey || '',
+    entityLabel: epic.tracker?.externalKey || '',
     fields: {
       scopeDescription: epic.scopeDescription || '',
       acceptanceCriteria: epic.acceptanceCriteria || '',
@@ -119,7 +119,7 @@ function buildContext(epic: Epic, stories: UserStory[], documents: EpicDocument[
       businessPriority: epic.businessPriority || '',
       startDate: epic.startDate || '',
       targetDate: epic.targetDate || '',
-      jiraKey: epic.jiraKey || '',
+      trackerKey: epic.tracker?.externalKey || '',
     },
     items: stories.map((s) => s.title),
     diagramTypes: epic.diagrams?.map((d) => d.type) ?? [],
@@ -733,7 +733,7 @@ export function DocCopilotSidebar({
       <div className="flex-none border-b bg-background/80 px-4 py-2">
         <p className="text-[11px] text-muted-foreground truncate">
           <Sparkles className="inline h-3 w-3 text-indigo-500 mr-1 -mt-0.5" />
-          <span className="font-mono text-indigo-500/80">{epic.jiraKey}</span>
+          <span className="font-mono text-indigo-500/80">{epic.tracker?.externalKey}</span>
           <span className="mx-1.5 text-muted-foreground/40">·</span>
           {epic.title}
         </p>

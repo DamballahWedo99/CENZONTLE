@@ -1,12 +1,13 @@
 'use client';
 
 import { useState } from 'react';
-import { useRouter } from 'next/navigation';
+import { useRouter, useSearchParams } from 'next/navigation';
 import Link from 'next/link';
 import { cn } from '@/lib/utils';
 import { Input } from '@/components/ui/input';
 import { Button } from '@/components/ui/button';
 import { Checkbox } from '@/components/ui/checkbox';
+import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip';
 import {
   Select,
   SelectContent,
@@ -46,14 +47,19 @@ import {
   Copy,
   Terminal,
   Users,
+  ClipboardCheck,
+  GripVertical,
+  Save,
+  Shield,
 } from 'lucide-react';
 import { TeamSection } from './TeamSection';
+import { RolesPermissionsSection } from './RolesPermissionsSection';
 
 // ---------------------------------------------------------------------------
 // Types
 // ---------------------------------------------------------------------------
 
-type SettingsSection = 'repository' | 'branches' | 'linear' | 'jira' | 'nodes' | 'agents' | 'team';
+type SettingsSection = 'repository' | 'branches' | 'linear' | 'jira' | 'nodes' | 'agents' | 'dod' | 'team' | 'roles';
 
 interface SidebarItem {
   id: SettingsSection;
@@ -69,7 +75,9 @@ const SIDEBAR_ITEMS: SidebarItem[] = [
   { id: 'jira', label: 'Jira', icon: TicketCheck, group: 'Integraciones' },
   { id: 'nodes', label: 'Nodos de cómputo', icon: Server, group: 'Infraestructura' },
   { id: 'agents', label: 'Agentes', icon: Bot, group: 'Automatización' },
+  { id: 'dod', label: 'Definition of Done', icon: ClipboardCheck, group: 'Automatización' },
   { id: 'team', label: 'Equipo', icon: Users, group: 'Equipo' },
+  { id: 'roles', label: 'Roles y permisos', icon: Shield, group: 'Equipo' },
 ];
 
 const SIDEBAR_GROUPS = ['Control de código', 'Integraciones', 'Infraestructura', 'Automatización', 'Equipo'];
@@ -858,6 +866,212 @@ function AgentsSection() {
 // Section renderer
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// Definition of Done Section (with drag-and-drop reordering via @dnd-kit)
+// ---------------------------------------------------------------------------
+
+import {
+  DndContext,
+  closestCenter,
+  KeyboardSensor,
+  PointerSensor,
+  useSensor,
+  useSensors,
+  type DragEndEvent,
+} from '@dnd-kit/core';
+import {
+  arrayMove,
+  SortableContext,
+  sortableKeyboardCoordinates,
+  useSortable,
+  verticalListSortingStrategy,
+} from '@dnd-kit/sortable';
+import { CSS } from '@dnd-kit/utilities';
+
+interface DodCriterion {
+  id: string;
+  text: string;
+  enabled: boolean;
+  required: boolean;
+}
+
+const DEFAULT_DOD_CRITERIA: DodCriterion[] = [
+  { id: 'code-written', text: 'Código escrito y funcional', enabled: true, required: true },
+  { id: 'tests-passing', text: 'Tests pasando ≥ 90% cobertura', enabled: true, required: true },
+  { id: 'pr-created', text: 'PR creado y aprobado', enabled: true, required: true },
+  { id: 'no-errors', text: 'Sin errores de lint/typecheck', enabled: true, required: true },
+  { id: 'docs-updated', text: 'Documentación actualizada', enabled: true, required: false },
+  { id: 'security-scan', text: 'Scan de seguridad sin vulnerabilidades críticas', enabled: false, required: false },
+  { id: 'perf-budget', text: 'Dentro del presupuesto de performance', enabled: false, required: false },
+  { id: 'accessibility', text: 'Cumple WCAG 2.1 AA', enabled: false, required: false },
+];
+
+function SortableDodRow({
+  criterion,
+  onToggleEnabled,
+  onToggleRequired,
+  onRemove,
+}: {
+  criterion: DodCriterion;
+  onToggleEnabled: () => void;
+  onToggleRequired: () => void;
+  onRemove: () => void;
+}) {
+  const { attributes, listeners, setNodeRef, transform, transition, isDragging } = useSortable({ id: criterion.id });
+
+  const style = {
+    transform: CSS.Transform.toString(transform),
+    transition,
+    zIndex: isDragging ? 10 : undefined,
+    opacity: isDragging ? 0.5 : undefined,
+  };
+
+  return (
+    <div
+      ref={setNodeRef}
+      style={style}
+      className={cn(
+        'grid grid-cols-[1fr_80px_80px_32px] gap-2 px-4 py-3 items-center border-b border-border last:border-b-0 bg-card',
+        !criterion.enabled && 'opacity-50',
+      )}
+    >
+      <div className="flex items-center gap-2 min-w-0">
+        <button {...attributes} {...listeners} className="cursor-grab active:cursor-grabbing touch-none shrink-0">
+          <GripVertical className="h-3.5 w-3.5 text-muted-foreground/30 hover:text-muted-foreground transition-colors" />
+        </button>
+        <span className="text-sm text-foreground truncate">{criterion.text}</span>
+      </div>
+      <div className="flex justify-center">
+        <Checkbox checked={criterion.enabled} onCheckedChange={onToggleEnabled} />
+      </div>
+      <div className="flex justify-center">
+        <Checkbox checked={criterion.enabled && criterion.required} disabled={!criterion.enabled} onCheckedChange={onToggleRequired} />
+      </div>
+      <button
+        onClick={onRemove}
+        className="flex items-center justify-center h-6 w-6 rounded text-muted-foreground/40 hover:text-red-400 hover:bg-red-500/10 transition-colors"
+      >
+        <Trash2 className="h-3 w-3" />
+      </button>
+    </div>
+  );
+}
+
+function DodSection() {
+  const [criteria, setCriteria] = useState(DEFAULT_DOD_CRITERIA);
+  const [newCriterion, setNewCriterion] = useState('');
+
+  const sensors = useSensors(
+    useSensor(PointerSensor),
+    useSensor(KeyboardSensor, { coordinateGetter: sortableKeyboardCoordinates }),
+  );
+
+  function handleDragEnd(event: DragEndEvent) {
+    const { active, over } = event;
+    if (over && active.id !== over.id) {
+      setCriteria((prev) => {
+        const oldIndex = prev.findIndex((c) => c.id === active.id);
+        const newIndex = prev.findIndex((c) => c.id === over.id);
+        return arrayMove(prev, oldIndex, newIndex);
+      });
+    }
+  }
+
+  function toggleEnabled(id: string) {
+    setCriteria((prev) => prev.map((c) => c.id === id ? { ...c, enabled: !c.enabled } : c));
+  }
+
+  function toggleRequired(id: string) {
+    setCriteria((prev) => prev.map((c) => c.id === id ? { ...c, required: !c.required } : c));
+  }
+
+  function removeCriterion(id: string) {
+    setCriteria((prev) => prev.filter((c) => c.id !== id));
+  }
+
+  function addCriterion() {
+    if (!newCriterion.trim()) return;
+    setCriteria((prev) => [...prev, { id: `custom-${Date.now()}`, text: newCriterion.trim(), enabled: true, required: false }]);
+    setNewCriterion('');
+  }
+
+  const enabledCount = criteria.filter((c) => c.enabled).length;
+  const requiredCount = criteria.filter((c) => c.enabled && c.required).length;
+
+  return (
+    <div className="flex-1 flex flex-col min-h-0 rounded-xl border border-border bg-card p-6">
+      <div className="mb-5">
+        <h3 className="text-sm font-semibold text-foreground">Definition of Done</h3>
+        <p className="mt-1 text-xs text-muted-foreground/70">Define los criterios estándar que cada agente debe cumplir antes de marcar una historia como completada. Los criterios requeridos bloquean el merge si no se cumplen.</p>
+      </div>
+      <div className="flex-1 flex flex-col min-h-0 gap-4">
+        {/* Summary + save button */}
+        <div className="flex items-center justify-between">
+          <div className="flex items-center gap-4 text-xs text-muted-foreground">
+            <span>{enabledCount} criterios activos</span>
+            <span className="text-border">|</span>
+            <span>{requiredCount} requeridos</span>
+          </div>
+          <TooltipProvider delayDuration={200}>
+            <Tooltip>
+              <TooltipTrigger asChild>
+                <button className="flex items-center justify-center h-8 w-8 rounded-lg border border-border bg-card text-muted-foreground hover:text-foreground hover:bg-muted transition-colors">
+                  <Save className="h-4 w-4" />
+                </button>
+              </TooltipTrigger>
+              <TooltipContent side="left" className="text-xs">Guardar cambios</TooltipContent>
+            </Tooltip>
+          </TooltipProvider>
+        </div>
+
+        {/* Criteria list with drag-and-drop */}
+        <div className="flex-1 min-h-0 flex flex-col rounded-lg border border-border overflow-hidden">
+          {/* Header */}
+          <div className="shrink-0 grid grid-cols-[1fr_80px_80px_32px] gap-2 px-4 py-2 text-[10px] font-medium uppercase tracking-wider text-muted-foreground/60 border-b border-border bg-muted/30">
+            <span>Criterio</span>
+            <span className="text-center">Activo</span>
+            <span className="text-center">Requerido</span>
+            <span />
+          </div>
+
+          {/* Scrollable list */}
+          <div className="flex-1 min-h-0 overflow-y-auto">
+            <DndContext sensors={sensors} collisionDetection={closestCenter} onDragEnd={handleDragEnd}>
+              <SortableContext items={criteria.map((c) => c.id)} strategy={verticalListSortingStrategy}>
+                {criteria.map((criterion) => (
+                  <SortableDodRow
+                    key={criterion.id}
+                    criterion={criterion}
+                    onToggleEnabled={() => toggleEnabled(criterion.id)}
+                    onToggleRequired={() => toggleRequired(criterion.id)}
+                    onRemove={() => removeCriterion(criterion.id)}
+                  />
+                ))}
+              </SortableContext>
+            </DndContext>
+          </div>
+        </div>
+
+        {/* Add new criterion */}
+        <div className="flex items-center gap-2">
+          <Input
+            value={newCriterion}
+            onChange={(e) => setNewCriterion(e.target.value)}
+            placeholder="Agregar nuevo criterio..."
+            className="flex-1 text-sm"
+            onKeyDown={(e) => e.key === 'Enter' && addCriterion()}
+          />
+          <Button variant="outline" size="sm" onClick={addCriterion} disabled={!newCriterion.trim()}>
+            <Plus className="h-3.5 w-3.5 mr-1" />
+            Agregar
+          </Button>
+        </div>
+
+      </div>
+    </div>
+  );
+}
+
 function SectionContent({ section }: { section: SettingsSection }) {
   switch (section) {
     case 'repository':
@@ -872,8 +1086,12 @@ function SectionContent({ section }: { section: SettingsSection }) {
       return <ComputeNodesSection />;
     case 'agents':
       return <AgentsSection />;
+    case 'dod':
+      return <DodSection />;
     case 'team':
       return <TeamSection />;
+    case 'roles':
+      return <RolesPermissionsSection />;
     default:
       return null;
   }
@@ -885,7 +1103,9 @@ function SectionContent({ section }: { section: SettingsSection }) {
 
 export function SettingsDashboard() {
   const router = useRouter();
-  const [activeSection, setActiveSection] = useState<SettingsSection>('repository');
+  const searchParams = useSearchParams();
+  const initialSection = (searchParams.get('section') as SettingsSection) || 'repository';
+  const [activeSection, setActiveSection] = useState<SettingsSection>(initialSection);
 
   return (
     <div className="settings-page flex flex-col bg-background overflow-hidden h-full">
@@ -949,7 +1169,7 @@ export function SettingsDashboard() {
         </nav>
 
         {/* Content area */}
-        <main className="flex-1 min-w-0 overflow-y-auto px-8 py-8">
+        <main className="flex-1 min-w-0 overflow-y-auto px-8 py-8 flex flex-col">
           <SectionContent section={activeSection} />
         </main>
       </div>

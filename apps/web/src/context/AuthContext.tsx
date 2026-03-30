@@ -1,18 +1,20 @@
 'use client';
 
 import React, { createContext, useContext, useReducer, useMemo, useCallback, ReactNode } from 'react';
-import { UserRole, Permission, ROLE_PERMISSIONS, TeamMember } from '@cenzontle/shared';
+import { UserRole, Permission, ROLE_PERMISSIONS, DEFAULT_ROLE_PERMISSIONS, TeamMember } from '@cenzontle/shared';
 import { mockTeamMembers, CURRENT_USER_ID } from '@/data/mock/users';
 
 // === STATE ===
 interface AuthState {
   currentUserId: string;
   members: TeamMember[];
+  rolePermissions: Record<UserRole, Permission[]>;
 }
 
 const initialState: AuthState = {
   currentUserId: CURRENT_USER_ID,
   members: mockTeamMembers,
+  rolePermissions: { ...DEFAULT_ROLE_PERMISSIONS },
 };
 
 // === ACTIONS ===
@@ -23,7 +25,9 @@ type AuthAction =
   | { type: 'REMOVE_MEMBER'; payload: string }
   | { type: 'CHANGE_ROLE'; payload: { userId: string; role: UserRole } }
   | { type: 'DEACTIVATE_MEMBER'; payload: string }
-  | { type: 'REACTIVATE_MEMBER'; payload: string };
+  | { type: 'REACTIVATE_MEMBER'; payload: string }
+  | { type: 'SET_ROLE_PERMISSIONS'; payload: { role: UserRole; permissions: Permission[] } }
+  | { type: 'RESET_ROLE_PERMISSIONS' };
 
 function authReducer(state: AuthState, action: AuthAction): AuthState {
   switch (action.type) {
@@ -57,6 +61,18 @@ function authReducer(state: AuthState, action: AuthAction): AuthState {
         ...state,
         members: state.members.map((m) => m.id === action.payload ? { ...m, status: 'active' as const } : m),
       };
+    case 'SET_ROLE_PERMISSIONS': {
+      const { role, permissions } = action.payload;
+      return {
+        ...state,
+        rolePermissions: { ...state.rolePermissions, [role]: permissions },
+      };
+    }
+    case 'RESET_ROLE_PERMISSIONS':
+      return {
+        ...state,
+        rolePermissions: { ...DEFAULT_ROLE_PERMISSIONS },
+      };
     default:
       return state;
   }
@@ -66,6 +82,7 @@ function authReducer(state: AuthState, action: AuthAction): AuthState {
 interface AuthContextValue {
   currentUser: TeamMember | null;
   members: TeamMember[];
+  rolePermissions: Record<UserRole, Permission[]>;
   dispatch: React.Dispatch<AuthAction>;
   hasPermission: (permission: Permission) => boolean;
   hasRole: (role: UserRole) => boolean;
@@ -87,9 +104,9 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
   const hasPermission = useCallback((permission: Permission): boolean => {
     if (!currentUser) return false;
-    const permissions = ROLE_PERMISSIONS[currentUser.role];
+    const permissions = state.rolePermissions[currentUser.role];
     return permissions.includes(permission);
-  }, [currentUser]);
+  }, [currentUser, state.rolePermissions]);
 
   const hasRole = useCallback((role: UserRole): boolean => {
     if (!currentUser) return false;
@@ -118,6 +135,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const value = useMemo(() => ({
     currentUser,
     members: state.members,
+    rolePermissions: state.rolePermissions,
     dispatch,
     hasPermission,
     hasRole,
@@ -125,7 +143,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     canAccessPod,
     switchUser,
     logout,
-  }), [currentUser, state.members, dispatch, hasPermission, hasRole, hasAnyRole, canAccessPod, switchUser, logout]);
+  }), [currentUser, state.members, state.rolePermissions, dispatch, hasPermission, hasRole, hasAnyRole, canAccessPod, switchUser, logout]);
 
   return (
     <AuthContext.Provider value={value}>

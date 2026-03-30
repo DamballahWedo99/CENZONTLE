@@ -20,6 +20,8 @@ export function DiagramFullPage({ epicId }: DiagramFullPageProps) {
   const rawEpic = state.epics.find((e) => e.id === epicId);
   const businessDiagram = rawEpic?.diagrams.find((d) => d.type === 'business');
 
+  const initiative = rawEpic ? state.initiatives.find((i) => i.id === rawEpic.initiativeId) : null;
+
   useEffect(() => {
     if (!rawEpic) return;
     setBreadcrumb(
@@ -28,15 +30,23 @@ export function DiagramFullPage({ epicId }: DiagramFullPageProps) {
           Proyectos
         </Link>
         <span className="text-muted-foreground/40">/</span>
-        <Link href={`/proyectos/epicas/${epicId}?tab=diagramas`} className="font-mono text-xs rounded-md bg-muted px-2 py-0.5 text-muted-foreground hover:text-foreground transition-colors">
-          {rawEpic.jiraKey ?? rawEpic.title}
+        {initiative && (
+          <>
+            <Link href={`/proyectos/iniciativas/${initiative.id}`} className="text-muted-foreground hover:text-foreground transition-colors truncate max-w-[180px]">
+              {initiative.name}
+            </Link>
+            <span className="text-muted-foreground/40">/</span>
+          </>
+        )}
+        <Link href={`/proyectos/epicas/${epicId}?tab=diagramas`} className="text-muted-foreground hover:text-foreground transition-colors truncate max-w-[180px]">
+          {rawEpic.title}
         </Link>
         <span className="text-muted-foreground/40">/</span>
         <span className="text-foreground">Diagrama</span>
       </div>
     );
     return () => setBreadcrumb(null);
-  }, [rawEpic, epicId, setBreadcrumb]);
+  }, [rawEpic, epicId, initiative, setBreadcrumb]);
 
   if (!rawEpic) {
     return (
@@ -76,7 +86,7 @@ export function DiagramFullPage({ epicId }: DiagramFullPageProps) {
             </Link>
           </Button>
           <div className="flex items-center gap-2">
-            <span className="text-xs font-mono text-muted-foreground">{rawEpic.jiraKey ?? '—'}</span>
+            <span className="text-xs font-mono text-muted-foreground">{rawEpic.tracker?.externalKey ?? '—'}</span>
             <span className="text-muted-foreground/30">·</span>
             <span className="text-sm font-medium">Diagrama de Negocio</span>
           </div>

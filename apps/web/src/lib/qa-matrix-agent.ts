@@ -162,7 +162,7 @@ export async function generateQAMatrix(epic: Epic, stories: UserStory[]): Promis
     return {
       storyId: story.id,
       storyTitle: story.title,
-      storyJiraKey: story.jiraKey ?? '',
+      storyJiraKey: story.tracker?.externalKey ?? '',
       acceptanceCriteria: story.po.acceptanceCriteria,
       testCases,
       coverage: 0, // All test cases start as pending, so 0% coverage

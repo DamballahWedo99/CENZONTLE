@@ -63,7 +63,7 @@ export const mockFactoryStories: FactoryStory[] = [
   // --- Wave 1 (completed) ---
   {
     id: STORY_IDS.w1s1,
-    jiraKey: 'CHK-201',
+    tracker: { provider: 'linear', externalId: STORY_IDS.w1s1, externalKey: 'CHK-201', externalUrl: 'https://linear.app/aeromexico/issue/CHK-201' },
     title: 'Implement responsive cart summary sidebar with collapsible sections',
     description: 'Build the new cart summary sidebar that collapses on mobile and shows itemized pricing with taxes and fees breakdown.',
     waveNumber: 1,
@@ -81,7 +81,7 @@ export const mockFactoryStories: FactoryStory[] = [
   },
   {
     id: STORY_IDS.w1s2,
-    jiraKey: 'CHK-202',
+    tracker: { provider: 'linear', externalId: STORY_IDS.w1s2, externalKey: 'CHK-202', externalUrl: 'https://linear.app/aeromexico/issue/CHK-202' },
     title: 'Add address autocomplete with Google Places integration',
     description: 'Integrate Google Places API for shipping address autocomplete with fallback to manual entry and address validation.',
     waveNumber: 1,
@@ -99,7 +99,7 @@ export const mockFactoryStories: FactoryStory[] = [
   },
   {
     id: STORY_IDS.w1s3,
-    jiraKey: 'CHK-203',
+    tracker: { provider: 'linear', externalId: STORY_IDS.w1s3, externalKey: 'CHK-203', externalUrl: 'https://linear.app/aeromexico/issue/CHK-203' },
     title: 'Create payment method selector with saved cards and new card form',
     description: 'Build the payment method selection UI supporting saved cards from Stripe, new card entry via Elements, and Apple Pay / Google Pay toggles.',
     waveNumber: 1,
@@ -118,7 +118,7 @@ export const mockFactoryStories: FactoryStory[] = [
   // --- Wave 2 (running) ---
   {
     id: STORY_IDS.w2s1,
-    jiraKey: 'CHK-204',
+    tracker: { provider: 'linear', externalId: STORY_IDS.w2s1, externalKey: 'CHK-204', externalUrl: 'https://linear.app/aeromexico/issue/CHK-204' },
     title: 'Build order review step with editable line items and promo code input',
     description: 'Implement the order review step where users can adjust quantities, remove items, and apply promotional codes with real-time price recalculation.',
     waveNumber: 2,
@@ -136,7 +136,7 @@ export const mockFactoryStories: FactoryStory[] = [
   },
   {
     id: STORY_IDS.w2s2,
-    jiraKey: 'CHK-205',
+    tracker: { provider: 'linear', externalId: STORY_IDS.w2s2, externalKey: 'CHK-205', externalUrl: 'https://linear.app/aeromexico/issue/CHK-205' },
     title: 'Implement shipping method selector with real-time carrier rate calculation',
     description: 'Create shipping method selection component that fetches live rates from UPS/FedEx/USPS APIs and displays estimated delivery dates.',
     waveNumber: 2,
@@ -154,7 +154,7 @@ export const mockFactoryStories: FactoryStory[] = [
   },
   {
     id: STORY_IDS.w2s3,
-    jiraKey: 'CHK-206',
+    tracker: { provider: 'linear', externalId: STORY_IDS.w2s3, externalKey: 'CHK-206', externalUrl: 'https://linear.app/aeromexico/issue/CHK-206' },
     title: 'Add 3D Secure authentication flow for high-risk transactions',
     description: 'Implement Stripe 3D Secure challenge flow with modal overlay, loading states, and graceful fallback for non-3DS cards.',
     waveNumber: 2,
@@ -173,7 +173,7 @@ export const mockFactoryStories: FactoryStory[] = [
   // --- Wave 3 (pending) ---
   {
     id: STORY_IDS.w3s1,
-    jiraKey: 'CHK-207',
+    tracker: { provider: 'linear', externalId: STORY_IDS.w3s1, externalKey: 'CHK-207', externalUrl: 'https://linear.app/aeromexico/issue/CHK-207' },
     title: 'Build checkout success page with order confirmation and tracking link',
     description: 'Create the post-purchase confirmation page showing order number, estimated delivery, tracking link, and cross-sell recommendations.',
     waveNumber: 3,
@@ -191,7 +191,7 @@ export const mockFactoryStories: FactoryStory[] = [
   },
   {
     id: STORY_IDS.w3s2,
-    jiraKey: 'CHK-208',
+    tracker: { provider: 'linear', externalId: STORY_IDS.w3s2, externalKey: 'CHK-208', externalUrl: 'https://linear.app/aeromexico/issue/CHK-208' },
     title: 'Implement checkout analytics and conversion funnel tracking',
     description: 'Add comprehensive event tracking for each checkout step including drop-off points, payment method usage, and A/B test variant logging.',
     waveNumber: 3,
@@ -244,8 +244,7 @@ export const mockSprintBatch: SprintBatch = {
   id: 'batch-47',
   name: 'Checkout Web Redesign - Sprint 47',
   epicTitle: 'Checkout Web Redesign',
-  jiraKey: 'CZ-EP-14',
-  linearProjectId: 'lin-proj-checkout-redesign',
+  tracker: { provider: 'linear', externalId: 'lin-proj-checkout-redesign', externalKey: 'CZ-EP-14', externalUrl: 'https://linear.app/aeromexico/project/checkout-redesign' },
   stories: mockFactoryStories,
   waves: mockWaves,
   branch: 'forge/sprint-batch-47',
@@ -1342,7 +1341,7 @@ export const mockReleaseBoardEpics: ReleaseBoardEpic[] = [
   {
     id: 'rb-epic-1',
     title: 'Guest Checkout Flow',
-    jiraKey: 'CZ-EP-12',
+    tracker: { provider: 'linear', externalId: 'proj-guest-checkout', externalKey: 'CZ-EP-12', externalUrl: 'https://linear.app/aeromexico/project/guest-checkout-flow' },
     storiesCompleted: 5,
     storiesTotal: 5,
     batchId: 'batch-46',
@@ -1357,7 +1356,7 @@ export const mockReleaseBoardEpics: ReleaseBoardEpic[] = [
   {
     id: 'rb-epic-2',
     title: 'Order Tracking Redesign',
-    jiraKey: 'CZ-EP-10',
+    tracker: { provider: 'linear', externalId: 'proj-order-tracking', externalKey: 'CZ-EP-10', externalUrl: 'https://linear.app/aeromexico/project/order-tracking-redesign' },
     storiesCompleted: 4,
     storiesTotal: 4,
     batchId: 'batch-44',
@@ -1372,7 +1371,7 @@ export const mockReleaseBoardEpics: ReleaseBoardEpic[] = [
   {
     id: 'rb-epic-3',
     title: 'Payment Method Selector v2',
-    jiraKey: 'CZ-EP-11',
+    tracker: { provider: 'linear', externalId: 'proj-payment-method', externalKey: 'CZ-EP-11', externalUrl: 'https://linear.app/aeromexico/project/payment-method-selector-v2' },
     storiesCompleted: 6,
     storiesTotal: 6,
     batchId: 'batch-45',

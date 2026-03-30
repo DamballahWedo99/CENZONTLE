@@ -1,14 +1,16 @@
 'use client';
 
-import { useCallback, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 import { cn } from '@/lib/utils';
 import { useFactory } from '@/context/FactoryContext';
+import { mockEpics } from '@/data/mock/proyectos/epics';
+import { mockInitiatives } from '@/data/mock/proyectos/initiatives';
 import { WaveDAG } from '@/components/factory/WaveDAG';
 import { AgentCard } from '@/components/factory/AgentCard';
 import { AgentStatus, GateDecision, PipelineLayer, WaveStatus } from '@cenzontle/shared';
-import type { FactoryAgent, FactoryStory, HumanGate, SprintBatch, Wave } from '@cenzontle/shared';
+import type { Epic, Initiative, FactoryAgent, FactoryStory, HumanGate, SprintBatch, Wave } from '@cenzontle/shared';
 import {
   ArrowLeft,
   Bot,
@@ -33,6 +35,11 @@ import {
   XCircle,
   Pause,
   User,
+  Info,
+  X,
+  Bookmark,
+  Target,
+  Calendar,
 } from 'lucide-react';
 
 // ---------------------------------------------------------------------------
@@ -40,21 +47,19 @@ import {
 // ---------------------------------------------------------------------------
 
 const PIPELINE_LAYERS = [
-  { layer: PipelineLayer.Requirements, label: 'Requirements', Icon: ClipboardList },
-  { layer: PipelineLayer.Linear, label: 'Linear', Icon: LayoutList },
   { layer: PipelineLayer.Forge, label: 'Forge', Icon: Hammer },
-  { layer: PipelineLayer.Staging, label: 'Staging', Icon: Eye },
-  { layer: PipelineLayer.ReleaseBoard, label: 'Release Board', Icon: Package },
-  { layer: PipelineLayer.QAGate, label: 'QA Gate', Icon: Shield },
+  { layer: PipelineLayer.Staging, label: 'Staged', Icon: Eye },
+  { layer: PipelineLayer.QAGate, label: 'QA Testing', Icon: Shield },
+  { layer: PipelineLayer.ReleaseBoard, label: 'Released', Icon: Package },
 ];
 
 const LAYER_ORDER: Record<PipelineLayer, number> = {
-  [PipelineLayer.Requirements]: 0,
-  [PipelineLayer.Linear]: 1,
-  [PipelineLayer.Forge]: 2,
-  [PipelineLayer.Staging]: 3,
-  [PipelineLayer.ReleaseBoard]: 4,
-  [PipelineLayer.QAGate]: 5,
+  [PipelineLayer.Requirements]: -1,
+  [PipelineLayer.Linear]: -1,
+  [PipelineLayer.Forge]: 0,
+  [PipelineLayer.Staging]: 1,
+  [PipelineLayer.QAGate]: 2,
+  [PipelineLayer.ReleaseBoard]: 3,
 };
 
 const PRIORITY_STYLES: Record<string, { text: string; bg: string; border: string }> = {
@@ -106,85 +111,50 @@ function getLayerLabel(layer: PipelineLayer): string {
 }
 
 // ---------------------------------------------------------------------------
-// BatchPipeline: compact horizontal 6-layer indicator
+// PipelinePills: inline pill-style pipeline progress in header
 // ---------------------------------------------------------------------------
 
-function BatchPipeline({ currentLayer }: { currentLayer: PipelineLayer }) {
+function PipelinePills({ currentLayer }: { currentLayer: PipelineLayer }) {
   const currentIdx = LAYER_ORDER[currentLayer];
 
   return (
-    <section aria-label="Batch Pipeline Progress" className="rounded-xl border border-border bg-card p-5">
-      <div className="flex items-center gap-2 mb-4">
-        <div className="flex h-7 w-7 items-center justify-center rounded-lg bg-indigo-500/10" aria-hidden="true">
-          <Layers className="h-3.5 w-3.5 text-indigo-400" />
-        </div>
-        <h2 className="text-sm font-semibold text-foreground">Pipeline Progress</h2>
-      </div>
+    <div className="flex items-center gap-1 overflow-x-auto" role="list" aria-label="Pipeline progress">
+      {PIPELINE_LAYERS.map((layerDef, idx) => {
+        const isCompleted = idx < currentIdx;
+        const isCurrent = idx === currentIdx;
 
-      <div className="flex items-center gap-1 sm:gap-2 overflow-x-auto pb-1">
-        {PIPELINE_LAYERS.map((layerDef, idx) => {
-          const isCompleted = idx < currentIdx;
-          const isCurrent = idx === currentIdx;
-          const isFuture = idx > currentIdx;
-          const { Icon } = layerDef;
-
-          return (
-            <div key={layerDef.layer} className="flex items-center gap-1 sm:gap-2">
-              {/* Node */}
-              <div
+        return (
+          <div
+            key={layerDef.layer}
+            role="listitem"
+            aria-label={`${layerDef.label}: ${isCompleted ? 'completed' : isCurrent ? 'current' : 'pending'}`}
+            className={cn(
+              'relative flex items-center gap-1.5 rounded-full px-3 py-1.5 text-xs font-medium transition-colors whitespace-nowrap',
+              isCompleted && 'text-[#22C55E]',
+              isCurrent && 'text-[#3B82F6] bg-[#3B82F6]/10',
+              !isCompleted && !isCurrent && 'text-muted-foreground/50',
+            )}
+          >
+            {isCompleted ? (
+              <CheckCircle2 className="h-3 w-3 shrink-0" aria-hidden="true" />
+            ) : (
+              <span
                 className={cn(
-                  'flex flex-col items-center gap-1.5 min-w-[56px]',
+                  'h-1.5 w-1.5 rounded-full shrink-0',
+                  isCurrent && 'bg-[#3B82F6] shadow-[0_0_6px_rgba(59,130,246,0.5)]',
+                  !isCurrent && 'bg-muted-foreground/30',
                 )}
-                aria-label={`${layerDef.label}: ${isCompleted ? 'completed' : isCurrent ? 'current' : 'pending'}`}
-              >
-                <div
-                  className={cn(
-                    'flex h-9 w-9 items-center justify-center rounded-full border-2 transition-all',
-                    isCompleted && 'border-[#22C55E] bg-[#22C55E]/15',
-                    isCurrent && 'border-[#3B82F6] bg-[#3B82F6]/15 shadow-[0_0_12px_-2px_rgba(59,130,246,0.4)]',
-                    isFuture && 'border-border bg-card',
-                  )}
-                >
-                  {isCompleted ? (
-                    <CheckCircle2 className="h-4 w-4 text-[#22C55E]" aria-hidden="true" />
-                  ) : (
-                    <Icon
-                      className={cn(
-                        'h-4 w-4',
-                        isCurrent && 'text-[#3B82F6]',
-                        isFuture && 'text-muted-foreground/70',
-                      )}
-                      aria-hidden="true"
-                    />
-                  )}
-                </div>
-                <span
-                  className={cn(
-                    'text-[10px] font-medium text-center leading-tight',
-                    isCompleted && 'text-[#22C55E]',
-                    isCurrent && 'text-[#3B82F6]',
-                    isFuture && 'text-muted-foreground/70',
-                  )}
-                >
-                  {layerDef.label}
-                </span>
-              </div>
-
-              {/* Connector line */}
-              {idx < PIPELINE_LAYERS.length - 1 && (
-                <div
-                  className={cn(
-                    'h-px w-4 sm:w-6 flex-shrink-0 mt-[-18px]',
-                    idx < currentIdx ? 'bg-[#22C55E]' : 'bg-[#2A2A35]',
-                  )}
-                  aria-hidden="true"
-                />
-              )}
-            </div>
-          );
-        })}
-      </div>
-    </section>
+                aria-hidden="true"
+              />
+            )}
+            {layerDef.label}
+            {isCurrent && (
+              <span className="absolute bottom-0 left-3 right-3 h-[2px] rounded-full bg-[#3B82F6]" aria-hidden="true" />
+            )}
+          </div>
+        );
+      })}
+    </div>
   );
 }
 
@@ -275,7 +245,7 @@ function WaveList({ waves, stories, agents }: WaveDisplayProps) {
                       <div
                         key={story.id}
                         role="listitem"
-                        aria-label={`${story.jiraKey}: ${story.title}, ${cfg.label}`}
+                        aria-label={`${story.tracker.externalKey}: ${story.title}, ${cfg.label}`}
                         className={cn(
                           'flex items-center gap-3 rounded-md border px-3 py-2 transition-colors',
                           cfg.bg,
@@ -293,7 +263,7 @@ function WaveList({ waves, stories, agents }: WaveDisplayProps) {
                         <div className="flex-1 min-w-0">
                           <div className="flex items-center gap-2">
                             <span className="font-mono text-xs font-semibold text-foreground">
-                              {story.jiraKey}
+                              {story.tracker.externalKey}
                             </span>
                             <span className="text-xs text-muted-foreground truncate">{story.title}</span>
                           </div>
@@ -579,7 +549,7 @@ function ApprovalSection({ gates, batchBranch, onDecision }: { gates: HumanGate[
         <h2 className="text-sm font-semibold text-foreground">Human Gate Approvals</h2>
         {pendingGates.length > 0 && (
           <span className="rounded-full bg-pink-500/15 border border-pink-500/30 px-2 py-0.5 text-[10px] font-semibold text-pink-400 animate-pulse">
-            {pendingGates.length} pending
+            Pending
           </span>
         )}
       </div>
@@ -634,6 +604,216 @@ function ApprovalSection({ gates, batchBranch, onDecision }: { gates: HumanGate[
 // ---------------------------------------------------------------------------
 // BatchDetail: main exported component
 // ---------------------------------------------------------------------------
+// EpicInfoDrawer: side panel with epic details related to the batch
+// ---------------------------------------------------------------------------
+
+function EpicInfoDrawer({ batch, epic, initiative, open, onClose }: {
+  batch: SprintBatch;
+  epic: Epic | null;
+  initiative: Initiative | null;
+  open: boolean;
+  onClose: () => void;
+}) {
+  useEffect(() => {
+    const handleKey = (e: KeyboardEvent) => { if (e.key === 'Escape' && open) onClose(); };
+    document.addEventListener('keydown', handleKey);
+    return () => document.removeEventListener('keydown', handleKey);
+  }, [open, onClose]);
+
+  const epicName = epic?.title ?? batch.epicTitle;
+  const storiesTotal = batch.stories.length;
+  const storiesDone = batch.stories.filter((s) => s.status === AgentStatus.Done).length;
+  const totalSP = batch.stories.reduce((s, st) => s + st.storyPoints, 0);
+  const totalCost = batch.stories.reduce((s, st) => s + st.cost, 0);
+  const startDate = batch.startedAt ? new Date(batch.startedAt).toLocaleDateString('es-MX', { day: 'numeric', month: 'short', year: 'numeric' }) : '—';
+
+  return (
+    <>
+      {/* Backdrop */}
+      <div
+        className={cn(
+          'fixed inset-0 z-40 bg-black/50 backdrop-blur-[2px] transition-opacity duration-300',
+          open ? 'opacity-100' : 'pointer-events-none opacity-0',
+        )}
+        onClick={onClose}
+        aria-hidden="true"
+      />
+
+      {/* Panel */}
+      <div
+        className={cn(
+          'fixed inset-y-0 right-0 z-50 flex w-[420px] flex-col bg-card border-l border-border shadow-2xl cursor-default',
+          'transform transition-transform duration-300 ease-in-out',
+          open ? 'translate-x-0' : 'translate-x-full',
+        )}
+        role="dialog"
+        aria-modal="true"
+        aria-label={`Epic details: ${epicName}`}
+      >
+        {/* Header */}
+        <div className="shrink-0 border-b border-border px-5 py-4">
+          <div className="flex items-start justify-between gap-3">
+            <div className="min-w-0 flex-1">
+              <div className="flex items-center gap-2">
+                <Bookmark className="h-4 w-4 shrink-0 text-indigo-400" aria-hidden="true" />
+                <h2 className="text-sm font-semibold text-foreground truncate">Epic Details</h2>
+              </div>
+              <div className="mt-1">
+                {epic ? (
+                  <Link
+                    href={`/proyectos/epicas/${epic.id}`}
+                    className="text-xs text-blue-400 hover:text-blue-300 hover:underline transition-colors truncate block"
+                  >
+                    {epicName}
+                  </Link>
+                ) : (
+                  <p className="text-xs text-muted-foreground truncate">{epicName}</p>
+                )}
+              </div>
+            </div>
+            <button
+              onClick={onClose}
+              className="h-7 w-7 shrink-0 flex items-center justify-center rounded-md text-muted-foreground hover:text-foreground hover:bg-muted transition-colors"
+              aria-label="Close"
+            >
+              <X className="h-3.5 w-3.5" />
+            </button>
+          </div>
+        </div>
+
+        {/* Body */}
+        <div className="flex-1 overflow-y-auto px-5 py-4 space-y-5">
+          {/* Identity */}
+          <div className="rounded-lg border border-border bg-[#0d1117] p-4 space-y-3">
+            <div className="flex items-center justify-between">
+              <span className="text-xs text-muted-foreground/60">Tracker Key</span>
+              <span className="font-mono text-xs text-foreground/90">{batch.tracker.externalKey}</span>
+            </div>
+            <div className="flex items-center justify-between">
+              <span className="text-xs text-muted-foreground/60">Provider</span>
+              <span className="text-xs text-foreground/90 capitalize">{batch.tracker.provider}</span>
+            </div>
+            <div className="flex items-center justify-between">
+              <span className="text-xs text-muted-foreground/60">Branch</span>
+              <a
+                href={`https://github.com/DamballahWedo99/CENZONTLE/tree/${batch.branch}`}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="font-mono text-[11px] text-blue-400 hover:text-blue-300 hover:underline transition-colors"
+              >
+                {batch.branch}
+              </a>
+            </div>
+            <div className="flex items-center justify-between">
+              <span className="flex items-center gap-1.5 text-xs text-muted-foreground/60">
+                <Calendar className="h-3 w-3" />
+                Started
+              </span>
+              <span className="text-xs text-foreground/90">{startDate}</span>
+            </div>
+            <div className="flex items-center justify-between">
+              <span className="text-xs text-muted-foreground/60">Initiative</span>
+              <span className="text-xs text-foreground/90 text-right max-w-[60%] truncate">{initiative?.name ?? '—'}</span>
+            </div>
+          </div>
+
+          {/* Epic details (from proyectos data) */}
+          {epic && (
+            <div>
+              <h3 className="mb-2.5 text-[11px] font-semibold uppercase tracking-widest text-muted-foreground/70">
+                Epic Info
+              </h3>
+              <div className="rounded-lg border border-border bg-[#0d1117] p-4 space-y-3">
+                {epic.description && (
+                  <div>
+                    <span className="text-[10px] text-muted-foreground/60 uppercase block mb-1">Description</span>
+                    <p className="text-xs text-foreground/90 leading-relaxed">{epic.description}</p>
+                  </div>
+                )}
+                <div className="flex items-center justify-between">
+                  <span className="text-xs text-muted-foreground/60">Status</span>
+                  <span className="text-xs text-foreground/90 capitalize">{epic.status}</span>
+                </div>
+                <div className="flex items-center justify-between">
+                  <span className="text-xs text-muted-foreground/60">Priority</span>
+                  <span className="text-xs text-foreground/90 capitalize">{epic.priority}</span>
+                </div>
+                {epic.targetDate && (
+                  <div className="flex items-center justify-between">
+                    <span className="flex items-center gap-1.5 text-xs text-muted-foreground/60">
+                      <Target className="h-3 w-3" />
+                      Target Date
+                    </span>
+                    <span className="text-xs text-foreground/90">
+                      {new Date(epic.targetDate).toLocaleDateString('es-MX', { day: 'numeric', month: 'short', year: 'numeric' })}
+                    </span>
+                  </div>
+                )}
+                {epic.teamsInvolved && (
+                  <div className="flex items-center justify-between">
+                    <span className="text-xs text-muted-foreground/60">Teams</span>
+                    <span className="text-xs text-foreground/90 text-right max-w-[60%] truncate">{epic.teamsInvolved}</span>
+                  </div>
+                )}
+                {epic.scopeDescription && (
+                  <div>
+                    <span className="text-[10px] text-muted-foreground/60 uppercase block mb-1">Scope</span>
+                    <p className="text-xs text-foreground/90 leading-relaxed">{epic.scopeDescription}</p>
+                  </div>
+                )}
+              </div>
+            </div>
+          )}
+
+          {/* Metrics */}
+          <div>
+            <h3 className="mb-2.5 text-[11px] font-semibold uppercase tracking-widest text-muted-foreground/70">
+              Metrics
+            </h3>
+            <div className="grid grid-cols-2 gap-2">
+              <div className="rounded-lg border border-border bg-muted/30 px-3 py-2.5">
+                <span className="text-[10px] text-muted-foreground/70 uppercase">Stories</span>
+                <p className="text-base font-semibold text-foreground">{storiesDone}/{storiesTotal}</p>
+              </div>
+              <div className="rounded-lg border border-border bg-muted/30 px-3 py-2.5">
+                <span className="text-[10px] text-muted-foreground/70 uppercase">Story Points</span>
+                <p className="text-base font-semibold text-foreground">{totalSP}</p>
+              </div>
+              <div className="rounded-lg border border-border bg-muted/30 px-3 py-2.5">
+                <span className="text-[10px] text-muted-foreground/70 uppercase">Agents</span>
+                <p className="text-base font-semibold text-foreground">{batch.agentCount}</p>
+              </div>
+              <div className="rounded-lg border border-border bg-muted/30 px-3 py-2.5">
+                <span className="text-[10px] text-muted-foreground/70 uppercase">Cost</span>
+                <p className="text-base font-semibold text-foreground">${totalCost.toFixed(2)}</p>
+              </div>
+            </div>
+          </div>
+
+          {/* Stories list */}
+          <div>
+            <h3 className="mb-2.5 text-[11px] font-semibold uppercase tracking-widest text-muted-foreground/70">
+              Stories
+            </h3>
+            <div className="rounded-lg border border-border divide-y divide-border">
+              {batch.stories.length > 0 ? batch.stories.map((story) => (
+                <div key={story.id} className="grid grid-cols-[56px_1fr_40px] items-center gap-2 px-3 py-2">
+                  <span className="font-mono text-[10px] text-muted-foreground/70 truncate">{story.tracker.externalKey}</span>
+                  <span className="text-xs text-foreground truncate">{story.title}</span>
+                  <span className="text-[10px] text-muted-foreground text-right shrink-0">{story.storyPoints}pt</span>
+                </div>
+              )) : (
+                <div className="px-3 py-4 text-center text-xs text-muted-foreground/50">No stories loaded</div>
+              )}
+            </div>
+          </div>
+        </div>
+      </div>
+    </>
+  );
+}
+
+// ---------------------------------------------------------------------------
 
 interface BatchDetailProps {
   batchId: string;
@@ -641,6 +821,9 @@ interface BatchDetailProps {
 
 export function BatchDetail({ batchId }: BatchDetailProps) {
   const { state, dispatch, computed } = useFactory();
+  // Use mock data directly — factory pages are outside ProyectosProvider
+  const proyectosEpics = mockEpics;
+  const proyectosInitiatives = mockInitiatives;
 
   const handleGateDecision = useCallback((gateId: string, decision: GateDecision, notes: string) => {
     const gate = state.gates.find((g) => g.id === gateId);
@@ -655,7 +838,22 @@ export function BatchDetail({ batchId }: BatchDetailProps) {
         decidedAt: new Date().toISOString(),
       },
     });
-  }, [state.gates, dispatch]);
+    // When staging gate is approved, advance pipeline to Staged
+    if (gate.type === 'staging' && decision === GateDecision.Approved) {
+      dispatch({
+        type: 'UPDATE_FACTORY',
+        payload: {
+          ...state.factory,
+          currentBatch: state.factory.currentBatch && state.factory.currentBatch.id === gate.batchId
+            ? { ...state.factory.currentBatch, currentLayer: PipelineLayer.Staging }
+            : state.factory.currentBatch,
+          activeBatches: state.factory.activeBatches.map((b) =>
+            b.id === gate.batchId ? { ...b, currentLayer: PipelineLayer.Staging } : b
+          ),
+        },
+      });
+    }
+  }, [state.gates, state.factory, dispatch]);
 
   const batch = useMemo(
     () => state.factory.activeBatches.find((b) => b.id === batchId) ?? null,
@@ -709,9 +907,16 @@ export function BatchDetail({ batchId }: BatchDetailProps) {
     return totalCases > 0 ? Math.round((passedCases / totalCases) * 100) : 0;
   }, [state.tests, batchStories]);
 
-  // Filter human gates belonging to this batch
+  // Filter human gates belonging to this batch.
+  // Release gate only shows after staging gate is approved (sequential approval flow).
   const batchGates = useMemo<HumanGate[]>(() => {
-    return state.gates.filter((g) => g.batchId === batchId);
+    const all = state.gates.filter((g) => g.batchId === batchId);
+    const stagingGate = all.find((g) => g.type === 'staging');
+    const stagingApproved = stagingGate?.decision === GateDecision.Approved;
+    return all.filter((g) => {
+      if (g.type === 'release' && !stagingApproved) return false;
+      return true;
+    });
   }, [state.gates, batchId]);
 
   if (!fullBatch) {
@@ -736,51 +941,58 @@ export function BatchDetail({ batchId }: BatchDetailProps) {
   }
 
   const priorityStyle = PRIORITY_STYLES[fullBatch.priority] ?? PRIORITY_STYLES.medium;
+  const [epicDrawerOpen, setEpicDrawerOpen] = useState(false);
 
   return (
     <div className="space-y-6">
       {/* ---- Header ---- */}
-      <header className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-        <div className="flex items-start gap-3">
-          <Link
-            href="/factory"
-            className="mt-1 flex h-8 w-8 items-center justify-center rounded-lg border border-border bg-card hover:bg-muted transition-colors"
-            aria-label="Back to Factory"
-          >
-            <ArrowLeft className="h-4 w-4 text-muted-foreground" />
-          </Link>
-          <div className="min-w-0">
-            <h1 className="text-lg font-bold text-foreground truncate">{fullBatch.epicTitle}</h1>
-            <div className="flex flex-wrap items-center gap-2 mt-1">
-              <span className="font-mono text-xs text-muted-foreground">{fullBatch.jiraKey}</span>
-              <span className="text-border" aria-hidden="true">|</span>
-              <span
-                className={cn(
-                  'inline-flex items-center rounded-full px-2 py-0.5 text-[10px] font-semibold border',
-                  priorityStyle.bg,
-                  priorityStyle.border,
-                  priorityStyle.text,
-                )}
-              >
-                {fullBatch.priority}
-              </span>
-              <span className="text-border" aria-hidden="true">|</span>
-              <span
-                className={cn(
-                  'inline-flex items-center rounded-full px-2 py-0.5 text-[10px] font-semibold border',
-                  'bg-[#3B82F6]/10 border-[#3B82F6]/30 text-[#3B82F6]',
-                )}
-              >
-                {getLayerLabel(fullBatch.currentLayer)}
-              </span>
+      <header className="space-y-3">
+        <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+          {/* Left: back + title */}
+          <div className="flex items-start gap-3">
+            <Link
+              href="/factory"
+              className="mt-1 flex h-8 w-8 items-center justify-center rounded-lg border border-border bg-card hover:bg-muted transition-colors"
+              aria-label="Back to Factory"
+            >
+              <ArrowLeft className="h-4 w-4 text-muted-foreground" />
+            </Link>
+            <div className="min-w-0">
+              <div className="flex items-center gap-1.5">
+                <h1 className="text-lg font-bold text-foreground truncate">{fullBatch.epicTitle}</h1>
+                <button
+                  onClick={() => setEpicDrawerOpen(true)}
+                  className="shrink-0 text-muted-foreground/40 hover:text-muted-foreground transition-colors"
+                  title="Epic details"
+                >
+                  <Info className="h-4 w-4" />
+                </button>
+              </div>
+              <div className="flex flex-wrap items-center gap-2 mt-1">
+                <span className="font-mono text-xs text-muted-foreground">{fullBatch.tracker.externalKey}</span>
+                <span className="text-border" aria-hidden="true">|</span>
+                <span
+                  className={cn(
+                    'inline-flex items-center rounded-full px-2 py-0.5 text-[10px] font-semibold border',
+                    priorityStyle.bg,
+                    priorityStyle.border,
+                    priorityStyle.text,
+                  )}
+                >
+                  {fullBatch.priority}
+                </span>
+              </div>
             </div>
           </div>
-        </div>
 
-        {/* Branch badge */}
-        <div className="flex items-center gap-2 rounded-lg border border-border bg-card px-3 py-2 self-start">
-          <GitBranch className="h-3.5 w-3.5 text-muted-foreground/70" aria-hidden="true" />
-          <span className="font-mono text-xs text-muted-foreground">{fullBatch.branch}</span>
+          {/* Right: pipeline pills + branch badge */}
+          <div className="flex items-center gap-4 shrink-0">
+            <PipelinePills currentLayer={fullBatch.currentLayer} />
+            <div className="flex items-center gap-2 rounded-lg border border-border bg-card px-3 py-2">
+              <GitBranch className="h-3.5 w-3.5 text-muted-foreground/70" aria-hidden="true" />
+              <a href={`https://github.com/DamballahWedo99/CENZONTLE/tree/${fullBatch.branch}`} target="_blank" rel="noopener noreferrer" className="font-mono text-xs text-blue-400 hover:text-blue-300 hover:underline transition-colors">{fullBatch.branch}</a>
+            </div>
+          </div>
         </div>
       </header>
 
@@ -793,7 +1005,6 @@ export function BatchDetail({ batchId }: BatchDetailProps) {
       />
 
       {/* ---- Pipeline ---- */}
-      <BatchPipeline currentLayer={fullBatch.currentLayer} />
 
       {/* ---- Human Gate Approvals ---- */}
       <ApprovalSection gates={batchGates} batchBranch={fullBatch.branch} onDecision={handleGateDecision} />
@@ -808,6 +1019,18 @@ export function BatchDetail({ batchId }: BatchDetailProps) {
 
       {/* ---- Agents ---- */}
       <AgentList agents={batchAgents} />
+
+      {/* ---- Epic Info Drawer ---- */}
+      <EpicInfoDrawer
+        batch={fullBatch}
+        epic={proyectosEpics.find(e => e.id === fullBatch.epicId) ?? null}
+        initiative={(() => {
+          const ep = proyectosEpics.find(e => e.id === fullBatch.epicId);
+          return ep ? proyectosInitiatives.find(i => i.id === ep.initiativeId) ?? null : null;
+        })()}
+        open={epicDrawerOpen}
+        onClose={() => setEpicDrawerOpen(false)}
+      />
     </div>
   );
 }

@@ -1,3 +1,5 @@
+import type { TrackerReference } from './factory';
+
 // === ENUMS ===
 
 export enum InitiativeStatus {
@@ -312,7 +314,7 @@ export interface Epic {
   priority: Priority;
   initiativeId: string;
   podIds: string[]; // many-to-many: epic can belong to multiple PODs
-  jiraKey: string | null;
+  tracker?: TrackerReference;
   startDate: string;
   targetDate: string;
   documents: EpicDocument[];
@@ -371,7 +373,7 @@ export interface UserStory {
   podId: string; // each story belongs to ONE pod
   productOwnerId: string | null;
   sprintId: string | null;
-  jiraKey: string | null; // e.g. "GAM-456"
+  tracker?: TrackerReference;
   labels: string[];
   // Structured sections
   po: StoryPOFields;
@@ -499,7 +501,7 @@ export interface ProyectosFilters {
   dateRange: { from: string | null; to: string | null };
   storyPointsRange: { min: number | null; max: number | null };
   searchQuery: string;
-  jiraKey: string;
+  trackerKey: string;
 }
 
 export const DEFAULT_FILTERS: ProyectosFilters = {
@@ -513,5 +515,5 @@ export const DEFAULT_FILTERS: ProyectosFilters = {
   dateRange: { from: null, to: null },
   storyPointsRange: { min: null, max: null },
   searchQuery: '',
-  jiraKey: '',
+  trackerKey: '',
 };

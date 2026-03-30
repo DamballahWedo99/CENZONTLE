@@ -611,7 +611,7 @@ function InitiativeFullPageInner({ initiativeId }: InitiativeFullPageProps) {
                           onClick={() => router.push(`/proyectos/epicas/${epic.id}`)}
                         >
                           <div className="flex items-center gap-3 px-4 py-3">
-                            <span className="font-mono text-xs text-muted-foreground w-20 shrink-0">{epic.jiraKey ?? '—'}</span>
+                            <span className="font-mono text-xs text-muted-foreground w-20 shrink-0">{epic.tracker?.externalKey ?? '—'}</span>
                             <span className="truncate flex-1 text-sm font-medium">{epic.title}</span>
                             <div className="flex gap-1 shrink-0">
                               {epicPods.slice(0, 2).map((pod) => (
@@ -743,7 +743,7 @@ function InitiativeFullPageInner({ initiativeId }: InitiativeFullPageProps) {
 
                       return (
                         <div key={epic.id} className="flex items-center gap-3">
-                          <span className="font-mono text-xs text-muted-foreground w-16 shrink-0">{epic.jiraKey ?? '—'}</span>
+                          <span className="font-mono text-xs text-muted-foreground w-16 shrink-0">{epic.tracker?.externalKey ?? '—'}</span>
                           <span className="text-sm truncate flex-1 min-w-0">{epic.title}</span>
                           <div className="w-32 shrink-0">
                             <ProgressBar progress={epicProgress} size="sm" />

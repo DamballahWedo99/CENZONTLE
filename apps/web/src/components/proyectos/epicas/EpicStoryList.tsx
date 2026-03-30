@@ -216,7 +216,7 @@ export function EpicStoryList({
   const [newLabel, setNewLabel] = useState('');
   const [deleteConfirmId, setDeleteConfirmId] = useState<string | null>(null);
 
-  // jiraKey is assigned externally (e.g. via Jira integration), not at creation time
+  // tracker is assigned externally (e.g. via Linear/Jira integration), not at creation time
 
   // --- QA matrix rows mapped by storyId ---
   const qaRowsByStoryId = new Map(qaMatrix?.rows.map((r) => [r.storyId, r]) ?? []);
@@ -282,7 +282,6 @@ export function EpicStoryList({
       podId: formData.podId,
       productOwnerId: null,
       sprintId: null,
-      jiraKey: null,
       labels: formData.labels,
       po: {
         ...formData.po,
@@ -906,7 +905,7 @@ export function EpicStoryList({
                 }}
               >
                 <span className="font-mono text-xs text-muted-foreground w-20 shrink-0">
-                  {story.jiraKey ?? '—'}
+                  {story.tracker?.externalKey ?? '—'}
                 </span>
                 <span className="truncate flex-1">{story.title}</span>
                 <StoryPointsBadge points={story.storyPoints} />
