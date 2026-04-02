@@ -401,7 +401,7 @@ export function TeamSection() {
             </div>
             <div className="space-y-1.5">
               <Label className="text-xs">Email</Label>
-              <Input type="email" placeholder="email@aeromexico.com" value={inviteEmail} onChange={(e) => setInviteEmail(e.target.value)} className="h-9" />
+              <Input type="email" placeholder="email@cenzontle.com" value={inviteEmail} onChange={(e) => setInviteEmail(e.target.value)} className="h-9" />
             </div>
             <div className="space-y-1.5">
               <Label className="text-xs">Rol</Label>

@@ -20,8 +20,8 @@ const geistMono = Geist_Mono({
 });
 
 export const metadata: Metadata = {
-  title: "Aeroméxico - Dashboard",
-  description: "Sistema de gestión Aeroméxico",
+  title: "CENZONTLE - Dashboard",
+  description: "Sistema de gestión CENZONTLE",
   icons: {
     icon: "/Imagotipo.svg",
   },

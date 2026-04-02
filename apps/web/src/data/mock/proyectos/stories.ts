@@ -1229,7 +1229,7 @@ export const mockStories: UserStory[] = ([
     id: 'story-58',
     title: 'Crear módulo de conversión de puntos entre programas',
     description:
-      'Como sistema, necesito convertir puntos entre el programa de Aeroméxico y programas de partners con tasas configurables.',
+      'Como sistema, necesito convertir puntos entre el programa de la plataforma y programas de partners con tasas configurables.',
     status: StoryStatus.Backlog,
     storyPoints: 5,
     epicId: 'epic-11',
@@ -1269,7 +1269,7 @@ export const mockStories: UserStory[] = ([
     id: 'story-60',
     title: 'Integrar programa de hoteles Marriott Bonvoy',
     description:
-      'Como usuario, quiero acumular y canjear puntos en hoteles Marriott a través del programa de lealtad de Aeroméxico.',
+      'Como usuario, quiero acumular y canjear puntos en hoteles Marriott a través del programa de lealtad de la plataforma.',
     status: StoryStatus.Backlog,
     storyPoints: 8,
     epicId: 'epic-11',

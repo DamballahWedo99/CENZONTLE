@@ -263,7 +263,7 @@ export function TeamManagementDialog({ open, onOpenChange }: TeamManagementDialo
                     <Label className="text-xs">Email</Label>
                     <Input
                       type="email"
-                      placeholder="email@aeromexico.com"
+                      placeholder="email@cenzontle.com"
                       value={inviteEmail}
                       onChange={(e) => setInviteEmail(e.target.value)}
                       className="h-9"

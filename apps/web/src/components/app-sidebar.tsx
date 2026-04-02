@@ -8,6 +8,7 @@ import { useState } from "react"
 import {
   FolderKanban,
   Grid3X3,
+  BookMarked,
   LogOut,
   Settings,
   GitBranch,
@@ -65,6 +66,12 @@ const proyectosItems = [
     icon: Grid3X3,
     description: "Matriz de proyectos",
   },
+  {
+    title: "Definiciones",
+    url: "/proyectos/definiciones",
+    icon: BookMarked,
+    description: "Definiciones de negocio",
+  },
 ]
 
 const factoryItems = [
@@ -89,7 +96,7 @@ export function AppSidebar({ ...props }: React.ComponentProps<typeof Sidebar>) {
   // Prepare user data
   const userData = {
     name: user?.name || user?.email?.split('@')[0] || 'Usuario',
-    email: user?.email || 'user@aeromexico.com',
+    email: user?.email || 'user@cenzontle.com',
     avatar: '/avatars/user.jpg',
   }
 
@@ -128,7 +135,7 @@ export function AppSidebar({ ...props }: React.ComponentProps<typeof Sidebar>) {
           <div className="flex items-center justify-center px-3">
             <Image
               src="/Logo.svg"
-              alt="Aeroméxico"
+              alt="CENZONTLE"
               width={153}
               height={25}
               className="object-contain dark:invert"
