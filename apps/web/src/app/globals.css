@@ -125,6 +125,117 @@
   }
 }
 
+/* Obsidian-style highlight */
+mark {
+  background-color: oklch(0.9 0.12 90);
+  color: inherit;
+  padding: 0.1em 0.2em;
+  border-radius: 0.2em;
+}
+.dark mark {
+  background-color: oklch(0.45 0.12 90);
+}
+
+/* TipTap editor */
+.tiptap {
+  outline: none;
+  min-height: 100%;
+}
+.tiptap p.is-editor-empty:first-child::before {
+  content: 'Escribe aquí...';
+  float: left;
+  color: var(--muted-foreground);
+  opacity: 0.5;
+  pointer-events: none;
+  height: 0;
+}
+.tiptap ul:not([data-type="taskList"]) {
+  list-style-type: disc !important;
+  padding-left: 1.5em !important;
+  margin: 0.5em 0;
+}
+.tiptap ol {
+  list-style-type: decimal !important;
+  padding-left: 1.5em !important;
+  margin: 0.5em 0;
+}
+.tiptap li p {
+  margin: 0;
+}
+.tiptap ul li,
+.tiptap ol li {
+  margin: 0.25em 0;
+}
+.tiptap ul[data-type="taskList"] {
+  list-style: none;
+  padding-left: 0;
+}
+.tiptap ul[data-type="taskList"] li {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.5rem;
+}
+.tiptap ul[data-type="taskList"] li label input[type="checkbox"] {
+  margin-top: 0.25rem;
+}
+.tiptap h1 {
+  font-size: 1.25rem;
+  font-weight: 700;
+  margin: 1em 0 0.5em;
+}
+.tiptap h2 {
+  font-size: 1.125rem;
+  font-weight: 600;
+  margin: 0.75em 0 0.4em;
+}
+.tiptap h3 {
+  font-size: 1rem;
+  font-weight: 600;
+  margin: 0.5em 0 0.3em;
+}
+.tiptap blockquote {
+  border-left: 3px solid var(--border);
+  padding-left: 1em;
+  margin: 0.5em 0;
+  color: var(--muted-foreground);
+}
+.tiptap code {
+  background: var(--muted);
+  padding: 0.15em 0.3em;
+  border-radius: 0.25em;
+  font-size: 0.85em;
+}
+.tiptap pre {
+  background: var(--muted);
+  padding: 1em;
+  border-radius: 0.5em;
+  overflow-x: auto;
+  margin: 0.5em 0;
+}
+.tiptap pre code {
+  background: none;
+  padding: 0;
+}
+.tiptap hr {
+  border: none;
+  border-top: 1px solid var(--border);
+  margin: 1em 0;
+}
+.tiptap table {
+  border-collapse: collapse;
+  width: 100%;
+}
+.tiptap table td,
+.tiptap table th {
+  border: 1px solid var(--border);
+  padding: 0.5rem 0.75rem;
+  text-align: left;
+}
+.tiptap table th {
+  font-weight: 600;
+  background: var(--muted);
+}
+
 @keyframes blink {
   0%, 100% { opacity: 1; }
   50% { opacity: 0; }

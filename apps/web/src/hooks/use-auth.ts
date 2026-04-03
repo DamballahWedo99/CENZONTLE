@@ -20,7 +20,7 @@ export function useAuth() {
       }
     : {
         name: 'Usuario',
-        email: 'user@aeromexico.com',
+        email: 'user@cenzontle.com',
         avatar: '/avatars/user.jpg',
       };
 

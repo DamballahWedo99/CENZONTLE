@@ -4,7 +4,7 @@ export const mockTeamMembers: TeamMember[] = [
   {
     id: 'user-1',
     name: 'Director General',
-    email: 'director@aeromexico.com',
+    email: 'director@cenzontle.com',
     avatarUrl: '',
     role: UserRole.AltaGerencia,
     status: 'active',
@@ -15,7 +15,7 @@ export const mockTeamMembers: TeamMember[] = [
   {
     id: 'user-2',
     name: 'Carlos Méndez',
-    email: 'carlos.mendez@aeromexico.com',
+    email: 'carlos.mendez@cenzontle.com',
     avatarUrl: '',
     role: UserRole.ProductOwner,
     status: 'active',
@@ -26,7 +26,7 @@ export const mockTeamMembers: TeamMember[] = [
   {
     id: 'user-3',
     name: 'Ana Lucía Torres',
-    email: 'ana.torres@aeromexico.com',
+    email: 'ana.torres@cenzontle.com',
     avatarUrl: '',
     role: UserRole.ProductOwner,
     status: 'active',
@@ -37,7 +37,7 @@ export const mockTeamMembers: TeamMember[] = [
   {
     id: 'user-4',
     name: 'Roberto Sánchez',
-    email: 'roberto.sanchez@aeromexico.com',
+    email: 'roberto.sanchez@cenzontle.com',
     avatarUrl: '',
     role: UserRole.TechLead,
     status: 'active',
@@ -48,7 +48,7 @@ export const mockTeamMembers: TeamMember[] = [
   {
     id: 'user-5',
     name: 'María Fernanda López',
-    email: 'maria.lopez@aeromexico.com',
+    email: 'maria.lopez@cenzontle.com',
     avatarUrl: '',
     role: UserRole.QA,
     status: 'active',
@@ -59,7 +59,7 @@ export const mockTeamMembers: TeamMember[] = [
   {
     id: 'user-6',
     name: 'Diego Ramírez',
-    email: 'diego.ramirez@aeromexico.com',
+    email: 'diego.ramirez@cenzontle.com',
     avatarUrl: '',
     role: UserRole.TechLead,
     status: 'active',
@@ -70,7 +70,7 @@ export const mockTeamMembers: TeamMember[] = [
   {
     id: 'user-7',
     name: 'Valentina Cruz',
-    email: 'valentina.cruz@aeromexico.com',
+    email: 'valentina.cruz@cenzontle.com',
     avatarUrl: '',
     role: UserRole.ProductOwner,
     status: 'active',
@@ -81,7 +81,7 @@ export const mockTeamMembers: TeamMember[] = [
   {
     id: 'user-8',
     name: 'Fernando Gutiérrez',
-    email: 'fernando.gutierrez@aeromexico.com',
+    email: 'fernando.gutierrez@cenzontle.com',
     avatarUrl: '',
     role: UserRole.Viewer,
     status: 'pending',

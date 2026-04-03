@@ -735,7 +735,7 @@ function ResourcePoolDrawer({ pool, open, onClose }: { pool: ResourcePool; open:
         {/* Body */}
         <div className="flex-1 overflow-y-auto px-5 py-4 space-y-4">
           {/* Capacity summary */}
-          <div className="rounded-lg border border-border bg-[#0d1117] p-4 space-y-3">
+          <div className="rounded-lg border border-border bg-muted/50 p-4 space-y-3">
             <div className="flex items-center justify-between">
               <span className="text-xs text-muted-foreground/60">Total Capacity</span>
               <span className="text-xs font-semibold text-foreground">{pool.usedSlots}/{pool.totalSlots} slots</span>
@@ -850,8 +850,8 @@ export function FactoryOverview() {
 
               <div
                 className={cn(
-                  'flex-1 flex flex-col gap-2 rounded-lg p-2 transition-colors',
-                  count > 0 ? 'bg-muted/10' : 'bg-muted/5 border border-dashed border-border/50',
+                  'flex-1 flex flex-col gap-2 rounded-lg p-2 transition-colors border border-border/50',
+                  count > 0 ? 'bg-muted/10' : 'bg-muted/5 border-dashed',
                 )}
               >
                 {queuedCards.map((q) => (
