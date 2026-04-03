@@ -5,3 +5,4 @@ export * from "./types/auth";
 export * from "./types/aprobacion";
 export * from "./types/reportes";
 export * from "./types/integrations";
+export * from "./types/access";

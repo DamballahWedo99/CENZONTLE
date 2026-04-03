@@ -1,21 +1,25 @@
 'use client';
 
 import React, { useState, useCallback } from 'react';
-import { Search, Network, List, BookMarked, SlidersHorizontal, History } from 'lucide-react';
+import { Search, Network, List, BookMarked, SlidersHorizontal, History, Shield } from 'lucide-react';
 import { useDefiniciones } from '@/context/DefinicionesContext';
+import { useAuthContext } from '@/context/AuthContext';
 import { DefinicionNode } from '@/types/definiciones';
+import { Permission } from '@cenzontle/shared';
 import { FolderTree } from './FolderTree';
 import { DocumentViewer } from './DocumentViewer';
 import { GraphView } from './GraphView';
 import { ChangelogView } from './ChangelogView';
+import { AccessView } from './AccessView';
 import { Input } from '@/components/ui/input';
 import { Button } from '@/components/ui/button';
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip';
 
-type ViewMode = 'tree' | 'graph' | 'changelog';
+type ViewMode = 'tree' | 'graph' | 'changelog' | 'access';
 
 export function DefinicionesExplorer() {
   const { state, setSearch, selectNode, expandFolder } = useDefiniciones();
+  const { hasPermission } = useAuthContext();
 
   const navigateToNode = useCallback((nodeId: string) => {
     // Find and expand all ancestor folders so the node is visible in the tree
@@ -132,6 +136,21 @@ export function DefinicionesExplorer() {
                 </TooltipTrigger>
                 <TooltipContent>Changelog</TooltipContent>
               </Tooltip>
+              {hasPermission(Permission.MANAGE_USERS) && (
+                <Tooltip>
+                  <TooltipTrigger asChild>
+                    <Button
+                      variant={viewMode === 'access' ? 'secondary' : 'ghost'}
+                      size="icon"
+                      className="h-8 w-8"
+                      onClick={() => setViewMode('access')}
+                    >
+                      <Shield className="h-4 w-4" />
+                    </Button>
+                  </TooltipTrigger>
+                  <TooltipContent>Gestión de acceso</TooltipContent>
+                </Tooltip>
+              )}
             </div>
           </div>
         </TooltipProvider>
@@ -169,6 +188,11 @@ export function DefinicionesExplorer() {
       {viewMode === 'changelog' && (
         <div className="flex-1 flex border border-border/50 rounded-lg overflow-hidden bg-background min-h-0 shadow-sm">
           <ChangelogView onNavigateToNode={navigateToNode} />
+        </div>
+      )}
+      {viewMode === 'access' && (
+        <div className="flex-1 flex gap-0 border border-border/50 rounded-lg overflow-hidden bg-background min-h-0 shadow-sm">
+          <AccessView />
         </div>
       )}
     </div>

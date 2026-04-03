@@ -14,7 +14,7 @@ import TableCell from '@tiptap/extension-table-cell';
 import TableHeader from '@tiptap/extension-table-header';
 import {
   FilePlus, Pencil, Trash2, FileEdit, FolderInput, Tag, ArrowUpDown,
-  Folder, FileText, Clock, ArrowRight, User,
+  Folder, FileText, Clock, ArrowRight, User, Shield,
 } from 'lucide-react';
 import { useDefiniciones, ChangelogAction, ChangelogEntry } from '@/context/DefinicionesContext';
 
@@ -43,6 +43,7 @@ const ACTION_CONFIG: Record<ChangelogAction, {
   move:    { icon: FolderInput, label: 'Movido',     color: 'text-amber-500',  dotColor: 'bg-amber-500' },
   tags:    { icon: Tag,         label: 'Tags',       color: 'text-purple-500', dotColor: 'bg-purple-500' },
   reorder: { icon: ArrowUpDown, label: 'Reordenado', color: 'text-gray-500',   dotColor: 'bg-gray-500' },
+  access:  { icon: Shield,      label: 'Acceso',     color: 'text-violet-500', dotColor: 'bg-violet-500' },
 };
 
 function formatRelativeTime(iso: string): string {

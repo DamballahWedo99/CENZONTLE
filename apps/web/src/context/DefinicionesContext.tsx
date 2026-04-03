@@ -3,11 +3,21 @@
 import React, { createContext, useContext, useReducer, useMemo, useCallback, useRef, ReactNode } from 'react';
 import { DefinicionNode } from '@/types/definiciones';
 import { mockDefiniciones } from '@/data/mock/definiciones';
+import { mockAccessConfig, getDefaultAccessConfig } from '@/data/mock/definiciones-access';
 import { useAuthContext } from '@/context/AuthContext';
+import {
+  AccessLevel,
+  AccessControlEntry,
+  NodeAccessConfig,
+  ACCESS_LEVEL_HIERARCHY,
+  DEFAULT_ROLE_ACCESS,
+  PrincipalType,
+  UserRole,
+} from '@cenzontle/shared';
 
 export type SortOption = 'name-asc' | 'name-desc' | 'created-newest' | 'created-oldest' | 'updated-newest' | 'updated-oldest';
 
-export type ChangelogAction = 'create' | 'edit' | 'delete' | 'rename' | 'move' | 'tags' | 'reorder';
+export type ChangelogAction = 'create' | 'edit' | 'delete' | 'rename' | 'move' | 'tags' | 'reorder' | 'access';
 
 export interface ChangelogEntry {
   id: string;
@@ -27,6 +37,12 @@ export interface ChangelogEntry {
     contentPreview?: string;
     previousContent?: string;
     newContent?: string;
+    accessChange?: {
+      principalName: string;
+      principalType: PrincipalType;
+      oldLevel?: AccessLevel;
+      newLevel?: AccessLevel;
+    };
   };
 }
 
@@ -38,6 +54,7 @@ interface DefinicionesState {
   isEditing: boolean;
   sortBy: SortOption;
   changelog: ChangelogEntry[];
+  accessConfig: Record<string, NodeAccessConfig>;
 }
 
 type DefinicionesAction =
@@ -56,7 +73,17 @@ type DefinicionesAction =
   | { type: 'REORDER_NODE'; nodeId: string; targetSiblingId: string; position: 'before' | 'after' }
   | { type: 'SET_SORT'; sortBy: SortOption }
   | { type: 'EXPAND_ALL' }
-  | { type: 'COLLAPSE_ALL' };
+  | { type: 'COLLAPSE_ALL' }
+  | { type: 'SET_INHERITANCE'; nodeId: string; inherit: boolean }
+  | { type: 'ADD_ACCESS'; entry: AccessControlEntry }
+  | { type: 'UPDATE_ACCESS'; entryId: string; nodeId: string; accessLevel: AccessLevel }
+  | { type: 'REMOVE_ACCESS'; entryId: string; nodeId: string };
+
+// === Tree helpers ===
+
+function collectAllNodeIds(nodes: DefinicionNode[]): string[] {
+  return nodes.flatMap(n => [n.id, ...(n.children ? collectAllNodeIds(n.children) : [])]);
+}
 
 function collectAllFolderIds(nodes: DefinicionNode[]): string[] {
   const ids: string[] = [];
@@ -102,7 +129,7 @@ function isDescendantOf(nodes: DefinicionNode[], ancestorId: string, targetId: s
   return false;
 }
 
-function findParentId(nodes: DefinicionNode[], targetId: string, currentParent: string | null = null): string | null {
+function findParentId(nodes: DefinicionNode[], targetId: string, currentParent: string | null = null): string | null | undefined {
   for (const node of nodes) {
     if (node.id === targetId) return currentParent;
     if (node.children) {
@@ -110,7 +137,7 @@ function findParentId(nodes: DefinicionNode[], targetId: string, currentParent: 
       if (found !== undefined) return found;
     }
   }
-  return undefined as unknown as null;
+  return undefined; // not found in this subtree
 }
 
 function insertNodeAtPosition(nodes: DefinicionNode[], nodeToInsert: DefinicionNode, targetSiblingId: string, position: 'before' | 'after'): DefinicionNode[] {
@@ -182,17 +209,104 @@ function filterTree(nodes: DefinicionNode[], query: string): DefinicionNode[] {
     const tagMatch = node.tags?.some(t => t.toLowerCase().includes(lower));
     const contentMatch = node.content?.toLowerCase().includes(lower);
 
-    if (node.type === 'folder' && node.children) {
+    if (nameMatch || tagMatch || contentMatch) {
+      // Node matches → include with ALL children intact
+      acc.push(node);
+    } else if (node.type === 'folder' && node.children) {
+      // Node doesn't match → check children recursively
       const filteredChildren = filterTree(node.children, query);
-      if (filteredChildren.length > 0 || nameMatch) {
+      if (filteredChildren.length > 0) {
         acc.push({ ...node, children: filteredChildren });
       }
-    } else if (nameMatch || tagMatch || contentMatch) {
+    }
+    return acc;
+  }, []);
+}
+
+// === Access control helpers ===
+
+export interface EffectiveAccess {
+  level: AccessLevel;
+  source: 'direct' | 'role' | 'inherited';
+  sourceNodeId?: string;
+}
+
+export function getEffectiveAccess(
+  userId: string,
+  userRole: UserRole,
+  nodeId: string,
+  fullTree: DefinicionNode[],
+  accessConfig: Record<string, NodeAccessConfig>,
+): EffectiveAccess {
+  const config = accessConfig[nodeId];
+
+  if (config) {
+    // 1. Direct user entry (highest priority)
+    const userEntry = config.entries.find(e => e.principalType === 'user' && e.principalId === userId);
+    if (userEntry) return { level: userEntry.accessLevel, source: 'direct' };
+
+    // 2. Role entry
+    const roleEntry = config.entries.find(e => e.principalType === 'role' && e.principalId === userRole);
+    if (roleEntry) return { level: roleEntry.accessLevel, source: 'role' };
+
+    // 3. Inherit from parent if enabled
+    if (config.inheritFromParent) {
+      const parentId = findParentId(fullTree, nodeId);
+      if (parentId) {
+        const parentAccess = getEffectiveAccess(userId, userRole, parentId, fullTree, accessConfig);
+        return { ...parentAccess, source: 'inherited', sourceNodeId: parentAccess.sourceNodeId ?? parentId };
+      }
+      // Root node that inherits but has no parent → role defaults
+      return { level: DEFAULT_ROLE_ACCESS[userRole], source: 'role' };
+    }
+
+    // Has config, no matching entry, inheritance disabled → deny
+    return { level: 'none', source: 'direct' };
+  }
+
+  // No config at all → inherit from parent, or use role defaults for root
+  const parentId = findParentId(fullTree, nodeId);
+  if (parentId) {
+    const parentAccess = getEffectiveAccess(userId, userRole, parentId, fullTree, accessConfig);
+    return { ...parentAccess, source: 'inherited', sourceNodeId: parentAccess.sourceNodeId ?? parentId };
+  }
+  return { level: DEFAULT_ROLE_ACCESS[userRole], source: 'role' };
+}
+
+export function getParentEffectiveLevel(
+  nodeId: string,
+  userId: string,
+  userRole: UserRole,
+  fullTree: DefinicionNode[],
+  accessConfig: Record<string, NodeAccessConfig>,
+): AccessLevel {
+  const parentId = findParentId(fullTree, nodeId);
+  if (!parentId) return 'owner'; // root folders can have any level
+  return getEffectiveAccess(userId, userRole, parentId, fullTree, accessConfig).level;
+}
+
+function filterTreeByAccess(
+  nodes: DefinicionNode[],
+  userId: string,
+  userRole: UserRole,
+  fullTree: DefinicionNode[],
+  accessConfig: Record<string, NodeAccessConfig>,
+): DefinicionNode[] {
+  return nodes.reduce<DefinicionNode[]>((acc, node) => {
+    const access = getEffectiveAccess(userId, userRole, node.id, fullTree, accessConfig);
+    if (access.level === 'none') return acc;
+
+    if (node.type === 'folder' && node.children) {
+      const filteredChildren = filterTreeByAccess(node.children, userId, userRole, fullTree, accessConfig);
+      acc.push({ ...node, children: filteredChildren });
+    } else {
       acc.push(node);
     }
     return acc;
   }, []);
 }
+
+// === Changelog helpers ===
 
 function logEntry(action: ChangelogAction, nodeId: string, nodeName: string, nodeType: 'folder' | 'document', details?: ChangelogEntry['details']): ChangelogEntry {
   return { id: crypto.randomUUID(), timestamp: new Date().toISOString(), action, nodeId, nodeName, nodeType, details };
@@ -208,6 +322,8 @@ function addToChangelog(changelog: ChangelogEntry[], entry: ChangelogEntry): Cha
   return [entry, ...changelog];
 }
 
+// === State & Reducer ===
+
 const initialState: DefinicionesState = {
   tree: mockDefiniciones,
   selectedId: null,
@@ -216,6 +332,7 @@ const initialState: DefinicionesState = {
   isEditing: false,
   sortBy: 'name-asc' as SortOption,
   changelog: [],
+  accessConfig: mockAccessConfig,
 };
 
 function reducer(state: DefinicionesState, action: DefinicionesAction): DefinicionesState {
@@ -279,6 +396,10 @@ function reducer(state: DefinicionesState, action: DefinicionesAction): Definici
         ...state,
         tree: addNodeToTree(state.tree, action.parentId, newFolder),
         expandedFolders: next,
+        accessConfig: {
+          ...state.accessConfig,
+          [newFolder.id]: getDefaultAccessConfig(newFolder.id),
+        },
         changelog: addToChangelog(state.changelog, logEntry('create', newFolder.id, action.name, 'folder', {
           parentName: parentFolder?.name ?? 'raíz',
         })),
@@ -304,6 +425,10 @@ function reducer(state: DefinicionesState, action: DefinicionesAction): Definici
         selectedId: newDoc.id,
         expandedFolders: next,
         isEditing: true,
+        accessConfig: {
+          ...state.accessConfig,
+          [newDoc.id]: getDefaultAccessConfig(newDoc.id),
+        },
         changelog: addToChangelog(state.changelog, logEntry('create', newDoc.id, action.name, 'document', {
           parentName: docParent?.name ?? 'raíz',
           newContent: newDoc.content,
@@ -348,10 +473,16 @@ function reducer(state: DefinicionesState, action: DefinicionesAction): Definici
 
     case 'DELETE_NODE': {
       const delNode = findNodeById(state.tree, action.id);
+      // Clean up accessConfig for the node and all its descendants
+      const idsToRemove = new Set(delNode ? collectAllNodeIds([delNode]) : [action.id]);
+      const cleanedAccess = Object.fromEntries(
+        Object.entries(state.accessConfig).filter(([k]) => !idsToRemove.has(k)),
+      );
       return {
         ...state,
         tree: deleteNodeFromTree(state.tree, action.id),
         selectedId: state.selectedId === action.id ? null : state.selectedId,
+        accessConfig: cleanedAccess,
         changelog: addToChangelog(state.changelog, logEntry('delete', action.id, delNode?.name ?? '', delNode?.type ?? 'document', {
           previousContent: delNode?.content,
         })),
@@ -401,16 +532,113 @@ function reducer(state: DefinicionesState, action: DefinicionesAction): Definici
     case 'COLLAPSE_ALL':
       return { ...state, expandedFolders: new Set() };
 
+    // === Access control actions ===
+
+    case 'SET_INHERITANCE': {
+      const inheritNode = findNodeById(state.tree, action.nodeId);
+      const existing = state.accessConfig[action.nodeId] ?? getDefaultAccessConfig(action.nodeId);
+      return {
+        ...state,
+        accessConfig: {
+          ...state.accessConfig,
+          [action.nodeId]: { ...existing, inheritFromParent: action.inherit },
+        },
+        changelog: addToChangelog(state.changelog, logEntry('access', action.nodeId, inheritNode?.name ?? '', inheritNode?.type ?? 'folder', {
+          accessChange: {
+            principalName: action.inherit ? 'Herencia activada' : 'Herencia desactivada',
+            principalType: 'role',
+          },
+        })),
+      };
+    }
+
+    case 'ADD_ACCESS': {
+      const accessNode = findNodeById(state.tree, action.entry.nodeId);
+      const existing = state.accessConfig[action.entry.nodeId] ?? getDefaultAccessConfig(action.entry.nodeId);
+      return {
+        ...state,
+        accessConfig: {
+          ...state.accessConfig,
+          [action.entry.nodeId]: {
+            ...existing,
+            entries: [...existing.entries, action.entry],
+          },
+        },
+        changelog: addToChangelog(state.changelog, logEntry('access', action.entry.nodeId, accessNode?.name ?? '', accessNode?.type ?? 'folder', {
+          accessChange: {
+            principalName: action.entry.principalId,
+            principalType: action.entry.principalType,
+            newLevel: action.entry.accessLevel,
+          },
+        })),
+      };
+    }
+
+    case 'UPDATE_ACCESS': {
+      const updateAccessNode = findNodeById(state.tree, action.nodeId);
+      const existingConfig = state.accessConfig[action.nodeId];
+      if (!existingConfig) return state;
+      const oldEntry = existingConfig.entries.find(e => e.id === action.entryId);
+      return {
+        ...state,
+        accessConfig: {
+          ...state.accessConfig,
+          [action.nodeId]: {
+            ...existingConfig,
+            entries: existingConfig.entries.map(e =>
+              e.id === action.entryId ? { ...e, accessLevel: action.accessLevel } : e,
+            ),
+          },
+        },
+        changelog: addToChangelog(state.changelog, logEntry('access', action.nodeId, updateAccessNode?.name ?? '', updateAccessNode?.type ?? 'folder', {
+          accessChange: {
+            principalName: oldEntry?.principalId ?? '',
+            principalType: oldEntry?.principalType ?? 'role',
+            oldLevel: oldEntry?.accessLevel,
+            newLevel: action.accessLevel,
+          },
+        })),
+      };
+    }
+
+    case 'REMOVE_ACCESS': {
+      const removeNode = findNodeById(state.tree, action.nodeId);
+      const removeConfig = state.accessConfig[action.nodeId];
+      if (!removeConfig) return state;
+      const removedEntry = removeConfig.entries.find(e => e.id === action.entryId);
+      return {
+        ...state,
+        accessConfig: {
+          ...state.accessConfig,
+          [action.nodeId]: {
+            ...removeConfig,
+            entries: removeConfig.entries.filter(e => e.id !== action.entryId),
+          },
+        },
+        changelog: addToChangelog(state.changelog, logEntry('access', action.nodeId, removeNode?.name ?? '', removeNode?.type ?? 'folder', {
+          accessChange: {
+            principalName: removedEntry?.principalId ?? '',
+            principalType: removedEntry?.principalType ?? 'role',
+            oldLevel: removedEntry?.accessLevel,
+          },
+        })),
+      };
+    }
+
     default:
       return state;
   }
 }
 
+// === Context ===
+
 interface DefinicionesContextValue {
   state: DefinicionesState;
   selectedNode: DefinicionNode | null;
   filteredTree: DefinicionNode[];
+  unfilteredTree: DefinicionNode[];
   changelog: ChangelogEntry[];
+  accessConfig: Record<string, NodeAccessConfig>;
   selectNode: (id: string | null) => void;
   toggleFolder: (id: string) => void;
   expandFolder: (id: string) => void;
@@ -427,6 +655,11 @@ interface DefinicionesContextValue {
   setSortBy: (sortBy: SortOption) => void;
   expandAll: () => void;
   collapseAll: () => void;
+  getEffectiveAccessForNode: (nodeId: string) => EffectiveAccess;
+  setInheritance: (nodeId: string, inherit: boolean) => void;
+  addAccess: (entry: AccessControlEntry) => void;
+  updateAccess: (entryId: string, nodeId: string, accessLevel: AccessLevel) => void;
+  removeAccess: (entryId: string, nodeId: string) => void;
 }
 
 const DefinicionesContext = createContext<DefinicionesContextValue | null>(null);
@@ -452,38 +685,134 @@ export function DefinicionesProvider({ children }: { children: ReactNode }) {
     return newState;
   }, initialState);
 
-  const selectedNode = useMemo(
-    () => (state.selectedId ? findNodeById(state.tree, state.selectedId) : null),
-    [state.tree, state.selectedId],
-  );
+  const selectedNode = useMemo(() => {
+    if (!state.selectedId) return null;
+    const node = findNodeById(state.tree, state.selectedId);
+    if (!node || !currentUser) return node;
+    // Block access to node content if user has no access
+    const access = getEffectiveAccess(currentUser.id, currentUser.role, node.id, state.tree, state.accessConfig);
+    if (access.level === 'none') return null;
+    return node;
+  }, [state.tree, state.selectedId, currentUser, state.accessConfig]);
 
-  const filteredTree = useMemo(
+  // Search + sort (full tree, no access filter)
+  const unfilteredTree = useMemo(
     () => sortTree(filterTree(state.tree, state.searchQuery), state.sortBy),
     [state.tree, state.searchQuery, state.sortBy],
   );
 
+  // Access-filtered tree: what the current user can see
+  const filteredTree = useMemo(
+    () => {
+      if (!currentUser) return unfilteredTree;
+      return filterTreeByAccess(unfilteredTree, currentUser.id, currentUser.role, state.tree, state.accessConfig);
+    },
+    [unfilteredTree, currentUser, state.tree, state.accessConfig],
+  );
+
+  const getEffectiveAccessForNode = useCallback(
+    (nodeId: string): EffectiveAccess => {
+      if (!currentUser) return { level: 'none', source: 'direct' };
+      return getEffectiveAccess(currentUser.id, currentUser.role, nodeId, state.tree, state.accessConfig);
+    },
+    [currentUser, state.tree, state.accessConfig],
+  );
+
+  // Access-level guard helpers
+  const requireEditor = useCallback((nodeId: string): boolean => {
+    const level = getEffectiveAccessForNode(nodeId).level;
+    return level === 'editor' || level === 'owner';
+  }, [getEffectiveAccessForNode]);
+
+  const requireOwner = useCallback((nodeId: string): boolean => {
+    return getEffectiveAccessForNode(nodeId).level === 'owner';
+  }, [getEffectiveAccessForNode]);
+
+  // Read-only actions (no access gate)
   const selectNode = useCallback((id: string | null) => dispatch({ type: 'SELECT_NODE', id }), []);
   const toggleFolder = useCallback((id: string) => dispatch({ type: 'TOGGLE_FOLDER', id }), []);
   const expandFolder = useCallback((id: string) => dispatch({ type: 'EXPAND_FOLDER', id }), []);
   const setSearch = useCallback((query: string) => dispatch({ type: 'SET_SEARCH', query }), []);
-  const toggleEditing = useCallback(() => dispatch({ type: 'TOGGLE_EDITING' }), []);
-  const updateContent = useCallback((id: string, content: string, previousContent?: string) => dispatch({ type: 'UPDATE_CONTENT', id, content, previousContent }), []);
-  const addFolder = useCallback((parentId: string | null, name: string) => dispatch({ type: 'ADD_FOLDER', parentId, name }), []);
-  const addDocument = useCallback((parentId: string, name: string) => dispatch({ type: 'ADD_DOCUMENT', parentId, name }), []);
-  const renameNode = useCallback((id: string, name: string) => dispatch({ type: 'RENAME_NODE', id, name }), []);
-  const updateTags = useCallback((id: string, tags: string[]) => dispatch({ type: 'UPDATE_TAGS', id, tags }), []);
-  const deleteNode = useCallback((id: string) => dispatch({ type: 'DELETE_NODE', id }), []);
-  const moveNode = useCallback((nodeId: string, newParentId: string | null) => dispatch({ type: 'MOVE_NODE', nodeId, newParentId }), []);
-  const reorderNode = useCallback((nodeId: string, targetSiblingId: string, position: 'before' | 'after') => dispatch({ type: 'REORDER_NODE', nodeId, targetSiblingId, position }), []);
   const setSortBy = useCallback((sortBy: SortOption) => dispatch({ type: 'SET_SORT', sortBy }), []);
   const expandAll = useCallback(() => dispatch({ type: 'EXPAND_ALL' }), []);
   const collapseAll = useCallback(() => dispatch({ type: 'COLLAPSE_ALL' }), []);
+
+  // Write actions (require editor+ access)
+  const toggleEditing = useCallback(() => dispatch({ type: 'TOGGLE_EDITING' }), []);
+  const updateContent = useCallback((id: string, content: string, previousContent?: string) => {
+    if (!requireEditor(id)) return;
+    dispatch({ type: 'UPDATE_CONTENT', id, content, previousContent });
+  }, [requireEditor]);
+  const addFolder = useCallback((parentId: string | null, name: string) => {
+    if (parentId && !requireEditor(parentId)) return;
+    dispatch({ type: 'ADD_FOLDER', parentId, name });
+  }, [requireEditor]);
+  const addDocument = useCallback((parentId: string, name: string) => {
+    if (!requireEditor(parentId)) return;
+    dispatch({ type: 'ADD_DOCUMENT', parentId, name });
+  }, [requireEditor]);
+  const renameNode = useCallback((id: string, name: string) => {
+    if (!requireEditor(id)) return;
+    dispatch({ type: 'RENAME_NODE', id, name });
+  }, [requireEditor]);
+  const updateTags = useCallback((id: string, tags: string[]) => {
+    if (!requireEditor(id)) return;
+    dispatch({ type: 'UPDATE_TAGS', id, tags });
+  }, [requireEditor]);
+  const deleteNode = useCallback((id: string) => {
+    if (!requireOwner(id)) return;
+    dispatch({ type: 'DELETE_NODE', id });
+  }, [requireOwner]);
+  const moveNode = useCallback((nodeId: string, newParentId: string | null) => {
+    if (!requireEditor(nodeId)) return;
+    dispatch({ type: 'MOVE_NODE', nodeId, newParentId });
+  }, [requireEditor]);
+  const reorderNode = useCallback((nodeId: string, targetSiblingId: string, position: 'before' | 'after') => {
+    if (!requireEditor(nodeId)) return;
+    dispatch({ type: 'REORDER_NODE', nodeId, targetSiblingId, position });
+  }, [requireEditor]);
+
+  // ACL actions (require owner access on target node)
+  const setInheritance = useCallback((nodeId: string, inherit: boolean) => {
+    if (!requireOwner(nodeId)) return;
+    dispatch({ type: 'SET_INHERITANCE', nodeId, inherit });
+  }, [requireOwner]);
+  const addAccess = useCallback((entry: AccessControlEntry) => {
+    if (!requireOwner(entry.nodeId)) return;
+    // Enforce restrictive inheritance: new level ≤ parent's level for the TARGET principal
+    const principalUserId = entry.principalType === 'user' ? entry.principalId : '';
+    const principalRole = entry.principalType === 'role' ? entry.principalId as UserRole : UserRole.Viewer;
+    const parentLevel = getParentEffectiveLevel(
+      entry.nodeId, principalUserId, principalRole, state.tree, state.accessConfig,
+    );
+    if (ACCESS_LEVEL_HIERARCHY[entry.accessLevel] > ACCESS_LEVEL_HIERARCHY[parentLevel]) return;
+    dispatch({ type: 'ADD_ACCESS', entry });
+  }, [requireOwner, state.tree, state.accessConfig]);
+  const updateAccess = useCallback((entryId: string, nodeId: string, accessLevel: AccessLevel) => {
+    if (!requireOwner(nodeId)) return;
+    // Enforce restrictive inheritance: find the entry's principal and check against parent
+    const config = state.accessConfig[nodeId];
+    const entry = config?.entries.find(e => e.id === entryId);
+    const principalUserId = entry?.principalType === 'user' ? entry.principalId : '';
+    const principalRole = entry?.principalType === 'role' ? entry.principalId as UserRole : UserRole.Viewer;
+    const parentLevel = getParentEffectiveLevel(
+      nodeId, principalUserId, principalRole, state.tree, state.accessConfig,
+    );
+    if (ACCESS_LEVEL_HIERARCHY[accessLevel] > ACCESS_LEVEL_HIERARCHY[parentLevel]) return;
+    dispatch({ type: 'UPDATE_ACCESS', entryId, nodeId, accessLevel });
+  }, [requireOwner, state.tree, state.accessConfig]);
+  const removeAccess = useCallback((entryId: string, nodeId: string) => {
+    if (!requireOwner(nodeId)) return;
+    dispatch({ type: 'REMOVE_ACCESS', entryId, nodeId });
+  }, [requireOwner]);
 
   const value = useMemo<DefinicionesContextValue>(() => ({
     state,
     selectedNode,
     filteredTree,
+    unfilteredTree,
     changelog: state.changelog,
+    accessConfig: state.accessConfig,
     selectNode,
     toggleFolder,
     expandFolder,
@@ -500,7 +829,12 @@ export function DefinicionesProvider({ children }: { children: ReactNode }) {
     setSortBy,
     expandAll,
     collapseAll,
-  }), [state, selectedNode, filteredTree, selectNode, toggleFolder, expandFolder, setSearch, toggleEditing, updateContent, addFolder, addDocument, renameNode, updateTags, deleteNode, moveNode, reorderNode, setSortBy, expandAll, collapseAll]);
+    getEffectiveAccessForNode,
+    setInheritance,
+    addAccess,
+    updateAccess,
+    removeAccess,
+  }), [state, selectedNode, filteredTree, unfilteredTree, selectNode, toggleFolder, expandFolder, setSearch, toggleEditing, updateContent, addFolder, addDocument, renameNode, updateTags, deleteNode, moveNode, reorderNode, setSortBy, expandAll, collapseAll, getEffectiveAccessForNode, setInheritance, addAccess, updateAccess, removeAccess]);
 
   return (
     <DefinicionesContext.Provider value={value}>

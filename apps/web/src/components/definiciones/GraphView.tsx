@@ -121,7 +121,7 @@ export function GraphView({ showForceControls = false, onNavigateToNode }: { sho
   const simulationRef = useRef<d3.Simulation<GraphNode, GraphLink> | null>(null);
   const dimensionsRef = useRef({ width: 800, height: 600 });
   const forcesRef = useRef<ForceSettings>(DEFAULT_FORCES);
-  const { state, selectNode } = useDefiniciones();
+  const { state, selectNode, filteredTree } = useDefiniciones();
   const [hoveredNode, setHoveredNode] = useState<string | null>(null);
   const [focusedNodeId, setFocusedNodeId] = useState<string | null>(null);
   const [dimensions, setDimensions] = useState({ width: 800, height: 600 });
@@ -130,7 +130,7 @@ export function GraphView({ showForceControls = false, onNavigateToNode }: { sho
   dimensionsRef.current = dimensions;
   forcesRef.current = forces;
 
-  const allGraphData = useMemo(() => extractGraphData(state.tree), [state.tree]);
+  const allGraphData = useMemo(() => extractGraphData(filteredTree), [filteredTree]);
 
   // Filter to local graph when a node is focused
   const { nodes, links } = useMemo(() => {
