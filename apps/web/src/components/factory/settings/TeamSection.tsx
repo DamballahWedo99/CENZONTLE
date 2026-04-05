@@ -203,14 +203,25 @@ export function TeamSection() {
   return (
     <>
       {/* Page header */}
-      <div className="space-y-1">
-        <h1 className="text-2xl font-semibold tracking-tight flex items-center gap-2">
-          <Users className="h-6 w-6" />
-          Gestion de Equipo
-        </h1>
-        <p className="text-sm text-muted-foreground">
-          Administra los miembros del equipo, roles y permisos de acceso.
-        </p>
+      <div className="flex items-start justify-between">
+        <div className="space-y-1">
+          <h1 className="text-2xl font-semibold tracking-tight flex items-center gap-2">
+            <Users className="h-6 w-6" />
+            Gestion de Equipo
+          </h1>
+          <p className="text-sm text-muted-foreground">
+            Administra los miembros del equipo, roles y permisos de acceso.
+          </p>
+        </div>
+        {canManageUsers && (
+          <Button
+            size="sm"
+            className="gap-2"
+            onClick={() => document.getElementById('invite-form')?.scrollIntoView({ behavior: 'smooth' })}
+          >
+            <UserPlus className="h-3.5 w-3.5" /> Agregar usuario
+          </Button>
+        )}
       </div>
 
       {/* Stats bar */}
@@ -389,7 +400,7 @@ export function TeamSection() {
 
       {/* Invitar nuevo miembro (debajo de la tabla) */}
       {canManageUsers && (
-        <div className="p-4 rounded-lg border bg-muted/30 space-y-3 mt-4">
+        <div id="invite-form" className="p-4 rounded-lg border bg-muted/30 space-y-3 mt-4">
           <h4 className="text-sm font-medium flex items-center gap-2">
             <UserPlus className="h-4 w-4" />
             Invitar nuevo miembro

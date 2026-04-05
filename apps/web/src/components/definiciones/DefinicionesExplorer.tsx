@@ -1,11 +1,21 @@
 'use client';
 
 import React, { useState, useCallback } from 'react';
-import { Search, Network, List, BookMarked, SlidersHorizontal, History, Shield } from 'lucide-react';
+import { useRouter } from 'next/navigation';
+import { Search, Network, List, BookMarked, SlidersHorizontal, History, Shield, ChevronDown, Plus } from 'lucide-react';
 import { useDefiniciones } from '@/context/DefinicionesContext';
 import { useAuthContext } from '@/context/AuthContext';
 import { DefinicionNode } from '@/types/definiciones';
 import { Permission } from '@cenzontle/shared';
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuRadioGroup,
+  DropdownMenuRadioItem,
+  DropdownMenuItem,
+  DropdownMenuSeparator,
+  DropdownMenuTrigger,
+} from '@/components/ui/dropdown-menu';
 import { FolderTree } from './FolderTree';
 import { DocumentViewer } from './DocumentViewer';
 import { GraphView } from './GraphView';
@@ -18,8 +28,10 @@ import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/comp
 type ViewMode = 'tree' | 'graph' | 'changelog' | 'access';
 
 export function DefinicionesExplorer() {
-  const { state, setSearch, selectNode, expandFolder } = useDefiniciones();
+  const { state, setSearch, selectNode, expandFolder, vaults, activeVaultId, setActiveVault } = useDefiniciones();
   const { hasPermission } = useAuthContext();
+  const router = useRouter();
+  const activeVault = vaults.find(v => v.id === activeVaultId);
 
   const navigateToNode = useCallback((nodeId: string) => {
     // Find and expand all ancestor folders so the node is visible in the tree
@@ -52,7 +64,7 @@ export function DefinicionesExplorer() {
             <BookMarked className="h-5 w-5 text-primary" />
           </div>
           <div>
-            <h1 className="text-xl font-bold">Definiciones de Negocio</h1>
+            <h1 className="text-xl font-bold">Vault de Definiciones</h1>
             <p className="text-sm text-muted-foreground">
               {countDocuments(state.tree)} documentos en el vault
             </p>
@@ -79,6 +91,27 @@ export function DefinicionesExplorer() {
               </div>
             </div>
           )}
+          <DropdownMenu>
+            <DropdownMenuTrigger asChild>
+              <button className="flex items-center gap-1.5 h-8 px-3 text-xs font-medium rounded-md border border-border/50 bg-muted/50 hover:bg-muted transition-colors">
+                {activeVault?.name ?? 'Vault'}
+                <ChevronDown className="h-3 w-3 text-muted-foreground" />
+              </button>
+            </DropdownMenuTrigger>
+            <DropdownMenuContent align="end">
+              <DropdownMenuRadioGroup value={activeVaultId} onValueChange={setActiveVault}>
+                {vaults.map(v => (
+                  <DropdownMenuRadioItem key={v.id} value={v.id}>
+                    {v.name}
+                  </DropdownMenuRadioItem>
+                ))}
+              </DropdownMenuRadioGroup>
+              <DropdownMenuSeparator />
+              <DropdownMenuItem className="gap-2 text-xs" onSelect={() => router.push('/factory/settings?section=obsidian')}>
+                <Plus className="h-3 w-3" /> Agregar vault
+              </DropdownMenuItem>
+            </DropdownMenuContent>
+          </DropdownMenu>
           <TooltipProvider>
           <div className="flex items-center gap-2">
             {viewMode === 'graph' && (

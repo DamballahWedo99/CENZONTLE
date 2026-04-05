@@ -39,6 +39,7 @@ export function AccessPanel({ node, parentNode }: AccessPanelProps) {
   const {
     state,
     accessConfig,
+    roleDefaults,
     getEffectiveAccessForNode,
     setInheritance,
     addAccess,
@@ -93,7 +94,7 @@ export function AccessPanel({ node, parentNode }: AccessPanelProps) {
 
   function getRoleLevel(role: UserRole): AccessLevel {
     const entry = roleEntries.find(e => e.principalId === role);
-    return entry?.accessLevel ?? 'viewer';
+    return entry?.accessLevel ?? roleDefaults[role];
   }
 
   function getUserLevel(userId: string): AccessLevel | null {
@@ -214,8 +215,8 @@ export function AccessPanel({ node, parentNode }: AccessPanelProps) {
         </div>
       )}
 
-      {/* === PERMISSION MATRIX === */}
-      <div className="space-y-2">
+      {/* === PERMISSION MATRIX (only when not inheriting, or root) === */}
+      {(isRoot || !inheritFromParent) && <div className="space-y-2">
         <div className="rounded-xl border border-border/70 overflow-hidden bg-card">
           {/* Column headers */}
           <div className="grid grid-cols-[1fr_repeat(4,56px)] border-b border-border/50 bg-muted/30">
@@ -386,7 +387,7 @@ export function AccessPanel({ node, parentNode }: AccessPanelProps) {
             )}
           </div>
         </div>
-      </div>
+      </div>}
 
       {/* Effective access preview */}
       <div className="space-y-2">

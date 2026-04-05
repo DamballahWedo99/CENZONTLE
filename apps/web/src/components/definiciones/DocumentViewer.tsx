@@ -12,6 +12,7 @@ import { Table as TiptapTable } from '@tiptap/extension-table';
 import TableRow from '@tiptap/extension-table-row';
 import TableCell from '@tiptap/extension-table-cell';
 import TableHeader from '@tiptap/extension-table-header';
+import TiptapLink from '@tiptap/extension-link';
 import {
   Pencil, Save, Tag, Clock, BookOpen, Folder, FileText, X, Plus,
   Bold, Italic, Strikethrough, Heading1, Heading2, Heading3,
@@ -338,6 +339,10 @@ const TIPTAP_EXTENSIONS = [
   TaskList,
   TaskItem.configure({ nested: true }),
   TiptapImage,
+  TiptapLink.configure({
+    openOnClick: false,
+    HTMLAttributes: { class: 'text-primary underline underline-offset-2 cursor-pointer hover:text-primary/80' },
+  }),
   TiptapTable.configure({ resizable: false }),
   TableRow,
   TableCell,
@@ -363,6 +368,10 @@ function ReadOnlyViewer({ content, onContentChange }: { content: string; onConte
       onReadOnlyChecked: () => true,
     }),
     TiptapImage,
+    TiptapLink.configure({
+      openOnClick: true,
+      HTMLAttributes: { class: 'text-primary underline underline-offset-2 cursor-pointer hover:text-primary/80', target: '_blank', rel: 'noopener noreferrer' },
+    }),
     TiptapTable.configure({ resizable: false }),
     TableRow,
     TableCell,

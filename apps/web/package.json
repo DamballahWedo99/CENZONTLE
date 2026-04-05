@@ -28,6 +28,7 @@
     "@radix-ui/react-tooltip": "^1.2.8",
     "@tiptap/extension-highlight": "^3.22.0",
     "@tiptap/extension-image": "^3.22.0",
+    "@tiptap/extension-link": "^3.22.1",
     "@tiptap/extension-table": "^3.22.0",
     "@tiptap/extension-table-cell": "^3.22.0",
     "@tiptap/extension-table-header": "^3.22.0",

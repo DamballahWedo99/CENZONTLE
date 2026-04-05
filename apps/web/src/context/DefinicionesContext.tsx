@@ -13,6 +13,7 @@ import {
   DEFAULT_ROLE_ACCESS,
   PrincipalType,
   UserRole,
+  VaultConfig,
 } from '@cenzontle/shared';
 
 export type SortOption = 'name-asc' | 'name-desc' | 'created-newest' | 'created-oldest' | 'updated-newest' | 'updated-oldest';
@@ -55,6 +56,9 @@ interface DefinicionesState {
   sortBy: SortOption;
   changelog: ChangelogEntry[];
   accessConfig: Record<string, NodeAccessConfig>;
+  roleDefaults: Record<UserRole, AccessLevel>;
+  vaults: VaultConfig[];
+  activeVaultId: string;
 }
 
 type DefinicionesAction =
@@ -77,7 +81,12 @@ type DefinicionesAction =
   | { type: 'SET_INHERITANCE'; nodeId: string; inherit: boolean }
   | { type: 'ADD_ACCESS'; entry: AccessControlEntry }
   | { type: 'UPDATE_ACCESS'; entryId: string; nodeId: string; accessLevel: AccessLevel }
-  | { type: 'REMOVE_ACCESS'; entryId: string; nodeId: string };
+  | { type: 'REMOVE_ACCESS'; entryId: string; nodeId: string }
+  | { type: 'SET_ROLE_DEFAULT'; role: UserRole; level: AccessLevel }
+  | { type: 'ADD_VAULT'; vault: VaultConfig }
+  | { type: 'UPDATE_VAULT'; vault: VaultConfig }
+  | { type: 'REMOVE_VAULT'; vaultId: string }
+  | { type: 'SET_ACTIVE_VAULT'; vaultId: string };
 
 // === Tree helpers ===
 
@@ -237,6 +246,7 @@ export function getEffectiveAccess(
   nodeId: string,
   fullTree: DefinicionNode[],
   accessConfig: Record<string, NodeAccessConfig>,
+  roleDefaults: Record<UserRole, AccessLevel> = DEFAULT_ROLE_ACCESS,
 ): EffectiveAccess {
   const config = accessConfig[nodeId];
 
@@ -253,11 +263,10 @@ export function getEffectiveAccess(
     if (config.inheritFromParent) {
       const parentId = findParentId(fullTree, nodeId);
       if (parentId) {
-        const parentAccess = getEffectiveAccess(userId, userRole, parentId, fullTree, accessConfig);
+        const parentAccess = getEffectiveAccess(userId, userRole, parentId, fullTree, accessConfig, roleDefaults);
         return { ...parentAccess, source: 'inherited', sourceNodeId: parentAccess.sourceNodeId ?? parentId };
       }
-      // Root node that inherits but has no parent → role defaults
-      return { level: DEFAULT_ROLE_ACCESS[userRole], source: 'role' };
+      return { level: roleDefaults[userRole], source: 'role' };
     }
 
     // Has config, no matching entry, inheritance disabled → deny
@@ -267,10 +276,10 @@ export function getEffectiveAccess(
   // No config at all → inherit from parent, or use role defaults for root
   const parentId = findParentId(fullTree, nodeId);
   if (parentId) {
-    const parentAccess = getEffectiveAccess(userId, userRole, parentId, fullTree, accessConfig);
+    const parentAccess = getEffectiveAccess(userId, userRole, parentId, fullTree, accessConfig, roleDefaults);
     return { ...parentAccess, source: 'inherited', sourceNodeId: parentAccess.sourceNodeId ?? parentId };
   }
-  return { level: DEFAULT_ROLE_ACCESS[userRole], source: 'role' };
+  return { level: roleDefaults[userRole], source: 'role' };
 }
 
 export function getParentEffectiveLevel(
@@ -279,10 +288,11 @@ export function getParentEffectiveLevel(
   userRole: UserRole,
   fullTree: DefinicionNode[],
   accessConfig: Record<string, NodeAccessConfig>,
+  roleDefaults: Record<UserRole, AccessLevel> = DEFAULT_ROLE_ACCESS,
 ): AccessLevel {
   const parentId = findParentId(fullTree, nodeId);
   if (!parentId) return 'owner'; // root folders can have any level
-  return getEffectiveAccess(userId, userRole, parentId, fullTree, accessConfig).level;
+  return getEffectiveAccess(userId, userRole, parentId, fullTree, accessConfig, roleDefaults).level;
 }
 
 function filterTreeByAccess(
@@ -291,13 +301,14 @@ function filterTreeByAccess(
   userRole: UserRole,
   fullTree: DefinicionNode[],
   accessConfig: Record<string, NodeAccessConfig>,
+  roleDefaults: Record<UserRole, AccessLevel>,
 ): DefinicionNode[] {
   return nodes.reduce<DefinicionNode[]>((acc, node) => {
-    const access = getEffectiveAccess(userId, userRole, node.id, fullTree, accessConfig);
+    const access = getEffectiveAccess(userId, userRole, node.id, fullTree, accessConfig, roleDefaults);
     if (access.level === 'none') return acc;
 
     if (node.type === 'folder' && node.children) {
-      const filteredChildren = filterTreeByAccess(node.children, userId, userRole, fullTree, accessConfig);
+      const filteredChildren = filterTreeByAccess(node.children, userId, userRole, fullTree, accessConfig, roleDefaults);
       acc.push({ ...node, children: filteredChildren });
     } else {
       acc.push(node);
@@ -324,15 +335,24 @@ function addToChangelog(changelog: ChangelogEntry[], entry: ChangelogEntry): Cha
 
 // === State & Reducer ===
 
+const defaultVaults: VaultConfig[] = [
+  { id: 'vault-negocio', name: 'Negocio', host: '127.0.0.1', port: '27124', protocol: 'https', apiKey: '', vaultPath: '', status: 'disconnected', allowedPodIds: ['pod-1', 'pod-2', 'pod-3'], createdAt: '2026-01-15T10:00:00Z' },
+  { id: 'vault-tecnico', name: 'Técnico', host: '127.0.0.1', port: '27125', protocol: 'https', apiKey: '', vaultPath: '', status: 'disconnected', allowedPodIds: ['pod-4'], createdAt: '2026-02-01T10:00:00Z' },
+  { id: 'vault-operaciones', name: 'Operaciones', host: '127.0.0.1', port: '27126', protocol: 'https', apiKey: '', vaultPath: '', status: 'disconnected', allowedPodIds: ['pod-5'], createdAt: '2026-02-15T10:00:00Z' },
+];
+
 const initialState: DefinicionesState = {
   tree: mockDefiniciones,
   selectedId: null,
   expandedFolders: new Set<string>(),
+  roleDefaults: { ...DEFAULT_ROLE_ACCESS },
   searchQuery: '',
   isEditing: false,
   sortBy: 'name-asc' as SortOption,
   changelog: [],
   accessConfig: mockAccessConfig,
+  vaults: defaultVaults,
+  activeVaultId: 'vault-negocio',
 };
 
 function reducer(state: DefinicionesState, action: DefinicionesAction): DefinicionesState {
@@ -625,6 +645,29 @@ function reducer(state: DefinicionesState, action: DefinicionesAction): Definici
       };
     }
 
+    case 'SET_ROLE_DEFAULT':
+      return {
+        ...state,
+        roleDefaults: { ...state.roleDefaults, [action.role]: action.level },
+      };
+
+    case 'ADD_VAULT':
+      return { ...state, vaults: [...state.vaults, action.vault] };
+
+    case 'UPDATE_VAULT':
+      return { ...state, vaults: state.vaults.map(v => v.id === action.vault.id ? action.vault : v) };
+
+    case 'REMOVE_VAULT': {
+      const nextVaults = state.vaults.filter(v => v.id !== action.vaultId);
+      const nextActiveId = state.activeVaultId === action.vaultId
+        ? (nextVaults[0]?.id ?? '')
+        : state.activeVaultId;
+      return { ...state, vaults: nextVaults, activeVaultId: nextActiveId };
+    }
+
+    case 'SET_ACTIVE_VAULT':
+      return { ...state, activeVaultId: action.vaultId };
+
     default:
       return state;
   }
@@ -660,12 +703,20 @@ interface DefinicionesContextValue {
   addAccess: (entry: AccessControlEntry) => void;
   updateAccess: (entryId: string, nodeId: string, accessLevel: AccessLevel) => void;
   removeAccess: (entryId: string, nodeId: string) => void;
+  roleDefaults: Record<UserRole, AccessLevel>;
+  setRoleDefault: (role: UserRole, level: AccessLevel) => void;
+  vaults: VaultConfig[];
+  activeVaultId: string;
+  addVault: (vault: VaultConfig) => void;
+  updateVault: (vault: VaultConfig) => void;
+  removeVault: (vaultId: string) => void;
+  setActiveVault: (vaultId: string) => void;
 }
 
 const DefinicionesContext = createContext<DefinicionesContextValue | null>(null);
 
 export function DefinicionesProvider({ children }: { children: ReactNode }) {
-  const { currentUser } = useAuthContext();
+  const { currentUser, members } = useAuthContext();
   const currentUserRef = useRef(currentUser);
   currentUserRef.current = currentUser;
 
@@ -690,10 +741,10 @@ export function DefinicionesProvider({ children }: { children: ReactNode }) {
     const node = findNodeById(state.tree, state.selectedId);
     if (!node || !currentUser) return node;
     // Block access to node content if user has no access
-    const access = getEffectiveAccess(currentUser.id, currentUser.role, node.id, state.tree, state.accessConfig);
+    const access = getEffectiveAccess(currentUser.id, currentUser.role, node.id, state.tree, state.accessConfig, state.roleDefaults);
     if (access.level === 'none') return null;
     return node;
-  }, [state.tree, state.selectedId, currentUser, state.accessConfig]);
+  }, [state.tree, state.selectedId, currentUser, state.accessConfig, state.roleDefaults]);
 
   // Search + sort (full tree, no access filter)
   const unfilteredTree = useMemo(
@@ -705,17 +756,17 @@ export function DefinicionesProvider({ children }: { children: ReactNode }) {
   const filteredTree = useMemo(
     () => {
       if (!currentUser) return unfilteredTree;
-      return filterTreeByAccess(unfilteredTree, currentUser.id, currentUser.role, state.tree, state.accessConfig);
+      return filterTreeByAccess(unfilteredTree, currentUser.id, currentUser.role, state.tree, state.accessConfig, state.roleDefaults);
     },
-    [unfilteredTree, currentUser, state.tree, state.accessConfig],
+    [unfilteredTree, currentUser, state.tree, state.accessConfig, state.roleDefaults],
   );
 
   const getEffectiveAccessForNode = useCallback(
     (nodeId: string): EffectiveAccess => {
       if (!currentUser) return { level: 'none', source: 'direct' };
-      return getEffectiveAccess(currentUser.id, currentUser.role, nodeId, state.tree, state.accessConfig);
+      return getEffectiveAccess(currentUser.id, currentUser.role, nodeId, state.tree, state.accessConfig, state.roleDefaults);
     },
-    [currentUser, state.tree, state.accessConfig],
+    [currentUser, state.tree, state.accessConfig, state.roleDefaults],
   );
 
   // Access-level guard helpers
@@ -772,39 +823,53 @@ export function DefinicionesProvider({ children }: { children: ReactNode }) {
     dispatch({ type: 'REORDER_NODE', nodeId, targetSiblingId, position });
   }, [requireEditor]);
 
-  // ACL actions (require owner access on target node)
+  // ACL actions
   const setInheritance = useCallback((nodeId: string, inherit: boolean) => {
-    if (!requireOwner(nodeId)) return;
+    // Check owner on PARENT (not the node itself) to avoid catch-22:
+    // turning off inheritance removes access → can't turn it back on
+    const parentId = findParentId(state.tree, nodeId);
+    if (parentId && !requireOwner(parentId)) return;
     dispatch({ type: 'SET_INHERITANCE', nodeId, inherit });
-  }, [requireOwner]);
+  }, [requireOwner, state.tree]);
+  const resolveRole = useCallback((principalType: 'user' | 'role', principalId: string): UserRole => {
+    if (principalType === 'role') return principalId as UserRole;
+    const member = members.find(m => m.id === principalId);
+    return member?.role ?? UserRole.Viewer;
+  }, [members]);
+
   const addAccess = useCallback((entry: AccessControlEntry) => {
     if (!requireOwner(entry.nodeId)) return;
     // Enforce restrictive inheritance: new level ≤ parent's level for the TARGET principal
     const principalUserId = entry.principalType === 'user' ? entry.principalId : '';
-    const principalRole = entry.principalType === 'role' ? entry.principalId as UserRole : UserRole.Viewer;
+    const principalRole = resolveRole(entry.principalType, entry.principalId);
     const parentLevel = getParentEffectiveLevel(
       entry.nodeId, principalUserId, principalRole, state.tree, state.accessConfig,
     );
     if (ACCESS_LEVEL_HIERARCHY[entry.accessLevel] > ACCESS_LEVEL_HIERARCHY[parentLevel]) return;
     dispatch({ type: 'ADD_ACCESS', entry });
-  }, [requireOwner, state.tree, state.accessConfig]);
+  }, [requireOwner, resolveRole, state.tree, state.accessConfig]);
   const updateAccess = useCallback((entryId: string, nodeId: string, accessLevel: AccessLevel) => {
     if (!requireOwner(nodeId)) return;
     // Enforce restrictive inheritance: find the entry's principal and check against parent
     const config = state.accessConfig[nodeId];
     const entry = config?.entries.find(e => e.id === entryId);
     const principalUserId = entry?.principalType === 'user' ? entry.principalId : '';
-    const principalRole = entry?.principalType === 'role' ? entry.principalId as UserRole : UserRole.Viewer;
+    const principalRole = resolveRole(entry?.principalType ?? 'role', entry?.principalId ?? '');
     const parentLevel = getParentEffectiveLevel(
       nodeId, principalUserId, principalRole, state.tree, state.accessConfig,
     );
     if (ACCESS_LEVEL_HIERARCHY[accessLevel] > ACCESS_LEVEL_HIERARCHY[parentLevel]) return;
     dispatch({ type: 'UPDATE_ACCESS', entryId, nodeId, accessLevel });
-  }, [requireOwner, state.tree, state.accessConfig]);
+  }, [requireOwner, resolveRole, state.tree, state.accessConfig]);
   const removeAccess = useCallback((entryId: string, nodeId: string) => {
     if (!requireOwner(nodeId)) return;
     dispatch({ type: 'REMOVE_ACCESS', entryId, nodeId });
   }, [requireOwner]);
+  const setRoleDefault = useCallback((role: UserRole, level: AccessLevel) => dispatch({ type: 'SET_ROLE_DEFAULT', role, level }), []);
+  const addVault = useCallback((vault: VaultConfig) => dispatch({ type: 'ADD_VAULT', vault }), []);
+  const updateVault = useCallback((vault: VaultConfig) => dispatch({ type: 'UPDATE_VAULT', vault }), []);
+  const removeVault = useCallback((vaultId: string) => dispatch({ type: 'REMOVE_VAULT', vaultId }), []);
+  const setActiveVault = useCallback((vaultId: string) => dispatch({ type: 'SET_ACTIVE_VAULT', vaultId }), []);
 
   const value = useMemo<DefinicionesContextValue>(() => ({
     state,
@@ -813,6 +878,9 @@ export function DefinicionesProvider({ children }: { children: ReactNode }) {
     unfilteredTree,
     changelog: state.changelog,
     accessConfig: state.accessConfig,
+    roleDefaults: state.roleDefaults,
+    vaults: state.vaults,
+    activeVaultId: state.activeVaultId,
     selectNode,
     toggleFolder,
     expandFolder,
@@ -834,7 +902,12 @@ export function DefinicionesProvider({ children }: { children: ReactNode }) {
     addAccess,
     updateAccess,
     removeAccess,
-  }), [state, selectedNode, filteredTree, unfilteredTree, selectNode, toggleFolder, expandFolder, setSearch, toggleEditing, updateContent, addFolder, addDocument, renameNode, updateTags, deleteNode, moveNode, reorderNode, setSortBy, expandAll, collapseAll, getEffectiveAccessForNode, setInheritance, addAccess, updateAccess, removeAccess]);
+    setRoleDefault,
+    addVault,
+    updateVault,
+    removeVault,
+    setActiveVault,
+  }), [state, selectedNode, filteredTree, unfilteredTree, selectNode, toggleFolder, expandFolder, setSearch, toggleEditing, updateContent, addFolder, addDocument, renameNode, updateTags, deleteNode, moveNode, reorderNode, setSortBy, expandAll, collapseAll, getEffectiveAccessForNode, setInheritance, addAccess, updateAccess, removeAccess, setRoleDefault, addVault, updateVault, removeVault, setActiveVault]);
 
   return (
     <DefinicionesContext.Provider value={value}>

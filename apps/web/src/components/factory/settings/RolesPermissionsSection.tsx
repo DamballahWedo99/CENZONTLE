@@ -22,6 +22,7 @@ import {
   Bug,
   Eye,
   Info,
+  BookMarked,
 } from 'lucide-react';
 import { useAuthContext } from '@/context/AuthContext';
 import {
@@ -32,7 +33,18 @@ import {
   PERMISSION_LABELS,
   PERMISSION_CATEGORIES,
   DEFAULT_ROLE_PERMISSIONS,
+  AccessLevel,
+  ACCESS_LEVEL_LABELS,
+  ACCESS_LEVEL_COLORS,
 } from '@cenzontle/shared';
+import { useDefiniciones, DefinicionesProvider } from '@/context/DefinicionesContext';
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from '@/components/ui/select';
 
 const ROLE_ICONS: Record<UserRole, React.ReactNode> = {
   [UserRole.AltaGerencia]: <Crown className="h-3.5 w-3.5" />,
@@ -229,35 +241,80 @@ export function RolesPermissionsSection() {
         </div>
       </div>
 
-      {/* Summary per role */}
-      <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-5 gap-3">
-        {ALL_ROLES.map((role) => {
-          const total = Object.values(Permission).length;
-          const enabled = rolePermissions[role].length;
-          const pct = Math.round((enabled / total) * 100);
-          return (
-            <div
-              key={role}
-              className="p-3 rounded-lg border bg-card"
-              style={{ borderLeftWidth: 3, borderLeftColor: USER_ROLE_COLORS[role] }}
-            >
-              <div className="text-xs font-medium text-foreground">{USER_ROLE_LABELS[role]}</div>
-              <div className="text-lg font-semibold mt-1" style={{ color: USER_ROLE_COLORS[role] }}>
-                {enabled}/{total}
-              </div>
-              <div className="mt-1.5 h-1.5 rounded-full bg-muted overflow-hidden">
-                <div
-                  className="h-full rounded-full transition-all duration-300"
-                  style={{
-                    width: `${pct}%`,
-                    backgroundColor: USER_ROLE_COLORS[role],
-                  }}
-                />
-              </div>
-              <div className="text-[10px] text-muted-foreground mt-1">{pct}% de permisos</div>
-            </div>
-          );
-        })}
+      {/* Vault access defaults */}
+      <DefinicionesProvider>
+        <VaultAccessDefaults canManage={canManage} />
+      </DefinicionesProvider>
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Vault access defaults section
+// ---------------------------------------------------------------------------
+
+const VAULT_LEVELS: AccessLevel[] = ['owner', 'editor', 'viewer', 'none'];
+const VAULT_ROLES = Object.values(UserRole).filter(r => r !== UserRole.AltaGerencia);
+
+function VaultAccessDefaults({ canManage }: { canManage: boolean }) {
+  const { roleDefaults, setRoleDefault } = useDefiniciones();
+
+  return (
+    <div className="space-y-4">
+      <div>
+        <h3 className="text-sm font-semibold flex items-center gap-2">
+          <BookMarked className="h-4 w-4 text-muted-foreground" />
+          Acceso por Defecto al Vault
+        </h3>
+        <p className="text-xs text-muted-foreground mt-1">
+          Nivel de acceso que cada rol tiene sobre carpetas y documentos cuando no hay permisos explícitos configurados.
+        </p>
+      </div>
+
+      <div className="rounded-lg border overflow-hidden bg-card">
+        <table className="w-full">
+          <thead>
+            <tr className="border-b bg-muted/30">
+              <th className="text-left px-4 py-2.5 text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">Rol</th>
+              <th className="text-left px-4 py-2.5 text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">Nivel por defecto</th>
+            </tr>
+          </thead>
+          <tbody className="divide-y divide-border/50">
+            {VAULT_ROLES.map(role => {
+              const current = roleDefaults[role];
+              return (
+                <tr key={role} className="hover:bg-muted/10 transition-colors">
+                  <td className="px-4 py-2.5">
+                    <div className="flex items-center gap-2.5">
+                      <span className="w-2.5 h-2.5 rounded-full" style={{ backgroundColor: USER_ROLE_COLORS[role] }} />
+                      <span className="text-xs font-medium">{USER_ROLE_LABELS[role]}</span>
+                    </div>
+                  </td>
+                  <td className="px-4 py-2.5">
+                    <Select
+                      value={current}
+                      onValueChange={v => setRoleDefault(role, v as AccessLevel)}
+                      disabled={!canManage}
+                    >
+                      <SelectTrigger size="sm" className="w-[140px] h-7 text-xs" style={{ color: ACCESS_LEVEL_COLORS[current] }}>
+                        <SelectValue />
+                      </SelectTrigger>
+                      <SelectContent position="popper" align="start">
+                        {VAULT_LEVELS.map(level => (
+                          <SelectItem key={level} value={level}>
+                            <span style={{ color: ACCESS_LEVEL_COLORS[level] }}>
+                              {ACCESS_LEVEL_LABELS[level]}
+                            </span>
+                          </SelectItem>
+                        ))}
+                      </SelectContent>
+                    </Select>
+                  </td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
       </div>
     </div>
   );

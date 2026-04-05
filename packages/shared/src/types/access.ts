@@ -45,6 +45,19 @@ export interface NodeAccessConfig {
   entries: AccessControlEntry[];
 }
 
+export interface VaultConfig {
+  id: string;
+  name: string;
+  host: string;
+  port: string;
+  protocol: 'https' | 'http';
+  apiKey: string;
+  vaultPath: string;
+  status: 'connected' | 'disconnected' | 'error';
+  allowedPodIds: string[];
+  createdAt: string;
+}
+
 export const DEFAULT_ROLE_ACCESS: Record<UserRole, AccessLevel> = {
   [UserRole.AltaGerencia]: 'owner',
   [UserRole.ProductOwner]: 'editor',

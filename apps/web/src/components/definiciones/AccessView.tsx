@@ -12,6 +12,15 @@ import { AccessPanel } from './AccessPanel';
 export function AccessView() {
   const { state, accessConfig, selectNode, getEffectiveAccessForNode } = useDefiniciones();
   const { currentUser, hasPermission } = useAuthContext();
+  const [searchQuery, setSearchQuery] = useState('');
+
+  const selectedNode = state.selectedId ? findNodeInTree(state.tree, state.selectedId) : null;
+  const parentNode = selectedNode ? findParentInTree(state.tree, selectedNode.id) : null;
+
+  const displayTree = useMemo(() => {
+    if (!searchQuery.trim()) return state.tree;
+    return filterAccessTree(state.tree, searchQuery.toLowerCase());
+  }, [state.tree, searchQuery]);
 
   if (!hasPermission(Permission.MANAGE_USERS)) {
     return (
@@ -24,16 +33,6 @@ export function AccessView() {
       </div>
     );
   }
-
-  const [searchQuery, setSearchQuery] = useState('');
-
-  const selectedNode = state.selectedId ? findNodeInTree(state.tree, state.selectedId) : null;
-  const parentNode = selectedNode ? findParentInTree(state.tree, selectedNode.id) : null;
-
-  const displayTree = useMemo(() => {
-    if (!searchQuery.trim()) return state.tree;
-    return filterAccessTree(state.tree, searchQuery.toLowerCase());
-  }, [state.tree, searchQuery]);
 
   return (
     <div className="flex-1 flex min-h-0">
