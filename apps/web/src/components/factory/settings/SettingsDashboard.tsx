@@ -57,6 +57,8 @@ import { TeamSection } from './TeamSection';
 import { RolesPermissionsSection } from './RolesPermissionsSection';
 import { useDefiniciones, DefinicionesProvider } from '@/context/DefinicionesContext';
 import type { VaultConfig } from '@cenzontle/shared';
+import { UserRole } from '@cenzontle/shared';
+import { useAuthContext } from '@/context/AuthContext';
 import { mockPods } from '@/data/mock/proyectos/pods';
 
 // ---------------------------------------------------------------------------
@@ -1326,6 +1328,7 @@ function SectionContent({ section }: { section: SettingsSection }) {
 export function SettingsDashboard() {
   const router = useRouter();
   const searchParams = useSearchParams();
+  const { hasRole } = useAuthContext();
   const initialSection = (searchParams.get('section') as SettingsSection) || 'repository';
   const [activeSection, setActiveSection] = useState<SettingsSection>(initialSection);
 
@@ -1356,7 +1359,12 @@ export function SettingsDashboard() {
           aria-label="Settings navigation"
         >
           {SIDEBAR_GROUPS.map((group) => {
-            const items = SIDEBAR_ITEMS.filter((item) => item.group === group);
+            const items = SIDEBAR_ITEMS.filter((item) => item.group === group)
+              .filter((item) => {
+                if (item.group === 'Equipo' && !hasRole(UserRole.AltaGerencia)) return false;
+                return true;
+              });
+            if (items.length === 0) return null;
             return (
               <div key={group} className="mb-5">
                 <span className="mb-1.5 block px-3 text-[10px] font-semibold uppercase tracking-wider text-muted-foreground/70">

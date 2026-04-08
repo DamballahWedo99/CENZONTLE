@@ -1,16 +1,9 @@
-/**
- * useAuth Hook
- *
- * Thin wrapper around AuthContext for backward compatibility.
- * Components that only need user + logout can keep using this hook.
- */
-
 'use client';
 
 import { useAuthContext } from '@/context/AuthContext';
 
 export function useAuth() {
-  const { currentUser, logout } = useAuthContext();
+  const { currentUser, isLoading, logout } = useAuthContext();
 
   const user = currentUser
     ? {
@@ -26,6 +19,7 @@ export function useAuth() {
 
   return {
     user,
+    isLoading,
     logout,
   };
 }

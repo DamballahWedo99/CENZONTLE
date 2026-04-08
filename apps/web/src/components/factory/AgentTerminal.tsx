@@ -1,6 +1,7 @@
 'use client';
 
 import { useState, useEffect, useRef, useCallback } from 'react';
+import { getAccessToken } from '@auth0/nextjs-auth0/client';
 import { cn } from '@/lib/utils';
 import type { FactoryAgent } from '@cenzontle/shared';
 import { AgentStatus } from '@cenzontle/shared';
@@ -12,6 +13,18 @@ import { useFactory } from '@/context/FactoryContext';
 import { AgentDetailDrawer, deriveDod, deriveMilestones } from './AgentDetailDrawer';
 
 const API_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:3001';
+
+async function authFetch(path: string, options?: RequestInit): Promise<Response> {
+  let token: string | undefined;
+  try { token = await getAccessToken(); } catch { /* no token */ }
+  return fetch(`${API_URL}${path}`, {
+    ...options,
+    headers: {
+      ...options?.headers,
+      ...(token ? { Authorization: `Bearer ${token}` } : {}),
+    },
+  });
+}
 
 interface AgentTerminalProps {
   agent: FactoryAgent;
@@ -64,7 +77,7 @@ export function AgentTerminal({ agent, onClose }: AgentTerminalProps) {
     if (!ttydUrl) return;
     const interval = setInterval(async () => {
       try {
-        const res = await fetch(`${API_URL}/api/factory/terminal/copy-mode/${agent.id}`);
+        const res = await authFetch(`/api/factory/terminal/copy-mode/${agent.id}`);
         if (res.ok) {
           const data = await res.json();
           setInCopyMode(data.inCopyMode);
@@ -76,7 +89,7 @@ export function AgentTerminal({ agent, onClose }: AgentTerminalProps) {
 
   async function scrollToBottom() {
     try {
-      const res = await fetch(`${API_URL}/api/factory/terminal/copy-mode/${agent.id}`);
+      const res = await authFetch(`/api/factory/terminal/copy-mode/${agent.id}`);
       const data = await res.json();
       if (data.inCopyMode) {
         sendKeys('q');
@@ -112,7 +125,7 @@ export function AgentTerminal({ agent, onClose }: AgentTerminalProps) {
       const formData = new FormData();
       formData.append('file', file);
 
-      const res = await fetch(`${API_URL}/api/factory/terminal/upload/${agent.id}`, {
+      const res = await authFetch(`/api/factory/terminal/upload/${agent.id}`, {
         method: 'POST',
         body: formData,
       });
@@ -121,7 +134,7 @@ export function AgentTerminal({ agent, onClose }: AgentTerminalProps) {
         const data = await res.json();
         // Exit copy-mode only if actually in copy-mode, to avoid injecting a stray 'q'
         try {
-          const cmRes = await fetch(`${API_URL}/api/factory/terminal/copy-mode/${agent.id}`);
+          const cmRes = await authFetch(`/api/factory/terminal/copy-mode/${agent.id}`);
           if (cmRes.ok) {
             const cm = await cmRes.json();
             if (cm.inCopyMode) {

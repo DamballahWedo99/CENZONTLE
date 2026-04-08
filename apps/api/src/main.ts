@@ -16,6 +16,7 @@ async function bootstrap() {
     .setTitle("Cenzontle API")
     .setDescription("API backend para el sistema de gestion CENZONTLE")
     .setVersion("0.1.0")
+    .addBearerAuth()
     .build();
   const document = SwaggerModule.createDocument(app, config);
   SwaggerModule.setup("api/docs", app, document);

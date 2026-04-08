@@ -222,3 +222,26 @@ export interface TeamMember {
   invitedAt: string;
   lastActiveAt: string | null;
 }
+
+// === Auth Types (Auth0 integration) ===
+
+export interface JwtPayload {
+  sub: string;
+  iss: string;
+  aud: string | string[];
+  iat: number;
+  exp: number;
+  azp?: string;
+  scope?: string;
+  'https://cenzontle.app/role'?: UserRole;
+  'https://cenzontle.app/pod_ids'?: string[];
+}
+
+export interface AuthenticatedUser {
+  sub: string;
+  email: string;
+  name: string;
+  picture?: string;
+  role: UserRole;
+  podIds: string[];
+}

@@ -1,6 +1,8 @@
 'use client';
 
 import { useState } from 'react';
+import { toast } from 'sonner';
+import { z } from 'zod';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
@@ -40,8 +42,20 @@ import {
   Code,
   Bug,
   Eye,
+  Loader2,
+  Search,
 } from 'lucide-react';
+import {
+  Dialog,
+  DialogContent,
+  DialogHeader,
+  DialogTitle,
+  DialogDescription,
+  DialogFooter,
+} from '@/components/ui/dialog';
+import { Checkbox } from '@/components/ui/checkbox';
 import { useAuthContext } from '@/context/AuthContext';
+import { mockPods } from '@/data/mock/proyectos/pods';
 import {
   UserRole,
   USER_ROLE_LABELS,
@@ -141,67 +155,175 @@ function getRolePermissionLabels(role: UserRole): string[] {
 }
 
 export function TeamSection() {
-  const { currentUser, members, dispatch, hasPermission } = useAuthContext();
+  const {
+    currentUser,
+    members,
+    hasPermission,
+    handleInvite: ctxInvite,
+    handleChangeRole: ctxChangeRole,
+    handleDeactivate: ctxDeactivate,
+    handleReactivate: ctxReactivate,
+    handleRemove: ctxRemove,
+  } = useAuthContext();
   const [inviteEmail, setInviteEmail] = useState('');
   const [inviteName, setInviteName] = useState('');
-  const [inviteRole, setInviteRole] = useState<UserRole>(UserRole.Viewer);
+  const [inviteRole, setInviteRole] = useState<UserRole>(UserRole.ProductOwner);
+  const [invitePod, setInvitePod] = useState<string>('');
+  const [searchQuery, setSearchQuery] = useState('');
   const [filterRole, setFilterRole] = useState<string>('all');
   const [filterStatus, setFilterStatus] = useState<string>('all');
-  const [switchingUser, setSwitchingUser] = useState(false);
+  const [filterPod, setFilterPod] = useState<string>('all');
+  const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
+  const [bulkAction, setBulkAction] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const [inviteOpen, setInviteOpen] = useState(false);
+  const [deletingMember, setDeletingMember] = useState<TeamMember | null>(null);
+  const [deleting, setDeleting] = useState(false);
+  const [errors, setErrors] = useState<Record<string, string>>({});
+
+  const inviteSchema = z.object({
+    name: z.string().min(2, 'Minimo 2 caracteres').max(100, 'Maximo 100 caracteres'),
+    email: z.string().email('Email invalido'),
+    role: z.nativeEnum(UserRole),
+  });
 
   const canManageUsers = hasPermission(Permission.MANAGE_USERS);
 
   const filteredMembers = members.filter((m) => {
+    if (searchQuery) {
+      const q = searchQuery.toLowerCase();
+      if (!m.name.toLowerCase().includes(q) && !m.email.toLowerCase().includes(q)) return false;
+    }
     if (filterRole !== 'all' && m.role !== filterRole) return false;
     if (filterStatus !== 'all' && m.status !== filterStatus) return false;
+    if (filterPod !== 'all' && !m.podIds.includes(filterPod)) return false;
     return true;
   });
 
-  const handleInvite = () => {
-    if (!inviteEmail || !inviteName) return;
-    const newMember: TeamMember = {
-      id: `user-${Date.now()}`,
-      name: inviteName,
-      email: inviteEmail,
-      avatarUrl: '',
-      role: inviteRole,
-      status: 'pending',
-      podIds: [],
-      invitedAt: new Date().toISOString(),
-      lastActiveAt: null,
-    };
-    dispatch({ type: 'ADD_MEMBER', payload: newMember });
-    setInviteEmail('');
-    setInviteName('');
-    setInviteRole(UserRole.Viewer);
+  const selectableMembers = filteredMembers.filter((m) => m.id !== currentUser?.id);
+  const allSelected = selectableMembers.length > 0 && selectableMembers.every((m) => selectedIds.has(m.id));
+
+  const toggleSelect = (id: string) => {
+    setSelectedIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id); else next.add(id);
+      return next;
+    });
   };
 
-  const handleChangeRole = (userId: string, role: UserRole) => {
-    dispatch({ type: 'CHANGE_ROLE', payload: { userId, role } });
+  const toggleAll = () => {
+    if (allSelected) {
+      setSelectedIds(new Set());
+    } else {
+      setSelectedIds(new Set(selectableMembers.map((m) => m.id)));
+    }
   };
 
-  const handleDeactivate = (userId: string) => {
-    dispatch({ type: 'DEACTIVATE_MEMBER', payload: userId });
+  const handleBulkDeactivate = async () => {
+    if (selectedIds.size === 0) return;
+    setBulkAction(true);
+    try {
+      await Promise.all([...selectedIds].map((id) => ctxDeactivate(id)));
+      toast.success(`${selectedIds.size} usuario(s) desactivado(s)`);
+      setSelectedIds(new Set());
+    } catch (err) {
+      toast.error('Error al desactivar usuarios');
+      console.error(err);
+    } finally {
+      setBulkAction(false);
+    }
   };
 
-  const handleReactivate = (userId: string) => {
-    dispatch({ type: 'REACTIVATE_MEMBER', payload: userId });
+  const handleBulkDelete = async () => {
+    if (selectedIds.size === 0) return;
+    setBulkAction(true);
+    try {
+      await Promise.all([...selectedIds].map((id) => ctxRemove(id)));
+      toast.success(`${selectedIds.size} usuario(s) eliminado(s)`);
+      setSelectedIds(new Set());
+    } catch (err) {
+      toast.error('Error al eliminar usuarios');
+      console.error(err);
+    } finally {
+      setBulkAction(false);
+    }
   };
 
-  const handleRemove = (userId: string) => {
-    dispatch({ type: 'REMOVE_MEMBER', payload: userId });
+  const handleInvite = async (): Promise<boolean> => {
+    const result = inviteSchema.safeParse({ name: inviteName, email: inviteEmail, role: inviteRole });
+    if (!result.success) {
+      const fieldErrors: Record<string, string> = {};
+      result.error.issues.forEach((issue) => {
+        fieldErrors[issue.path[0] as string] = issue.message;
+      });
+      setErrors(fieldErrors);
+      return false;
+    }
+    setErrors({});
+    if (saving) return false;
+    setSaving(true);
+    try {
+      await ctxInvite(inviteEmail, inviteName, inviteRole, invitePod ? [invitePod] : []);
+      setInviteEmail('');
+      setInviteName('');
+      setInviteRole(UserRole.ProductOwner);
+      setInvitePod('');
+      toast.success('Usuario invitado. Se envio un email para establecer contrasena.');
+      return true;
+    } catch (err) {
+      toast.error('Error al invitar usuario. Verifica que el email no este registrado.');
+      console.error('Failed to invite member:', err);
+      return false;
+    } finally {
+      setSaving(false);
+    }
   };
 
-  const handleSwitchUser = (userId: string) => {
-    dispatch({ type: 'SET_CURRENT_USER', payload: userId });
-    setSwitchingUser(false);
+  const handleChangeRole = async (userId: string, role: UserRole) => {
+    try {
+      await ctxChangeRole(userId, role);
+      toast.success(`Rol actualizado a ${USER_ROLE_LABELS[role]}`);
+    } catch (err) {
+      toast.error('Error al cambiar rol');
+      console.error('Failed to change role:', err);
+    }
+  };
+
+  const handleDeactivate = async (userId: string) => {
+    try {
+      await ctxDeactivate(userId);
+      toast.success('Usuario desactivado');
+    } catch (err) {
+      toast.error('Error al desactivar usuario');
+      console.error('Failed to deactivate:', err);
+    }
+  };
+
+  const handleReactivate = async (userId: string) => {
+    try {
+      await ctxReactivate(userId);
+      toast.success('Usuario reactivado');
+    } catch (err) {
+      toast.error('Error al reactivar usuario');
+      console.error('Failed to reactivate:', err);
+    }
+  };
+
+  const handleRemove = async (userId: string) => {
+    try {
+      await ctxRemove(userId);
+      toast.success('Usuario eliminado');
+    } catch (err) {
+      toast.error('Error al eliminar usuario');
+      console.error('Failed to remove:', err);
+    }
   };
 
   const activeCount = members.filter((m) => m.status === 'active').length;
   const pendingCount = members.filter((m) => m.status === 'pending').length;
 
   return (
-    <>
+    <div className="flex flex-col h-full">
       {/* Page header */}
       <div className="flex items-start justify-between">
         <div className="space-y-1">
@@ -213,82 +335,19 @@ export function TeamSection() {
             Administra los miembros del equipo, roles y permisos de acceso.
           </p>
         </div>
-        {canManageUsers && (
-          <Button
-            size="sm"
-            className="gap-2"
-            onClick={() => document.getElementById('invite-form')?.scrollIntoView({ behavior: 'smooth' })}
-          >
-            <UserPlus className="h-3.5 w-3.5" /> Agregar usuario
-          </Button>
-        )}
       </div>
 
-      {/* Stats bar */}
-      <div className="flex gap-4 mt-4">
-        <div className="flex items-center gap-2 text-sm text-muted-foreground">
-          <div className="h-2 w-2 rounded-full bg-emerald-500" />
-          {activeCount} activos
+      {/* Busqueda + Filtros + Agregar */}
+      <div className="flex items-center gap-3 mt-4">
+        <div className="relative">
+          <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 h-3.5 w-3.5 text-muted-foreground" />
+          <Input
+            placeholder="Buscar usuario..."
+            value={searchQuery}
+            onChange={(e) => setSearchQuery(e.target.value)}
+            className="h-8 w-[280px] pl-8 text-xs"
+          />
         </div>
-        <div className="flex items-center gap-2 text-sm text-muted-foreground">
-          <div className="h-2 w-2 rounded-full bg-amber-500" />
-          {pendingCount} pendientes
-        </div>
-        <div className="flex items-center gap-2 text-sm text-muted-foreground">
-          <div className="h-2 w-2 rounded-full bg-gray-400" />
-          {members.length} total
-        </div>
-      </div>
-
-      {/* Dev tool: switch user */}
-      <div className="flex items-center gap-2 p-3 rounded-lg border border-dashed border-orange-300 bg-orange-50/50 dark:bg-orange-950/20 dark:border-orange-800 mt-4">
-        <Shield className="h-4 w-4 text-orange-500" />
-        <span className="text-xs text-orange-600 dark:text-orange-400 font-medium">
-          Dev Mode — Sesion activa:
-        </span>
-        <Badge variant="outline" className="text-xs">
-          {currentUser?.name} ({USER_ROLE_LABELS[currentUser?.role ?? UserRole.Viewer]})
-        </Badge>
-        <Button
-          variant="ghost"
-          size="sm"
-          className="ml-auto h-7 text-xs"
-          onClick={() => setSwitchingUser(!switchingUser)}
-        >
-          Cambiar usuario
-        </Button>
-      </div>
-
-      {switchingUser && (
-        <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 gap-2 p-3 rounded-lg border bg-muted/30 mt-4">
-          {members
-            .filter((m) => m.status === 'active')
-            .map((m) => (
-              <Button
-                key={m.id}
-                variant={m.id === currentUser?.id ? 'default' : 'outline'}
-                size="sm"
-                className="justify-start gap-2 h-auto py-2"
-                onClick={() => handleSwitchUser(m.id)}
-              >
-                <Avatar className="h-6 w-6">
-                  <AvatarFallback className="text-[10px] bg-black text-white dark:bg-white dark:text-black">
-                    {getInitials(m.name)}
-                  </AvatarFallback>
-                </Avatar>
-                <div className="text-left">
-                  <div className="text-xs font-medium">{m.name}</div>
-                  <div className="text-[10px] text-muted-foreground">
-                    {USER_ROLE_LABELS[m.role]}
-                  </div>
-                </div>
-              </Button>
-            ))}
-        </div>
-      )}
-
-      {/* Filtros */}
-      <div className="flex gap-3 mt-4">
         <Select value={filterRole} onValueChange={setFilterRole}>
           <SelectTrigger className="w-[180px] h-8 text-xs">
             <SelectValue placeholder="Filtrar por rol" />
@@ -311,15 +370,64 @@ export function TeamSection() {
             <SelectItem value="inactive">Inactivos</SelectItem>
           </SelectContent>
         </Select>
+        <Select value={filterPod} onValueChange={setFilterPod}>
+          <SelectTrigger className="w-[180px] h-8 text-xs">
+            <SelectValue placeholder="Filtrar por pod" />
+          </SelectTrigger>
+          <SelectContent>
+            <SelectItem value="all">Todos los pods</SelectItem>
+            {mockPods.map((pod) => (
+              <SelectItem key={pod.id} value={pod.id}>
+                <div className="flex items-center gap-2">
+                  <span className="h-2 w-2 rounded-full" style={{ backgroundColor: pod.color }} />
+                  {pod.name}
+                </div>
+              </SelectItem>
+            ))}
+          </SelectContent>
+        </Select>
+        {canManageUsers && (
+          <Button
+            size="sm"
+            className="gap-2 ml-auto"
+            onClick={() => setInviteOpen(true)}
+          >
+            <UserPlus className="h-3.5 w-3.5" /> Agregar usuario
+          </Button>
+        )}
       </div>
 
+      {/* Acciones en lote */}
+      {canManageUsers && selectedIds.size > 0 && (
+        <div className="flex items-center gap-3 mt-3 p-2.5 rounded-lg border bg-muted/50">
+          <span className="text-xs font-medium">{selectedIds.size} seleccionado(s)</span>
+          <Button variant="outline" size="sm" className="h-7 text-xs gap-1.5" onClick={handleBulkDeactivate} disabled={bulkAction}>
+            {bulkAction ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <UserX className="h-3.5 w-3.5" />}
+            Desactivar
+          </Button>
+          <Button variant="destructive" size="sm" className="h-7 text-xs gap-1.5" onClick={() => setDeletingMember({ id: 'bulk', name: `${selectedIds.size} usuarios`, email: '' } as TeamMember)} disabled={bulkAction}>
+            <Trash2 className="h-3.5 w-3.5" />
+            Eliminar
+          </Button>
+          <Button variant="ghost" size="sm" className="h-7 text-xs ml-auto" onClick={() => setSelectedIds(new Set())}>
+            Cancelar
+          </Button>
+        </div>
+      )}
+
       {/* Tabla de miembros */}
-      <div className="rounded-lg border mt-4">
+      <div className="rounded-lg border mt-4 bg-gray-50/50 dark:bg-zinc-900/50 shadow-sm flex-1 min-h-0 overflow-auto">
         <Table>
           <TableHeader>
             <TableRow>
+              {canManageUsers && (
+                <TableHead className="w-[40px]">
+                  <Checkbox checked={allSelected} onCheckedChange={toggleAll} />
+                </TableHead>
+              )}
               <TableHead className="w-[280px]">Miembro</TableHead>
               <TableHead>Rol</TableHead>
+              <TableHead>Pod</TableHead>
               <TableHead>Estado</TableHead>
               <TableHead>Última actividad</TableHead>
               {canManageUsers && <TableHead className="w-[50px]" />}
@@ -327,7 +435,18 @@ export function TeamSection() {
           </TableHeader>
           <TableBody>
             {filteredMembers.map((member) => (
-              <TableRow key={member.id}>
+              <TableRow key={member.id} className={selectedIds.has(member.id) ? 'bg-muted/50' : ''}>
+                {canManageUsers && (
+                  <TableCell>
+                    <div title={member.id === currentUser?.id ? 'No puedes seleccionarte a ti mismo' : undefined}>
+                      <Checkbox
+                        checked={selectedIds.has(member.id)}
+                        onCheckedChange={() => toggleSelect(member.id)}
+                        disabled={member.id === currentUser?.id}
+                      />
+                    </div>
+                  </TableCell>
+                )}
                 <TableCell>
                   <div className="flex items-center gap-3">
                     <Avatar className="h-8 w-8">
@@ -365,6 +484,19 @@ export function TeamSection() {
                     </div>
                   )}
                 </TableCell>
+                <TableCell>
+                  {(() => {
+                    const pod = mockPods.find((p) => member.podIds.includes(p.id));
+                    return pod ? (
+                      <div className="flex items-center gap-2 text-sm">
+                        <span className="h-2 w-2 rounded-full" style={{ backgroundColor: pod.color }} />
+                        {pod.name}
+                      </div>
+                    ) : (
+                      <span className="text-xs text-muted-foreground">—</span>
+                    );
+                  })()}
+                </TableCell>
                 <TableCell>{getStatusBadge(member.status)}</TableCell>
                 <TableCell className="text-xs text-muted-foreground">{formatRelativeTime(member.lastActiveAt)}</TableCell>
                 {canManageUsers && (
@@ -380,7 +512,7 @@ export function TeamSection() {
                           ) : (
                             <DropdownMenuItem onClick={() => handleReactivate(member.id)}><UserCheck className="h-4 w-4 mr-2" />Reactivar</DropdownMenuItem>
                           )}
-                          <DropdownMenuItem onClick={() => handleRemove(member.id)} className="text-destructive focus:text-destructive"><Trash2 className="h-4 w-4 mr-2" />Eliminar</DropdownMenuItem>
+                          <DropdownMenuItem onClick={() => setDeletingMember(member)} className="text-destructive focus:text-destructive"><Trash2 className="h-4 w-4 mr-2" />Eliminar</DropdownMenuItem>
                         </DropdownMenuContent>
                       </DropdownMenu>
                     )}
@@ -398,73 +530,131 @@ export function TeamSection() {
         </div>
       )}
 
-      {/* Invitar nuevo miembro (debajo de la tabla) */}
-      {canManageUsers && (
-        <div id="invite-form" className="p-4 rounded-lg border bg-muted/30 space-y-3 mt-4">
-          <h4 className="text-sm font-medium flex items-center gap-2">
-            <UserPlus className="h-4 w-4" />
-            Invitar nuevo miembro
-          </h4>
-          <div className="grid grid-cols-1 sm:grid-cols-[1fr_1fr_auto_auto] gap-3 items-end">
+      {/* Modal invitar nuevo miembro */}
+      <Dialog open={inviteOpen} onOpenChange={(open) => { if (!open) { setInviteOpen(false); setInviteName(''); setInviteEmail(''); setInviteRole(UserRole.ProductOwner); setInvitePod(''); setErrors({}); } }}>
+        <DialogContent className="max-w-md">
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2 text-lg">
+              <UserPlus className="h-5 w-5" />
+              Invitar nuevo miembro
+            </DialogTitle>
+            <DialogDescription>
+              El usuario recibira un email para establecer su contrasena.
+            </DialogDescription>
+          </DialogHeader>
+          <div className="space-y-5 pt-1">
             <div className="space-y-1.5">
-              <Label className="text-xs">Nombre</Label>
-              <Input placeholder="Nombre completo" value={inviteName} onChange={(e) => setInviteName(e.target.value)} className="h-9" />
+              <Label className="text-xs text-muted-foreground font-normal">Nombre</Label>
+              <Input placeholder="Nombre completo" value={inviteName} onChange={(e) => { setInviteName(e.target.value); setErrors((prev) => ({ ...prev, name: '' })); }} className={errors.name ? 'border-destructive' : ''} />
+              {errors.name && <p className="text-xs text-destructive mt-1">{errors.name}</p>}
             </div>
             <div className="space-y-1.5">
-              <Label className="text-xs">Email</Label>
-              <Input type="email" placeholder="email@cenzontle.com" value={inviteEmail} onChange={(e) => setInviteEmail(e.target.value)} className="h-9" />
+              <Label className="text-xs text-muted-foreground font-normal">Email</Label>
+              <Input type="email" placeholder="email@cenzontle.com" value={inviteEmail} onChange={(e) => { setInviteEmail(e.target.value); setErrors((prev) => ({ ...prev, email: '' })); }} className={errors.email ? 'border-destructive' : ''} />
+              {errors.email && <p className="text-xs text-destructive mt-1">{errors.email}</p>}
             </div>
-            <div className="space-y-1.5">
-              <Label className="text-xs">Rol</Label>
-              <Select value={inviteRole} onValueChange={(v) => setInviteRole(v as UserRole)}>
-                <SelectTrigger className="w-[160px] h-9"><SelectValue /></SelectTrigger>
-                <SelectContent>
-                  {Object.entries(USER_ROLE_LABELS).map(([value, label]) => (
-                    <SelectItem key={value} value={value}>
-                      <div className="flex items-center gap-2">{ROLE_ICONS[value as UserRole]}{label}</div>
-                    </SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
-            </div>
-            <Button onClick={handleInvite} disabled={!inviteEmail || !inviteName} className="h-9">
-              <Send className="h-4 w-4 mr-1" />
-              Invitar
-            </Button>
-          </div>
-        </div>
-      )}
-
-      {/* Roles y permisos */}
-      <div className="mt-6">
-        <h3 className="text-sm font-semibold text-foreground mb-3">Roles y permisos</h3>
-        <div className="grid gap-3">
-          {Object.values(UserRole).map((role) => {
-            const memberCount = members.filter((m) => m.role === role).length;
-            return (
-              <div key={role} className="p-4 rounded-lg border bg-card" style={{ borderLeftWidth: 4, borderLeftColor: USER_ROLE_COLORS[role] }}>
-                <div className="flex items-start justify-between">
-                  <div className="flex items-center gap-3">
-                    <div className="p-2 rounded-lg" style={{ backgroundColor: USER_ROLE_COLORS[role] + '15' }}>
-                      <div style={{ color: USER_ROLE_COLORS[role] }}>{ROLE_ICONS[role]}</div>
-                    </div>
-                    <div>
-                      <h4 className="font-medium text-sm">{USER_ROLE_LABELS[role]}</h4>
-                      <p className="text-xs text-muted-foreground mt-0.5">{USER_ROLE_DESCRIPTIONS[role]}</p>
-                    </div>
-                  </div>
-                  <Badge variant="outline" className="text-xs">{memberCount} {memberCount === 1 ? 'miembro' : 'miembros'}</Badge>
-                </div>
-                <div className="mt-3 flex flex-wrap gap-1.5">
-                  {getRolePermissionLabels(role).map((label) => (
-                    <Badge key={label} variant="secondary" className="text-[10px] font-normal">{label}</Badge>
-                  ))}
-                </div>
+            <div className="grid grid-cols-2 gap-4">
+              <div className="space-y-1.5">
+                <Label className="text-xs text-muted-foreground font-normal">Rol</Label>
+                <Select value={inviteRole} onValueChange={(v) => setInviteRole(v as UserRole)}>
+                  <SelectTrigger className="w-full"><SelectValue /></SelectTrigger>
+                  <SelectContent>
+                    {Object.entries(USER_ROLE_LABELS)
+                      .filter(([value]) => value !== UserRole.Viewer)
+                      .map(([value, label]) => (
+                      <SelectItem key={value} value={value}>
+                        <div className="flex items-center gap-2">{ROLE_ICONS[value as UserRole]}{label}</div>
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
               </div>
-            );
-          })}
-        </div>
-      </div>
-    </>
+              <div className="space-y-1.5">
+                <Label className="text-xs text-muted-foreground font-normal">Pod</Label>
+                <Select value={invitePod} onValueChange={setInvitePod}>
+                  <SelectTrigger className="w-full"><SelectValue placeholder="Seleccionar pod" /></SelectTrigger>
+                  <SelectContent>
+                    {mockPods.map((pod) => (
+                      <SelectItem key={pod.id} value={pod.id}>
+                        <div className="flex items-center gap-2">
+                          <span className="h-2 w-2 rounded-full" style={{ backgroundColor: pod.color }} />
+                          {pod.name}
+                        </div>
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              </div>
+            </div>
+          </div>
+          <div className="border-t mt-2 pt-4">
+            <DialogFooter className="gap-3">
+              <Button variant="outline" onClick={() => setInviteOpen(false)} disabled={saving}>
+                Cancelar
+              </Button>
+            <Button
+              disabled={!inviteEmail || !inviteName || saving}
+              onClick={async () => {
+                const ok = await handleInvite();
+                if (ok) setInviteOpen(false);
+              }}
+            >
+              {saving ? (
+                <Loader2 className="h-4 w-4 mr-2 animate-spin" />
+              ) : (
+                <Send className="h-4 w-4 mr-2" />
+              )}
+              {saving ? 'Invitando...' : 'Invitar'}
+            </Button>
+            </DialogFooter>
+          </div>
+        </DialogContent>
+      </Dialog>
+
+      {/* Confirmacion de eliminacion */}
+      <Dialog open={!!deletingMember} onOpenChange={(open) => !open && setDeletingMember(null)}>
+        <DialogContent className="max-w-md">
+          <DialogHeader>
+            <DialogTitle>Eliminar {deletingMember?.id === 'bulk' ? 'usuarios' : 'usuario'}</DialogTitle>
+            <DialogDescription>
+              {deletingMember?.id === 'bulk'
+                ? `Esta accion eliminara permanentemente ${selectedIds.size} usuario(s) del sistema. No se puede deshacer.`
+                : <>Esta accion eliminara permanentemente a <strong>{deletingMember?.name}</strong> ({deletingMember?.email}) del sistema. No se puede deshacer.</>
+              }
+            </DialogDescription>
+          </DialogHeader>
+          <DialogFooter className="gap-3">
+            <Button variant="outline" onClick={() => setDeletingMember(null)} disabled={deleting}>
+              Cancelar
+            </Button>
+            <Button
+              variant="destructive"
+              disabled={deleting}
+              onClick={async () => {
+                if (!deletingMember) return;
+                setDeleting(true);
+                try {
+                  if (deletingMember.id === 'bulk') {
+                    await handleBulkDelete();
+                  } else {
+                    await handleRemove(deletingMember.id);
+                  }
+                  setDeletingMember(null);
+                } finally {
+                  setDeleting(false);
+                }
+              }}
+            >
+              {deleting ? (
+                <Loader2 className="h-4 w-4 mr-2 animate-spin" />
+              ) : (
+                <Trash2 className="h-4 w-4 mr-2" />
+              )}
+              {deleting ? 'Eliminando...' : 'Eliminar'}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+    </div>
   );
 }

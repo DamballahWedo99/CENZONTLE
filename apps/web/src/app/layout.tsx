@@ -1,6 +1,7 @@
 import type { Metadata } from "next";
 import { Geist, Geist_Mono } from "next/font/google";
 import "./globals.css";
+import { Auth0Provider } from "@auth0/nextjs-auth0/client";
 import { SidebarProvider } from "@/components/ui/sidebar";
 import { FullscreenOrChrome } from "@/components/fullscreen-or-chrome";
 import { ThemeProvider } from "@/components/theme-provider";
@@ -8,6 +9,7 @@ import { BreadcrumbProvider } from "@/context/BreadcrumbContext";
 import { HeaderActionsProvider } from "@/context/HeaderActionsContext";
 import { IntegrationsProvider } from "@/context/IntegrationsContext";
 import { AuthProvider } from "@/context/AuthContext";
+import { Toaster } from "sonner";
 
 const geistSans = Geist({
   variable: "--font-geist-sans",
@@ -43,19 +45,22 @@ export default function RootLayout({
           enableSystem
           disableTransitionOnChange
         >
-          <AuthProvider>
-          <BreadcrumbProvider>
-            <HeaderActionsProvider>
-              <IntegrationsProvider>
-                <SidebarProvider defaultOpen={false}>
-                  <FullscreenOrChrome>
-                    {children}
-                  </FullscreenOrChrome>
-                </SidebarProvider>
-              </IntegrationsProvider>
-            </HeaderActionsProvider>
-          </BreadcrumbProvider>
-          </AuthProvider>
+          <Auth0Provider>
+            <AuthProvider>
+              <BreadcrumbProvider>
+                <HeaderActionsProvider>
+                  <IntegrationsProvider>
+                    <SidebarProvider defaultOpen={false}>
+                      <FullscreenOrChrome>
+                        {children}
+                      </FullscreenOrChrome>
+                    </SidebarProvider>
+                  </IntegrationsProvider>
+                </HeaderActionsProvider>
+              </BreadcrumbProvider>
+            </AuthProvider>
+          </Auth0Provider>
+          <Toaster richColors position="bottom-right" />
         </ThemeProvider>
       </body>
     </html>

@@ -1,12 +1,14 @@
 'use client';
 
 import { useState } from 'react';
+import { toast } from 'sonner';
 import {
   Dialog,
   DialogContent,
   DialogHeader,
   DialogTitle,
   DialogDescription,
+  DialogFooter,
 } from '@/components/ui/dialog';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -48,6 +50,7 @@ import {
   Code,
   Bug,
   Eye,
+  Loader2,
 } from 'lucide-react';
 import { useAuthContext } from '@/context/AuthContext';
 import {
@@ -103,13 +106,24 @@ function formatRelativeTime(isoDate: string | null): string {
 }
 
 export function TeamManagementDialog({ open, onOpenChange }: TeamManagementDialogProps) {
-  const { currentUser, members, dispatch, hasPermission } = useAuthContext();
+  const {
+    currentUser,
+    members,
+    hasPermission,
+    handleInvite: ctxInvite,
+    handleChangeRole: ctxChangeRole,
+    handleDeactivate: ctxDeactivate,
+    handleReactivate: ctxReactivate,
+    handleRemove: ctxRemove,
+  } = useAuthContext();
   const [inviteEmail, setInviteEmail] = useState('');
   const [inviteName, setInviteName] = useState('');
   const [inviteRole, setInviteRole] = useState<UserRole>(UserRole.Viewer);
   const [filterRole, setFilterRole] = useState<string>('all');
   const [filterStatus, setFilterStatus] = useState<string>('all');
-  const [switchingUser, setSwitchingUser] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const [deletingMember, setDeletingMember] = useState<TeamMember | null>(null);
+  const [deleting, setDeleting] = useState(false);
 
   const canManageUsers = hasPermission(Permission.MANAGE_USERS);
 
@@ -119,44 +133,61 @@ export function TeamManagementDialog({ open, onOpenChange }: TeamManagementDialo
     return true;
   });
 
-  const handleInvite = () => {
-    if (!inviteEmail || !inviteName) return;
-    const newMember: TeamMember = {
-      id: `user-${Date.now()}`,
-      name: inviteName,
-      email: inviteEmail,
-      avatarUrl: '',
-      role: inviteRole,
-      status: 'pending',
-      podIds: [],
-      invitedAt: new Date().toISOString(),
-      lastActiveAt: null,
-    };
-    dispatch({ type: 'ADD_MEMBER', payload: newMember });
-    setInviteEmail('');
-    setInviteName('');
-    setInviteRole(UserRole.Viewer);
+  const handleInvite = async () => {
+    if (!inviteEmail || !inviteName || saving) return;
+    setSaving(true);
+    try {
+      await ctxInvite(inviteEmail, inviteName, inviteRole);
+      setInviteEmail('');
+      setInviteName('');
+      setInviteRole(UserRole.Viewer);
+      toast.success('Usuario invitado. Se envio un email para establecer contrasena.');
+    } catch (err) {
+      toast.error('Error al invitar usuario. Verifica que el email no este registrado.');
+      console.error('Failed to invite member:', err);
+    } finally {
+      setSaving(false);
+    }
   };
 
-  const handleChangeRole = (userId: string, role: UserRole) => {
-    dispatch({ type: 'CHANGE_ROLE', payload: { userId, role } });
+  const handleChangeRole = async (userId: string, role: UserRole) => {
+    try {
+      await ctxChangeRole(userId, role);
+      toast.success(`Rol actualizado a ${USER_ROLE_LABELS[role]}`);
+    } catch (err) {
+      toast.error('Error al cambiar rol');
+      console.error('Failed to change role:', err);
+    }
   };
 
-  const handleDeactivate = (userId: string) => {
-    dispatch({ type: 'DEACTIVATE_MEMBER', payload: userId });
+  const handleDeactivate = async (userId: string) => {
+    try {
+      await ctxDeactivate(userId);
+      toast.success('Usuario desactivado');
+    } catch (err) {
+      toast.error('Error al desactivar usuario');
+      console.error('Failed to deactivate:', err);
+    }
   };
 
-  const handleReactivate = (userId: string) => {
-    dispatch({ type: 'REACTIVATE_MEMBER', payload: userId });
+  const handleReactivate = async (userId: string) => {
+    try {
+      await ctxReactivate(userId);
+      toast.success('Usuario reactivado');
+    } catch (err) {
+      toast.error('Error al reactivar usuario');
+      console.error('Failed to reactivate:', err);
+    }
   };
 
-  const handleRemove = (userId: string) => {
-    dispatch({ type: 'REMOVE_MEMBER', payload: userId });
-  };
-
-  const handleSwitchUser = (userId: string) => {
-    dispatch({ type: 'SET_CURRENT_USER', payload: userId });
-    setSwitchingUser(false);
+  const handleRemove = async (userId: string) => {
+    try {
+      await ctxRemove(userId);
+      toast.success('Usuario eliminado');
+    } catch (err) {
+      toast.error('Error al eliminar usuario');
+      console.error('Failed to remove:', err);
+    }
   };
 
   const activeCount = members.filter((m) => m.status === 'active').length;
@@ -190,49 +221,6 @@ export function TeamManagementDialog({ open, onOpenChange }: TeamManagementDialo
             {members.length} total
           </div>
         </div>
-
-        {/* Dev tool: switch user */}
-        <div className="flex items-center gap-2 p-3 rounded-lg border border-dashed border-orange-300 bg-orange-50/50 dark:bg-orange-950/20 dark:border-orange-800">
-          <Shield className="h-4 w-4 text-orange-500" />
-          <span className="text-xs text-orange-600 dark:text-orange-400 font-medium">
-            Dev Mode — Sesion activa:
-          </span>
-          <Badge variant="outline" className="text-xs">
-            {currentUser?.name} ({USER_ROLE_LABELS[currentUser?.role ?? UserRole.Viewer]})
-          </Badge>
-          <Button
-            variant="ghost"
-            size="sm"
-            className="ml-auto h-7 text-xs"
-            onClick={() => setSwitchingUser(!switchingUser)}
-          >
-            Cambiar usuario
-          </Button>
-        </div>
-
-        {switchingUser && (
-          <div className="grid grid-cols-2 gap-2 p-3 rounded-lg border bg-muted/30">
-            {members.filter((m) => m.status === 'active').map((m) => (
-              <Button
-                key={m.id}
-                variant={m.id === currentUser?.id ? 'default' : 'outline'}
-                size="sm"
-                className="justify-start gap-2 h-auto py-2"
-                onClick={() => handleSwitchUser(m.id)}
-              >
-                <Avatar className="h-6 w-6">
-                  <AvatarFallback className="text-[10px] bg-black text-white dark:bg-white dark:text-black">
-                    {getInitials(m.name)}
-                  </AvatarFallback>
-                </Avatar>
-                <div className="text-left">
-                  <div className="text-xs font-medium">{m.name}</div>
-                  <div className="text-[10px] text-muted-foreground">{USER_ROLE_LABELS[m.role]}</div>
-                </div>
-              </Button>
-            ))}
-          </div>
-        )}
 
         <Tabs defaultValue="members" className="w-full">
           <TabsList className="grid w-full grid-cols-2">
@@ -420,7 +408,7 @@ export function TeamManagementDialog({ open, onOpenChange }: TeamManagementDialo
                                   </DropdownMenuItem>
                                 )}
                                 <DropdownMenuItem
-                                  onClick={() => handleRemove(member.id)}
+                                  onClick={() => setDeletingMember(member)}
                                   className="text-destructive focus:text-destructive"
                                 >
                                   <Trash2 className="h-4 w-4 mr-2" />
@@ -495,6 +483,44 @@ export function TeamManagementDialog({ open, onOpenChange }: TeamManagementDialo
           </TabsContent>
         </Tabs>
       </DialogContent>
+
+      {/* Confirmacion de eliminacion */}
+      <Dialog open={!!deletingMember} onOpenChange={(o) => !o && setDeletingMember(null)}>
+        <DialogContent className="max-w-md">
+          <DialogHeader>
+            <DialogTitle>Eliminar usuario</DialogTitle>
+            <DialogDescription>
+              Esta accion eliminara permanentemente a <strong>{deletingMember?.name}</strong> ({deletingMember?.email}) del sistema. No se puede deshacer.
+            </DialogDescription>
+          </DialogHeader>
+          <DialogFooter className="gap-3">
+            <Button variant="outline" onClick={() => setDeletingMember(null)} disabled={deleting}>
+              Cancelar
+            </Button>
+            <Button
+              variant="destructive"
+              disabled={deleting}
+              onClick={async () => {
+                if (!deletingMember) return;
+                setDeleting(true);
+                try {
+                  await handleRemove(deletingMember.id);
+                  setDeletingMember(null);
+                } finally {
+                  setDeleting(false);
+                }
+              }}
+            >
+              {deleting ? (
+                <Loader2 className="h-4 w-4 mr-2 animate-spin" />
+              ) : (
+                <Trash2 className="h-4 w-4 mr-2" />
+              )}
+              {deleting ? 'Eliminando...' : 'Eliminar'}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </Dialog>
   );
 }
