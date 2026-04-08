@@ -12,7 +12,7 @@ const actionConfig: Record<ChangelogAction, { icon: React.ElementType; color: st
   [ChangelogAction.Updated]: { icon: Pencil, color: 'text-blue-500', bgColor: 'bg-blue-500/10 border-blue-500/20', verb: 'actualizó' },
   [ChangelogAction.Deleted]: { icon: Trash2, color: 'text-red-500', bgColor: 'bg-red-500/10 border-red-500/20', verb: 'eliminó' },
   [ChangelogAction.Moved]: { icon: ArrowRightLeft, color: 'text-amber-500', bgColor: 'bg-amber-500/10 border-amber-500/20', verb: 'movió' },
-  [ChangelogAction.Reassigned]: { icon: UserCheck, color: 'text-fuchsia-500', bgColor: 'bg-fuchsia-500/10 border-fuchsia-500/20', verb: 'reasignó' },
+  [ChangelogAction.Reassigned]: { icon: UserCheck, color: 'text-cyan-500', bgColor: 'bg-cyan-500/10 border-cyan-500/20', verb: 'reasignó' },
   [ChangelogAction.Approved]: { icon: CheckCircle2, color: 'text-green-600', bgColor: 'bg-green-500/10 border-green-500/20', verb: 'aprobó' },
   [ChangelogAction.Rejected]: { icon: XCircle, color: 'text-red-600', bgColor: 'bg-red-500/10 border-red-500/20', verb: 'rechazó' },
 };
@@ -79,7 +79,7 @@ function getStatusColor(value: string): string {
     completed: 'bg-green-500/15 text-green-700 dark:text-green-400',
     in_progress: 'bg-blue-500/15 text-blue-700 dark:text-blue-400',
     active: 'bg-blue-500/15 text-blue-700 dark:text-blue-400',
-    in_review: 'bg-fuchsia-500/15 text-fuchsia-700 dark:text-fuchsia-400',
+    in_review: 'bg-cyan-500/15 text-cyan-700 dark:text-cyan-400',
     qa: 'bg-amber-500/15 text-amber-700 dark:text-amber-400',
     to_do: 'bg-slate-500/15 text-slate-700 dark:text-slate-400',
     backlog: 'bg-gray-500/15 text-gray-700 dark:text-gray-400',

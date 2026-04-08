@@ -36,7 +36,7 @@ function matchesFilter(status: AgentStatus, filter: StatusFilter): boolean {
 
 // === BATCH COLOR GENERATOR ===
 
-const BATCH_COLORS = ['#3B82F6', '#22C55E', '#F59E0B', '#A855F7', '#EC4899', '#EF4444', '#06B6D4', '#F97316'];
+const BATCH_COLORS = ['#3B82F6', '#22C55E', '#F59E0B', '#0891B2', '#06B6D4', '#EF4444', '#2563EB', '#F97316'];
 
 function batchColor(batchId: string): string {
   let hash = 0;
@@ -372,8 +372,8 @@ function TokenBurnChart({ totalTokens }: { totalTokens: number }) {
       .attr('id', TOKEN_GRADIENT_ID)
       .attr('x1', '0').attr('y1', '0')
       .attr('x2', '0').attr('y2', '1');
-    gradient.append('stop').attr('offset', '0%').attr('stop-color', '#A78BFA').attr('stop-opacity', 0.85);
-    gradient.append('stop').attr('offset', '100%').attr('stop-color', '#7C3AED').attr('stop-opacity', 0.3);
+    gradient.append('stop').attr('offset', '0%').attr('stop-color', '#38BDF8').attr('stop-opacity', 0.85);
+    gradient.append('stop').attr('offset', '100%').attr('stop-color', '#1d4ed8').attr('stop-opacity', 0.3);
 
     // --- Bars ---
     g.selectAll('rect.bar')
@@ -392,7 +392,7 @@ function TokenBurnChart({ totalTokens }: { totalTokens: number }) {
     g.append('line')
       .attr('x1', 0).attr('x2', innerW)
       .attr('y1', y(avgTokens)).attr('y2', y(avgTokens))
-      .attr('stroke', '#A78BFA')
+      .attr('stroke', '#38BDF8')
       .attr('stroke-dasharray', '4,3')
       .attr('stroke-width', 1)
       .attr('opacity', 0.6);
@@ -400,7 +400,7 @@ function TokenBurnChart({ totalTokens }: { totalTokens: number }) {
     // --- Avg label ---
     g.append('text')
       .attr('x', innerW + 4).attr('y', y(avgTokens) + 3)
-      .attr('fill', '#A78BFA').attr('font-size', 9).attr('opacity', 0.7)
+      .attr('fill', '#38BDF8').attr('font-size', 9).attr('opacity', 0.7)
       .text(`avg ${formatTokensShort(avgTokens)}`);
 
     // --- X Axis (show every 4th hour) ---
@@ -444,14 +444,14 @@ function TokenBurnChart({ totalTokens }: { totalTokens: number }) {
       <div className="flex items-center justify-between mb-1">
         <div className="flex items-center gap-3">
           <span className="text-xs text-muted-foreground">Token Burn Rate</span>
-          <span className="text-sm font-mono font-semibold tabular-nums text-purple-400">
+          <span className="text-sm font-mono font-semibold tabular-nums text-cyan-400">
             {formatTokensShort(currentHourTokens)}
             <span className="text-muted-foreground/60 text-[10px] ml-1">/hr</span>
           </span>
         </div>
         <div className="flex items-center gap-3">
           <span className="flex items-center gap-1 text-[9px] text-muted-foreground/60">
-            <span className="inline-block h-[2px] w-3 rounded" style={{ backgroundColor: '#A78BFA', opacity: 0.6 }} />avg
+            <span className="inline-block h-[2px] w-3 rounded" style={{ backgroundColor: '#38BDF8', opacity: 0.6 }} />avg
           </span>
           <span className="text-[10px] text-muted-foreground/70">
             Total: {formatTokensShort(totalTokens)} · 24h

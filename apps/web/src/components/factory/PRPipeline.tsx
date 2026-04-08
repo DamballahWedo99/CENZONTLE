@@ -25,7 +25,7 @@ import { formatDistanceToNowStrict } from 'date-fns';
 const STATUS_CFG: Record<PRStatus, { label: string; dot: string; bg: string; text: string }> = {
   [PRStatus.Draft]:            { label: 'Draft',     dot: 'bg-gray-400',    bg: 'bg-gray-500/15',    text: 'text-gray-400' },
   [PRStatus.Open]:             { label: 'Open',      dot: 'bg-blue-400',    bg: 'bg-blue-500/15',    text: 'text-blue-400' },
-  [PRStatus.InReview]:         { label: 'In Review', dot: 'bg-fuchsia-400', bg: 'bg-fuchsia-500/15', text: 'text-fuchsia-400' },
+  [PRStatus.InReview]:         { label: 'In Review', dot: 'bg-cyan-400', bg: 'bg-cyan-500/15', text: 'text-cyan-400' },
   [PRStatus.ChangesRequested]: { label: 'Changes',   dot: 'bg-amber-400',   bg: 'bg-amber-500/15',   text: 'text-amber-400' },
   [PRStatus.Approved]:         { label: 'Approved',  dot: 'bg-emerald-400', bg: 'bg-emerald-500/15', text: 'text-emerald-400' },
   [PRStatus.Merged]:           { label: 'Merged',    dot: 'bg-emerald-400', bg: 'bg-emerald-500/80', text: 'text-white' },

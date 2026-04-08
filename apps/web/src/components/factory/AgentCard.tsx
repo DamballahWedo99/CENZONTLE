@@ -50,16 +50,16 @@ const STATUS_MAP: Record<AgentStatus, StatusConfig> = {
   },
   [AgentStatus.CreatingPR]: {
     label: 'Creating PR',
-    bg: 'bg-purple-500/20',
-    text: 'text-purple-400',
-    border: 'border-purple-500/60',
+    bg: 'bg-cyan-500/20',
+    text: 'text-cyan-400',
+    border: 'border-cyan-500/60',
     pulse: false,
   },
   [AgentStatus.InReview]: {
     label: 'In Review',
-    bg: 'bg-fuchsia-500/20',
-    text: 'text-fuchsia-400',
-    border: 'border-fuchsia-500/60',
+    bg: 'bg-cyan-500/20',
+    text: 'text-cyan-400',
+    border: 'border-cyan-500/60',
     pulse: false,
   },
   [AgentStatus.Rejected]: {

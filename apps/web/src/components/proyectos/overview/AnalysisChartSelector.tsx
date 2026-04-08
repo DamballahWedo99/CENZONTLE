@@ -83,10 +83,10 @@ const CATEGORY_COLORS: Record<VizCategory, { dot: string; text: string; bg: stri
     border: 'border-sky-200 dark:border-sky-800',
   },
   composition: {
-    dot: 'bg-violet-500',
-    text: 'text-violet-700 dark:text-violet-300',
-    bg: 'bg-violet-50 dark:bg-violet-950/30',
-    border: 'border-violet-200 dark:border-violet-800',
+    dot: 'bg-cyan-500',
+    text: 'text-cyan-700 dark:text-cyan-300',
+    bg: 'bg-cyan-50 dark:bg-cyan-950/30',
+    border: 'border-cyan-200 dark:border-cyan-800',
   },
   correlation: {
     dot: 'bg-amber-500',

@@ -14,7 +14,7 @@ export const mockPods: Pod[] = [
     name: 'Frontend Digital',
     description: 'Experiencia web, checkout y portal de clientes',
     productOwnerIds: ['po-3'],
-    color: '#8b5cf6',
+    color: '#1e40af',
   },
   {
     id: 'pod-3',

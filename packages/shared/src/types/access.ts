@@ -19,7 +19,7 @@ export const ACCESS_LEVEL_LABELS: Record<AccessLevel, string> = {
 };
 
 export const ACCESS_LEVEL_COLORS: Record<AccessLevel, string> = {
-  owner: '#8b5cf6',
+  owner: '#1e40af',
   editor: '#3b82f6',
   viewer: '#10b981',
   none: '#6b7280',

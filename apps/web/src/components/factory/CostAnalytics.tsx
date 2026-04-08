@@ -90,21 +90,21 @@ function useContainerWidth(ref: React.RefObject<HTMLDivElement | null>) {
 // =============================================================================
 
 const C = {
-  totalCostArea: 'rgba(99,102,241,0.12)',
-  totalCostStroke: '#6366F1',
-  costPerStoryLine: '#A78BFA',
+  totalCostArea: 'rgba(37,99,232,0.12)',
+  totalCostStroke: '#2563EB',
+  costPerStoryLine: '#38BDF8',
   rejectionLine: '#F59E0B',
   axisTick: '#9CA3AF',
   gridLine: 'rgba(107,114,128,0.15)',
-  donutToken: '#6366F1',
+  donutToken: '#2563EB',
   donutCompute: '#10B981',
   donutOrch: '#F59E0B',
-  scatterVersions: ['#6366F1', '#10B981', '#F59E0B', '#EF4444', '#8B5CF6'],
-  stackToken: 'rgba(99,102,241,0.55)',
+  scatterVersions: ['#2563EB', '#10B981', '#F59E0B', '#EF4444', '#1e40af'],
+  stackToken: 'rgba(37,99,232,0.55)',
   stackCompute: 'rgba(16,185,129,0.55)',
   stackOrch: 'rgba(245,158,11,0.55)',
   effGood: '#10B981',
-  effMid: '#6366F1',
+  effMid: '#2563EB',
   effPoor: '#EF4444',
   deltaGreen: '#22C55E',
   deltaRed: '#EF4444',
@@ -1035,7 +1035,7 @@ function CostForecastChart() {
             <text x={chart.x(splitIdx - 0.5)} y={-6} textAnchor="middle" fill={C.axisTick} fontSize={9} opacity={0.5}>hoy</text>
 
             {/* Area under historical line */}
-            <path d={chart.histArea(chart.histData) ?? ''} fill="rgba(99,102,241,0.08)" />
+            <path d={chart.histArea(chart.histData) ?? ''} fill="rgba(37,99,232,0.08)" />
 
             {/* Regression trend line (thin, full width) */}
             <line x1={chart.x(0)} y1={chart.y(chart.trendY0)} x2={chart.x(chart.allData.length - 1)} y2={chart.y(chart.trendY1)} stroke={C.axisTick} strokeWidth={1} strokeDasharray="8 4" opacity={0.3} />
@@ -1043,7 +1043,7 @@ function CostForecastChart() {
             {/* Historical line (solid indigo) */}
             <path d={chart.histLine(chart.histData) ?? ''} fill="none" stroke={C.totalCostStroke} strokeWidth={2.5} />
 
-            {/* Forecast line (dashed violet) */}
+            {/* Forecast line (dashed blue) */}
             <path d={chart.forecastLine([chart.histData[chart.histData.length - 1], ...chart.forecastData]) ?? ''} fill="none" stroke={C.costPerStoryLine} strokeWidth={2} strokeDasharray="6 4" />
 
             {/* Historical dots */}

@@ -72,9 +72,9 @@ const STATUS_BAR_COLORS: Record<
     label: 'En progreso',
   },
   [StoryStatus.InReview]: {
-    bg: 'bg-fuchsia-500/70',
-    bgHover: 'hover:bg-fuchsia-500/80',
-    dot: 'bg-fuchsia-500',
+    bg: 'bg-cyan-500/70',
+    bgHover: 'hover:bg-cyan-500/80',
+    dot: 'bg-cyan-500',
     label: 'En revision',
   },
   [StoryStatus.QA]: {

@@ -41,17 +41,17 @@ const LAYER_CONFIG: Record<
   },
   [PipelineLayer.Staging]: {
     label: 'Staged',
-    color: '#EC4899',
-    bg: 'bg-pink-500/10',
-    border: 'border-l-pink-500',
-    textColor: 'text-pink-400',
+    color: '#06B6D4',
+    bg: 'bg-cyan-500/10',
+    border: 'border-l-cyan-500',
+    textColor: 'text-cyan-400',
   },
   [PipelineLayer.ReleaseBoard]: {
     label: 'Release Board',
-    color: '#A855F7',
-    bg: 'bg-violet-500/10',
-    border: 'border-l-violet-500',
-    textColor: 'text-violet-400',
+    color: '#0891B2',
+    bg: 'bg-cyan-600/10',
+    border: 'border-l-cyan-600',
+    textColor: 'text-cyan-400',
   },
   [PipelineLayer.QAGate]: {
     label: 'QA Gate',
@@ -69,10 +69,10 @@ const LAYER_CONFIG: Record<
   },
   [PipelineLayer.Linear]: {
     label: 'Linear',
-    color: '#6366F1',
-    bg: 'bg-indigo-500/10',
-    border: 'border-l-indigo-500',
-    textColor: 'text-indigo-400',
+    color: '#2563EB',
+    bg: 'bg-blue-600/10',
+    border: 'border-l-blue-600',
+    textColor: 'text-blue-400',
   },
 };
 
@@ -89,11 +89,11 @@ const PRIORITY_STYLES: Record<
 /** Deterministic color per batch id for the resource grid. */
 const BATCH_COLORS = [
   '#3B82F6', // blue
-  '#EC4899', // pink
-  '#A855F7', // violet
+  '#06B6D4', // cyan
+  '#0891B2', // cyan-600
   '#22C55E', // green
   '#F59E0B', // amber
-  '#06B6D4', // cyan
+  '#2563EB', // blue-600
 ];
 
 function batchColor(batchId: string): string {
@@ -540,9 +540,9 @@ interface KanbanColumn {
 const KANBAN_COLUMNS: KanbanColumn[] = [
   { id: 'queue', label: 'In Queue', color: 'text-muted-foreground', dotColor: '#6B7280' },
   { id: PipelineLayer.Forge, label: 'Forge', color: 'text-blue-400', dotColor: '#3B82F6' },
-  { id: PipelineLayer.Staging, label: 'Staged', color: 'text-pink-400', dotColor: '#EC4899' },
+  { id: PipelineLayer.Staging, label: 'Staged', color: 'text-cyan-400', dotColor: '#06B6D4' },
   { id: PipelineLayer.QAGate, label: 'QA Testing', color: 'text-green-400', dotColor: '#22C55E' },
-  { id: 'released', label: 'Released', color: 'text-violet-400', dotColor: '#A855F7' },
+  { id: 'released', label: 'Released', color: 'text-cyan-400', dotColor: '#0891B2' },
 ];
 
 function KanbanColumnHeader({ column, count }: { column: KanbanColumn; count: number }) {

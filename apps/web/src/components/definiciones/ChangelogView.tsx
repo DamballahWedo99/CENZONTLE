@@ -41,9 +41,9 @@ const ACTION_CONFIG: Record<ChangelogAction, {
   delete:  { icon: Trash2,      label: 'Eliminado',  color: 'text-red-500',    dotColor: 'bg-red-500' },
   rename:  { icon: FileEdit,    label: 'Renombrado', color: 'text-amber-500',  dotColor: 'bg-amber-500' },
   move:    { icon: FolderInput, label: 'Movido',     color: 'text-amber-500',  dotColor: 'bg-amber-500' },
-  tags:    { icon: Tag,         label: 'Tags',       color: 'text-purple-500', dotColor: 'bg-purple-500' },
+  tags:    { icon: Tag,         label: 'Tags',       color: 'text-cyan-500', dotColor: 'bg-cyan-500' },
   reorder: { icon: ArrowUpDown, label: 'Reordenado', color: 'text-gray-500',   dotColor: 'bg-gray-500' },
-  access:  { icon: Shield,      label: 'Acceso',     color: 'text-violet-500', dotColor: 'bg-violet-500' },
+  access:  { icon: Shield,      label: 'Acceso',     color: 'text-cyan-500', dotColor: 'bg-cyan-500' },
 };
 
 function formatRelativeTime(iso: string): string {

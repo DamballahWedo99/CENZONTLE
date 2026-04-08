@@ -35,9 +35,9 @@ const TIME_RANGES: { value: TimeRange; label: string }[] = [
 
 const SOURCE_BADGE: Record<LogEntry['source'], { bg: string; text: string }> = {
   agent: { bg: 'bg-blue-500/15', text: 'text-blue-400' },
-  review: { bg: 'bg-fuchsia-500/15', text: 'text-fuchsia-400' },
+  review: { bg: 'bg-cyan-500/15', text: 'text-cyan-400' },
   ci: { bg: 'bg-amber-500/15', text: 'text-amber-400' },
-  temporal: { bg: 'bg-purple-500/15', text: 'text-purple-400' },
+  temporal: { bg: 'bg-cyan-500/15', text: 'text-cyan-400' },
   qa: { bg: 'bg-emerald-500/15', text: 'text-emerald-400' },
 };
 

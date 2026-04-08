@@ -85,7 +85,7 @@ const automationLabels: Record<import('@cenzontle/shared').AutomationStatus, str
 const automationColors: Record<import('@cenzontle/shared').AutomationStatus, string> = {
   manual: 'bg-muted text-muted-foreground',
   automated: 'bg-cyan-500/10 text-cyan-700 dark:text-cyan-300 border-cyan-500/30',
-  to_automate: 'bg-violet-500/10 text-violet-700 dark:text-violet-300 border-violet-500/30',
+  to_automate: 'bg-cyan-500/10 text-cyan-700 dark:text-cyan-300 border-cyan-500/30',
 };
 
 // --- Coverage helpers ---

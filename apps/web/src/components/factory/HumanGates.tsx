@@ -29,7 +29,7 @@ import { GateDecision } from '@cenzontle/shared';
 // Constants
 // ---------------------------------------------------------------------------
 
-const ACCENT_PINK = '#EC4899';
+const ACCENT_CYAN = '#06B6D4';
 
 const DECISION_CONFIG: Record<
   GateDecision,
@@ -37,9 +37,9 @@ const DECISION_CONFIG: Record<
 > = {
   [GateDecision.Pending]: {
     label: 'Pending',
-    color: 'text-pink-400',
-    bg: 'bg-pink-500/10',
-    border: 'border-pink-500/30',
+    color: 'text-cyan-400',
+    bg: 'bg-cyan-500/10',
+    border: 'border-cyan-500/30',
     icon: Clock,
   },
   [GateDecision.Approved]: {
@@ -338,7 +338,7 @@ function GateCard({ gate }: { gate: HumanGate }) {
         'rounded-xl border p-5 transition-all duration-300',
         'bg-card',
         isPending
-          ? 'border-pink-500/40 shadow-[0_0_20px_-5px_rgba(236,72,153,0.15)]'
+          ? 'border-cyan-500/40 shadow-[0_0_20px_-5px_rgba(6,182,212,0.15)]'
           : config.border,
       )}
       role="region"
@@ -350,13 +350,13 @@ function GateCard({ gate }: { gate: HumanGate }) {
           <div
             className={cn(
               'flex h-10 w-10 items-center justify-center rounded-lg',
-              isPending ? 'bg-pink-500/10' : config.bg,
+              isPending ? 'bg-cyan-500/10' : config.bg,
             )}
           >
             <GateIcon
               className={cn(
                 'h-5 w-5',
-                isPending ? 'text-pink-400 animate-pulse' : config.color,
+                isPending ? 'text-cyan-400 animate-pulse' : config.color,
               )}
               aria-hidden="true"
             />
@@ -416,7 +416,7 @@ function GateCard({ gate }: { gate: HumanGate }) {
                 className={cn(
                   'w-full rounded-md border bg-card border-border px-3 py-2',
                   'text-sm text-foreground placeholder:text-muted-foreground/50',
-                  'focus:outline-none focus:ring-1 focus:ring-pink-500/50 focus:border-pink-500/50',
+                  'focus:outline-none focus:ring-1 focus:ring-cyan-500/50 focus:border-cyan-500/50',
                   'resize-none',
                 )}
                 rows={2}
@@ -515,10 +515,10 @@ export function HumanGates() {
       {/* Section header */}
       <div className="flex items-center gap-3">
         <div
-          className="flex h-8 w-8 items-center justify-center rounded-lg bg-pink-500/10"
+          className="flex h-8 w-8 items-center justify-center rounded-lg bg-cyan-500/10"
           aria-hidden="true"
         >
-          <AlertTriangle className="h-4 w-4 text-pink-400" />
+          <AlertTriangle className="h-4 w-4 text-cyan-400" />
         </div>
         <div>
           <h2 className="text-base font-semibold text-foreground">Human Approval Gates</h2>
@@ -531,7 +531,7 @@ export function HumanGates() {
         {pendingCount > 0 && (
           <span
             className="ml-auto inline-flex h-6 w-6 items-center justify-center rounded-full text-xs font-bold text-white animate-pulse"
-            style={{ backgroundColor: ACCENT_PINK }}
+            style={{ backgroundColor: ACCENT_CYAN }}
             aria-label={`${pendingCount} pending`}
           >
             {pendingCount}

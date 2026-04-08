@@ -213,7 +213,7 @@ function EmptyState({
   return (
     <div className="flex flex-col items-center justify-center min-h-full gap-8 px-6 py-12">
       <div className="flex flex-col items-center gap-4 text-center">
-        <div className="flex h-14 w-14 items-center justify-center rounded-2xl bg-gradient-to-br from-indigo-800 to-fuchsia-600 shadow-md">
+        <div className="flex h-14 w-14 items-center justify-center rounded-2xl bg-gradient-to-br from-indigo-800 to-cyan-600 shadow-md">
           <Bot className="h-7 w-7 text-white" />
         </div>
         <div className="space-y-2">

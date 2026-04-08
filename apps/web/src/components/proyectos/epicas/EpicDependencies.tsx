@@ -56,7 +56,7 @@ import {
 const TYPE_CONFIG: Record<DependencyType, { label: string; icon: typeof Server; color: string }> = {
   technical: { label: 'Técnica', icon: Server, color: 'bg-blue-100 text-blue-700 dark:bg-blue-900/30 dark:text-blue-300' },
   resource: { label: 'Recurso', icon: Users, color: 'bg-amber-100 text-amber-700 dark:bg-amber-900/30 dark:text-amber-300' },
-  knowledge: { label: 'Conocimiento', icon: BookOpen, color: 'bg-violet-100 text-violet-700 dark:bg-violet-900/30 dark:text-violet-300' },
+  knowledge: { label: 'Conocimiento', icon: BookOpen, color: 'bg-cyan-100 text-cyan-700 dark:bg-cyan-900/30 dark:text-cyan-300' },
   external: { label: 'Externa', icon: ExternalLink, color: 'bg-rose-100 text-rose-700 dark:bg-rose-900/30 dark:text-rose-300' },
   'cross-team': { label: 'Cross-team', icon: Link2, color: 'bg-teal-100 text-teal-700 dark:bg-teal-900/30 dark:text-teal-300' },
 };

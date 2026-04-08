@@ -35,8 +35,8 @@ const statusColors: Record<AgentStatus, string> = {
   [AgentStatus.Idle]: 'text-muted-foreground/70',
   [AgentStatus.Coding]: 'text-blue-400',
   [AgentStatus.Testing]: 'text-amber-400',
-  [AgentStatus.CreatingPR]: 'text-purple-400',
-  [AgentStatus.InReview]: 'text-fuchsia-400',
+  [AgentStatus.CreatingPR]: 'text-cyan-400',
+  [AgentStatus.InReview]: 'text-cyan-400',
   [AgentStatus.Rejected]: 'text-red-400',
   [AgentStatus.Done]: 'text-green-400',
   [AgentStatus.Error]: 'text-red-400',
@@ -231,7 +231,7 @@ export function AgentTerminal({ agent, onClose }: AgentTerminalProps) {
                   className={cn(
                     'flex items-center gap-1.5 rounded-full border px-2 py-0.5 text-[10px] transition-colors shrink-0',
                     activeBar === 'dod'
-                      ? 'border-purple-500/50 bg-purple-500/10 text-purple-400'
+                      ? 'border-cyan-500/50 bg-cyan-500/10 text-cyan-400'
                       : 'border-border bg-muted/50 text-muted-foreground hover:text-foreground hover:bg-muted',
                   )}
                 >
@@ -356,7 +356,7 @@ export function AgentTerminal({ agent, onClose }: AgentTerminalProps) {
               : deriveMilestones(story, agent);
             const doneCount = items.filter((c) => c.done).length;
             const label = activeBar === 'dod' ? 'Definition of Done' : 'Milestones';
-            const accentColor = activeBar === 'dod' ? 'text-purple-400' : 'text-blue-400';
+            const accentColor = activeBar === 'dod' ? 'text-cyan-400' : 'text-blue-400';
             return (
               <div className="absolute bottom-0 left-0 right-0 z-10 flex items-center gap-3 px-4 py-2 bg-card/90 backdrop-blur-sm border-t border-border">
                 <span className={cn('text-[10px] font-medium uppercase tracking-wider shrink-0', accentColor)}>

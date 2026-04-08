@@ -145,7 +145,7 @@ function getStatusColor(value: string): string {
     completed: 'bg-green-500/15 text-green-700 dark:text-green-400',
     in_progress: 'bg-blue-500/15 text-blue-700 dark:text-blue-400',
     active: 'bg-blue-500/15 text-blue-700 dark:text-blue-400',
-    in_review: 'bg-fuchsia-500/15 text-fuchsia-700 dark:text-fuchsia-400',
+    in_review: 'bg-cyan-500/15 text-cyan-700 dark:text-cyan-400',
     qa: 'bg-amber-500/15 text-amber-700 dark:text-amber-400',
     to_do: 'bg-slate-500/15 text-slate-700 dark:text-slate-400',
     backlog: 'bg-gray-500/15 text-gray-700 dark:text-gray-400',

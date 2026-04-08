@@ -125,8 +125,8 @@ export function ReleaseBoard() {
       <div className="rounded-xl border border-border bg-card p-6">
         <div className="flex items-start justify-between mb-4">
           <div className="flex items-center gap-3">
-            <div className="flex h-10 w-10 items-center justify-center rounded-lg bg-violet-500/10">
-              <Rocket className="h-5 w-5 text-violet-400" />
+            <div className="flex h-10 w-10 items-center justify-center rounded-lg bg-cyan-500/10">
+              <Rocket className="h-5 w-5 text-cyan-400" />
             </div>
             <div>
               <h2 className="text-foreground font-semibold text-base">Release Board</h2>
@@ -137,7 +137,7 @@ export function ReleaseBoard() {
           </div>
 
           <Button
-            className="bg-violet-600 hover:bg-violet-500 text-white gap-2"
+            className="bg-cyan-600 hover:bg-cyan-500 text-white gap-2"
             disabled={releaseBoard.epics.length === 0}
           >
             <Rocket className="h-4 w-4" />

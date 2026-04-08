@@ -74,7 +74,7 @@ export function DefinicionesExplorer() {
           {viewMode === 'graph' && (
             <div className="flex items-center gap-4 text-xs">
               <div className="flex items-center gap-1.5">
-                <span className="w-2.5 h-2.5 rounded-full" style={{ background: '#6366f1' }} />
+                <span className="w-2.5 h-2.5 rounded-full" style={{ background: '#2563eb' }} />
                 <span className="text-muted-foreground">Carpeta</span>
               </div>
               <div className="flex items-center gap-1.5">
@@ -86,7 +86,7 @@ export function DefinicionesExplorer() {
                 <span className="text-muted-foreground">Tags comunes</span>
               </div>
               <div className="flex items-center gap-1.5">
-                <span className="w-5 border-t-2" style={{ borderColor: '#6366f1' }} />
+                <span className="w-5 border-t-2" style={{ borderColor: '#2563eb' }} />
                 <span className="text-muted-foreground">Jerarquía</span>
               </div>
             </div>
@@ -129,7 +129,7 @@ export function DefinicionesExplorer() {
                 <TooltipContent>Ajustes de física</TooltipContent>
               </Tooltip>
             )}
-            <div className="flex items-center gap-1 bg-muted/50 rounded-lg p-1">
+            <div className="flex items-center gap-1 bg-muted rounded-lg p-1 border border-border/50">
               <Tooltip>
                 <TooltipTrigger asChild>
                   <Button

@@ -140,7 +140,7 @@ export const CEREMONY_CONFIG: Record<string, { label: string; abbreviation: stri
   pi_planning:  { label: 'PI Planning',   abbreviation: 'PI',  bgOverlay: 'bg-amber-400/20',   dotColor: 'bg-amber-400',   textColor: 'text-amber-300' },
   e2e:          { label: 'e2e Testing',   abbreviation: 'e2e', bgOverlay: 'bg-sky-500/15',     dotColor: 'bg-sky-500',     textColor: 'text-sky-400' },
   cvt:          { label: 'CVT',           abbreviation: 'CVT', bgOverlay: 'bg-cyan-500/15',    dotColor: 'bg-cyan-500',    textColor: 'text-cyan-400' },
-  integration:  { label: 'Integración',   abbreviation: 'Int', bgOverlay: 'bg-violet-500/15',  dotColor: 'bg-violet-500',  textColor: 'text-violet-400' },
+  integration:  { label: 'Integración',   abbreviation: 'Int', bgOverlay: 'bg-cyan-500/15',    dotColor: 'bg-cyan-500',    textColor: 'text-cyan-400' },
 };
 
 // ---------------------------------------------------------------------------
@@ -344,9 +344,9 @@ export function getStatusColor(status: string): {
       };
     case "in_review":
       return {
-        bg: "bg-fuchsia-500/60",
-        text: "text-fuchsia-300",
-        border: "border-fuchsia-500/30",
+        bg: "bg-cyan-500/60",
+        text: "text-cyan-300",
+        border: "border-cyan-500/30",
       };
     case "qa":
       return {

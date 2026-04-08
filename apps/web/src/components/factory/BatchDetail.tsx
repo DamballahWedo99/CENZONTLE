@@ -83,8 +83,8 @@ const STORY_STATUS_CONFIG: Record<
   [AgentStatus.Idle]: { label: 'Pending', color: 'text-[#6B7280]', bg: 'bg-[#6B7280]/10', border: 'border-[#6B7280]/30', Icon: Clock },
   [AgentStatus.Coding]: { label: 'Coding', color: 'text-[#3B82F6]', bg: 'bg-[#3B82F6]/10', border: 'border-[#3B82F6]/50', Icon: Loader2 },
   [AgentStatus.Testing]: { label: 'Testing', color: 'text-[#F59E0B]', bg: 'bg-[#F59E0B]/10', border: 'border-[#F59E0B]/50', Icon: Loader2 },
-  [AgentStatus.CreatingPR]: { label: 'Creating PR', color: 'text-[#A855F7]', bg: 'bg-[#A855F7]/10', border: 'border-[#A855F7]/50', Icon: Loader2 },
-  [AgentStatus.InReview]: { label: 'In Review', color: 'text-[#D946EF]', bg: 'bg-[#D946EF]/10', border: 'border-[#D946EF]/50', Icon: Clock },
+  [AgentStatus.CreatingPR]: { label: 'Creating PR', color: 'text-[#06B6D4]', bg: 'bg-[#06B6D4]/10', border: 'border-[#06B6D4]/50', Icon: Loader2 },
+  [AgentStatus.InReview]: { label: 'In Review', color: 'text-[#0891B2]', bg: 'bg-[#0891B2]/10', border: 'border-[#0891B2]/50', Icon: Clock },
   [AgentStatus.Rejected]: { label: 'Rejected', color: 'text-[#EF4444]', bg: 'bg-[#EF4444]/10', border: 'border-[#EF4444]/50', Icon: AlertCircle },
   [AgentStatus.Done]: { label: 'Done', color: 'text-[#22C55E]', bg: 'bg-[#22C55E]/10', border: 'border-[#22C55E]/50', Icon: CheckCircle2 },
   [AgentStatus.Error]: { label: 'Error', color: 'text-[#EF4444]', bg: 'bg-[#EF4444]/10', border: 'border-[#EF4444]/50', Icon: AlertCircle },
@@ -302,8 +302,8 @@ const AGENT_STATUS_STYLES: Record<AgentStatus, { label: string; color: string; b
   [AgentStatus.Idle]: { label: 'Idle', color: 'text-[#6B7280]', bg: 'bg-[#6B7280]/10' },
   [AgentStatus.Coding]: { label: 'Coding', color: 'text-[#3B82F6]', bg: 'bg-[#3B82F6]/10' },
   [AgentStatus.Testing]: { label: 'Testing', color: 'text-[#F59E0B]', bg: 'bg-[#F59E0B]/10' },
-  [AgentStatus.CreatingPR]: { label: 'Creating PR', color: 'text-[#A855F7]', bg: 'bg-[#A855F7]/10' },
-  [AgentStatus.InReview]: { label: 'In Review', color: 'text-[#D946EF]', bg: 'bg-[#D946EF]/10' },
+  [AgentStatus.CreatingPR]: { label: 'Creating PR', color: 'text-[#06B6D4]', bg: 'bg-[#06B6D4]/10' },
+  [AgentStatus.InReview]: { label: 'In Review', color: 'text-[#0891B2]', bg: 'bg-[#0891B2]/10' },
   [AgentStatus.Rejected]: { label: 'Rejected', color: 'text-[#EF4444]', bg: 'bg-[#EF4444]/10' },
   [AgentStatus.Done]: { label: 'Done', color: 'text-[#22C55E]', bg: 'bg-[#22C55E]/10' },
   [AgentStatus.Error]: { label: 'Error', color: 'text-[#EF4444]', bg: 'bg-[#EF4444]/10' },
@@ -315,8 +315,8 @@ function AgentList({ agents }: AgentListProps) {
   return (
     <section aria-label="Assigned Agents">
       <div className="flex items-center gap-2 mb-4">
-        <div className="flex h-7 w-7 items-center justify-center rounded-lg bg-purple-500/10" aria-hidden="true">
-          <Bot className="h-3.5 w-3.5 text-purple-400" />
+        <div className="flex h-7 w-7 items-center justify-center rounded-lg bg-cyan-500/10" aria-hidden="true">
+          <Bot className="h-3.5 w-3.5 text-cyan-400" />
         </div>
         <h2 className="text-sm font-semibold text-foreground">Assigned Agents</h2>
         <span className="rounded-md bg-zinc-800 px-2 py-0.5 text-xs font-medium text-zinc-400">
@@ -378,8 +378,8 @@ function MetricsCards({ batch, stories, agents, testPassRate }: MetricsCardsProp
       value: `${agents.length}`,
       sub: `${agents.filter((a) => a.status !== AgentStatus.Idle && a.status !== AgentStatus.Done).length} active`,
       Icon: Bot,
-      accent: 'text-purple-400',
-      accentBg: 'bg-purple-500/10',
+      accent: 'text-cyan-400',
+      accentBg: 'bg-cyan-500/10',
     },
     {
       label: 'Cost',
@@ -440,7 +440,7 @@ function MetricsCards({ batch, stories, agents, testPassRate }: MetricsCardsProp
 // ---------------------------------------------------------------------------
 
 const GATE_DECISION_CONFIG: Record<GateDecision, { label: string; color: string; bg: string; border: string; Icon: typeof CheckCircle }> = {
-  [GateDecision.Pending]: { label: 'Awaiting Approval', color: 'text-pink-400', bg: 'bg-pink-500/10', border: 'border-pink-500/30', Icon: ShieldAlert },
+  [GateDecision.Pending]: { label: 'Awaiting Approval', color: 'text-cyan-400', bg: 'bg-cyan-500/10', border: 'border-cyan-500/30', Icon: ShieldAlert },
   [GateDecision.Approved]: { label: 'Approved', color: 'text-emerald-400', bg: 'bg-emerald-500/10', border: 'border-emerald-500/30', Icon: CheckCircle },
   [GateDecision.Rejected]: { label: 'Rejected', color: 'text-red-400', bg: 'bg-red-500/10', border: 'border-red-500/30', Icon: XCircle },
   [GateDecision.Deferred]: { label: 'Deferred', color: 'text-amber-400', bg: 'bg-amber-500/10', border: 'border-amber-500/30', Icon: Pause },
@@ -503,7 +503,7 @@ function PendingGateCard({ gate, batchBranch, onDecision }: { gate: HumanGate; b
             onChange={(e) => setNotes(e.target.value)}
             placeholder="Review notes — describe business intent concerns, UX issues, or strategic misalignment..."
             rows={3}
-            className="w-full rounded-lg border border-border bg-card px-3 py-2 text-sm text-foreground placeholder:text-muted-foreground/70 focus:outline-none focus:ring-1 focus:ring-pink-500/50 focus:border-pink-500/50 resize-none"
+            className="w-full rounded-lg border border-border bg-card px-3 py-2 text-sm text-foreground placeholder:text-muted-foreground/70 focus:outline-none focus:ring-1 focus:ring-cyan-500/50 focus:border-cyan-500/50 resize-none"
           />
         </label>
 
@@ -543,12 +543,12 @@ function ApprovalSection({ gates, batchBranch, onDecision }: { gates: HumanGate[
   return (
     <section aria-label="Human Gate Approvals" className="rounded-xl border border-border bg-card p-5">
       <div className="flex items-center gap-2 mb-4">
-        <div className="flex h-7 w-7 items-center justify-center rounded-lg bg-pink-500/10" aria-hidden="true">
-          <ShieldAlert className="h-3.5 w-3.5 text-pink-400" />
+        <div className="flex h-7 w-7 items-center justify-center rounded-lg bg-cyan-500/10" aria-hidden="true">
+          <ShieldAlert className="h-3.5 w-3.5 text-cyan-400" />
         </div>
         <h2 className="text-sm font-semibold text-foreground">Human Gate Approvals</h2>
         {pendingGates.length > 0 && (
-          <span className="rounded-full bg-pink-500/15 border border-pink-500/30 px-2 py-0.5 text-[10px] font-semibold text-pink-400 animate-pulse">
+          <span className="rounded-full bg-cyan-500/15 border border-cyan-500/30 px-2 py-0.5 text-[10px] font-semibold text-cyan-400 animate-pulse">
             Pending
           </span>
         )}

@@ -93,7 +93,7 @@ const automationLabels: Record<AutomationStatus, string> = {
 const automationColors: Record<AutomationStatus, string> = {
   manual: 'bg-muted text-muted-foreground',
   automated: 'bg-cyan-500/10 text-cyan-700 dark:text-cyan-300 border-cyan-500/30',
-  to_automate: 'bg-violet-500/10 text-violet-700 dark:text-violet-300 border-violet-500/30',
+  to_automate: 'bg-cyan-500/10 text-cyan-700 dark:text-cyan-300 border-cyan-500/30',
 };
 
 const categoryIcons: Record<EpicQATestCategory, typeof Layers> = {
@@ -110,13 +110,13 @@ const categoryIcons: Record<EpicQATestCategory, typeof Layers> = {
 
 const categoryColors: Record<EpicQATestCategory, string> = {
   integration: 'text-blue-600 dark:text-blue-400 bg-blue-500/10',
-  e2e: 'text-purple-600 dark:text-purple-400 bg-purple-500/10',
+  e2e: 'text-cyan-600 dark:text-cyan-400 bg-cyan-500/10',
   performance: 'text-amber-600 dark:text-amber-400 bg-amber-500/10',
   security: 'text-red-600 dark:text-red-400 bg-red-500/10',
   compatibility: 'text-teal-600 dark:text-teal-400 bg-teal-500/10',
   reliability: 'text-indigo-600 dark:text-indigo-400 bg-indigo-500/10',
   safety: 'text-orange-600 dark:text-orange-400 bg-orange-500/10',
-  usability: 'text-pink-600 dark:text-pink-400 bg-pink-500/10',
+  usability: 'text-sky-600 dark:text-sky-400 bg-sky-500/10',
   maintainability: 'text-slate-600 dark:text-slate-400 bg-slate-500/10',
 };
 

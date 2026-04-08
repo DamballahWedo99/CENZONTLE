@@ -25,7 +25,7 @@ export const USER_ROLE_DESCRIPTIONS: Record<UserRole, string> = {
 };
 
 export const USER_ROLE_COLORS: Record<UserRole, string> = {
-  [UserRole.AltaGerencia]: '#8b5cf6',
+  [UserRole.AltaGerencia]: '#1e40af',
   [UserRole.ProductOwner]: '#3b82f6',
   [UserRole.TechLead]: '#f59e0b',
   [UserRole.QA]: '#10b981',

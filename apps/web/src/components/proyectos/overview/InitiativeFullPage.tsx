@@ -331,7 +331,7 @@ function InitiativeFullPageInner({ initiativeId }: InitiativeFullPageProps) {
   const statusColors: Record<string, string> = {
     [StoryStatus.Done]: 'bg-green-500',
     [StoryStatus.InProgress]: 'bg-blue-500',
-    [StoryStatus.InReview]: 'bg-fuchsia-500',
+    [StoryStatus.InReview]: 'bg-cyan-500',
     [StoryStatus.QA]: 'bg-amber-500',
     [StoryStatus.ToDo]: 'bg-slate-400',
     [StoryStatus.Backlog]: 'bg-gray-300 dark:bg-gray-600',

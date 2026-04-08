@@ -92,14 +92,14 @@ function CurrentVersionCard({ version }: { version: PromptVersion }) {
   return (
     <div className="rounded-xl border border-border bg-card p-5">
       <div className="flex items-center gap-3 mb-3">
-        <div className="flex h-9 w-9 items-center justify-center rounded-lg bg-violet-500/10">
-          <Tag className="h-4 w-4 text-violet-400" aria-hidden="true" />
+        <div className="flex h-9 w-9 items-center justify-center rounded-lg bg-cyan-500/10">
+          <Tag className="h-4 w-4 text-cyan-400" aria-hidden="true" />
         </div>
         <div>
           <h3 className="text-sm font-semibold text-foreground">Current Prompt Version</h3>
           <p className="text-xs text-muted-foreground">Active across all forge agents</p>
         </div>
-        <span className="ml-auto inline-flex items-center gap-1.5 rounded-full bg-violet-500/10 border border-violet-500/20 px-3 py-1 text-xs font-mono font-semibold text-violet-400">
+        <span className="ml-auto inline-flex items-center gap-1.5 rounded-full bg-cyan-500/10 border border-cyan-500/20 px-3 py-1 text-xs font-mono font-semibold text-cyan-400">
           {version.version}
         </span>
       </div>
@@ -220,7 +220,7 @@ function BatchHistoryTable({ batches }: { batches: BatchMetrics[] }) {
                     <span className="text-foreground font-medium">{batch.batchName}</span>
                   </td>
                   <td className="px-4 py-3">
-                    <span className="font-mono text-xs text-violet-400 bg-violet-500/10 border border-violet-500/20 rounded px-1.5 py-0.5">
+                    <span className="font-mono text-xs text-cyan-400 bg-cyan-500/10 border border-cyan-500/20 rounded px-1.5 py-0.5">
                       {batch.promptVersion}
                     </span>
                   </td>
@@ -291,7 +291,7 @@ function PromptVersionHistory({ versions }: { versions: PromptVersion[] }) {
                   className={cn(
                     'h-3 w-3 rounded-full border-2 mt-1.5 shrink-0',
                     isCurrent
-                      ? 'border-violet-400 bg-violet-400'
+                      ? 'border-cyan-400 bg-cyan-400'
                       : 'border-border bg-background',
                   )}
                   aria-hidden="true"
@@ -307,14 +307,14 @@ function PromptVersionHistory({ versions }: { versions: PromptVersion[] }) {
                   <span
                     className={cn(
                       'font-mono text-sm font-semibold',
-                      isCurrent ? 'text-violet-400' : 'text-foreground',
+                      isCurrent ? 'text-cyan-400' : 'text-foreground',
                     )}
                   >
                     {v.version}
                   </span>
                   <span className="text-xs text-muted-foreground">{formatDate(v.createdAt)}</span>
                   {isCurrent && (
-                    <span className="text-[10px] font-medium uppercase tracking-wider text-violet-400 bg-violet-500/10 border border-violet-500/20 rounded-full px-2 py-0.5">
+                    <span className="text-[10px] font-medium uppercase tracking-wider text-cyan-400 bg-cyan-500/10 border border-cyan-500/20 rounded-full px-2 py-0.5">
                       current
                     </span>
                   )}
@@ -390,8 +390,8 @@ export function EvolutionView() {
     <section aria-label="Self-Evolution Metrics" className="space-y-5">
       {/* Section header */}
       <div className="flex items-center gap-3">
-        <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-violet-500/10" aria-hidden="true">
-          <Dna className="h-4 w-4 text-violet-400" />
+        <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-cyan-500/10" aria-hidden="true">
+          <Dna className="h-4 w-4 text-cyan-400" />
         </div>
         <div>
           <h2 className="text-base font-semibold text-foreground">Self-Evolution</h2>

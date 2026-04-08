@@ -109,7 +109,7 @@ function extractGraphData(tree: DefinicionNode[]): { nodes: GraphNode[]; links: 
 }
 
 const NODE_COLORS = {
-  folder: { fill: '#6366f1', stroke: '#4f46e5' },
+  folder: { fill: '#2563eb', stroke: '#1d4ed8' },
   document: { fill: '#06b6d4', stroke: '#0891b2' },
   highlighted: { fill: '#f59e0b', stroke: '#d97706' },
 };
@@ -229,7 +229,7 @@ export function GraphView({ showForceControls = false, onNavigateToNode }: { sho
       .selectAll('line')
       .data(simLinks)
       .join('line')
-      .attr('stroke', d => d.type === 'tag' ? '#f59e0b55' : '#6366f155')
+      .attr('stroke', d => d.type === 'tag' ? '#f59e0b55' : '#2563eb55')
       .attr('stroke-width', d => d.type === 'tag' ? 1 : 1.5)
       .attr('stroke-dasharray', d => d.type === 'tag' ? '4,3' : 'none');
 
