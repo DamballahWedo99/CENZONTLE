@@ -806,6 +806,7 @@ function VaultSection() {
   };
 
   return (
+    <TooltipProvider delayDuration={300}>
     <SettingsCard
       title="Vault"
       description="Conecta uno o más repositorios de GitHub como vaults. Los documentos, épicas, historias e iniciativas se guardan como markdown versionado. Puedes restringir el acceso de cada vault a células específicas."
@@ -849,9 +850,9 @@ function VaultSection() {
                         <div className="flex items-center gap-2">
                           <span className="text-sm font-medium truncate">{v.name}</span>
                           {v.isActive && (
-                            <span className="shrink-0 inline-flex items-center gap-1 text-[10px] font-semibold uppercase tracking-wider text-primary bg-primary/10 border border-primary/20 rounded-full px-2 py-0.5">
+                            <span className="shrink-0 inline-flex items-center gap-0.5 text-[10px] text-primary bg-primary/10 border border-primary/20 rounded-full px-1.5 py-0.5">
                               <Check className="h-2.5 w-2.5" />
-                              Activo
+                              Vinculado
                             </span>
                           )}
                         </div>
@@ -863,16 +864,23 @@ function VaultSection() {
                     </div>
                     <div className="flex items-center gap-1 shrink-0">
                       {!v.isActive && (
-                        <Button
-                          variant="outline"
-                          size="sm"
-                          className="h-7 text-xs gap-1.5"
-                          onClick={() => handleActivate(v.id, v.name)}
-                          disabled={busyId === v.id}
-                        >
-                          {busyId === v.id ? <Loader2 className="h-3 w-3 animate-spin" /> : <Zap className="h-3 w-3" />}
-                          Activar
-                        </Button>
+                        <Tooltip>
+                          <TooltipTrigger asChild>
+                            <Button
+                              variant="outline"
+                              size="sm"
+                              className="h-7 text-xs gap-1.5"
+                              onClick={() => handleActivate(v.id, v.name)}
+                              disabled={busyId === v.id}
+                            >
+                              {busyId === v.id ? <Loader2 className="h-3 w-3 animate-spin" /> : <Zap className="h-3 w-3" />}
+                              Vincular
+                            </Button>
+                          </TooltipTrigger>
+                          <TooltipContent side="top" className="max-w-[260px] text-center">
+                            Establece este vault como fuente activa para el dashboard de Proyectos
+                          </TooltipContent>
+                        </Tooltip>
                       )}
                       <Button
                         variant="ghost"
@@ -971,6 +979,7 @@ function VaultSection() {
         destructive
       />
     </SettingsCard>
+    </TooltipProvider>
   );
 }
 
