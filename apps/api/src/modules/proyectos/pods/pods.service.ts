@@ -4,18 +4,13 @@ import { CreatePodDto } from './dto/create-pod.dto';
 import { UpdatePodDto } from './dto/update-pod.dto';
 
 const POD_INCLUDE = {
-  productOwners: {
-    include: { productOwner: { select: { id: true, name: true, email: true, avatarUrl: true } } },
-  },
   _count: { select: { epics: true } },
 } as const;
 
 function mapPod(raw: any) {
-  const { productOwners, _count, ...pod } = raw;
+  const { _count, ...pod } = raw;
   return {
     ...pod,
-    productOwnerIds: productOwners.map((po: any) => po.productOwnerId),
-    productOwners: productOwners.map((po: any) => po.productOwner),
     epicCount: _count.epics,
   };
 }
@@ -42,32 +37,18 @@ export class PodsService {
   }
 
   async create(dto: CreatePodDto) {
-    const { productOwnerIds, ...data } = dto;
-    const pod = await this.prisma.$transaction(async (tx) => {
-      const created = await tx.pod.create({ data });
-      if (productOwnerIds?.length) {
-        await tx.podProductOwner.createMany({
-          data: productOwnerIds.map((poId) => ({ podId: created.id, productOwnerId: poId })),
-        });
-      }
-      return tx.pod.findUniqueOrThrow({ where: { id: created.id }, include: POD_INCLUDE });
+    const pod = await this.prisma.pod.create({
+      data: dto,
+      include: POD_INCLUDE,
     });
     return mapPod(pod);
   }
 
   async update(id: string, dto: UpdatePodDto) {
-    const { productOwnerIds, ...data } = dto;
-    const pod = await this.prisma.$transaction(async (tx) => {
-      await tx.pod.update({ where: { id }, data });
-      if (productOwnerIds !== undefined) {
-        await tx.podProductOwner.deleteMany({ where: { podId: id } });
-        if (productOwnerIds.length) {
-          await tx.podProductOwner.createMany({
-            data: productOwnerIds.map((poId) => ({ podId: id, productOwnerId: poId })),
-          });
-        }
-      }
-      return tx.pod.findUniqueOrThrow({ where: { id }, include: POD_INCLUDE });
+    const pod = await this.prisma.pod.update({
+      where: { id },
+      data: dto,
+      include: POD_INCLUDE,
     });
     return mapPod(pod);
   }

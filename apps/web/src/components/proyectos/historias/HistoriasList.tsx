@@ -64,7 +64,6 @@ interface StoryFormData {
   storyPoints: number;
   status: StoryStatus;
   podId: string;
-  productOwnerId: string | null;
   labels: string[];
   po: StoryPOFields;
   technical: StoryTechnicalFields;
@@ -187,7 +186,6 @@ export function HistoriasList() {
     storyPoints: 3,
     status: StoryStatusEnum.Backlog,
     podId: '',
-    productOwnerId: '',
     labels: [],
     po: emptyPO,
     technical: emptyTechnical,
@@ -198,27 +196,10 @@ export function HistoriasList() {
   const [newLabel, setNewLabel] = useState('');
   const [deleteConfirmId, setDeleteConfirmId] = useState<string | null>(null);
 
-  // Current user — determines PO permissions
-  const currentUser = state.productOwners.find((p) => p.id === state.currentUserId);
-
-  // Check if the current user is a PO on the epic's pods
-  const isPoForEpic = useCallback(
-    (epicId: string): boolean => {
-      if (!currentUser) return false;
-      const epic = state.epics.find((e) => e.id === epicId);
-      if (!epic) return false;
-      return epic.podIds.some((podId) => currentUser.podIds.includes(podId));
-    },
-    [currentUser, state.epics],
-  );
-
-  // Check if user can edit a specific story (must be the PO who owns it)
+  // All users can edit/delete stories (permissions enforced server-side via Auth0 roles)
   const canEditStory = useCallback(
-    (story: UserStory): boolean => {
-      if (!currentUser) return false;
-      return story.productOwnerId === currentUser.id;
-    },
-    [currentUser],
+    (_story: UserStory): boolean => true,
+    [],
   );
 
   const toggleSort = (field: SortField) => {
@@ -276,7 +257,6 @@ export function HistoriasList() {
       storyPoints: story.storyPoints,
       status: story.status,
       podId: story.podId,
-      productOwnerId: story.productOwnerId ?? '',
       labels: [...story.labels],
       po: {
         ...story.po,
@@ -336,7 +316,6 @@ export function HistoriasList() {
         status: formData.status as string,
         storyPoints: formData.storyPoints,
         podId: formData.podId,
-        productOwnerId: formData.productOwnerId || undefined,
         labels: formData.labels,
         po: poForApi,
         technical: cleanedTechnical,
@@ -356,7 +335,6 @@ export function HistoriasList() {
             storyPoints: formData.storyPoints,
             status: formData.status,
             podId: formData.podId,
-            productOwnerId: formData.productOwnerId || null,
             labels: formData.labels,
             po: cleanedPO,
             technical: cleanedTechnical,
@@ -412,7 +390,7 @@ export function HistoriasList() {
   // --- Form sections ---
 
   const renderMetaFields = () => (
-    <div className="grid grid-cols-2 gap-3 sm:grid-cols-4 mb-4">
+    <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 mb-4">
       <div className="space-y-1.5">
         <label className="text-xs font-medium text-muted-foreground">Story Points</label>
         <Select
@@ -462,24 +440,6 @@ export function HistoriasList() {
             {state.pods.map((pod) => (
               <SelectItem key={pod.id} value={pod.id}>
                 {pod.name}
-              </SelectItem>
-            ))}
-          </SelectContent>
-        </Select>
-      </div>
-      <div className="space-y-1.5">
-        <label className="text-xs font-medium text-muted-foreground">Product Owner</label>
-        <Select
-          value={formData.productOwnerId ?? undefined}
-          onValueChange={(v) => setFormData((prev) => ({ ...prev, productOwnerId: v }))}
-        >
-          <SelectTrigger className="text-sm">
-            <SelectValue placeholder="Seleccionar" />
-          </SelectTrigger>
-          <SelectContent>
-            {state.productOwners.map((po) => (
-              <SelectItem key={po.id} value={po.id}>
-                {po.name}
               </SelectItem>
             ))}
           </SelectContent>
@@ -863,12 +823,11 @@ export function HistoriasList() {
   return (
     <div className="space-y-3">
       {/* Header row */}
-      <div className="grid grid-cols-[60px_1fr_180px_160px_140px_90px_32px_100px_60px_28px] gap-2 items-center px-4 py-2 text-xs font-medium text-muted-foreground border-b">
+      <div className="grid grid-cols-[60px_1fr_180px_160px_90px_32px_100px_60px_28px] gap-2 items-center px-4 py-2 text-xs font-medium text-muted-foreground border-b">
         <SortHeader field="trackerKey">Key</SortHeader>
         <SortHeader field="title">Título</SortHeader>
         <div>Épica</div>
         <div>Célula</div>
-        <div>Product Owner</div>
         <SortHeader field="status">Status</SortHeader>
         <SortHeader field="storyPoints">SP</SortHeader>
         <div>Sprint</div>
@@ -888,7 +847,6 @@ export function HistoriasList() {
             const isExpanded = expandedStoryId === story.id;
             const epic = state.epics.find((e) => e.id === story.epicId);
             const pod = state.pods.find((p) => p.id === story.podId);
-            const po = state.productOwners.find((p) => p.id === story.productOwnerId);
             const sprint = story.sprintId
               ? state.sprints.find((s) => s.id === story.sprintId)
               : null;
@@ -904,7 +862,7 @@ export function HistoriasList() {
               >
                 {/* Row summary */}
                 <div
-                  className="grid grid-cols-[60px_1fr_180px_160px_140px_90px_32px_100px_60px_28px] gap-2 items-center px-4 py-3 text-sm cursor-pointer"
+                  className="grid grid-cols-[60px_1fr_180px_160px_90px_32px_100px_60px_28px] gap-2 items-center px-4 py-3 text-sm cursor-pointer"
                   onClick={() => {
                     if (!isEditing) {
                       router.push(`/proyectos/historias/${story.id}`);
@@ -921,7 +879,6 @@ export function HistoriasList() {
                   <span className="truncate font-medium">{story.title}</span>
                   <span className="text-xs text-muted-foreground truncate">{epic?.title}</span>
                   <div>{pod && <PodBadge name={pod.name} color={pod.color} />}</div>
-                  <span className="text-xs">{po?.name ?? '\u2014'}</span>
                   <div><StatusBadge status={story.status} /></div>
                   <div><StoryPointsBadge points={story.storyPoints} /></div>
                   <span className="text-xs text-muted-foreground">{sprint?.name ?? '\u2014'}</span>
@@ -1002,11 +959,6 @@ export function HistoriasList() {
                       {pod && (
                         <span>
                           Pod: <span className="text-foreground">{pod.name}</span>
-                        </span>
-                      )}
-                      {po && (
-                        <span>
-                          PO: <span className="text-foreground">{po.name}</span>
                         </span>
                       )}
                       {epic && (

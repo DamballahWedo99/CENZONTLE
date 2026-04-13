@@ -6,21 +6,18 @@ export const mockPods: Pod[] = [
     name: 'Payments Backend',
     description:
       'Procesamiento de pagos, integraciones con procesadores y reconciliación',
-    productOwnerIds: ['po-1', 'po-2'],
     color: '#3b82f6',
   },
   {
     id: 'pod-2',
     name: 'Frontend Digital',
     description: 'Experiencia web, checkout y portal de clientes',
-    productOwnerIds: ['po-3'],
     color: '#1e40af',
   },
   {
     id: 'pod-3',
     name: 'Loyalty & Rewards',
     description: 'Programa de lealtad, puntos y recompensas',
-    productOwnerIds: ['po-4'],
     color: '#f59e0b',
   },
   {
@@ -28,7 +25,6 @@ export const mockPods: Pod[] = [
     name: 'Platform Infrastructure',
     description:
       'Infraestructura cloud, CI/CD, observabilidad y seguridad',
-    productOwnerIds: ['po-5'],
     color: '#10b981',
   },
   {
@@ -36,7 +32,6 @@ export const mockPods: Pod[] = [
     name: 'Mobile Experience',
     description:
       'App móvil iOS/Android, notificaciones push y experiencia nativa',
-    productOwnerIds: ['po-6'],
     color: '#ef4444',
   },
 ];

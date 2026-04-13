@@ -2,7 +2,7 @@
 
 import React, { createContext, useContext, useReducer, useMemo, useEffect, useCallback, useRef, ReactNode } from 'react';
 import {
-  Initiative, Epic, UserStory, Pod, ProductOwner, Sprint, ChangelogEntry,
+  Initiative, Epic, UserStory, Pod, Sprint, ChangelogEntry,
   SprintCeremony, InitiativeStatus, EpicStatus as SharedEpicStatus, Priority,
   ProyectosFilters, DEFAULT_FILTERS, EpicWithRelations, MatrizRow, MatrizCell,
   StoryStatus, EpicStatus, ChangelogAction, ChangelogEntityType, QAMatrix, EpicQAMatrix,
@@ -14,13 +14,11 @@ import { getInitiatives, createInitiative as apiCreateInitiative, updateInitiati
 import { getEpics, createEpic as apiCreateEpic, updateEpic as apiUpdateEpic } from '@/lib/api/epics';
 import { getStories, type StoryResponse } from '@/lib/api/stories';
 import { getPods } from '@/lib/api/pods';
-import { getProductOwners } from '@/lib/api/product-owners';
 import { useAuthContext } from '@/context/AuthContext';
 import { getChangelog, createChangelogEntry as apiCreateChangelog, type ChangelogEntryResponse } from '@/lib/api/changelog';
 import type { InitiativeResponse } from '@/lib/api/initiatives';
 import type { EpicResponse } from '@/lib/api/epics';
 import type { PodResponse } from '@/lib/api/pods';
-import type { ProductOwnerResponse } from '@/lib/api/product-owners';
 
 // === API → Domain mappers ===
 function toDateStr(iso: string): string {
@@ -57,7 +55,7 @@ export function mapEpic(r: EpicResponse): Epic {
 }
 
 function mapPod(r: PodResponse): Pod {
-  return { id: r.id, name: r.name, description: r.description, color: r.color, productOwnerIds: r.productOwnerIds };
+  return { id: r.id, name: r.name, description: r.description, color: r.color };
 }
 
 function mapStory(r: StoryResponse): UserStory {
@@ -72,17 +70,12 @@ function mapStory(r: StoryResponse): UserStory {
     storyPoints: r.storyPoints as 1 | 2 | 3 | 5 | 8 | 13,
     epicId: r.epicId,
     podId: r.podId,
-    productOwnerId: r.productOwnerId,
     sprintId: r.sprintId,
     labels: r.labels ?? [],
     tracker: r.tracker ?? null,
     createdAt: r.createdAt,
     updatedAt: r.updatedAt,
   } as unknown as UserStory;
-}
-
-function mapProductOwner(r: ProductOwnerResponse): ProductOwner {
-  return { id: r.id, name: r.name, email: r.email, avatarUrl: r.avatarUrl, podIds: r.podIds };
 }
 
 function mapChangelog(r: ChangelogEntryResponse): ChangelogEntry {
@@ -107,7 +100,6 @@ interface ProyectosState {
   epics: Epic[];
   stories: UserStory[];
   pods: Pod[];
-  productOwners: ProductOwner[];
   sprints: Sprint[];
   ceremonies: SprintCeremony[];
   changelog: ChangelogEntry[];
@@ -124,7 +116,6 @@ const initialState: ProyectosState = {
   epics: [],
   stories: [],
   pods: [],
-  productOwners: [],
   sprints: mockSprints,
   ceremonies: mockCeremonies,
   changelog: [],
@@ -167,7 +158,7 @@ let _currentUserName = 'Sistema';
 
 // === ACTIONS ===
 type ProyectosAction =
-  | { type: 'LOAD_DATA'; payload: { initiatives: Initiative[]; epics: Epic[]; stories: UserStory[]; pods: Pod[]; productOwners: ProductOwner[]; changelog: ChangelogEntry[]; currentUserName: string } }
+  | { type: 'LOAD_DATA'; payload: { initiatives: Initiative[]; epics: Epic[]; stories: UserStory[]; pods: Pod[]; changelog: ChangelogEntry[]; currentUserName: string } }
   | { type: 'SET_LOADING'; payload: boolean }
   | { type: 'SET_ERROR'; payload: string | null }
   | { type: 'SET_FILTERS'; payload: Partial<ProyectosFilters> }
@@ -207,8 +198,8 @@ type ProyectosAction =
 function proyectosReducer(state: ProyectosState, action: ProyectosAction): ProyectosState {
   switch (action.type) {
     case 'LOAD_DATA': {
-      const { initiatives, epics, stories, pods, productOwners, changelog, currentUserName } = action.payload;
-      return { ...state, initiatives, epics, stories, pods, productOwners, changelog, currentUserName, loading: false, error: null, currentUserId: productOwners[0]?.id ?? '' };
+      const { initiatives, epics, stories, pods, changelog, currentUserName } = action.payload;
+      return { ...state, initiatives, epics, stories, pods, changelog, currentUserName, loading: false, error: null };
     }
     case 'SET_LOADING':
       return { ...state, loading: action.payload };
@@ -361,12 +352,12 @@ function proyectosReducer(state: ProyectosState, action: ProyectosAction): Proye
       };
     }
     case 'APPROVE_EPIC_STORIES': {
-      const { epicId, poId, poName } = action.payload;
+      const { epicId, poName } = action.payload;
       const epic = state.epics.find((e) => e.id === epicId);
       if (!epic) return state;
       const approval = {
         status: 'approved' as const,
-        approvedBy: poId,
+        approvedBy: poName,
         approvedAt: new Date().toISOString(),
         comment: null,
       };
@@ -381,12 +372,12 @@ function proyectosReducer(state: ProyectosState, action: ProyectosAction): Proye
       };
     }
     case 'REJECT_EPIC_STORIES': {
-      const { epicId, poId, poName, comment } = action.payload;
+      const { epicId, poName, comment } = action.payload;
       const epic = state.epics.find((e) => e.id === epicId);
       if (!epic) return state;
       const rejection = {
         status: 'rejected' as const,
-        approvedBy: poId,
+        approvedBy: poName,
         approvedAt: new Date().toISOString(),
         comment,
       };
@@ -717,12 +708,11 @@ export function ProyectosProvider({ children }: { children: ReactNode }) {
   const reload = useCallback(async () => {
     dispatch({ type: 'SET_LOADING', payload: true });
     try {
-      const [initiativesRaw, epicsRaw, storiesRaw, podsRaw, productOwnersRaw, changelogRaw] = await Promise.all([
+      const [initiativesRaw, epicsRaw, storiesRaw, podsRaw, changelogRaw] = await Promise.all([
         getInitiatives(),
         getEpics(),
         getStories(),
         getPods(),
-        getProductOwners(),
         getChangelog(),
       ]);
       dispatch({
@@ -732,7 +722,6 @@ export function ProyectosProvider({ children }: { children: ReactNode }) {
           epics: epicsRaw.map(mapEpic),
           stories: storiesRaw.map(mapStory),
           pods: podsRaw.map(mapPod),
-          productOwners: productOwnersRaw.map(mapProductOwner),
           changelog: changelogRaw.map(mapChangelog),
           currentUserName: currentUser?.name || 'Sistema',
         },
@@ -776,7 +765,6 @@ export function ProyectosProvider({ children }: { children: ReactNode }) {
         if (!epic || !filters.initiativeIds.includes(epic.initiativeId)) return false;
       }
       if (filters.podIds.length > 0 && !filters.podIds.includes(story.podId)) return false;
-      if (filters.productOwnerIds.length > 0 && (!story.productOwnerId || !filters.productOwnerIds.includes(story.productOwnerId))) return false;
       if (filters.statuses.length > 0 && !filters.statuses.includes(story.status)) return false;
       if (filters.priorities.length > 0) {
         const epic = state.epics.find((e) => e.id === story.epicId);

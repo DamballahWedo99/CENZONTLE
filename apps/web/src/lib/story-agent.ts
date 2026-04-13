@@ -246,7 +246,7 @@ export async function generateStories(epic: Epic, podIds: string[]): Promise<Use
           storyPoints: story.points,
           epicId: epic.id,
           podId,
-          productOwnerId: null,
+
           sprintId: null,
           labels: story.labels,
           po: {
@@ -291,7 +291,6 @@ export async function generateStories(epic: Epic, podIds: string[]): Promise<Use
         storyPoints: story.points,
         epicId: epic.id,
         podId,
-        productOwnerId: null,
         sprintId: null,
         labels: story.labels,
         po: {

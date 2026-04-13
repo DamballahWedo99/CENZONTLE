@@ -33,7 +33,6 @@ const fieldLabels: Record<string, string> = {
   storyPoints: 'story points',
   sprintId: 'sprint',
   podId: 'Célula',
-  productOwnerId: 'product owner',
   updatedAt: 'última actualización',
   createdAt: 'fecha de creación',
   epicId: 'épica',

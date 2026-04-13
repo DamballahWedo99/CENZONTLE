@@ -111,27 +111,12 @@ model Pod {
   color       String
 
   epics         EpicPod[]
-  productOwners PodProductOwner[]
   stories       Story[]
 
   createdAt   DateTime @default(now())
   updatedAt   DateTime @updatedAt
 
   @@map("pods")
-}
-
-model ProductOwner {
-  id        String @id @default(uuid())
-  name      String
-  email     String @unique
-  avatarUrl String @default("")
-
-  pods      PodProductOwner[]
-
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
-
-  @@map("product_owners")
 }
 
 model EpicPod {
@@ -144,16 +129,6 @@ model EpicPod {
   @@map("epic_pods")
 }
 
-model PodProductOwner {
-  podId          String
-  productOwnerId String
-  pod            Pod          @relation(fields: [podId], references: [id], onDelete: Cascade)
-  productOwner   ProductOwner @relation(fields: [productOwnerId], references: [id], onDelete: Cascade)
-
-  @@id([podId, productOwnerId])
-  @@map("pod_product_owners")
-}
-
 model Story {
   id             String      @id @default(uuid())
   title          String
@@ -164,7 +139,6 @@ model Story {
   epic           Epic        @relation(fields: [epicId], references: [id], onDelete: Cascade)
   podId          String
   pod            Pod         @relation(fields: [podId], references: [id])
-  productOwnerId String?
   sprintId       String?
 
   labels         String[]    @default([])

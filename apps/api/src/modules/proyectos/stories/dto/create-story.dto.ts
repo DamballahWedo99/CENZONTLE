@@ -35,11 +35,6 @@ export class CreateStoryDto {
 
   @ApiPropertyOptional()
   @IsOptional()
-  @IsUUID()
-  productOwnerId?: string;
-
-  @ApiPropertyOptional()
-  @IsOptional()
   @IsString()
   sprintId?: string;
 

@@ -44,7 +44,7 @@ export const mockStories: UserStory[] = ([
     storyPoints: 8,
     epicId: 'epic-1',
     podId: 'pod-1',
-    productOwnerId: null,
+
     sprintId: 'sprint-1',
     acceptanceCriteria: [
       'El endpoint recibe datos de tarjeta y devuelve un token único',
@@ -64,7 +64,7 @@ export const mockStories: UserStory[] = ([
     storyPoints: 5,
     epicId: 'epic-1',
     podId: 'pod-2',
-    productOwnerId: null,
+
     sprintId: 'sprint-6',
     acceptanceCriteria: [
       'Muestra tarjetas guardadas con los últimos 4 dígitos',
@@ -84,7 +84,7 @@ export const mockStories: UserStory[] = ([
     storyPoints: 3,
     epicId: 'epic-1',
     podId: 'pod-1',
-    productOwnerId: null,
+
     sprintId: 'sprint-2',
     acceptanceCriteria: [
       'Valida código postal contra catálogo SEPOMEX',
@@ -104,7 +104,7 @@ export const mockStories: UserStory[] = ([
     storyPoints: 8,
     epicId: 'epic-1',
     podId: 'pod-2',
-    productOwnerId: null,
+
     sprintId: 'sprint-8',
     acceptanceCriteria: [
       'Stepper visual muestra progreso del checkout',
@@ -124,7 +124,7 @@ export const mockStories: UserStory[] = ([
     storyPoints: 5,
     epicId: 'epic-1',
     podId: 'pod-1',
-    productOwnerId: null,
+
     sprintId: 'sprint-4',
     acceptanceCriteria: [
       'Calcula TUA para vuelos nacionales e internacionales',
@@ -144,7 +144,7 @@ export const mockStories: UserStory[] = ([
     storyPoints: 5,
     epicId: 'epic-1',
     podId: 'pod-1',
-    productOwnerId: null,
+
     sprintId: 'sprint-5',
     acceptanceCriteria: [
       'Genera referencia de pago OXXO con fecha de expiración',
@@ -164,7 +164,7 @@ export const mockStories: UserStory[] = ([
     storyPoints: 3,
     epicId: 'epic-1',
     podId: 'pod-2',
-    productOwnerId: null,
+
     sprintId: 'sprint-8',
     acceptanceCriteria: [
       'Muestra tarifa base, impuestos y cargos por separado',
@@ -184,7 +184,7 @@ export const mockStories: UserStory[] = ([
     storyPoints: 8,
     epicId: 'epic-1',
     podId: 'pod-1',
-    productOwnerId: null,
+
     sprintId: 'sprint-4',
     acceptanceCriteria: [
       'Pre-autoriza el monto total por 72 horas',
@@ -209,7 +209,7 @@ export const mockStories: UserStory[] = ([
     storyPoints: 13,
     epicId: 'epic-2',
     podId: 'pod-4',
-    productOwnerId: null,
+
     sprintId: 'sprint-11',
     acceptanceCriteria: [
       'Servicio independiente con su propia base de datos',
@@ -229,7 +229,7 @@ export const mockStories: UserStory[] = ([
     storyPoints: 8,
     epicId: 'epic-2',
     podId: 'pod-4',
-    productOwnerId: null,
+
     sprintId: 'sprint-11',
     acceptanceCriteria: [
       'mTLS habilitado entre todos los microservicios',
@@ -249,7 +249,7 @@ export const mockStories: UserStory[] = ([
     storyPoints: 8,
     epicId: 'epic-2',
     podId: 'pod-4',
-    productOwnerId: null,
+
     sprintId: 'sprint-12',
     acceptanceCriteria: [
       'Cluster de Kafka con 3 brokers en producción',
@@ -269,7 +269,7 @@ export const mockStories: UserStory[] = ([
     storyPoints: 5,
     epicId: 'epic-2',
     podId: 'pod-4',
-    productOwnerId: null,
+
     sprintId: 'sprint-12',
     acceptanceCriteria: [
       'Servicio consume eventos de Kafka para enviar notificaciones',
@@ -289,7 +289,7 @@ export const mockStories: UserStory[] = ([
     storyPoints: 5,
     epicId: 'epic-2',
     podId: 'pod-4',
-    productOwnerId: null,
+
     sprintId: null,
     acceptanceCriteria: [
       'APM traces end-to-end entre microservicios',
@@ -309,7 +309,7 @@ export const mockStories: UserStory[] = ([
     storyPoints: 8,
     epicId: 'epic-2',
     podId: 'pod-4',
-    productOwnerId: null,
+
     sprintId: null,
     acceptanceCriteria: [
       'Build y tests automáticos en cada PR',
@@ -334,7 +334,7 @@ export const mockStories: UserStory[] = ([
     storyPoints: 3,
     epicId: 'epic-3',
     podId: 'pod-4',
-    productOwnerId: null,
+
     sprintId: null,
     acceptanceCriteria: [
       'Definir límites por tier: free (100/min), premium (1000/min), enterprise (10000/min)',
@@ -354,7 +354,7 @@ export const mockStories: UserStory[] = ([
     storyPoints: 8,
     epicId: 'epic-3',
     podId: 'pod-4',
-    productOwnerId: null,
+
     sprintId: null,
     acceptanceCriteria: [
       'Soporte para authorization code flow con PKCE',
@@ -374,7 +374,7 @@ export const mockStories: UserStory[] = ([
     storyPoints: 5,
     epicId: 'epic-3',
     podId: 'pod-1',
-    productOwnerId: null,
+
     sprintId: null,
     acceptanceCriteria: [
       'Swagger UI accesible en /docs para cada microservicio',
@@ -394,7 +394,7 @@ export const mockStories: UserStory[] = ([
     storyPoints: 3,
     epicId: 'epic-3',
     podId: 'pod-4',
-    productOwnerId: null,
+
     sprintId: null,
     acceptanceCriteria: [
       'URLs con prefijo /v1, /v2 para cada versión',
@@ -419,7 +419,7 @@ export const mockStories: UserStory[] = ([
     storyPoints: 8,
     epicId: 'epic-4',
     podId: 'pod-5',
-    productOwnerId: null,
+
     sprintId: 'sprint-13',
     acceptanceCriteria: [
       'Botón de Apple Pay visible cuando el dispositivo lo soporta',
@@ -439,7 +439,7 @@ export const mockStories: UserStory[] = ([
     storyPoints: 8,
     epicId: 'epic-4',
     podId: 'pod-5',
-    productOwnerId: null,
+
     sprintId: 'sprint-14',
     acceptanceCriteria: [
       'Botón de Google Pay según guidelines de Google',
@@ -459,7 +459,7 @@ export const mockStories: UserStory[] = ([
     storyPoints: 13,
     epicId: 'epic-4',
     podId: 'pod-1',
-    productOwnerId: null,
+
     sprintId: 'sprint-4',
     acceptanceCriteria: [
       'API unificada para tokenización, autorización y captura',
@@ -479,7 +479,7 @@ export const mockStories: UserStory[] = ([
     storyPoints: 5,
     epicId: 'epic-4',
     podId: 'pod-5',
-    productOwnerId: null,
+
     sprintId: 'sprint-14',
     acceptanceCriteria: [
       'Face ID en iOS, fingerprint/face en Android',
@@ -499,7 +499,7 @@ export const mockStories: UserStory[] = ([
     storyPoints: 3,
     epicId: 'epic-4',
     podId: 'pod-5',
-    productOwnerId: null,
+
     sprintId: null,
     acceptanceCriteria: [
       'Muestra número de confirmación y resumen del vuelo',
@@ -519,7 +519,7 @@ export const mockStories: UserStory[] = ([
     storyPoints: 5,
     epicId: 'epic-4',
     podId: 'pod-5',
-    productOwnerId: null,
+
     sprintId: null,
     acceptanceCriteria: [
       'Deep link abre la app en el paso exacto donde se abandonó',
@@ -544,7 +544,7 @@ export const mockStories: UserStory[] = ([
     storyPoints: 8,
     epicId: 'epic-5',
     podId: 'pod-1',
-    productOwnerId: null,
+
     sprintId: 'sprint-1',
     acceptanceCriteria: [
       'Interface define métodos: authorize, capture, refund, void',
@@ -564,7 +564,7 @@ export const mockStories: UserStory[] = ([
     storyPoints: 8,
     epicId: 'epic-5',
     podId: 'pod-1',
-    productOwnerId: null,
+
     sprintId: 'sprint-2',
     acceptanceCriteria: [
       'Implementa PaymentProcessor interface con SDK de DEUNA',
@@ -584,7 +584,7 @@ export const mockStories: UserStory[] = ([
     storyPoints: 5,
     epicId: 'epic-5',
     podId: 'pod-1',
-    productOwnerId: null,
+
     sprintId: 'sprint-2',
     acceptanceCriteria: [
       'Implementa PaymentProcessor interface con Stripe API',
@@ -604,7 +604,7 @@ export const mockStories: UserStory[] = ([
     storyPoints: 8,
     epicId: 'epic-5',
     podId: 'pod-1',
-    productOwnerId: null,
+
     sprintId: 'sprint-4',
     acceptanceCriteria: [
       'Implementa PaymentProcessor interface con Adyen API',
@@ -624,7 +624,7 @@ export const mockStories: UserStory[] = ([
     storyPoints: 13,
     epicId: 'epic-5',
     podId: 'pod-1',
-    productOwnerId: null,
+
     sprintId: 'sprint-4',
     acceptanceCriteria: [
       'Reglas de routing configurables por BIN, país y monto',
@@ -644,7 +644,7 @@ export const mockStories: UserStory[] = ([
     storyPoints: 5,
     epicId: 'epic-5',
     podId: 'pod-1',
-    productOwnerId: null,
+
     sprintId: 'sprint-5',
     acceptanceCriteria: [
       'Toggle on/off por procesador sin deploy',
@@ -664,7 +664,7 @@ export const mockStories: UserStory[] = ([
     storyPoints: 5,
     epicId: 'epic-5',
     podId: 'pod-1',
-    productOwnerId: null,
+
     sprintId: 'sprint-5',
     acceptanceCriteria: [
       'Migración de datos sin downtime usando dual-write',
@@ -689,7 +689,7 @@ export const mockStories: UserStory[] = ([
     storyPoints: 5,
     epicId: 'epic-6',
     podId: 'pod-1',
-    productOwnerId: null,
+
     sprintId: 'sprint-1',
     acceptanceCriteria: [
       'Retry con intervalos: 1s, 2s, 4s, 8s, 16s',
@@ -709,7 +709,7 @@ export const mockStories: UserStory[] = ([
     storyPoints: 5,
     epicId: 'epic-6',
     podId: 'pod-1',
-    productOwnerId: null,
+
     sprintId: 'sprint-1',
     acceptanceCriteria: [
       'Circuit breaker abre con >50% error rate en ventana de 1 minuto',
@@ -729,7 +729,7 @@ export const mockStories: UserStory[] = ([
     storyPoints: 8,
     epicId: 'epic-6',
     podId: 'pod-1',
-    productOwnerId: null,
+
     sprintId: 'sprint-2',
     acceptanceCriteria: [
       'Fallback transparente para el usuario',
@@ -749,7 +749,7 @@ export const mockStories: UserStory[] = ([
     storyPoints: 3,
     epicId: 'epic-6',
     podId: 'pod-1',
-    productOwnerId: null,
+
     sprintId: 'sprint-3',
     acceptanceCriteria: [
       'Gráfica de retry success rate por procesador',
@@ -769,7 +769,7 @@ export const mockStories: UserStory[] = ([
     storyPoints: 3,
     epicId: 'epic-6',
     podId: 'pod-1',
-    productOwnerId: null,
+
     sprintId: 'sprint-3',
     acceptanceCriteria: [
       'Transacciones en DLQ son visibles en panel de operaciones',
@@ -794,7 +794,7 @@ export const mockStories: UserStory[] = ([
     storyPoints: 3,
     epicId: 'epic-7',
     podId: 'pod-2',
-    productOwnerId: null,
+
     sprintId: 'sprint-7',
     acceptanceCriteria: [
       'Wireframes revisados y aprobados por Director de Pagos',
@@ -814,7 +814,7 @@ export const mockStories: UserStory[] = ([
     storyPoints: 5,
     epicId: 'epic-7',
     podId: 'pod-2',
-    productOwnerId: null,
+
     sprintId: 'sprint-7',
     acceptanceCriteria: [
       'Widget muestra tasa de aprobación últimas 24h vs semana anterior',
@@ -834,7 +834,7 @@ export const mockStories: UserStory[] = ([
     storyPoints: 8,
     epicId: 'epic-7',
     podId: 'pod-1',
-    productOwnerId: null,
+
     sprintId: 'sprint-4',
     acceptanceCriteria: [
       'GET /metrics/approval-rate con filtros de fecha y procesador',
@@ -854,7 +854,7 @@ export const mockStories: UserStory[] = ([
     storyPoints: 5,
     epicId: 'epic-7',
     podId: 'pod-2',
-    productOwnerId: null,
+
     sprintId: 'sprint-8',
     acceptanceCriteria: [
       'Gráfica de líneas con p50, p90, p99 por procesador',
@@ -874,7 +874,7 @@ export const mockStories: UserStory[] = ([
     storyPoints: 5,
     epicId: 'epic-7',
     podId: 'pod-1',
-    productOwnerId: null,
+
     sprintId: 'sprint-5',
     acceptanceCriteria: [
       'Alertas vía Slack y email cuando error rate > umbral',
@@ -894,7 +894,7 @@ export const mockStories: UserStory[] = ([
     storyPoints: 5,
     epicId: 'epic-7',
     podId: 'pod-2',
-    productOwnerId: null,
+
     sprintId: null,
     acceptanceCriteria: [
       'Tabla paginada con filtros por estado, procesador y rango de fechas',
@@ -919,7 +919,7 @@ export const mockStories: UserStory[] = ([
     storyPoints: 5,
     epicId: 'epic-8',
     podId: 'pod-1',
-    productOwnerId: null,
+
     sprintId: null,
     acceptanceCriteria: [
       'Esquema soporta reconciliación por procesador y por fecha',
@@ -939,7 +939,7 @@ export const mockStories: UserStory[] = ([
     storyPoints: 5,
     epicId: 'epic-8',
     podId: 'pod-1',
-    productOwnerId: null,
+
     sprintId: null,
     acceptanceCriteria: [
       'Parser soporta formato CSV de DEUNA con encoding UTF-8',
@@ -959,7 +959,7 @@ export const mockStories: UserStory[] = ([
     storyPoints: 8,
     epicId: 'epic-8',
     podId: 'pod-1',
-    productOwnerId: null,
+
     sprintId: null,
     acceptanceCriteria: [
       'Job ejecuta diariamente a las 6:00 AM CST',
@@ -979,7 +979,7 @@ export const mockStories: UserStory[] = ([
     storyPoints: 5,
     epicId: 'epic-8',
     podId: 'pod-1',
-    productOwnerId: null,
+
     sprintId: null,
     acceptanceCriteria: [
       'Vista diaria con status verde/amarillo/rojo por procesador',
@@ -1004,7 +1004,7 @@ export const mockStories: UserStory[] = ([
     storyPoints: 5,
     epicId: 'epic-9',
     podId: 'pod-3',
-    productOwnerId: null,
+
     sprintId: 'sprint-9',
     acceptanceCriteria: [
       'Tabla de multiplicadores por ruta: nacional 1x, internacional 1.5x, transatlántico 2x',
@@ -1024,7 +1024,7 @@ export const mockStories: UserStory[] = ([
     storyPoints: 13,
     epicId: 'epic-9',
     podId: 'pod-3',
-    productOwnerId: null,
+
     sprintId: 'sprint-10',
     acceptanceCriteria: [
       'Motor evalúa reglas en orden de prioridad',
@@ -1044,7 +1044,7 @@ export const mockStories: UserStory[] = ([
     storyPoints: 5,
     epicId: 'epic-9',
     podId: 'pod-3',
-    productOwnerId: null,
+
     sprintId: 'sprint-10',
     acceptanceCriteria: [
       'GET /loyalty/balance devuelve total, por expirar y bloqueados',
@@ -1064,7 +1064,7 @@ export const mockStories: UserStory[] = ([
     storyPoints: 5,
     epicId: 'epic-9',
     podId: 'pod-3',
-    productOwnerId: null,
+
     sprintId: null,
     acceptanceCriteria: [
       'Admin puede crear campañas con fecha inicio/fin y multiplicador',
@@ -1084,7 +1084,7 @@ export const mockStories: UserStory[] = ([
     storyPoints: 5,
     epicId: 'epic-9',
     podId: 'pod-3',
-    productOwnerId: null,
+
     sprintId: null,
     acceptanceCriteria: [
       'Job nocturno identifica puntos próximos a expirar',
@@ -1104,7 +1104,7 @@ export const mockStories: UserStory[] = ([
     storyPoints: 8,
     epicId: 'epic-9',
     podId: 'pod-3',
-    productOwnerId: null,
+
     sprintId: null,
     acceptanceCriteria: [
       'Segmentos: frecuente, ocasional, nuevo, dormido',
@@ -1129,7 +1129,7 @@ export const mockStories: UserStory[] = ([
     storyPoints: 5,
     epicId: 'epic-10',
     podId: 'pod-3',
-    productOwnerId: null,
+
     sprintId: null,
     acceptanceCriteria: [
       'Modelo soporta categorías jerárquicas de recompensas',
@@ -1149,7 +1149,7 @@ export const mockStories: UserStory[] = ([
     storyPoints: 3,
     epicId: 'epic-10',
     podId: 'pod-2',
-    productOwnerId: null,
+
     sprintId: null,
     acceptanceCriteria: [
       'Tarjeta muestra imagen, nombre, puntos requeridos y categoría',
@@ -1169,7 +1169,7 @@ export const mockStories: UserStory[] = ([
     storyPoints: 8,
     epicId: 'epic-10',
     podId: 'pod-3',
-    productOwnerId: null,
+
     sprintId: null,
     acceptanceCriteria: [
       'Algoritmo considera destinos frecuentes y historial de canjes',
@@ -1189,7 +1189,7 @@ export const mockStories: UserStory[] = ([
     storyPoints: 8,
     epicId: 'epic-10',
     podId: 'pod-3',
-    productOwnerId: null,
+
     sprintId: null,
     acceptanceCriteria: [
       'Flujo: seleccionar recompensa, confirmar, recibo',
@@ -1214,7 +1214,7 @@ export const mockStories: UserStory[] = ([
     storyPoints: 5,
     epicId: 'epic-11',
     podId: 'pod-3',
-    productOwnerId: null,
+
     sprintId: null,
     acceptanceCriteria: [
       'OpenAPI spec con endpoints de acumulación y redención cruzada',
@@ -1234,7 +1234,7 @@ export const mockStories: UserStory[] = ([
     storyPoints: 5,
     epicId: 'epic-11',
     podId: 'pod-3',
-    productOwnerId: null,
+
     sprintId: null,
     acceptanceCriteria: [
       'Tabla de tasas de conversión por partner configurable en admin',
@@ -1254,7 +1254,7 @@ export const mockStories: UserStory[] = ([
     storyPoints: 8,
     epicId: 'epic-11',
     podId: 'pod-4',
-    productOwnerId: null,
+
     sprintId: null,
     acceptanceCriteria: [
       'mTLS con certificados rotativos por partner',
@@ -1274,7 +1274,7 @@ export const mockStories: UserStory[] = ([
     storyPoints: 8,
     epicId: 'epic-11',
     podId: 'pod-3',
-    productOwnerId: null,
+
     sprintId: null,
     acceptanceCriteria: [
       'Acumulación de puntos por noches en Marriott',
@@ -1298,7 +1298,7 @@ export const mockStories: UserStory[] = ([
     storyPoints: 3,
     epicId: 'epic-1',
     podId: 'pod-2',
-    productOwnerId: null,
+
     sprintId: 'sprint-8',
     acceptanceCriteria: [
       'Componentes de paso 2 y 3 se cargan bajo demanda',
@@ -1318,7 +1318,7 @@ export const mockStories: UserStory[] = ([
     storyPoints: 3,
     epicId: 'epic-1',
     podId: 'pod-2',
-    productOwnerId: null,
+
     sprintId: 'sprint-8',
     acceptanceCriteria: [
       'Eventos de Google Analytics en cada transición de paso',
@@ -1338,7 +1338,7 @@ export const mockStories: UserStory[] = ([
     storyPoints: 2,
     epicId: 'epic-2',
     podId: 'pod-4',
-    productOwnerId: null,
+
     sprintId: 'sprint-11',
     acceptanceCriteria: [
       'GET /health retorna status, versión y dependencias',
@@ -1358,7 +1358,7 @@ export const mockStories: UserStory[] = ([
     storyPoints: 5,
     epicId: 'epic-5',
     podId: 'pod-1',
-    productOwnerId: null,
+
     sprintId: 'sprint-3',
     acceptanceCriteria: [
       'Header X-Idempotency-Key requerido en POST de pagos',
@@ -1378,7 +1378,7 @@ export const mockStories: UserStory[] = ([
     storyPoints: 5,
     epicId: 'epic-4',
     podId: 'pod-5',
-    productOwnerId: null,
+
     sprintId: 'sprint-14',
     acceptanceCriteria: [
       'Push notification inmediata al aprobarse el pago',
@@ -1398,7 +1398,7 @@ export const mockStories: UserStory[] = ([
     storyPoints: 8,
     epicId: 'epic-4',
     podId: 'pod-5',
-    productOwnerId: null,
+
     sprintId: null,
     acceptanceCriteria: [
       'Formulario se puede llenar sin conexión a internet',
@@ -1418,7 +1418,7 @@ export const mockStories: UserStory[] = ([
     storyPoints: 3,
     epicId: 'epic-7',
     podId: 'pod-2',
-    productOwnerId: null,
+
     sprintId: null,
     acceptanceCriteria: [
       'Botón de exportar en cada vista del dashboard',
@@ -1438,7 +1438,7 @@ export const mockStories: UserStory[] = ([
     storyPoints: 8,
     epicId: 'epic-9',
     podId: 'pod-3',
-    productOwnerId: null,
+
     sprintId: 'sprint-10',
     acceptanceCriteria: [
       'Endpoint verifica disponibilidad de upgrade en el vuelo',
@@ -1458,7 +1458,7 @@ export const mockStories: UserStory[] = ([
     storyPoints: 13,
     epicId: 'epic-2',
     podId: 'pod-4',
-    productOwnerId: null,
+
     sprintId: null,
     acceptanceCriteria: [
       'Servicio gestiona disponibilidad de asientos de forma independiente',
@@ -1478,7 +1478,7 @@ export const mockStories: UserStory[] = ([
     storyPoints: 5,
     epicId: 'epic-1',
     podId: 'pod-2',
-    productOwnerId: null,
+
     sprintId: null,
     acceptanceCriteria: [
       'Framework de feature flags integrado con LaunchDarkly',

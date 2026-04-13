@@ -54,8 +54,9 @@ export class DocumentsController {
     const ext = extname(name);
     const contentType = lookup(ext) || 'application/octet-stream';
 
+    const encodedName = encodeURIComponent(name);
     res.setHeader('Content-Type', contentType);
-    res.setHeader('Content-Disposition', `attachment; filename="${name}"`);
+    res.setHeader('Content-Disposition', `attachment; filename="${encodedName}"; filename*=UTF-8''${encodedName}`);
     createReadStream(path).pipe(res);
   }
 

@@ -109,11 +109,6 @@ export function ProyectosFilters({ portalContainer }: { portalContainer?: HTMLEl
     color: p.color,
   }));
 
-  const poOptions = state.productOwners.map((p) => ({
-    value: p.id,
-    label: p.name,
-  }));
-
   const statusOptions = Object.values(StoryStatus).map((s) => ({
     value: s,
     label: STATUS_LABELS[s],
@@ -157,14 +152,6 @@ export function ProyectosFilters({ portalContainer }: { portalContainer?: HTMLEl
         options={podOptions}
         selected={filters.podIds}
         onToggle={(v) => toggleArrayFilter('podIds', v)}
-        portalContainer={portalContainer}
-      />
-
-      <FilterDropdown
-        label="Product Owner"
-        options={poOptions}
-        selected={filters.productOwnerIds}
-        onToggle={(v) => toggleArrayFilter('productOwnerIds', v)}
         portalContainer={portalContainer}
       />
 

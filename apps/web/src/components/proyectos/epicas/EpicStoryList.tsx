@@ -9,7 +9,6 @@ import {
   StoryTechnicalFields,
   StoryQAFields,
   Pod,
-  ProductOwner,
   QAMatrix,
 } from '@cenzontle/shared';
 import { Button } from '@/components/ui/button';
@@ -30,7 +29,6 @@ import {
   Trash2,
   X,
   Check,
-  User,
   ChevronRight,
   ClipboardList,
   Code2,
@@ -84,7 +82,6 @@ interface StoryFormData {
   storyPoints: number;
   status: StoryStatus;
   podId: string;
-  productOwnerId: string | null;
   labels: string[];
   po: StoryPOFields;
   technical: StoryTechnicalFields;
@@ -96,7 +93,6 @@ const emptyForm: StoryFormData = {
   storyPoints: 3,
   status: StoryStatus.Backlog,
   podId: '',
-  productOwnerId: null,
   labels: [],
   po: emptyPO,
   technical: emptyTechnical,
@@ -188,7 +184,6 @@ interface EpicStoryListProps {
   stories: UserStory[];
   epicId: string;
   pods: Pod[];
-  productOwners: ProductOwner[];
   qaMatrix?: QAMatrix | null;
   onCreateStory: (story: UserStory) => void;
   onUpdateStory: (id: string, changes: Partial<UserStory>) => void;
@@ -199,7 +194,6 @@ export function EpicStoryList({
   stories,
   epicId,
   pods,
-  productOwners,
   qaMatrix,
   onCreateStory,
   onUpdateStory,
@@ -280,7 +274,6 @@ export function EpicStoryList({
       status: formData.status,
       epicId,
       podId: formData.podId,
-      productOwnerId: null,
       sprintId: null,
       labels: formData.labels,
       po: {
@@ -314,7 +307,6 @@ export function EpicStoryList({
       storyPoints: story.storyPoints,
       status: story.status,
       podId: story.podId,
-      productOwnerId: story.productOwnerId ?? '',
       labels: [...story.labels],
       po: {
         ...story.po,
@@ -347,7 +339,6 @@ export function EpicStoryList({
       storyPoints: formData.storyPoints,
       status: formData.status,
       podId: formData.podId,
-      productOwnerId: formData.productOwnerId,
       labels: formData.labels,
       po: {
         ...formData.po,
@@ -385,8 +376,8 @@ export function EpicStoryList({
 
   // --- Shared form sections ---
 
-  const renderMetaFields = (showProductOwner: boolean) => (
-    <div className={`grid grid-cols-2 gap-3 ${showProductOwner ? 'md:grid-cols-4' : 'md:grid-cols-3'} mb-4`}>
+  const renderMetaFields = () => (
+    <div className="grid grid-cols-2 gap-3 md:grid-cols-3 mb-4">
       <div className="min-w-0 space-y-1.5">
         <label className="text-xs font-medium text-muted-foreground">Story Points</label>
         <Select
@@ -441,26 +432,6 @@ export function EpicStoryList({
           </SelectContent>
         </Select>
       </div>
-      {showProductOwner && (
-        <div className="min-w-0 space-y-1.5">
-          <label className="text-xs font-medium text-muted-foreground">Product Owner</label>
-          <Select
-            value={formData.productOwnerId ?? undefined}
-            onValueChange={(v) => setFormData((prev) => ({ ...prev, productOwnerId: v }))}
-          >
-            <SelectTrigger className="w-full text-sm">
-              <SelectValue placeholder="Seleccionar" />
-            </SelectTrigger>
-            <SelectContent>
-              {productOwners.map((po) => (
-                <SelectItem key={po.id} value={po.id}>
-                  {po.name}
-                </SelectItem>
-              ))}
-            </SelectContent>
-          </Select>
-        </div>
-      )}
     </div>
   );
 
@@ -666,7 +637,7 @@ export function EpicStoryList({
         />
       </div>
 
-      {renderMetaFields(!isCreating)}
+      {renderMetaFields()}
 
       {/* Labels */}
       <div className="mb-4 space-y-1.5">
@@ -886,8 +857,6 @@ export function EpicStoryList({
         {stories.map((story) => {
           const isEditing = editingStoryId === story.id;
           const isExpanded = expandedStoryId === story.id;
-          const po = productOwners.find((p) => p.id === story.productOwnerId);
-
           return (
             <div
               key={story.id}
@@ -910,12 +879,6 @@ export function EpicStoryList({
                 <span className="truncate flex-1">{story.title}</span>
                 <StoryPointsBadge points={story.storyPoints} />
                 <StatusBadge status={story.status} />
-                {po && (
-                  <span className="flex items-center gap-1.5 text-xs text-muted-foreground shrink-0">
-                    <User className="h-3 w-3" />
-                    {po.name.split(' ')[0]}
-                  </span>
-                )}
                 <div className="flex items-center gap-0.5 shrink-0">
                   <Button
                     size="sm"
@@ -996,11 +959,6 @@ export function EpicStoryList({
                         <span className="text-foreground">
                           {pods.find((p) => p.id === story.podId)!.name}
                         </span>
-                      </span>
-                    )}
-                    {po && (
-                      <span>
-                        PO: <span className="text-foreground">{po.name}</span>
                       </span>
                     )}
                     <span>

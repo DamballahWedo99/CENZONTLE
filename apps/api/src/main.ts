@@ -15,18 +15,22 @@ async function bootstrap() {
   app.useGlobalPipes(new ValidationPipe({ whitelist: true, transform: true }));
   app.useGlobalFilters(new PrismaExceptionFilter());
 
-  const config = new DocumentBuilder()
-    .setTitle("Cenzontle API")
-    .setDescription("API backend para el sistema de gestion CENZONTLE")
-    .setVersion("0.1.0")
-    .addBearerAuth()
-    .build();
-  const document = SwaggerModule.createDocument(app, config);
-  SwaggerModule.setup("api/docs", app, document);
+  if (process.env.NODE_ENV !== "production") {
+    const config = new DocumentBuilder()
+      .setTitle("Cenzontle API")
+      .setDescription("API backend para el sistema de gestion CENZONTLE")
+      .setVersion("0.1.0")
+      .addBearerAuth()
+      .build();
+    const document = SwaggerModule.createDocument(app, config);
+    SwaggerModule.setup("api/docs", app, document);
+  }
 
   const port = process.env.PORT || 3001;
   await app.listen(port);
   console.log(`Cenzontle API running on http://localhost:${port}/api`);
-  console.log(`Swagger docs at http://localhost:${port}/api/docs`);
+  if (process.env.NODE_ENV !== "production") {
+    console.log(`Swagger docs at http://localhost:${port}/api/docs`);
+  }
 }
 bootstrap();

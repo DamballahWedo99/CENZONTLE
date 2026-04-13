@@ -371,7 +371,6 @@ export interface UserStory {
   storyPoints: number; // fibonacci: 1, 2, 3, 5, 8, 13
   epicId: string;
   podId: string; // each story belongs to ONE pod
-  productOwnerId: string | null;
   sprintId: string | null;
   tracker?: TrackerReference;
   labels: string[];
@@ -387,16 +386,7 @@ export interface Pod {
   id: string;
   name: string;
   description: string;
-  productOwnerIds: string[]; // a POD can have multiple POs
   color: string; // hex color for UI
-}
-
-export interface ProductOwner {
-  id: string;
-  name: string;
-  email: string;
-  avatarUrl: string;
-  podIds: string[];
 }
 
 export interface Sprint {
@@ -461,12 +451,10 @@ export interface EpicWithRelations extends Epic {
 export interface StoryWithRelations extends UserStory {
   epic: Epic;
   pod: Pod;
-  productOwner: ProductOwner | null;
   sprint: Sprint | null;
 }
 
 export interface PodWithRelations extends Pod {
-  productOwners: ProductOwner[];
   stories: UserStory[];
   epics: Epic[];
 }
@@ -493,7 +481,6 @@ export interface MatrizRow {
 export interface ProyectosFilters {
   initiativeIds: string[];
   podIds: string[];
-  productOwnerIds: string[];
   statuses: StoryStatus[];
   epicStatuses: EpicStatus[];
   priorities: Priority[];
@@ -507,7 +494,6 @@ export interface ProyectosFilters {
 export const DEFAULT_FILTERS: ProyectosFilters = {
   initiativeIds: [],
   podIds: [],
-  productOwnerIds: [],
   statuses: [],
   epicStatuses: [],
   priorities: [],

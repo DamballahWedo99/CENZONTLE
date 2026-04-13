@@ -1,5 +1,5 @@
-import { IsString, IsNotEmpty, MaxLength, Matches, IsArray, IsUUID, IsOptional } from 'class-validator';
-import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
+import { IsString, IsNotEmpty, MaxLength, Matches } from 'class-validator';
+import { ApiProperty } from '@nestjs/swagger';
 
 export class CreatePodDto {
   @ApiProperty({ example: 'Payments Backend' })
@@ -17,10 +17,4 @@ export class CreatePodDto {
   @IsString()
   @Matches(/^#[0-9a-fA-F]{6}$/, { message: 'color must be a valid hex color (e.g. #3b82f6)' })
   color!: string;
-
-  @ApiPropertyOptional({ type: [String] })
-  @IsOptional()
-  @IsArray()
-  @IsUUID('4', { each: true })
-  productOwnerIds?: string[];
 }

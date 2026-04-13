@@ -97,7 +97,6 @@ export function CreateStoryDialog({ open, onOpenChange, defaultEpicId }: CreateS
         storyPoints: created.storyPoints as 1 | 2 | 3 | 5 | 8 | 13,
         epicId: created.epicId,
         podId: created.podId,
-        productOwnerId: created.productOwnerId,
         sprintId: created.sprintId,
         labels: [],
         po: { background: '', objective: '', userStory: description.trim(), whatHowWhen: { what: '', how: '', when: '' }, acceptanceCriteria: [], additionalNotes: '' },

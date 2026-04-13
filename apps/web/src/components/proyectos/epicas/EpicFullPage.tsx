@@ -41,7 +41,6 @@ import { EpicStoryList } from './EpicStoryList';
 import { generateStories } from '@/lib/story-agent';
 import {
   Calendar,
-  User,
   Pencil,
   X,
   Check,
@@ -286,12 +285,6 @@ function EpicFullPageInner({ epicId }: { epicId: string }) {
   const [activeTab, setActiveTab] = useState(() => searchParams.get('tab') ?? 'definicion');
   const [showChecklist, setShowChecklist] = useState(false);
 
-  const epicProductOwners = useMemo(() => {
-    if (!epic) return [];
-    const poIds = new Set(epic.pods.flatMap((pod) => pod.productOwnerIds));
-    return state.productOwners.filter((po) => poIds.has(po.id));
-  }, [epic, state.productOwners]);
-
   const epicChangelog = useMemo(() => {
     if (!epic) return [];
     const epicStoryIds = new Set(epic.stories.map((s) => s.id));
@@ -532,33 +525,24 @@ function EpicFullPageInner({ epicId }: { epicId: string }) {
     setIsGeneratingStories(true);
     try {
       const stories = await generateStories(rawEpic, rawEpic.podIds);
-      // Assign PO from the first pod
-      const firstPo = epicProductOwners[0];
-      const storiesWithPo = stories.map((s) => ({
-        ...s,
-        productOwnerId: firstPo?.id ?? '',
-      }));
-      dispatch({ type: 'BULK_CREATE_STORIES', payload: { epicId: rawEpic.id, stories: storiesWithPo } });
+      dispatch({ type: 'BULK_CREATE_STORIES', payload: { epicId: rawEpic.id, stories } });
     } finally {
       setIsGeneratingStories(false);
     }
   };
 
   const handleApprove = () => {
-    const po = epicProductOwners[0];
-    if (!po) return;
     dispatch({
       type: 'APPROVE_EPIC_STORIES',
-      payload: { epicId: epic.id, poId: po.id, poName: po.name },
+      payload: { epicId: epic.id, poId: state.currentUserId, poName: state.currentUserName },
     });
   };
 
   const handleReject = () => {
-    const po = epicProductOwners[0];
-    if (!po || !rejectComment.trim()) return;
+    if (!rejectComment.trim()) return;
     dispatch({
       type: 'REJECT_EPIC_STORIES',
-      payload: { epicId: epic.id, poId: po.id, poName: po.name, comment: rejectComment.trim() },
+      payload: { epicId: epic.id, poId: state.currentUserId, poName: state.currentUserName, comment: rejectComment.trim() },
     });
     setRejectComment('');
     setShowRejectForm(false);
@@ -744,12 +728,6 @@ function EpicFullPageInner({ epicId }: { epicId: string }) {
                     {epic.pods.map((pod) => (
                       <PodBadge key={pod.id} name={pod.name} color={pod.color} />
                     ))}
-                    {epicProductOwners.map((po) => (
-                      <span key={po.id} className="inline-flex items-center gap-1.5 rounded-md bg-muted px-2 py-0.5 text-xs font-medium">
-                        <User className="h-3 w-3 text-muted-foreground" />
-                        {po.name}
-                      </span>
-                    ))}
                   </div>
                 </>
               )}
@@ -925,7 +903,6 @@ function EpicFullPageInner({ epicId }: { epicId: string }) {
                   stories={epic.stories}
                   epicId={rawEpic!.id}
                   pods={state.pods}
-                  productOwners={state.productOwners}
                   qaMatrix={rawEpic!.qaMatrix}
                   onCreateStory={async (story) => {
                     try {
@@ -936,7 +913,6 @@ function EpicFullPageInner({ epicId }: { epicId: string }) {
                         podId: story.podId,
                         status: story.status as string,
                         storyPoints: story.storyPoints,
-                        productOwnerId: story.productOwnerId ?? undefined,
                         sprintId: story.sprintId ?? undefined,
                         labels: story.labels ?? [],
                         po: {
@@ -964,7 +940,6 @@ function EpicFullPageInner({ epicId }: { epicId: string }) {
                         status: changes.status as string | undefined,
                         storyPoints: changes.storyPoints,
                         podId: changes.podId,
-                        productOwnerId: changes.productOwnerId ?? undefined,
                         sprintId: changes.sprintId ?? undefined,
                         labels: changes.labels,
                         po: Object.keys(po).length ? {
@@ -1041,7 +1016,7 @@ function EpicFullPageInner({ epicId }: { epicId: string }) {
                         <div>
                           <p className="text-sm font-medium text-green-700 dark:text-green-400">Historias aprobadas</p>
                           <p className="text-xs text-muted-foreground">
-                            Aprobado por {state.productOwners.find((p) => p.id === poApproval.approvedBy)?.name ?? 'PO'} · {poApproval.approvedAt ? formatShortDate(poApproval.approvedAt) : ''}
+                            Aprobado por {poApproval.approvedBy ?? 'PO'} · {poApproval.approvedAt ? formatShortDate(poApproval.approvedAt) : ''}
                           </p>
                         </div>
                       </div>
@@ -1056,7 +1031,7 @@ function EpicFullPageInner({ epicId }: { epicId: string }) {
                           <div className="flex-1">
                             <p className="text-sm font-medium text-red-700 dark:text-red-400">Historias rechazadas</p>
                             <p className="text-xs text-muted-foreground">
-                              Rechazado por {state.productOwners.find((p) => p.id === poApproval.approvedBy)?.name ?? 'PO'} · {poApproval.approvedAt ? formatShortDate(poApproval.approvedAt) : ''}
+                              Rechazado por {poApproval.approvedBy ?? 'PO'} · {poApproval.approvedAt ? formatShortDate(poApproval.approvedAt) : ''}
                             </p>
                           </div>
                           <Button

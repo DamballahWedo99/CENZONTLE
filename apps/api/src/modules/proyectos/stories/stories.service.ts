@@ -85,7 +85,6 @@ export class StoriesService {
           storyPoints: dto.storyPoints ?? 0,
           epicId: dto.epicId,
           podId: dto.podId,
-          productOwnerId: dto.productOwnerId,
           sprintId: dto.sprintId,
           labels: dto.labels ?? [],
           vaultPath,

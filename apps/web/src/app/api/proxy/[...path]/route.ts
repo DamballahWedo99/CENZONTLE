@@ -76,7 +76,10 @@ async function proxyRequest(
     try {
       return NextResponse.json(JSON.parse(text), { status: res.status });
     } catch {
-      return new NextResponse(text, { status: res.status });
+      return new NextResponse(text, {
+        status: res.status,
+        headers: { 'Content-Type': 'application/json' },
+      });
     }
   } catch {
     return NextResponse.json(

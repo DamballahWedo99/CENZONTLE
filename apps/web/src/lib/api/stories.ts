@@ -29,7 +29,6 @@ export interface StoryResponse {
   storyPoints: number;
   epicId: string;
   podId: string;
-  productOwnerId: string | null;
   sprintId: string | null;
   labels: string[];
   tracker: any;
@@ -52,7 +51,6 @@ export interface CreateStoryInput {
   podId: string;
   status?: string;
   storyPoints?: number;
-  productOwnerId?: string;
   sprintId?: string;
   labels?: string[];
   po?: StoryPoFields;

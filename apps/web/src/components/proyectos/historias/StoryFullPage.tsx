@@ -31,7 +31,7 @@ import { PodBadge } from '../shared/PodBadge';
 import { StoryPointsBadge } from '../shared/StoryPointsBadge';
 import {
   Calendar,
-  User,
+
   Pencil,
   X,
   Check,
@@ -216,7 +216,6 @@ function StoryFullPageInner({ storyId }: StoryFullPageProps) {
   const epic = useMemo(() => (story ? state.epics.find((e) => e.id === story.epicId) ?? null : null), [story, state.epics]);
   const initiative = useMemo(() => (epic ? state.initiatives.find((i) => i.id === epic.initiativeId) ?? null : null), [epic, state.initiatives]);
   const pod = useMemo(() => (story ? state.pods.find((p) => p.id === story.podId) ?? null : null), [story, state.pods]);
-  const productOwner = useMemo(() => (story ? state.productOwners.find((p) => p.id === story.productOwnerId) ?? null : null), [story, state.productOwners]);
   const sprint = useMemo(() => (story?.sprintId ? state.sprints.find((s) => s.id === story.sprintId) ?? null : null), [story, state.sprints]);
 
   const [isEditing, setIsEditing] = useState(false);
@@ -225,7 +224,6 @@ function StoryFullPageInner({ storyId }: StoryFullPageProps) {
   const [editStatus, setEditStatus] = useState<StoryStatus>(StoryStatus.Backlog);
   const [editStoryPoints, setEditStoryPoints] = useState(3);
   const [editPodId, setEditPodId] = useState('');
-  const [editProductOwnerId, setEditProductOwnerId] = useState('');
   const [editLabels, setEditLabels] = useState<string[]>([]);
   const [newLabel, setNewLabel] = useState('');
   const [editPO, setEditPO] = useState<StoryPOFields>({
@@ -291,7 +289,6 @@ function StoryFullPageInner({ storyId }: StoryFullPageProps) {
     setEditStatus(story.status);
     setEditStoryPoints(story.storyPoints);
     setEditPodId(story.podId);
-    setEditProductOwnerId(story.productOwnerId ?? '');
     setEditLabels([...story.labels]);
     setEditPO({
       ...story.po,
@@ -345,7 +342,6 @@ function StoryFullPageInner({ storyId }: StoryFullPageProps) {
         status: editStatus as string,
         storyPoints: editStoryPoints,
         podId: editPodId,
-        productOwnerId: editProductOwnerId || undefined,
         labels: editLabels,
         po: poForApi,
         technical: cleanedTechnical,
@@ -364,7 +360,6 @@ function StoryFullPageInner({ storyId }: StoryFullPageProps) {
             storyPoints: editStoryPoints,
             status: editStatus,
             podId: editPodId,
-            productOwnerId: editProductOwnerId || null,
             labels: editLabels,
             po: cleanedPO,
             technical: cleanedTechnical,
@@ -379,7 +374,7 @@ function StoryFullPageInner({ storyId }: StoryFullPageProps) {
       console.error('[StoryFullPage] apiUpdateStory FAILED', err);
       toast.error(err.message || 'Error al actualizar historia');
     }
-  }, [story, editTitle, editStoryPoints, editStatus, editPodId, editProductOwnerId, editLabels, editPO, editTechnical, editQA, dispatch]);
+  }, [story, editTitle, editStoryPoints, editStatus, editPodId, editLabels, editPO, editTechnical, editQA, dispatch]);
 
   const addLabel = useCallback(() => {
     const trimmed = newLabel.trim();
@@ -488,17 +483,6 @@ function StoryFullPageInner({ storyId }: StoryFullPageProps) {
                       </SelectContent>
                     </Select>
                   </div>
-                  <div>
-                    <label className="text-xs font-medium text-muted-foreground mb-1.5 block">Product Owner</label>
-                    <Select value={editProductOwnerId || ''} onValueChange={setEditProductOwnerId}>
-                      <SelectTrigger className="w-full h-8 text-xs"><SelectValue placeholder="Seleccionar" /></SelectTrigger>
-                      <SelectContent>
-                        {state.productOwners.map((po) => (
-                          <SelectItem key={po.id} value={po.id}>{po.name}</SelectItem>
-                        ))}
-                      </SelectContent>
-                    </Select>
-                  </div>
                 </div>
 
                 {/* Labels editing */}
@@ -553,12 +537,6 @@ function StoryFullPageInner({ storyId }: StoryFullPageProps) {
 
                 <div className="flex flex-wrap items-center gap-2 mt-3">
                   {pod && <PodBadge name={pod.name} color={pod.color} />}
-                  {productOwner && (
-                    <span className="inline-flex items-center gap-1.5 rounded-md bg-muted px-2 py-0.5 text-xs font-medium">
-                      <User className="h-3 w-3 text-muted-foreground" />
-                      {productOwner.name}
-                    </span>
-                  )}
                   {epic && (
                     <Link
                       href={`/proyectos/epicas/${epic.id}`}

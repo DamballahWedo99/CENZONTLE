@@ -32,7 +32,7 @@ import { PodBadge } from '../shared/PodBadge';
 import { ProgressBar } from '../shared/ProgressBar';
 import { StoryPointsBadge } from '../shared/StoryPointsBadge';
 import { useProyectos } from '@/context/ProyectosContext';
-import { Calendar, User, Pencil, X, Check, History, BookOpen, FileText } from 'lucide-react';
+import { Calendar, Pencil, X, Check, History, BookOpen, FileText } from 'lucide-react';
 
 // --- Changelog formatting helpers ---
 
@@ -56,7 +56,6 @@ const fieldLabels: Record<string, string> = {
   storyPoints: 'story points',
   sprintId: 'sprint',
   podId: 'Célula',
-  productOwnerId: 'product owner',
   updatedAt: 'última actualización',
   createdAt: 'fecha de creación',
   epicId: 'épica',
@@ -349,12 +348,6 @@ export function EpicDetail({ epic, onClose }: EpicDetailProps) {
     thirdPartyDependencies: epic.thirdPartyDependencies,
   });
 
-  // Derive POs from the epic's pods
-  const epicProductOwners = useMemo(() => {
-    const poIds = new Set(epic.pods.flatMap((pod) => pod.productOwnerIds));
-    return state.productOwners.filter((po) => poIds.has(po.id));
-  }, [epic.pods, state.productOwners]);
-
   const totalPoints = epic.stories.reduce((sum, s) => sum + s.storyPoints, 0);
   const donePoints = epic.stories
     .filter((s) => s.status === StoryStatus.Done)
@@ -583,24 +576,6 @@ export function EpicDetail({ epic, onClose }: EpicDetailProps) {
                       <span className="text-[11px] text-muted-foreground block mb-0.5">Iniciativa</span>
                       <span className="text-sm">{epic.initiative.name}</span>
                     </div>
-                    <div>
-                      <span className="text-[11px] text-muted-foreground block mb-0.5">Product Owners</span>
-                      <div className="flex flex-wrap gap-1.5 mt-0.5">
-                        {epicProductOwners.length > 0 ? (
-                          epicProductOwners.map((po) => (
-                            <span
-                              key={po.id}
-                              className="inline-flex items-center gap-1.5 rounded-md bg-muted px-2 py-0.5 text-xs font-medium"
-                            >
-                              <User className="h-3 w-3 text-muted-foreground" />
-                              {po.name}
-                            </span>
-                          ))
-                        ) : (
-                          <span className="text-xs text-muted-foreground">Sin PO asignado</span>
-                        )}
-                      </div>
-                    </div>
                   </div>
                 )}
               </section>
@@ -664,9 +639,6 @@ export function EpicDetail({ epic, onClose }: EpicDetailProps) {
             <TabsContent value="historias" className="mt-4">
               <div className="space-y-2">
                 {epic.stories.map((story) => {
-                  const po = state.productOwners.find(
-                    (p) => p.id === story.productOwnerId
-                  );
                   return (
                     <div
                       key={story.id}
@@ -678,12 +650,6 @@ export function EpicDetail({ epic, onClose }: EpicDetailProps) {
                       <span className="truncate flex-1">{story.title}</span>
                       <StoryPointsBadge points={story.storyPoints} />
                       <StatusBadge status={story.status} />
-                      {po && (
-                        <span className="flex items-center gap-1.5 text-xs text-muted-foreground shrink-0">
-                          <User className="h-3 w-3" />
-                          {po.name.split(' ')[0]}
-                        </span>
-                      )}
                     </div>
                   );
                 })}
