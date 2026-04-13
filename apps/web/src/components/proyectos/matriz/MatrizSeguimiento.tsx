@@ -25,7 +25,7 @@ export function MatrizSeguimiento() {
   return (
     <div className="space-y-4">
       <div className="rounded-lg border overflow-x-auto">
-        <table className="w-full text-sm" role="grid" aria-label="Matriz de Seguimiento por POD y Epica">
+        <table className="w-full text-sm" role="grid" aria-label="Matriz de Seguimiento por Célula y Épica">
           <thead>
             <tr className="border-b bg-muted/50">
               <th

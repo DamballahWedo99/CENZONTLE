@@ -1,11 +1,12 @@
 'use client';
 
-import { useState, useMemo, useEffect, useCallback, useRef } from 'react';
+import { useState, useMemo, useEffect, useCallback } from 'react';
 import { useRouter } from 'next/navigation';
 import Link from 'next/link';
+import { toast } from 'sonner';
 import { useProyectos } from '@/context/ProyectosContext';
 import { useBreadcrumb } from '@/context/BreadcrumbContext';
-import { useHeaderActions } from '@/context/HeaderActionsContext';
+import { updateInitiative as apiUpdateInitiative } from '@/lib/api/initiatives';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -27,15 +28,7 @@ import { ProgressBar } from '../shared/ProgressBar';
 import { StoryPointsBadge } from '../shared/StoryPointsBadge';
 import { InitiativeEconomicAnalysis } from './InitiativeEconomicAnalysis';
 import { InitiativeDocuments } from './InitiativeDocuments';
-import { CopilotSidebar, type CopilotSidebarApi } from '../shared/CopilotSidebar';
-import { getSuggestedPrompts } from '@/lib/doc-copilot-agent';
 import { generateEpics } from '@/lib/epic-agent';
-import {
-  type VisualizationType,
-  type AnalysisResponse,
-  generateAnalysisFromPrompt,
-} from '@/lib/economic-analysis-agent';
-import { AnalysisChartSelector } from './AnalysisChartSelector';
 import { InlineEpicCreator } from './InlineEpicCreator';
 import {
   Calendar,
@@ -52,7 +45,6 @@ import {
   Loader2,
   Plus,
   BriefcaseBusiness,
-  Brain,
   Paperclip,
 } from 'lucide-react';
 
@@ -124,71 +116,6 @@ function InitiativeFullPageInner({ initiativeId }: InitiativeFullPageProps) {
   const [activeTab, setActiveTab] = useState('descripcion');
   const [isGeneratingEpics, setIsGeneratingEpics] = useState(false);
   const [isCreatingEpic, setIsCreatingEpic] = useState(false);
-  const [copilotOpen, setCopilotOpen] = useState(false);
-  const [copilotWidth, setCopilotWidth] = useState(420);
-
-  // -- Analysis mode (active when sidebar opened from "Generar Analisis con IA") --
-  const [analysisMode, setAnalysisMode] = useState(false);
-  const [chartSelection, setChartSelection] = useState<VisualizationType[]>([]);
-  const [analyses, setAnalyses] = useState<AnalysisResponse[]>([]);
-  const [selectedAnalysisId, setSelectedAnalysisId] = useState<string | null>(null);
-  const sidebarApiRef = useRef<CopilotSidebarApi | null>(null);
-
-  const handleOpenAnalysisCopilot = useCallback(() => {
-    setAnalysisMode(true);
-    setCopilotOpen(true);
-  }, []);
-
-  const handleAnalysisGenerated = useCallback((response: AnalysisResponse) => {
-    setAnalyses((prev) => [response, ...prev]);
-    setSelectedAnalysisId(response.id);
-  }, []);
-
-  const handleDeleteAnalysis = useCallback((id: string) => {
-    setAnalyses((prev) => prev.filter((a) => a.id !== id));
-    setSelectedAnalysisId((prev) => (prev === id ? null : prev));
-  }, []);
-
-  // Intercepts sidebar send when in analysis mode
-  const handleBeforeSend = useCallback(
-    async (message: string): Promise<boolean> => {
-      if (!analysisMode || !initiative) return false;
-
-      const api = sidebarApiRef.current;
-      if (api) api.setLoading(true);
-
-      try {
-        const response = await generateAnalysisFromPrompt({
-          prompt: message,
-          initiative,
-          epics,
-          storiesCount: stories.length,
-          doneStoriesCount: doneStories.length,
-          totalPoints,
-          donePoints,
-        });
-
-        handleAnalysisGenerated(response);
-        if (api) {
-          api.addAssistantMessage(response.summary);
-          api.setLoading(false);
-        }
-      } catch {
-        if (api) {
-          api.addAssistantMessage('Lo siento, ocurrio un error al generar el analisis. Intenta de nuevo.');
-          api.setLoading(false);
-        }
-      }
-
-      return true; // Prevent default doc-copilot send
-    },
-    [analysisMode, initiative, epics, stories, doneStories, totalPoints, donePoints, handleAnalysisGenerated],
-  );
-
-  // Reset analysis mode when sidebar closes
-  useEffect(() => {
-    if (!copilotOpen) setAnalysisMode(false);
-  }, [copilotOpen]);
 
   // Changelog filtered to this initiative and its epics
   const changelog = useMemo(() => {
@@ -220,57 +147,6 @@ function InitiativeFullPageInner({ initiativeId }: InitiativeFullPageProps) {
     return () => setBreadcrumb(null);
   }, [initiative, setBreadcrumb]);
 
-  // Inject copilot toggle into app header
-  const { setActions } = useHeaderActions();
-  useEffect(() => {
-    setActions(
-      <Button
-        variant="ghost"
-        size="icon"
-        onClick={() => setCopilotOpen(prev => !prev)}
-        className={`relative h-9 w-9 rounded-lg transition-colors ${
-          copilotOpen
-            ? 'bg-indigo-100 text-indigo-700 hover:bg-indigo-200 dark:bg-indigo-950/40 dark:text-indigo-300 dark:hover:bg-indigo-950/60'
-            : 'text-muted-foreground hover:text-foreground hover:bg-accent'
-        }`}
-        aria-label="Toggle Copilot"
-      >
-        <Brain className="h-5 w-5" />
-        {copilotOpen && (
-          <span className="absolute top-1.5 right-1.5 h-1.5 w-1.5 rounded-full bg-indigo-500" />
-        )}
-      </Button>
-    );
-    return () => setActions(null);
-  }, [copilotOpen, setActions]);
-
-  // Override main styles for full-height flex
-  useEffect(() => {
-    const main = document.querySelector('main');
-    if (!main) return;
-    main.style.overflow = 'hidden';
-    main.style.height = '100%';
-    main.style.minHeight = '0';
-    return () => {
-      main.style.overflow = '';
-      main.style.height = '';
-      main.style.minHeight = '';
-    };
-  }, []);
-
-  // Push the entire layout (header + main) left when sidebar is open
-  useEffect(() => {
-    const main = document.querySelector('main');
-    const layoutWrapper = main?.parentElement;
-    if (!layoutWrapper) return;
-    const mr = copilotOpen ? `${copilotWidth}px` : '0px';
-    layoutWrapper.style.transition = 'margin-right 300ms ease-in-out';
-    layoutWrapper.style.marginRight = mr;
-    return () => {
-      layoutWrapper.style.transition = '';
-      layoutWrapper.style.marginRight = '';
-    };
-  }, [copilotOpen, copilotWidth]);
 
   if (!initiative) {
     return (
@@ -295,7 +171,7 @@ function InitiativeFullPageInner({ initiativeId }: InitiativeFullPageProps) {
     setIsEditing(true);
   };
 
-  const handleSave = () => {
+  const handleSave = async () => {
     const changes: Record<string, string> = {};
     if (editName !== initiative.name) changes.name = editName;
     if (editDescription !== initiative.description) changes.description = editDescription;
@@ -305,7 +181,13 @@ function InitiativeFullPageInner({ initiativeId }: InitiativeFullPageProps) {
     if (editTargetDate !== initiative.targetDate) changes.targetDate = editTargetDate;
 
     if (Object.keys(changes).length > 0) {
-      dispatch({ type: 'UPDATE_INITIATIVE', payload: { id: initiative.id, changes } });
+      try {
+        await apiUpdateInitiative(initiative.id, changes);
+        dispatch({ type: 'UPDATE_INITIATIVE', payload: { id: initiative.id, changes } });
+        toast.success('Iniciativa actualizada');
+      } catch (err: any) {
+        toast.error(err.message || 'Error al actualizar');
+      }
     }
     setIsEditing(false);
   };
@@ -351,7 +233,7 @@ function InitiativeFullPageInner({ initiativeId }: InitiativeFullPageProps) {
   return (
     <div className="h-full min-h-0">
       <div className="h-full min-h-0 overflow-y-auto">
-        <div className={`mx-auto px-6 py-8 transition-[max-width] duration-300 ease-in-out ${copilotOpen ? 'max-w-5xl' : 'max-w-6xl'}`}>
+        <div className="mx-auto px-6 py-8 max-w-6xl">
           {/* ── Header ── */}
           <div className="mb-8">
             <div className="flex items-start gap-2">
@@ -702,7 +584,7 @@ function InitiativeFullPageInner({ initiativeId }: InitiativeFullPageProps) {
 
               {/* POD distribution */}
               <section>
-                <h3 className="text-sm font-semibold uppercase tracking-wider text-muted-foreground mb-4">Carga por POD</h3>
+                <h3 className="text-sm font-semibold uppercase tracking-wider text-muted-foreground mb-4">Carga por Célula</h3>
                 {podDistribution.length > 0 ? (
                   <div className="space-y-3">
                     {podDistribution.map(({ pod, storyCount, doneCount, points }) => {
@@ -773,12 +655,6 @@ function InitiativeFullPageInner({ initiativeId }: InitiativeFullPageProps) {
                 doneStories={doneStories}
                 totalPoints={totalPoints}
                 donePoints={donePoints}
-                onOpenCopilot={handleOpenAnalysisCopilot}
-                analyses={analyses}
-                selectedAnalysisId={selectedAnalysisId}
-                onSelectAnalysis={setSelectedAnalysisId}
-                onDeleteAnalysis={handleDeleteAnalysis}
-                globalVizPreference={chartSelection}
               />
             </TabsContent>
 
@@ -788,10 +664,26 @@ function InitiativeFullPageInner({ initiativeId }: InitiativeFullPageProps) {
                 initiative={initiative}
                 epicTitles={epics.map((e) => e.title)}
                 documents={initiative.documents ?? []}
-                onDocumentGenerated={(doc) => dispatch({ type: 'ADD_INITIATIVE_DOCUMENT', payload: { initiativeId: initiative.id, document: doc } })}
-                onDocumentUpdated={(doc) => dispatch({ type: 'UPDATE_INITIATIVE_DOCUMENT', payload: { initiativeId: initiative.id, document: doc } })}
-                onDocumentDeleted={(docId) => dispatch({ type: 'DELETE_INITIATIVE_DOCUMENT', payload: { initiativeId: initiative.id, documentId: docId } })}
-                onDocumentAdded={(doc) => dispatch({ type: 'ADD_INITIATIVE_DOCUMENT', payload: { initiativeId: initiative.id, document: doc } })}
+                onDocumentGenerated={async (doc) => {
+                  const newDocs = [...(initiative.documents ?? []), doc];
+                  await apiUpdateInitiative(initiative.id, { documents: newDocs } as any).catch(() => {});
+                  dispatch({ type: 'ADD_INITIATIVE_DOCUMENT', payload: { initiativeId: initiative.id, document: doc } });
+                }}
+                onDocumentUpdated={async (doc) => {
+                  const newDocs = (initiative.documents ?? []).map((d) => d.id === doc.id ? doc : d);
+                  await apiUpdateInitiative(initiative.id, { documents: newDocs } as any).catch(() => {});
+                  dispatch({ type: 'UPDATE_INITIATIVE_DOCUMENT', payload: { initiativeId: initiative.id, document: doc } });
+                }}
+                onDocumentDeleted={async (docId) => {
+                  const newDocs = (initiative.documents ?? []).filter((d) => d.id !== docId);
+                  await apiUpdateInitiative(initiative.id, { documents: newDocs } as any).catch(() => {});
+                  dispatch({ type: 'DELETE_INITIATIVE_DOCUMENT', payload: { initiativeId: initiative.id, documentId: docId } });
+                }}
+                onDocumentAdded={async (doc) => {
+                  const newDocs = [...(initiative.documents ?? []), doc];
+                  await apiUpdateInitiative(initiative.id, { documents: newDocs } as any).catch(() => {});
+                  dispatch({ type: 'ADD_INITIATIVE_DOCUMENT', payload: { initiativeId: initiative.id, document: doc } });
+                }}
               />
             </TabsContent>
 
@@ -826,8 +718,8 @@ function InitiativeFullPageInner({ initiativeId }: InitiativeFullPageProps) {
                             <span className="text-muted-foreground"> · {entry.field}</span>
                           )}
                         </p>
-                        {entry.newValue && (
-                          <p className="text-xs text-muted-foreground mt-0.5 truncate">{entry.newValue}</p>
+                        {(entry.newValue || entry.oldValue) && (
+                          <p className="text-xs text-muted-foreground mt-0.5 whitespace-pre-wrap break-words">{entry.newValue || entry.oldValue}</p>
                         )}
                       </div>
                       <span className="text-[11px] text-muted-foreground tabular-nums shrink-0">
@@ -842,39 +734,6 @@ function InitiativeFullPageInner({ initiativeId }: InitiativeFullPageProps) {
         </div>
       </div>
 
-      {/* Copilot Sidebar — in-flow flex child */}
-      <CopilotSidebar
-        open={copilotOpen}
-        onOpenChange={setCopilotOpen}
-        context={{
-          entityType: 'initiative',
-          entityTitle: initiative.name,
-          entityDescription: initiative.description,
-          entityLabel: '',
-          fields: {
-            owner: initiative.owner,
-            status: initiative.status,
-            startDate: initiative.startDate,
-            targetDate: initiative.targetDate,
-          },
-          items: epics.map((e) => e.title),
-          diagramTypes: [],
-          existingDocs: (initiative.documents ?? []).map((d) => d.name),
-        }}
-        suggestedPrompts={getSuggestedPrompts('initiative')}
-        title="Copilot de Iniciativa"
-        description="Pregunta sobre épicas, roadmap, inversión o genera documentación basada en el contexto completo de la iniciativa."
-        contextLabel={initiative.name}
-        onDocumentAccepted={(doc) => dispatch({ type: 'ADD_INITIATIVE_DOCUMENT', payload: { initiativeId: initiative.id, document: doc } })}
-        width={copilotWidth}
-        onWidthChange={setCopilotWidth}
-        inputAddon={analysisMode ? (
-          <AnalysisChartSelector selected={chartSelection} onChange={setChartSelection} />
-        ) : undefined}
-        onBeforeSend={analysisMode ? handleBeforeSend : undefined}
-        onReady={(api) => { sidebarApiRef.current = api; }}
-        placeholder={analysisMode ? 'Describe que analisis necesitas...' : undefined}
-      />
     </div>
   );
 }

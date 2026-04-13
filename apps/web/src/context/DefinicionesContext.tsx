@@ -1,9 +1,7 @@
 'use client';
 
-import React, { createContext, useContext, useReducer, useMemo, useCallback, useRef, ReactNode } from 'react';
+import React, { createContext, useContext, useReducer, useState, useMemo, useCallback, useRef, useEffect, ReactNode } from 'react';
 import { DefinicionNode } from '@/types/definiciones';
-import { mockDefiniciones } from '@/data/mock/definiciones';
-import { mockAccessConfig, getDefaultAccessConfig } from '@/data/mock/definiciones-access';
 import { useAuthContext } from '@/context/AuthContext';
 import {
   AccessLevel,
@@ -13,8 +11,37 @@ import {
   DEFAULT_ROLE_ACCESS,
   PrincipalType,
   UserRole,
-  VaultConfig,
 } from '@cenzontle/shared';
+import {
+  getVaultTree,
+  getVaultFile,
+  writeVaultFile,
+  deleteVaultFile,
+  getVaultChangelog,
+  type VaultTreeNode,
+  type VaultCommit,
+} from '@/lib/api/vault';
+import {
+  getAccessibleVaultConfigs,
+  activateVaultConfig,
+  type VaultConfig as VaultConfigApi,
+} from '@/lib/api/vault-configs';
+import { toast } from 'sonner';
+
+/**
+ * Folder raíz del vault. Vacío = raíz del repo completo (comportamiento tipo Obsidian:
+ * el dashboard muestra TODOS los folders del vault, no un sub-folder específico).
+ *
+ * Con `VAULT_ROOT = ''` el dashboard de Definiciones sirve como browser completo del
+ * vault ecommerce: adrs/, definitions/, epics/, initiatives/, qa-matrices/, research/, stories/.
+ *
+ * Caveat: si editas un `.md` dentro de `epics/` o `stories/` desde este dashboard, estás
+ * editando el mismo archivo que el backend escribe/lee vía parseEpicMarkdown. Si rompes
+ * el formato de headings esperado (`## Descripción`, `## Criterios de aceptación`, etc.),
+ * la vista estructurada de esas entidades puede parsear mal los campos. Los folders de
+ * "contenido libre" (definitions/, adrs/, research/, qa-matrices/) no tienen esa restricción.
+ */
+const VAULT_ROOT = '';
 
 export type SortOption = 'name-asc' | 'name-desc' | 'created-newest' | 'created-oldest' | 'updated-newest' | 'updated-oldest';
 
@@ -57,24 +84,28 @@ interface DefinicionesState {
   changelog: ChangelogEntry[];
   accessConfig: Record<string, NodeAccessConfig>;
   roleDefaults: Record<UserRole, AccessLevel>;
-  vaults: VaultConfig[];
-  activeVaultId: string;
+  loading: boolean;
+  error: string | null;
 }
 
 type DefinicionesAction =
+  | { type: 'LOAD_TREE_START' }
+  | { type: 'LOAD_TREE_SUCCESS'; tree: DefinicionNode[] }
+  | { type: 'LOAD_CHANGELOG'; entries: ChangelogEntry[] }
+  | { type: 'LOAD_ACCESS_CONFIG'; accessConfig: Record<string, NodeAccessConfig> }
+  | { type: 'LOAD_TREE_ERROR'; error: string }
+  | { type: 'SET_NODE_CONTENT'; id: string; content: string; metadata?: Record<string, string>; tags?: string[]; updatedAt?: string }
   | { type: 'SELECT_NODE'; id: string | null }
   | { type: 'TOGGLE_FOLDER'; id: string }
   | { type: 'EXPAND_FOLDER'; id: string }
   | { type: 'SET_SEARCH'; query: string }
   | { type: 'TOGGLE_EDITING' }
   | { type: 'UPDATE_CONTENT'; id: string; content: string; previousContent?: string }
-  | { type: 'ADD_FOLDER'; parentId: string | null; name: string }
-  | { type: 'ADD_DOCUMENT'; parentId: string; name: string }
+  | { type: 'ADD_FOLDER'; parentId: string | null; name: string; node: DefinicionNode }
+  | { type: 'ADD_DOCUMENT'; parentId: string; name: string; node: DefinicionNode }
   | { type: 'RENAME_NODE'; id: string; name: string }
   | { type: 'UPDATE_TAGS'; id: string; tags: string[] }
   | { type: 'DELETE_NODE'; id: string }
-  | { type: 'MOVE_NODE'; nodeId: string; newParentId: string | null }
-  | { type: 'REORDER_NODE'; nodeId: string; targetSiblingId: string; position: 'before' | 'after' }
   | { type: 'SET_SORT'; sortBy: SortOption }
   | { type: 'EXPAND_ALL' }
   | { type: 'COLLAPSE_ALL' }
@@ -82,11 +113,7 @@ type DefinicionesAction =
   | { type: 'ADD_ACCESS'; entry: AccessControlEntry }
   | { type: 'UPDATE_ACCESS'; entryId: string; nodeId: string; accessLevel: AccessLevel }
   | { type: 'REMOVE_ACCESS'; entryId: string; nodeId: string }
-  | { type: 'SET_ROLE_DEFAULT'; role: UserRole; level: AccessLevel }
-  | { type: 'ADD_VAULT'; vault: VaultConfig }
-  | { type: 'UPDATE_VAULT'; vault: VaultConfig }
-  | { type: 'REMOVE_VAULT'; vaultId: string }
-  | { type: 'SET_ACTIVE_VAULT'; vaultId: string };
+  | { type: 'SET_ROLE_DEFAULT'; role: UserRole; level: AccessLevel };
 
 // === Tree helpers ===
 
@@ -128,16 +155,6 @@ function updateNodeInTree(nodes: DefinicionNode[], id: string, updater: (node: D
   });
 }
 
-function isDescendantOf(nodes: DefinicionNode[], ancestorId: string, targetId: string): boolean {
-  const ancestor = findNodeById(nodes, ancestorId);
-  if (!ancestor || !ancestor.children) return false;
-  for (const child of ancestor.children) {
-    if (child.id === targetId) return true;
-    if (child.children && isDescendantOf([child], child.id, targetId)) return true;
-  }
-  return false;
-}
-
 function findParentId(nodes: DefinicionNode[], targetId: string, currentParent: string | null = null): string | null | undefined {
   for (const node of nodes) {
     if (node.id === targetId) return currentParent;
@@ -146,27 +163,7 @@ function findParentId(nodes: DefinicionNode[], targetId: string, currentParent: 
       if (found !== undefined) return found;
     }
   }
-  return undefined; // not found in this subtree
-}
-
-function insertNodeAtPosition(nodes: DefinicionNode[], nodeToInsert: DefinicionNode, targetSiblingId: string, position: 'before' | 'after'): DefinicionNode[] {
-  const result: DefinicionNode[] = [];
-  for (const node of nodes) {
-    if (node.id === targetSiblingId) {
-      if (position === 'before') {
-        result.push(nodeToInsert, node);
-      } else {
-        result.push(node, nodeToInsert);
-      }
-    } else {
-      if (node.children) {
-        result.push({ ...node, children: insertNodeAtPosition(node.children, nodeToInsert, targetSiblingId, position) });
-      } else {
-        result.push(node);
-      }
-    }
-  }
-  return result;
+  return undefined;
 }
 
 function addNodeToTree(nodes: DefinicionNode[], parentId: string | null, newNode: DefinicionNode): DefinicionNode[] {
@@ -219,10 +216,8 @@ function filterTree(nodes: DefinicionNode[], query: string): DefinicionNode[] {
     const contentMatch = node.content?.toLowerCase().includes(lower);
 
     if (nameMatch || tagMatch || contentMatch) {
-      // Node matches → include with ALL children intact
       acc.push(node);
     } else if (node.type === 'folder' && node.children) {
-      // Node doesn't match → check children recursively
       const filteredChildren = filterTree(node.children, query);
       if (filteredChildren.length > 0) {
         acc.push({ ...node, children: filteredChildren });
@@ -230,6 +225,203 @@ function filterTree(nodes: DefinicionNode[], query: string): DefinicionNode[] {
     }
     return acc;
   }, []);
+}
+
+// === Vault mapping ===
+
+/**
+ * Regex que detecta el prefijo UUID v4 que el backend agrega a los filenames
+ * de épicas, historias e iniciativas (ej: `420e7507-e650-4489-80ce-fdef119f1354-motores-antifraude.md`).
+ * Si un archivo tiene ese prefijo, lo removemos para el display name — el ID del nodo
+ * (path completo) sigue intacto porque es la identidad real del recurso en el vault.
+ */
+const UUID_PREFIX_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}-/i;
+
+/**
+ * Convierte un filename del vault en un nombre legible para la UI:
+ * 1. Remueve extensión `.md`
+ * 2. Strip UUID prefix si existe
+ * 3. Reemplaza guiones por espacios y capitaliza primera letra (un-slugify)
+ */
+function humanizeFilename(filename: string): string {
+  const withoutExt = filename.replace(/\.md$/i, '');
+  const withoutUuid = withoutExt.replace(UUID_PREFIX_RE, '');
+  // Un-slugify: guiones a espacios + capitalizar
+  const humanized = withoutUuid.replace(/-/g, ' ').trim();
+  if (!humanized) return withoutUuid || withoutExt;
+  return humanized.charAt(0).toUpperCase() + humanized.slice(1);
+}
+
+/**
+ * Convierte un VaultTreeNode (path crudo del backend) en un DefinicionNode.
+ * El ID del nodo es el path completo en el vault (ej. "definitions/finanzas/ebit.md").
+ *
+ * Filtrado:
+ * - `.gitkeep` se omite (marcador para folders vacíos, no debe aparecer en UI)
+ * - Archivos no-markdown se omiten
+ * - Folders vacíos se conservan (sin children después del filtrado)
+ */
+function vaultTreeToDefinicionNodes(vaultNodes: VaultTreeNode[]): DefinicionNode[] {
+  const out: DefinicionNode[] = [];
+  const now = new Date().toISOString();
+
+  for (const v of vaultNodes) {
+    // Ocultar archivos/folders ocultos (empiezan con .) y no-markdown
+    if (v.name.startsWith('.')) continue;
+    if (v.type === 'file' && !v.name.endsWith('.md')) continue;
+
+    const displayName = v.type === 'file' ? humanizeFilename(v.name) : v.name;
+
+    const children = v.children ? vaultTreeToDefinicionNodes(v.children) : undefined;
+
+    // Si un folder queda sin hijos válidos después del filtrado, lo conservamos
+    // vacío (puede ser un folder "en progreso" con solo un .gitkeep)
+    out.push({
+      id: v.path,
+      name: displayName,
+      type: v.type === 'folder' ? 'folder' : 'document',
+      tags: [],
+      createdAt: now,
+      updatedAt: now,
+      ...(v.type === 'folder' ? { children: children ?? [] } : {}),
+    });
+  }
+
+  return out;
+}
+
+/** Deriva el path vault completo para un nodo nuevo dentro de un parent. */
+function buildChildPath(parentPath: string | null, childName: string, type: 'folder' | 'document'): string {
+  const leaf = type === 'document' ? `${childName}.md` : childName;
+  // Si estamos en la raíz del vault (parentPath null y VAULT_ROOT vacío),
+  // el path es solo el leaf — sin leading slash (el backend rechaza paths con /).
+  if (parentPath === null) {
+    return VAULT_ROOT ? `${VAULT_ROOT}/${leaf}` : leaf;
+  }
+  return `${parentPath}/${leaf}`;
+}
+
+/** Slugify simple para filenames — mantiene letras, números y guiones. */
+function slugifyFilename(name: string): string {
+  return name
+    .trim()
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .replace(/[^a-zA-Z0-9_\- ]/g, '')
+    .replace(/\s+/g, '-')
+    .slice(0, 100);
+}
+
+/**
+ * Separa un documento markdown en su frontmatter YAML y su body.
+ * El frontmatter son las líneas entre el primer par de `---` al inicio del archivo.
+ * Si no hay frontmatter, `frontmatter` es null y `body` es el contenido completo.
+ *
+ * Ejemplo:
+ *   ---
+ *   id: abc
+ *   type: epic
+ *   ---
+ *
+ *   # Title
+ *   ...
+ *
+ * → { frontmatter: "---\nid: abc\ntype: epic\n---", body: "\n# Title\n..." }
+ */
+function splitFrontmatter(content: string): { frontmatter: string | null; body: string } {
+  // Debe empezar con `---\n` y tener un cierre `\n---\n` (o `\n---` al final)
+  const match = content.match(/^---\n([\s\S]*?)\n---\n?/);
+  if (!match) return { frontmatter: null, body: content };
+  const frontmatter = match[0].replace(/\n?$/, '');
+  const body = content.slice(match[0].length).replace(/^\n+/, '');
+  return { frontmatter, body };
+}
+
+/** Re-adjunta el frontmatter original al body editado (si existía). */
+function joinFrontmatter(frontmatter: string | null, body: string): string {
+  if (!frontmatter) return body;
+  // Aseguramos newline entre frontmatter y body
+  return `${frontmatter}\n\n${body}`;
+}
+
+/**
+ * Parser de frontmatter YAML flat. Soporta:
+ * - `key: value` → string
+ * - `key: [a, b, c]` → array (inline flow syntax)
+ * - `key: []` → array vacío
+ *
+ * NO soporta: objetos anidados, valores multilínea, arrays block-style (- item).
+ * Cubre el 100% del formato que genera el backend y lo que la UI escribe para tags.
+ */
+function parseYamlFrontmatter(yaml: string): Record<string, string | string[]> {
+  const result: Record<string, string | string[]> = {};
+  const stripped = yaml.replace(/^---\n?/, '').replace(/\n?---\s*$/, '');
+  const lines = stripped.split('\n');
+  for (const line of lines) {
+    const colonIdx = line.indexOf(':');
+    if (colonIdx === -1) continue;
+    const key = line.slice(0, colonIdx).trim();
+    const rawValue = line.slice(colonIdx + 1).trim();
+    if (!key) continue;
+
+    // Detectar array inline: [a, b, c] o []
+    if (rawValue.startsWith('[') && rawValue.endsWith(']')) {
+      const inner = rawValue.slice(1, -1).trim();
+      if (inner === '') {
+        result[key] = [];
+      } else {
+        result[key] = inner
+          .split(',')
+          .map((s) => s.trim().replace(/^["']|["']$/g, ''))
+          .filter(Boolean);
+      }
+    } else {
+      result[key] = rawValue;
+    }
+  }
+  return result;
+}
+
+/** Serializa un array de tags a flow-style YAML: `[pagos, checkout]` */
+function serializeTags(tags: string[]): string {
+  if (tags.length === 0) return '[]';
+  const escaped = tags.map((t) =>
+    /[\s,\[\]"':]/.test(t) ? `"${t.replace(/"/g, '\\"')}"` : t,
+  );
+  return `[${escaped.join(', ')}]`;
+}
+
+/**
+ * Actualiza (o crea) el campo `tags` dentro de un frontmatter YAML.
+ * - Si el frontmatter es null y hay tags → crea un frontmatter nuevo con solo tags
+ * - Si el frontmatter existe y ya tiene tags → reemplaza esa línea
+ * - Si el frontmatter existe pero no tiene tags → agrega la línea
+ * - Si tags es vacío y había una línea tags → la elimina
+ * - Si el resultado es un frontmatter sin ningún campo → devuelve string vacío
+ */
+function updateFrontmatterTags(frontmatter: string | null, tags: string[]): string {
+  // No hay frontmatter previo
+  if (!frontmatter) {
+    if (tags.length === 0) return '';
+    return `---\ntags: ${serializeTags(tags)}\n---`;
+  }
+
+  const inner = frontmatter.replace(/^---\n?/, '').replace(/\n?---\s*$/, '');
+  const lines = inner.split('\n').filter((l) => l.trim() !== '');
+  const tagLineIdx = lines.findIndex((l) => l.trim().startsWith('tags:'));
+  const newTagLine = `tags: ${serializeTags(tags)}`;
+
+  if (tags.length === 0) {
+    if (tagLineIdx !== -1) lines.splice(tagLineIdx, 1);
+  } else if (tagLineIdx !== -1) {
+    lines[tagLineIdx] = newTagLine;
+  } else {
+    lines.push(newTagLine);
+  }
+
+  // Si quedó sin campos, devolver vacío
+  if (lines.length === 0) return '';
+  return ['---', ...lines, '---'].join('\n');
 }
 
 // === Access control helpers ===
@@ -251,15 +443,12 @@ export function getEffectiveAccess(
   const config = accessConfig[nodeId];
 
   if (config) {
-    // 1. Direct user entry (highest priority)
     const userEntry = config.entries.find(e => e.principalType === 'user' && e.principalId === userId);
     if (userEntry) return { level: userEntry.accessLevel, source: 'direct' };
 
-    // 2. Role entry
     const roleEntry = config.entries.find(e => e.principalType === 'role' && e.principalId === userRole);
     if (roleEntry) return { level: roleEntry.accessLevel, source: 'role' };
 
-    // 3. Inherit from parent if enabled
     if (config.inheritFromParent) {
       const parentId = findParentId(fullTree, nodeId);
       if (parentId) {
@@ -269,11 +458,11 @@ export function getEffectiveAccess(
       return { level: roleDefaults[userRole], source: 'role' };
     }
 
-    // Has config, no matching entry, inheritance disabled → deny
-    return { level: 'none', source: 'direct' };
+    // Herencia OFF + sin entries explícitas → fallback a roleDefaults del vault.
+    // Sin esto, el nodo queda inaccesible para todos (incluso admin) al desactivar herencia.
+    return { level: roleDefaults[userRole] ?? 'none', source: 'role' };
   }
 
-  // No config at all → inherit from parent, or use role defaults for root
   const parentId = findParentId(fullTree, nodeId);
   if (parentId) {
     const parentAccess = getEffectiveAccess(userId, userRole, parentId, fullTree, accessConfig, roleDefaults);
@@ -291,7 +480,7 @@ export function getParentEffectiveLevel(
   roleDefaults: Record<UserRole, AccessLevel> = DEFAULT_ROLE_ACCESS,
 ): AccessLevel {
   const parentId = findParentId(fullTree, nodeId);
-  if (!parentId) return 'owner'; // root folders can have any level
+  if (!parentId) return 'owner';
   return getEffectiveAccess(userId, userRole, parentId, fullTree, accessConfig, roleDefaults).level;
 }
 
@@ -324,7 +513,6 @@ function logEntry(action: ChangelogAction, nodeId: string, nodeName: string, nod
 }
 
 function addToChangelog(changelog: ChangelogEntry[], entry: ChangelogEntry): ChangelogEntry[] {
-  // Deduplicate: skip if same action + node within 2 seconds
   const latest = changelog[0];
   if (latest && latest.action === entry.action && latest.nodeId === entry.nodeId) {
     const diff = new Date(entry.timestamp).getTime() - new Date(latest.timestamp).getTime();
@@ -335,14 +523,8 @@ function addToChangelog(changelog: ChangelogEntry[], entry: ChangelogEntry): Cha
 
 // === State & Reducer ===
 
-const defaultVaults: VaultConfig[] = [
-  { id: 'vault-negocio', name: 'Negocio', host: '127.0.0.1', port: '27124', protocol: 'https', apiKey: '', vaultPath: '', status: 'disconnected', allowedPodIds: ['pod-1', 'pod-2', 'pod-3'], createdAt: '2026-01-15T10:00:00Z' },
-  { id: 'vault-tecnico', name: 'Técnico', host: '127.0.0.1', port: '27125', protocol: 'https', apiKey: '', vaultPath: '', status: 'disconnected', allowedPodIds: ['pod-4'], createdAt: '2026-02-01T10:00:00Z' },
-  { id: 'vault-operaciones', name: 'Operaciones', host: '127.0.0.1', port: '27126', protocol: 'https', apiKey: '', vaultPath: '', status: 'disconnected', allowedPodIds: ['pod-5'], createdAt: '2026-02-15T10:00:00Z' },
-];
-
 const initialState: DefinicionesState = {
-  tree: mockDefiniciones,
+  tree: [],
   selectedId: null,
   expandedFolders: new Set<string>(),
   roleDefaults: { ...DEFAULT_ROLE_ACCESS },
@@ -350,13 +532,44 @@ const initialState: DefinicionesState = {
   isEditing: false,
   sortBy: 'name-asc' as SortOption,
   changelog: [],
-  accessConfig: mockAccessConfig,
-  vaults: defaultVaults,
-  activeVaultId: 'vault-negocio',
+  accessConfig: {},
+  loading: true,
+  error: null,
 };
 
 function reducer(state: DefinicionesState, action: DefinicionesAction): DefinicionesState {
   switch (action.type) {
+    case 'LOAD_TREE_START':
+      return { ...state, loading: true, error: null };
+
+    case 'LOAD_TREE_SUCCESS':
+      return { ...state, tree: action.tree, loading: false, error: null };
+
+    case 'LOAD_TREE_ERROR':
+      return { ...state, loading: false, error: action.error };
+
+    case 'LOAD_ACCESS_CONFIG':
+      return { ...state, accessConfig: action.accessConfig };
+
+    case 'LOAD_CHANGELOG':
+      // Replace completo — cada vault tiene su propio git history.
+      // Las entradas locales de la sesión (create/edit/delete) se pierden al cambiar
+      // de vault, pero se reemplazan con el historial real de commits del nuevo vault.
+      return { ...state, changelog: action.entries };
+
+    case 'SET_NODE_CONTENT':
+      return {
+        ...state,
+        tree: updateNodeInTree(state.tree, action.id, node => ({
+          ...node,
+          content: action.content,
+          // Solo actualizar si viene en la action (no pisar con undefined)
+          ...(action.metadata !== undefined ? { metadata: action.metadata } : {}),
+          ...(action.tags !== undefined ? { tags: action.tags } : {}),
+          ...(action.updatedAt ? { updatedAt: action.updatedAt } : {}),
+        })),
+      };
+
     case 'SELECT_NODE':
       return { ...state, selectedId: action.id, isEditing: false };
 
@@ -401,57 +614,32 @@ function reducer(state: DefinicionesState, action: DefinicionesAction): Definici
     }
 
     case 'ADD_FOLDER': {
-      const newFolder: DefinicionNode = {
-        id: `folder-${crypto.randomUUID()}`,
-        name: action.name,
-        type: 'folder',
-        createdAt: new Date().toISOString(),
-        updatedAt: new Date().toISOString(),
-        children: [],
-      };
       const next = new Set(state.expandedFolders);
       if (action.parentId) next.add(action.parentId);
       const parentFolder = action.parentId ? findNodeById(state.tree, action.parentId) : null;
       return {
         ...state,
-        tree: addNodeToTree(state.tree, action.parentId, newFolder),
+        tree: addNodeToTree(state.tree, action.parentId, action.node),
         expandedFolders: next,
-        accessConfig: {
-          ...state.accessConfig,
-          [newFolder.id]: getDefaultAccessConfig(newFolder.id),
-        },
-        changelog: addToChangelog(state.changelog, logEntry('create', newFolder.id, action.name, 'folder', {
+        changelog: addToChangelog(state.changelog, logEntry('create', action.node.id, action.name, 'folder', {
           parentName: parentFolder?.name ?? 'raíz',
         })),
       };
     }
 
     case 'ADD_DOCUMENT': {
-      const newDoc: DefinicionNode = {
-        id: `doc-${crypto.randomUUID()}`,
-        name: action.name,
-        type: 'document',
-        tags: [],
-        createdAt: new Date().toISOString(),
-        updatedAt: new Date().toISOString(),
-        content: `# ${action.name}\n\nDescribe esta definición aquí...\n`,
-      };
       const next = new Set(state.expandedFolders);
       next.add(action.parentId);
       const docParent = findNodeById(state.tree, action.parentId);
       return {
         ...state,
-        tree: addNodeToTree(state.tree, action.parentId, newDoc),
-        selectedId: newDoc.id,
+        tree: addNodeToTree(state.tree, action.parentId, action.node),
+        selectedId: action.node.id,
         expandedFolders: next,
         isEditing: true,
-        accessConfig: {
-          ...state.accessConfig,
-          [newDoc.id]: getDefaultAccessConfig(newDoc.id),
-        },
-        changelog: addToChangelog(state.changelog, logEntry('create', newDoc.id, action.name, 'document', {
+        changelog: addToChangelog(state.changelog, logEntry('create', action.node.id, action.name, 'document', {
           parentName: docParent?.name ?? 'raíz',
-          newContent: newDoc.content,
+          newContent: action.node.content,
         })),
       };
     }
@@ -493,7 +681,6 @@ function reducer(state: DefinicionesState, action: DefinicionesAction): Definici
 
     case 'DELETE_NODE': {
       const delNode = findNodeById(state.tree, action.id);
-      // Clean up accessConfig for the node and all its descendants
       const idsToRemove = new Set(delNode ? collectAllNodeIds([delNode]) : [action.id]);
       const cleanedAccess = Object.fromEntries(
         Object.entries(state.accessConfig).filter(([k]) => !idsToRemove.has(k)),
@@ -509,40 +696,6 @@ function reducer(state: DefinicionesState, action: DefinicionesAction): Definici
       };
     }
 
-    case 'MOVE_NODE': {
-      if (action.nodeId === action.newParentId) return state;
-      if (action.newParentId && isDescendantOf(state.tree, action.nodeId, action.newParentId)) return state;
-
-      const nodeToMove = findNodeById(state.tree, action.nodeId);
-      if (!nodeToMove) return state;
-
-      const treeWithout = deleteNodeFromTree(state.tree, action.nodeId);
-      const treeWithNew = addNodeToTree(treeWithout, action.newParentId, nodeToMove);
-
-      const next = new Set(state.expandedFolders);
-      if (action.newParentId) next.add(action.newParentId);
-      const moveTarget = action.newParentId ? findNodeById(state.tree, action.newParentId) : null;
-
-      return {
-        ...state,
-        tree: treeWithNew,
-        expandedFolders: next,
-        changelog: addToChangelog(state.changelog, logEntry('move', action.nodeId, nodeToMove.name, nodeToMove.type, {
-          parentName: moveTarget?.name ?? 'raíz',
-        })),
-      };
-    }
-
-    case 'REORDER_NODE': {
-      if (action.nodeId === action.targetSiblingId) return state;
-      const nodeToReorder = findNodeById(state.tree, action.nodeId);
-      if (!nodeToReorder) return state;
-
-      const treeWithout = deleteNodeFromTree(state.tree, action.nodeId);
-      const reorderedTree = insertNodeAtPosition(treeWithout, nodeToReorder, action.targetSiblingId, action.position);
-      return { ...state, tree: reorderedTree };
-    }
-
     case 'SET_SORT':
       return { ...state, sortBy: action.sortBy };
 
@@ -552,11 +705,10 @@ function reducer(state: DefinicionesState, action: DefinicionesAction): Definici
     case 'COLLAPSE_ALL':
       return { ...state, expandedFolders: new Set() };
 
-    // === Access control actions ===
-
     case 'SET_INHERITANCE': {
       const inheritNode = findNodeById(state.tree, action.nodeId);
-      const existing = state.accessConfig[action.nodeId] ?? getDefaultAccessConfig(action.nodeId);
+      const defaultCfg: NodeAccessConfig = { nodeId: action.nodeId, inheritFromParent: true, entries: [] };
+      const existing = state.accessConfig[action.nodeId] ?? defaultCfg;
       return {
         ...state,
         accessConfig: {
@@ -574,7 +726,8 @@ function reducer(state: DefinicionesState, action: DefinicionesAction): Definici
 
     case 'ADD_ACCESS': {
       const accessNode = findNodeById(state.tree, action.entry.nodeId);
-      const existing = state.accessConfig[action.entry.nodeId] ?? getDefaultAccessConfig(action.entry.nodeId);
+      const defaultCfg: NodeAccessConfig = { nodeId: action.entry.nodeId, inheritFromParent: true, entries: [] };
+      const existing = state.accessConfig[action.entry.nodeId] ?? defaultCfg;
       return {
         ...state,
         accessConfig: {
@@ -651,23 +804,6 @@ function reducer(state: DefinicionesState, action: DefinicionesAction): Definici
         roleDefaults: { ...state.roleDefaults, [action.role]: action.level },
       };
 
-    case 'ADD_VAULT':
-      return { ...state, vaults: [...state.vaults, action.vault] };
-
-    case 'UPDATE_VAULT':
-      return { ...state, vaults: state.vaults.map(v => v.id === action.vault.id ? action.vault : v) };
-
-    case 'REMOVE_VAULT': {
-      const nextVaults = state.vaults.filter(v => v.id !== action.vaultId);
-      const nextActiveId = state.activeVaultId === action.vaultId
-        ? (nextVaults[0]?.id ?? '')
-        : state.activeVaultId;
-      return { ...state, vaults: nextVaults, activeVaultId: nextActiveId };
-    }
-
-    case 'SET_ACTIVE_VAULT':
-      return { ...state, activeVaultId: action.vaultId };
-
     default:
       return state;
   }
@@ -682,6 +818,15 @@ interface DefinicionesContextValue {
   unfilteredTree: DefinicionNode[];
   changelog: ChangelogEntry[];
   accessConfig: Record<string, NodeAccessConfig>;
+  loading: boolean;
+  error: string | null;
+  reloadTree: () => Promise<void>;
+  // Vault configs (multi-vault support)
+  vaults: VaultConfigApi[];
+  vaultsLoaded: boolean;
+  activeVaultId: string | null;
+  switchVault: (vaultId: string) => Promise<void>;
+  reloadVaults: () => Promise<void>;
   selectNode: (id: string | null) => void;
   toggleFolder: (id: string) => void;
   expandFolder: (id: string) => void;
@@ -693,8 +838,6 @@ interface DefinicionesContextValue {
   renameNode: (id: string, name: string) => void;
   updateTags: (id: string, tags: string[]) => void;
   deleteNode: (id: string) => void;
-  moveNode: (nodeId: string, newParentId: string | null) => void;
-  reorderNode: (nodeId: string, targetSiblingId: string, position: 'before' | 'after') => void;
   setSortBy: (sortBy: SortOption) => void;
   expandAll: () => void;
   collapseAll: () => void;
@@ -705,12 +848,6 @@ interface DefinicionesContextValue {
   removeAccess: (entryId: string, nodeId: string) => void;
   roleDefaults: Record<UserRole, AccessLevel>;
   setRoleDefault: (role: UserRole, level: AccessLevel) => void;
-  vaults: VaultConfig[];
-  activeVaultId: string;
-  addVault: (vault: VaultConfig) => void;
-  updateVault: (vault: VaultConfig) => void;
-  removeVault: (vaultId: string) => void;
-  setActiveVault: (vaultId: string) => void;
 }
 
 const DefinicionesContext = createContext<DefinicionesContextValue | null>(null);
@@ -722,7 +859,6 @@ export function DefinicionesProvider({ children }: { children: ReactNode }) {
 
   const [state, dispatch] = useReducer((s: DefinicionesState, action: DefinicionesAction) => {
     const newState = reducer(s, action);
-    // Decorate new changelog entries with current user info
     if (newState.changelog.length > s.changelog.length && currentUserRef.current) {
       const [newest, ...rest] = newState.changelog;
       return {
@@ -736,23 +872,281 @@ export function DefinicionesProvider({ children }: { children: ReactNode }) {
     return newState;
   }, initialState);
 
+  // === Content caches (refs para no disparar re-renders) ===
+  // `contentCache` marca qué nodos ya tuvieron su body cargado — evita re-fetch en re-renders
+  // `frontmatterCache` preserva el YAML crudo del archivo para re-adjuntarlo al guardar
+  const contentCache = useRef<Set<string>>(new Set());
+  const frontmatterCache = useRef<Map<string, string>>(new Map());
+
+  // === Async loader: fetch tree from GitHub vault ===
+  const reloadTree = useCallback(async () => {
+    // Solo mostrar spinner en la carga inicial (tree vacío).
+    // En reloads posteriores (rename, vault switch), mantener el tree visible
+    // mientras se carga en background para evitar flicker.
+    if (state.tree.length === 0) {
+      dispatch({ type: 'LOAD_TREE_START' });
+    }
+    // CRÍTICO: limpiar caches de contenido — el tree nuevo tiene instancias frescas de
+    // DefinicionNode sin `content`/`metadata`. Si no limpiamos, el lazy-load effect ve
+    // el cache y se skipea, dejando el selectedNode sin contenido permanentemente.
+    contentCache.current.clear();
+    frontmatterCache.current.clear();
+    try {
+      const vaultTree = await getVaultTree(VAULT_ROOT);
+      const mapped = vaultTreeToDefinicionNodes(vaultTree);
+      dispatch({ type: 'LOAD_TREE_SUCCESS', tree: mapped });
+    } catch (err: any) {
+      const msg = err?.message || 'Error cargando el vault';
+      dispatch({ type: 'LOAD_TREE_ERROR', error: msg });
+      toast.error(`No se pudo cargar el vault: ${msg}`);
+    }
+  }, []);
+
+  // Tree se carga condicionalmente — ver useEffect después del bloque multi-vault
+
+  // === Multi-vault support ===
+  const [allVaults, setAllVaults] = useState<VaultConfigApi[]>([]);
+
+  // Filtro de acceso: un usuario solo ve vaults donde:
+  // 1. Su rol es AltaGerencia → ve todos los vaults
+  // 2. allowedPodIds está vacío (sin restricción, todos ven)
+  // 3. Alguno de sus podIds está en allowedPodIds del vault
+  const vaults = useMemo(() => {
+    if (!currentUser) return allVaults;
+    if (currentUser.role === UserRole.AltaGerencia) return allVaults;
+    const userPodIds = new Set(currentUser.podIds ?? []);
+    return allVaults.filter((v) =>
+      v.allowedPodIds.length === 0 || v.allowedPodIds.some((pid) => userPodIds.has(pid)),
+    );
+  }, [allVaults, currentUser]);
+
+  const activeVaultId = useMemo(() => vaults.find((v) => v.isActive)?.id ?? vaults[0]?.id ?? null, [vaults]);
+
+  const [vaultsLoaded, setVaultsLoaded] = useState(false);
+
+  const reloadVaults = useCallback(async () => {
+    try {
+      const data = await getAccessibleVaultConfigs();
+      setAllVaults(data);
+    } catch (err: any) {
+      console.error('[DefinicionesContext] Failed to load vault configs', err);
+    } finally {
+      setVaultsLoaded(true);
+    }
+  }, []);
+
+  useEffect(() => {
+    void reloadVaults();
+  }, [reloadVaults]);
+
+  const switchVault = useCallback(async (vaultId: string) => {
+    const target = vaults.find((v) => v.id === vaultId);
+    if (!target || target.isActive) return;
+    try {
+      await activateVaultConfig(vaultId);
+      toast.success(`Cambiado a vault "${target.name}"`);
+      // Actualizar lista de vaults (nuevo activo) y recargar el árbol del nuevo vault
+      await reloadVaults();
+      await reloadTree();
+    } catch (err: any) {
+      toast.error(`Error cambiando de vault: ${err?.message ?? 'error desconocido'}`);
+    }
+  }, [vaults, reloadVaults, reloadTree]);
+
+  // === Sincronizar roleDefaults del vault activo al state ===
+  useEffect(() => {
+    const activeVault = vaults.find((v) => v.id === activeVaultId);
+    if (!activeVault) return;
+    const vaultDefaults = activeVault.roleDefaults ?? {};
+    // Para cada rol, usar el default del vault si está definido, sino el global
+    for (const role of Object.values(UserRole)) {
+      if (role === UserRole.AltaGerencia) continue;
+      const level = (vaultDefaults[role] as AccessLevel) || DEFAULT_ROLE_ACCESS[role];
+      dispatch({ type: 'SET_ROLE_DEFAULT', role, level });
+    }
+  }, [activeVaultId, vaults]);
+
+  // === Tree load condicionado a que haya vaults accesibles ===
+  // Si el usuario no tiene ningún vault permitido, no carga el tree (empty state).
+  // Si tiene al menos uno, carga al montar y al cambiar de vault.
+  useEffect(() => {
+    if (vaults.length === 0) {
+      // Sin vaults accesibles → limpiar tree
+      dispatch({ type: 'LOAD_TREE_SUCCESS', tree: [] });
+      return;
+    }
+    void reloadTree();
+  }, [vaults.length > 0, activeVaultId, reloadTree]);
+
+  // === Changelog from git history ===
+  // Se recarga cada vez que cambia el vault activo para mostrar
+  // solo los commits del vault seleccionado.
+  useEffect(() => {
+    if (!activeVaultId) return;
+    getVaultChangelog(50)
+      .then((commits) => {
+        const entries: ChangelogEntry[] = commits
+          // Filtrar commits de config interna — no son documentos del usuario
+          .filter((c) => !c.message.includes('.cenzontle/') && !c.message.includes('folder access config') && !c.message.includes('folder access permissions'))
+          .map((c) => {
+          let action: ChangelogAction = 'edit';
+          if (c.message.startsWith('feat(')) action = 'create';
+          else if (c.message.includes('delete')) action = 'delete';
+          else if (c.message.startsWith('fix(')) action = 'edit';
+
+          const afterColon = c.message.split(': ').slice(1).join(': ').trim();
+          const pathMatch = afterColon.match(/(?:create|update|delete|repair)\s+"?([^"[\]]+)"?/i);
+          const nodePath = pathMatch?.[1]?.trim() || afterColon.slice(0, 80);
+          const rawName = nodePath.split('/').pop() || nodePath;
+          const nodeName = humanizeFilename(rawName);
+
+          return {
+            id: c.sha,
+            timestamp: c.date,
+            action,
+            nodeId: nodePath,
+            nodeName,
+            nodeType: 'document' as const,
+            userName: c.authorName,
+            details: { contentPreview: c.message },
+          };
+        });
+        // REPLACE, no merge — cada vault tiene su propio historial de commits
+        dispatch({ type: 'LOAD_CHANGELOG', entries });
+      })
+      .catch((err) => {
+        console.error('[DefinicionesContext] Failed to load changelog', err);
+      });
+  }, [activeVaultId]);
+
+  // === Per-folder access config persistence ===
+  // Carga `.cenzontle/access.json` del vault al cambiar de vault activo.
+  // Guarda cada vez que cambia el accessConfig (debounced 1s).
+  const ACCESS_CONFIG_PATH = '.cenzontle/access.json';
+
+  useEffect(() => {
+    if (!activeVaultId || vaults.length === 0) return;
+    // Fetch silencioso vía BFF proxy (inyecta Auth0 token).
+    // No usar apiFetch para evitar log de error cuando 404 (archivo no existe aún).
+    fetch(`/api/proxy/vault/file?path=${encodeURIComponent(ACCESS_CONFIG_PATH)}`)
+      .then((res) => (res.ok ? res.json() : null))
+      .then((data) => {
+        if (data?.content) {
+          try {
+            const parsed = JSON.parse(data.content);
+            dispatch({ type: 'LOAD_ACCESS_CONFIG', accessConfig: parsed });
+          } catch { /* archivo corrupto, usar defaults */ }
+        }
+      })
+      .catch(() => { /* network error, usar defaults */ });
+  }, [activeVaultId]);
+
+  // Guardar accessConfig al vault (debounced) cada vez que cambia
+  const accessConfigRef = useRef(state.accessConfig);
+  accessConfigRef.current = state.accessConfig;
+  const saveAccessTimeout = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  const saveAccessConfig = useCallback(() => {
+    if (saveAccessTimeout.current) clearTimeout(saveAccessTimeout.current);
+    saveAccessTimeout.current = setTimeout(() => {
+      const config = accessConfigRef.current;
+      // Solo guardar si hay entradas (no guardar un objeto vacío)
+      if (Object.keys(config).length === 0) return;
+      writeVaultFile(
+        ACCESS_CONFIG_PATH,
+        JSON.stringify(config, null, 2),
+        'config(vault): update folder access permissions',
+      ).catch((err) => {
+        console.error('[DefinicionesContext] Failed to save access config', err);
+      });
+    }, 1500); // Debounce 1.5s para no hacer un commit por cada click de radio button
+  }, []);
+
+  // === Lazy-load file content on selection ===
+  // Se dispara cuando se selecciona un nodo (documento o folder).
+  // - Para un documento: carga su contenido
+  // - Para un folder: pre-carga el contenido de TODOS sus hijos directos tipo documento
+  //   (necesario para que las cards de la vista de folder muestren previews del body)
+  useEffect(() => {
+    if (!state.selectedId) return;
+    const node = findNodeById(state.tree, state.selectedId);
+    if (!node) return;
+
+    // Acumular la lista de documentos que necesitan carga
+    const docsToLoad: DefinicionNode[] = [];
+    const pushIfNeeded = (n: DefinicionNode) => {
+      if (n.type !== 'document') return;
+      if (n.content !== undefined) return;
+      if (contentCache.current.has(n.id)) return;
+      docsToLoad.push(n);
+    };
+
+    if (node.type === 'document') {
+      pushIfNeeded(node);
+    } else if (node.type === 'folder' && node.children) {
+      for (const child of node.children) {
+        pushIfNeeded(child);
+      }
+    }
+
+    if (docsToLoad.length === 0) return;
+
+    for (const doc of docsToLoad) {
+      contentCache.current.add(doc.id);
+      getVaultFile(doc.id)
+        .then((file) => {
+          // Separar frontmatter del body
+          const { frontmatter, body } = splitFrontmatter(file.content);
+          let metadata: Record<string, string> | undefined;
+          let tagsFromFrontmatter: string[] | undefined;
+
+          if (frontmatter) {
+            frontmatterCache.current.set(doc.id, frontmatter);
+            const parsed = parseYamlFrontmatter(frontmatter);
+            // Separar tags (metadata de usuario) del resto (metadata de sistema)
+            const metadataEntries: [string, string][] = [];
+            for (const [key, value] of Object.entries(parsed)) {
+              if (key === 'tags') {
+                if (Array.isArray(value)) tagsFromFrontmatter = value;
+                continue;
+              }
+              // MetadataTable solo renderea strings — si hay otro array, lo serializamos
+              metadataEntries.push([key, Array.isArray(value) ? value.join(', ') : value]);
+            }
+            metadata = Object.fromEntries(metadataEntries);
+          }
+
+          dispatch({
+            type: 'SET_NODE_CONTENT',
+            id: doc.id,
+            content: body,
+            metadata,
+            tags: tagsFromFrontmatter,
+            updatedAt: file.updatedAt ?? undefined,
+          });
+        })
+        .catch((err) => {
+          contentCache.current.delete(doc.id);
+          console.error('[DefinicionesContext] Failed to load file content', err);
+          toast.error(`No se pudo cargar el archivo: ${err?.message ?? 'error desconocido'}`);
+        });
+    }
+  }, [state.selectedId, state.tree]);
+
   const selectedNode = useMemo(() => {
     if (!state.selectedId) return null;
     const node = findNodeById(state.tree, state.selectedId);
     if (!node || !currentUser) return node;
-    // Block access to node content if user has no access
     const access = getEffectiveAccess(currentUser.id, currentUser.role, node.id, state.tree, state.accessConfig, state.roleDefaults);
     if (access.level === 'none') return null;
     return node;
   }, [state.tree, state.selectedId, currentUser, state.accessConfig, state.roleDefaults]);
 
-  // Search + sort (full tree, no access filter)
   const unfilteredTree = useMemo(
     () => sortTree(filterTree(state.tree, state.searchQuery), state.sortBy),
     [state.tree, state.searchQuery, state.sortBy],
   );
 
-  // Access-filtered tree: what the current user can see
   const filteredTree = useMemo(
     () => {
       if (!currentUser) return unfilteredTree;
@@ -769,7 +1163,6 @@ export function DefinicionesProvider({ children }: { children: ReactNode }) {
     [currentUser, state.tree, state.accessConfig, state.roleDefaults],
   );
 
-  // Access-level guard helpers
   const requireEditor = useCallback((nodeId: string): boolean => {
     const level = getEffectiveAccessForNode(nodeId).level;
     return level === 'editor' || level === 'owner';
@@ -779,7 +1172,7 @@ export function DefinicionesProvider({ children }: { children: ReactNode }) {
     return getEffectiveAccessForNode(nodeId).level === 'owner';
   }, [getEffectiveAccessForNode]);
 
-  // Read-only actions (no access gate)
+  // === Read-only UI actions (local only) ===
   const selectNode = useCallback((id: string | null) => dispatch({ type: 'SELECT_NODE', id }), []);
   const toggleFolder = useCallback((id: string) => dispatch({ type: 'TOGGLE_FOLDER', id }), []);
   const expandFolder = useCallback((id: string) => dispatch({ type: 'EXPAND_FOLDER', id }), []);
@@ -787,50 +1180,252 @@ export function DefinicionesProvider({ children }: { children: ReactNode }) {
   const setSortBy = useCallback((sortBy: SortOption) => dispatch({ type: 'SET_SORT', sortBy }), []);
   const expandAll = useCallback(() => dispatch({ type: 'EXPAND_ALL' }), []);
   const collapseAll = useCallback(() => dispatch({ type: 'COLLAPSE_ALL' }), []);
-
-  // Write actions (require editor+ access)
   const toggleEditing = useCallback(() => dispatch({ type: 'TOGGLE_EDITING' }), []);
-  const updateContent = useCallback((id: string, content: string, previousContent?: string) => {
+
+  // === Write actions that persist to vault ===
+
+  const updateContent = useCallback(async (id: string, content: string, previousContent?: string) => {
     if (!requireEditor(id)) return;
+    // Optimistic update local (el body sin frontmatter es lo que vive en el state)
     dispatch({ type: 'UPDATE_CONTENT', id, content, previousContent });
-  }, [requireEditor]);
-  const addFolder = useCallback((parentId: string | null, name: string) => {
-    if (parentId && !requireEditor(parentId)) return;
-    dispatch({ type: 'ADD_FOLDER', parentId, name });
-  }, [requireEditor]);
-  const addDocument = useCallback((parentId: string, name: string) => {
-    if (!requireEditor(parentId)) return;
-    dispatch({ type: 'ADD_DOCUMENT', parentId, name });
-  }, [requireEditor]);
-  const renameNode = useCallback((id: string, name: string) => {
-    if (!requireEditor(id)) return;
-    dispatch({ type: 'RENAME_NODE', id, name });
-  }, [requireEditor]);
-  const updateTags = useCallback((id: string, tags: string[]) => {
-    if (!requireEditor(id)) return;
-    dispatch({ type: 'UPDATE_TAGS', id, tags });
-  }, [requireEditor]);
-  const deleteNode = useCallback((id: string) => {
-    if (!requireOwner(id)) return;
-    dispatch({ type: 'DELETE_NODE', id });
-  }, [requireOwner]);
-  const moveNode = useCallback((nodeId: string, newParentId: string | null) => {
-    if (!requireEditor(nodeId)) return;
-    dispatch({ type: 'MOVE_NODE', nodeId, newParentId });
-  }, [requireEditor]);
-  const reorderNode = useCallback((nodeId: string, targetSiblingId: string, position: 'before' | 'after') => {
-    if (!requireEditor(nodeId)) return;
-    dispatch({ type: 'REORDER_NODE', nodeId, targetSiblingId, position });
+    try {
+      // Re-adjuntar el frontmatter original al guardar para no perder la metadata
+      // (id, type, initiativeId, created, etc.) que el backend necesita para parsear.
+      const frontmatter = frontmatterCache.current.get(id) ?? null;
+      const fullContent = joinFrontmatter(frontmatter, content);
+      await writeVaultFile(id, fullContent, `docs(vault): update ${id}`);
+    } catch (err: any) {
+      if (previousContent !== undefined) {
+        dispatch({ type: 'UPDATE_CONTENT', id, content: previousContent });
+      }
+      toast.error(`Error guardando: ${err?.message ?? 'error desconocido'}`);
+    }
   }, [requireEditor]);
 
-  // ACL actions
+  const addFolder = useCallback(async (parentId: string | null, name: string) => {
+    if (parentId && !requireEditor(parentId)) return;
+    const safeName = slugifyFilename(name);
+    if (!safeName) {
+      toast.error('Nombre de folder inválido');
+      return;
+    }
+    const folderPath = buildChildPath(parentId, safeName, 'folder');
+    const gitkeepPath = `${folderPath}/.gitkeep`;
+    const now = new Date().toISOString();
+
+    const newNode: DefinicionNode = {
+      id: folderPath,
+      name,
+      type: 'folder',
+      createdAt: now,
+      updatedAt: now,
+      children: [],
+    };
+
+    // Optimistic
+    dispatch({ type: 'ADD_FOLDER', parentId, name, node: newNode });
+    try {
+      // Git no trackea folders vacíos — creamos un .gitkeep como marcador
+      await writeVaultFile(gitkeepPath, '', `feat(vault): create folder ${folderPath}`);
+      toast.success(`Folder "${name}" creado`);
+    } catch (err: any) {
+      dispatch({ type: 'DELETE_NODE', id: folderPath });
+      toast.error(`Error creando folder: ${err?.message ?? 'error desconocido'}`);
+    }
+  }, [requireEditor]);
+
+  const addDocument = useCallback(async (parentId: string, name: string) => {
+    if (!requireEditor(parentId)) return;
+    const safeName = slugifyFilename(name);
+    if (!safeName) {
+      toast.error('Nombre de documento inválido');
+      return;
+    }
+    const docPath = buildChildPath(parentId, safeName, 'document');
+    const initialContent = `# ${name}\n\nDescribe esta definición aquí...\n`;
+    const now = new Date().toISOString();
+
+    const newNode: DefinicionNode = {
+      id: docPath,
+      name,
+      type: 'document',
+      tags: [],
+      createdAt: now,
+      updatedAt: now,
+      content: initialContent,
+    };
+
+    // Optimistic
+    dispatch({ type: 'ADD_DOCUMENT', parentId, name, node: newNode });
+    try {
+      await writeVaultFile(docPath, initialContent, `feat(vault): create ${docPath}`);
+    } catch (err: any) {
+      dispatch({ type: 'DELETE_NODE', id: docPath });
+      toast.error(`Error creando documento: ${err?.message ?? 'error desconocido'}`);
+    }
+  }, [requireEditor]);
+
+  const deleteNode = useCallback(async (id: string) => {
+    if (!requireOwner(id)) return;
+    const node = findNodeById(state.tree, id);
+    if (!node) return;
+
+    // Optimistic local delete
+    dispatch({ type: 'DELETE_NODE', id });
+
+    try {
+      if (node.type === 'document') {
+        await deleteVaultFile(id, `chore(vault): delete ${id}`);
+      } else {
+        // Folder: recursive delete of all descendant files
+        const descendantFiles = collectDescendantFilePaths(node);
+        for (const filePath of descendantFiles) {
+          await deleteVaultFile(filePath, `chore(vault): delete ${filePath}`).catch((err) => {
+            console.warn(`[deleteNode] Failed to delete ${filePath}`, err);
+          });
+        }
+        // También borrar el .gitkeep si existía
+        await deleteVaultFile(`${id}/.gitkeep`, `chore(vault): delete folder marker ${id}`).catch(() => {});
+      }
+      toast.success(`Eliminado "${node.name}"`);
+    } catch (err: any) {
+      toast.error(`Error eliminando: ${err?.message ?? 'error desconocido'}`);
+      // Reload completo para re-sincronizar con GitHub
+      void reloadTree();
+    }
+  }, [requireOwner, state.tree, reloadTree]);
+
+  const renameNode = useCallback(async (id: string, name: string) => {
+    if (!requireEditor(id)) return;
+    const node = findNodeById(state.tree, id);
+    if (!node) return;
+
+    // Folders: mover recursivamente todos los archivos hijos al nuevo path
+    if (node.type === 'folder') {
+      const safeName = slugifyFilename(name);
+      if (!safeName) { toast.error('Nombre inválido'); return; }
+
+      const oldFolderPath = id;
+      const parentSegments = id.split('/').slice(0, -1);
+      const newFolderPath = [...parentSegments, safeName].join('/');
+
+      // Optimistic
+      const oldName = node.name;
+      dispatch({ type: 'RENAME_NODE', id, name });
+
+      try {
+        // Recopilar todos los archivos descendientes del folder
+        const descendantFiles = collectDescendantFilePaths(node);
+
+        // Mover cada archivo: leer contenido → escribir en nueva ruta → borrar vieja
+        for (const filePath of descendantFiles) {
+          const relativePart = filePath.slice(oldFolderPath.length); // ej: /subfolder/doc.md
+          const newFilePath = newFolderPath + relativePart;
+
+          const fileContent = await getVaultFile(filePath).then(f => f.content).catch(() => '');
+          await writeVaultFile(newFilePath, fileContent, `docs(vault): rename folder ${oldFolderPath} → ${newFolderPath}`);
+          await deleteVaultFile(filePath, `chore(vault): cleanup old path ${filePath}`);
+        }
+
+        // Mover el .gitkeep si existe
+        try {
+          await writeVaultFile(`${newFolderPath}/.gitkeep`, '', `chore(vault): gitkeep for ${newFolderPath}`);
+          await deleteVaultFile(`${oldFolderPath}/.gitkeep`, `chore(vault): cleanup old gitkeep`).catch(() => {});
+        } catch { /* puede no existir */ }
+
+        await reloadTree();
+        toast.success(`Carpeta renombrada a "${name}"`);
+      } catch (err: any) {
+        dispatch({ type: 'RENAME_NODE', id, name: oldName });
+        toast.error(`Error renombrando carpeta: ${err?.message ?? 'error desconocido'}`);
+        await reloadTree();
+      }
+      return;
+    }
+
+    // Documentos: delete old + write new en el vault
+    const safeName = slugifyFilename(name);
+    if (!safeName) { toast.error('Nombre inválido'); return; }
+
+    // Derivar el nuevo path: mismo parent folder, nuevo nombre
+    const segments = id.split('/');
+    segments[segments.length - 1] = `${safeName}.md`;
+    const newPath = segments.join('/');
+
+    // Optimistic update local
+    const oldName = node.name;
+    dispatch({ type: 'RENAME_NODE', id, name });
+
+    try {
+      // Leer contenido actual (puede estar en el state o necesitar fetch)
+      const frontmatter = frontmatterCache.current.get(id) ?? null;
+      const body = node.content ?? '';
+      const fullContent = frontmatter ? `${frontmatter}\n\n${body}` : body;
+
+      // Escribir con nuevo path
+      await writeVaultFile(newPath, fullContent, `docs(vault): rename ${id} → ${newPath}`);
+      // Borrar el viejo
+      await deleteVaultFile(id, `chore(vault): delete old path ${id}`);
+
+      // Actualizar caches
+      if (frontmatter) {
+        frontmatterCache.current.set(newPath, frontmatter);
+        frontmatterCache.current.delete(id);
+      }
+      contentCache.current.delete(id);
+
+      // Recargar el tree para reflejar el nuevo path como ID
+      await reloadTree();
+      toast.success(`Renombrado a "${name}"`);
+    } catch (err: any) {
+      // Rollback
+      dispatch({ type: 'RENAME_NODE', id, name: oldName });
+      toast.error(`Error renombrando: ${err?.message ?? 'error desconocido'}`);
+    }
+  }, [requireEditor, state.tree, reloadTree]);
+
+  const updateTags = useCallback(async (id: string, tags: string[]) => {
+    if (!requireEditor(id)) return;
+    const node = findNodeById(state.tree, id);
+    if (!node || node.type !== 'document') return;
+
+    const oldTags = node.tags ?? [];
+    // Optimistic update local para UX responsiva
+    dispatch({ type: 'UPDATE_TAGS', id, tags });
+
+    try {
+      // Reconstruir frontmatter con los tags actualizados
+      const currentFrontmatter = frontmatterCache.current.get(id) ?? null;
+      const newFrontmatter = updateFrontmatterTags(currentFrontmatter, tags);
+
+      // Actualizar cache del frontmatter
+      if (newFrontmatter) {
+        frontmatterCache.current.set(id, newFrontmatter);
+      } else {
+        frontmatterCache.current.delete(id);
+      }
+
+      // Escribir al vault combinando frontmatter nuevo + body existente
+      const body = node.content ?? '';
+      const fullContent = newFrontmatter
+        ? `${newFrontmatter}\n\n${body}`
+        : body;
+      await writeVaultFile(id, fullContent, `docs(vault): update tags for ${id}`);
+    } catch (err: any) {
+      // Rollback: restaurar tags previos en el state
+      dispatch({ type: 'UPDATE_TAGS', id, tags: oldTags });
+      toast.error(`Error guardando tags: ${err?.message ?? 'error desconocido'}`);
+    }
+  }, [requireEditor, state.tree]);
+
+  // === ACL actions (persisted to .cenzontle/access.json) ===
   const setInheritance = useCallback((nodeId: string, inherit: boolean) => {
-    // Check owner on PARENT (not the node itself) to avoid catch-22:
-    // turning off inheritance removes access → can't turn it back on
     const parentId = findParentId(state.tree, nodeId);
     if (parentId && !requireOwner(parentId)) return;
     dispatch({ type: 'SET_INHERITANCE', nodeId, inherit });
-  }, [requireOwner, state.tree]);
+    saveAccessConfig();
+  }, [requireOwner, state.tree, saveAccessConfig]);
+
   const resolveRole = useCallback((principalType: 'user' | 'role', principalId: string): UserRole => {
     if (principalType === 'role') return principalId as UserRole;
     const member = members.find(m => m.id === principalId);
@@ -839,37 +1434,47 @@ export function DefinicionesProvider({ children }: { children: ReactNode }) {
 
   const addAccess = useCallback((entry: AccessControlEntry) => {
     if (!requireOwner(entry.nodeId)) return;
-    // Enforce restrictive inheritance: new level ≤ parent's level for the TARGET principal
-    const principalUserId = entry.principalType === 'user' ? entry.principalId : '';
-    const principalRole = resolveRole(entry.principalType, entry.principalId);
-    const parentLevel = getParentEffectiveLevel(
-      entry.nodeId, principalUserId, principalRole, state.tree, state.accessConfig,
-    );
-    if (ACCESS_LEVEL_HIERARCHY[entry.accessLevel] > ACCESS_LEVEL_HIERARCHY[parentLevel]) return;
+    // Solo aplicar herencia restrictiva si el nodo HEREDA del padre.
+    // Si inheritFromParent está OFF, el usuario explícitamente quiere permisos custom
+    // que pueden ser MAYORES que los del padre — por eso desactivó la herencia.
+    const nodeConfig = state.accessConfig[entry.nodeId];
+    const inherits = nodeConfig?.inheritFromParent ?? true;
+    if (inherits) {
+      const principalUserId = entry.principalType === 'user' ? entry.principalId : '';
+      const principalRole = resolveRole(entry.principalType, entry.principalId);
+      const parentLevel = getParentEffectiveLevel(
+        entry.nodeId, principalUserId, principalRole, state.tree, state.accessConfig,
+      );
+      if (ACCESS_LEVEL_HIERARCHY[entry.accessLevel] > ACCESS_LEVEL_HIERARCHY[parentLevel]) return;
+    }
     dispatch({ type: 'ADD_ACCESS', entry });
-  }, [requireOwner, resolveRole, state.tree, state.accessConfig]);
+    saveAccessConfig();
+  }, [requireOwner, resolveRole, state.tree, state.accessConfig, saveAccessConfig]);
+
   const updateAccess = useCallback((entryId: string, nodeId: string, accessLevel: AccessLevel) => {
     if (!requireOwner(nodeId)) return;
-    // Enforce restrictive inheritance: find the entry's principal and check against parent
     const config = state.accessConfig[nodeId];
-    const entry = config?.entries.find(e => e.id === entryId);
-    const principalUserId = entry?.principalType === 'user' ? entry.principalId : '';
-    const principalRole = resolveRole(entry?.principalType ?? 'role', entry?.principalId ?? '');
-    const parentLevel = getParentEffectiveLevel(
-      nodeId, principalUserId, principalRole, state.tree, state.accessConfig,
-    );
-    if (ACCESS_LEVEL_HIERARCHY[accessLevel] > ACCESS_LEVEL_HIERARCHY[parentLevel]) return;
+    const inherits = config?.inheritFromParent ?? true;
+    if (inherits) {
+      const entry = config?.entries.find(e => e.id === entryId);
+      const principalUserId = entry?.principalType === 'user' ? entry.principalId : '';
+      const principalRole = resolveRole(entry?.principalType ?? 'role', entry?.principalId ?? '');
+      const parentLevel = getParentEffectiveLevel(
+        nodeId, principalUserId, principalRole, state.tree, state.accessConfig,
+      );
+      if (ACCESS_LEVEL_HIERARCHY[accessLevel] > ACCESS_LEVEL_HIERARCHY[parentLevel]) return;
+    }
     dispatch({ type: 'UPDATE_ACCESS', entryId, nodeId, accessLevel });
-  }, [requireOwner, resolveRole, state.tree, state.accessConfig]);
+    saveAccessConfig();
+  }, [requireOwner, resolveRole, state.tree, state.accessConfig, saveAccessConfig]);
+
   const removeAccess = useCallback((entryId: string, nodeId: string) => {
     if (!requireOwner(nodeId)) return;
     dispatch({ type: 'REMOVE_ACCESS', entryId, nodeId });
-  }, [requireOwner]);
+    saveAccessConfig();
+  }, [requireOwner, saveAccessConfig]);
+
   const setRoleDefault = useCallback((role: UserRole, level: AccessLevel) => dispatch({ type: 'SET_ROLE_DEFAULT', role, level }), []);
-  const addVault = useCallback((vault: VaultConfig) => dispatch({ type: 'ADD_VAULT', vault }), []);
-  const updateVault = useCallback((vault: VaultConfig) => dispatch({ type: 'UPDATE_VAULT', vault }), []);
-  const removeVault = useCallback((vaultId: string) => dispatch({ type: 'REMOVE_VAULT', vaultId }), []);
-  const setActiveVault = useCallback((vaultId: string) => dispatch({ type: 'SET_ACTIVE_VAULT', vaultId }), []);
 
   const value = useMemo<DefinicionesContextValue>(() => ({
     state,
@@ -879,8 +1484,14 @@ export function DefinicionesProvider({ children }: { children: ReactNode }) {
     changelog: state.changelog,
     accessConfig: state.accessConfig,
     roleDefaults: state.roleDefaults,
-    vaults: state.vaults,
-    activeVaultId: state.activeVaultId,
+    loading: state.loading,
+    error: state.error,
+    reloadTree,
+    vaults,
+    vaultsLoaded,
+    activeVaultId,
+    switchVault,
+    reloadVaults,
     selectNode,
     toggleFolder,
     expandFolder,
@@ -892,8 +1503,6 @@ export function DefinicionesProvider({ children }: { children: ReactNode }) {
     renameNode,
     updateTags,
     deleteNode,
-    moveNode,
-    reorderNode,
     setSortBy,
     expandAll,
     collapseAll,
@@ -903,11 +1512,7 @@ export function DefinicionesProvider({ children }: { children: ReactNode }) {
     updateAccess,
     removeAccess,
     setRoleDefault,
-    addVault,
-    updateVault,
-    removeVault,
-    setActiveVault,
-  }), [state, selectedNode, filteredTree, unfilteredTree, selectNode, toggleFolder, expandFolder, setSearch, toggleEditing, updateContent, addFolder, addDocument, renameNode, updateTags, deleteNode, moveNode, reorderNode, setSortBy, expandAll, collapseAll, getEffectiveAccessForNode, setInheritance, addAccess, updateAccess, removeAccess, setRoleDefault, addVault, updateVault, removeVault, setActiveVault]);
+  }), [state, selectedNode, filteredTree, unfilteredTree, reloadTree, vaults, vaultsLoaded, activeVaultId, switchVault, reloadVaults, selectNode, toggleFolder, expandFolder, setSearch, toggleEditing, updateContent, addFolder, addDocument, renameNode, updateTags, deleteNode, setSortBy, expandAll, collapseAll, getEffectiveAccessForNode, setInheritance, addAccess, updateAccess, removeAccess, setRoleDefault]);
 
   return (
     <DefinicionesContext.Provider value={value}>
@@ -920,4 +1525,16 @@ export function useDefiniciones() {
   const ctx = useContext(DefinicionesContext);
   if (!ctx) throw new Error('useDefiniciones must be used within DefinicionesProvider');
   return ctx;
+}
+
+/** Collects full vault paths of all descendant file nodes (not the node itself). */
+function collectDescendantFilePaths(node: DefinicionNode): string[] {
+  const out: string[] = [];
+  const walk = (n: DefinicionNode) => {
+    if (n.type === 'document') out.push(n.id);
+    if (n.children) n.children.forEach(walk);
+  };
+  if (node.children) node.children.forEach(walk);
+  if (node.type === 'document') out.push(node.id);
+  return out;
 }

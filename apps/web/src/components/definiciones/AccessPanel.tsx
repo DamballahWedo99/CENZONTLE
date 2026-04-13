@@ -26,7 +26,7 @@ interface AccessPanelProps {
   parentNode: DefinicionNode | null;
 }
 
-const LEVELS: AccessLevel[] = ['owner', 'editor', 'viewer', 'none'];
+const LEVELS: AccessLevel[] = ['owner', 'editor', 'viewer'];
 
 const LEVEL_ICONS: Record<AccessLevel, React.ElementType> = {
   owner: Crown,
@@ -204,7 +204,7 @@ export function AccessPanel({ node, parentNode }: AccessPanelProps) {
               onClick={() => setInheritance(node.id, !inheritFromParent)}
               className={`relative inline-flex h-5 w-9 items-center rounded-full transition-colors ${inheritFromParent ? 'bg-primary' : 'bg-muted-foreground/30'}`}
             >
-              <span className={`inline-block h-3.5 w-3.5 transform rounded-full bg-white shadow-sm transition-transform ${inheritFromParent ? 'translate-x-4' : 'translate-x-0.5'}`} />
+              <span className={`inline-block h-3.5 w-3.5 transform rounded-full bg-white shadow-sm transition-transform ${inheritFromParent ? 'translate-x-[19px]' : 'translate-x-[3px]'}`} />
             </button>
           </div>
           {inheritFromParent && parentNode && (
@@ -219,7 +219,7 @@ export function AccessPanel({ node, parentNode }: AccessPanelProps) {
       {(isRoot || !inheritFromParent) && <div className="space-y-2">
         <div className="rounded-xl border border-border/70 overflow-hidden bg-card">
           {/* Column headers */}
-          <div className="grid grid-cols-[1fr_repeat(4,56px)] border-b border-border/50 bg-muted/30">
+          <div className="grid grid-cols-[1fr_repeat(3,56px)] border-b border-border/50 bg-muted/30">
             <div className="px-3 py-2.5 text-[11px] font-semibold text-muted-foreground uppercase tracking-widest flex items-end">
               Matriz de Permisos
             </div>
@@ -229,7 +229,7 @@ export function AccessPanel({ node, parentNode }: AccessPanelProps) {
                 <div key={level} className="flex flex-col items-center justify-center py-2.5 gap-1">
                   <Icon className="h-3 w-3" style={{ color: ACCESS_LEVEL_COLORS[level] }} />
                   <span className="text-[9px] font-semibold uppercase tracking-wider" style={{ color: ACCESS_LEVEL_COLORS[level] }}>
-                    {level === 'owner' ? 'Dueño' : level === 'editor' ? 'Editor' : level === 'viewer' ? 'Lector' : 'Ninguno'}
+                    {level === 'owner' ? 'Admin' : level === 'editor' ? 'Editor' : level === 'viewer' ? 'Lector' : 'Ninguno'}
                   </span>
                 </div>
               );
@@ -238,11 +238,11 @@ export function AccessPanel({ node, parentNode }: AccessPanelProps) {
 
           {/* Role rows */}
           <div className="divide-y divide-border/30">
-            {Object.values(UserRole).filter(r => r !== UserRole.AltaGerencia).map(role => {
+            {Object.values(UserRole).filter(r => r !== UserRole.AltaGerencia && r !== UserRole.Viewer).map(role => {
               const currentLevel = getRoleLevel(role);
               const roleColor = USER_ROLE_COLORS[role];
               return (
-                <div key={role} className="grid grid-cols-[1fr_repeat(4,56px)] items-center hover:bg-muted/20 transition-colors">
+                <div key={role} className="grid grid-cols-[1fr_repeat(3,56px)] items-center hover:bg-muted/20 transition-colors">
                   <div className="px-3 py-2 flex items-center gap-2.5">
                     <span
                       className="w-2 h-2 rounded-full shrink-0"
@@ -288,7 +288,7 @@ export function AccessPanel({ node, parentNode }: AccessPanelProps) {
                   const member = members.find(m => m.id === entry.principalId);
                   const initials = member?.name.split(' ').map(w => w[0]).join('').slice(0, 2) ?? '??';
                   return (
-                    <div key={entry.id} className="grid grid-cols-[1fr_repeat(4,56px)] items-center group hover:bg-muted/20 transition-colors">
+                    <div key={entry.id} className="grid grid-cols-[1fr_repeat(3,56px)] items-center group hover:bg-muted/20 transition-colors">
                       <div className="px-3 py-2 flex items-center gap-2.5">
                         <span className="w-5 h-5 rounded-full bg-muted border border-border/50 flex items-center justify-center text-[9px] font-bold text-muted-foreground shrink-0">
                           {initials}

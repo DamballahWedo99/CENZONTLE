@@ -17,7 +17,7 @@ import {
   Pencil, Save, Tag, Clock, BookOpen, Folder, FileText, X, Plus,
   Bold, Italic, Strikethrough, Heading1, Heading2, Heading3,
   List, ListOrdered, CheckSquare, Code, Quote, Minus, Link, Table, Image,
-  Highlighter, Code2, Eye,
+  Highlighter, Code2, Eye, ChevronRight,
 } from 'lucide-react';
 import { useDefiniciones } from '@/context/DefinicionesContext';
 import { DefinicionNode } from '@/types/definiciones';
@@ -27,6 +27,105 @@ import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/comp
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover';
 import { Separator } from '@/components/ui/separator';
 import { Input } from '@/components/ui/input';
+import { Skeleton } from '@/components/ui/skeleton';
+
+/* ─── Document skeleton loader ─── */
+
+/**
+ * Placeholder visual mientras el body del documento lazy-loadea desde GitHub.
+ * Simula una estructura markdown típica (heading + párrafos) para que el layout
+ * no salte cuando el contenido real aparece.
+ */
+function DocumentSkeleton() {
+  return (
+    <div className="p-6">
+      <div className="bg-card rounded-lg border border-border/40 shadow-sm p-8 space-y-6" aria-label="Cargando documento">
+        {/* Heading principal */}
+        <div className="space-y-3">
+          <Skeleton className="h-7 w-1/2" />
+          <Skeleton className="h-3 w-24" />
+        </div>
+        {/* Primer párrafo */}
+        <div className="space-y-2">
+          <Skeleton className="h-3 w-full" />
+          <Skeleton className="h-3 w-full" />
+          <Skeleton className="h-3 w-11/12" />
+          <Skeleton className="h-3 w-4/5" />
+        </div>
+        {/* Sub-heading */}
+        <Skeleton className="h-5 w-1/3 mt-8" />
+        {/* Segundo párrafo */}
+        <div className="space-y-2">
+          <Skeleton className="h-3 w-full" />
+          <Skeleton className="h-3 w-5/6" />
+          <Skeleton className="h-3 w-3/4" />
+        </div>
+        {/* Lista */}
+        <div className="space-y-2 pl-4">
+          <Skeleton className="h-3 w-2/3" />
+          <Skeleton className="h-3 w-3/5" />
+          <Skeleton className="h-3 w-1/2" />
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/* ─── Metadata table ─── */
+
+/**
+ * Tabla colapsable read-only que renderiza el frontmatter YAML parseado del archivo.
+ * Oculta por default — el usuario la expande con click en el header cuando quiere
+ * ver id/type/initiativeId/created. Esto mantiene el foco visual en el contenido
+ * narrativo (que es lo que importa) sin perder acceso a la metadata del sistema.
+ *
+ * Intencionalmente NO editable desde aquí — estos campos son gestionados
+ * por el backend (epics/stories/initiatives services). Cambiarlos desde
+ * el vault view rompería el parsing estructurado.
+ */
+function MetadataTable({ metadata }: { metadata: Record<string, string> }) {
+  const [isOpen, setIsOpen] = useState(false);
+  const entries = Object.entries(metadata);
+  if (entries.length === 0) return null;
+
+  return (
+    <div className="mx-6 mt-6 mb-2 rounded-lg border border-border/50 overflow-hidden bg-muted/20">
+      <button
+        type="button"
+        onClick={() => setIsOpen((v) => !v)}
+        aria-expanded={isOpen}
+        className={`w-full px-3 py-2 flex items-center gap-1.5 bg-muted/30 hover:bg-muted/50 transition-colors text-left ${isOpen ? 'border-b border-border/40' : ''}`}
+      >
+        <ChevronRight
+          className={`h-3 w-3 text-muted-foreground transition-transform duration-200 ${isOpen ? 'rotate-90' : ''}`}
+        />
+        <FileText className="h-3 w-3 text-muted-foreground" />
+        <span className="text-[10px] font-mono uppercase tracking-wider text-muted-foreground">
+          Metadata
+        </span>
+        <span className="ml-auto text-[10px] text-muted-foreground/60 tabular-nums">
+          {entries.length} {entries.length === 1 ? 'campo' : 'campos'}
+        </span>
+      </button>
+      {isOpen && (
+        <table className="w-full text-xs">
+          <tbody>
+            {entries.map(([key, value], idx) => (
+              <tr key={key} className={idx < entries.length - 1 ? 'border-b border-border/30' : ''}>
+                <td className="py-1.5 px-3 font-medium text-muted-foreground w-[140px] align-top">
+                  {key}
+                </td>
+                <td className="py-1.5 px-3 font-mono text-foreground/90 break-all">
+                  {value}
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      )}
+    </div>
+  );
+}
 
 /* ─── Tag helpers ─── */
 
@@ -334,6 +433,7 @@ const TIPTAP_EXTENSIONS = [
     html: true,
     tightLists: true,
     transformPastedText: true,
+    breaks: true, // GFM: un \n genera <br>, no se colapsa como en CommonMark strict
   }),
   Highlight,
   TaskList,
@@ -360,7 +460,7 @@ function ReadOnlyViewer({ content, onContentChange }: { content: string; onConte
       listItem: { HTMLAttributes: { class: 'my-1' } },
       blockquote: { HTMLAttributes: { class: 'border-l-3 border-border pl-4 my-2 text-muted-foreground' } },
     }),
-    Markdown.configure({ html: true, tightLists: true }),
+    Markdown.configure({ html: true, tightLists: true, breaks: true }),
     Highlight,
     TaskList,
     TaskItem.configure({
@@ -385,7 +485,11 @@ function ReadOnlyViewer({ content, onContentChange }: { content: string; onConte
     content,
     editorProps: {
       attributes: {
-        class: 'outline-none p-6 prose prose-sm dark:prose-invert max-w-none',
+        // Los arbitrary variants al final neutralizan el margin-top del primer hijo
+        // y margin-bottom del último hijo — sin esto, los headings/párrafos agregan
+        // márgenes extra arriba/abajo, creando asimetría visual con el padding del card.
+        // El `!` fuerza specificity sobre cualquier regla de prose o .tiptap que pise.
+        class: 'outline-none p-6 prose prose-sm dark:prose-invert max-w-none [&>*:first-child]:!mt-0 [&>*:last-child]:!mb-0',
       },
     },
     onUpdate: ({ editor: e }) => {
@@ -414,7 +518,7 @@ function ReadOnlyViewer({ content, onContentChange }: { content: string; onConte
 /* ─── Main component ─── */
 
 export function DocumentViewer() {
-  const { selectedNode, state, toggleEditing, updateContent, selectNode, updateTags } = useDefiniciones();
+  const { selectedNode, state, toggleEditing, updateContent, selectNode, updateTags, getEffectiveAccessForNode } = useDefiniciones();
   const [editBuffer, setEditBuffer] = useState('');
   const [showSource, setShowSource] = useState(false);
   const [, setEditorTick] = useState(0);
@@ -428,7 +532,7 @@ export function DocumentViewer() {
     content: selectedNode?.content ?? '',
     editorProps: {
       attributes: {
-        class: 'outline-none p-6 min-h-full prose prose-sm dark:prose-invert max-w-none',
+        class: 'outline-none p-6 min-h-full prose prose-sm dark:prose-invert max-w-none [&>*:first-child]:!mt-0 [&>*:last-child]:!mb-0',
       },
     },
     onUpdate: ({ editor: e }) => {
@@ -629,10 +733,18 @@ export function DocumentViewer() {
                   }
                   <span className="font-medium text-sm truncate">{child.name}</span>
                 </div>
-                {child.type === 'document' && child.content && (
+                {child.type === 'document' && child.content !== undefined && (
                   <p className="text-xs text-muted-foreground line-clamp-3 leading-relaxed">
                     {child.content.replace(/^#.*\n/gm, '').replace(/[#*|`\->\[\]]/g, '').trim().slice(0, 150)}
                   </p>
+                )}
+                {child.type === 'document' && child.content === undefined && (
+                  /* Skeleton shimmer mientras el body se carga en background */
+                  <div className="space-y-1.5" aria-label="Cargando preview">
+                    <Skeleton className="h-2.5 w-full" />
+                    <Skeleton className="h-2.5 w-11/12" />
+                    <Skeleton className="h-2.5 w-3/4" />
+                  </div>
                 )}
                 {child.type === 'folder' && child.children && (
                   <p className="text-xs text-muted-foreground">
@@ -668,6 +780,23 @@ export function DocumentViewer() {
     toggleEditing();
   };
 
+  /**
+   * Descarta los cambios no guardados del editor y sale del modo edición.
+   * Revierte el Tiptap al `contentOnEditStart` original (la versión que había
+   * cuando el usuario apretó "Editar"), NO toca el vault en GitHub, y salta
+   * de vuelta al read-only viewer.
+   */
+  const handleCancel = () => {
+    const baseline = contentOnEditStart.current;
+    if (editor) {
+      editor.commands.setContent(baseline, { emitUpdate: false });
+    }
+    setEditBuffer(baseline);
+    userHasEdited.current = false;
+    setShowSource(false);
+    toggleEditing();
+  };
+
   const formatDate = (iso: string) => {
     const d = new Date(iso);
     if (isNaN(d.getTime())) return '—';
@@ -688,13 +817,40 @@ export function DocumentViewer() {
           <div className="flex items-center gap-2 min-w-0">
             <h2 className="text-base font-semibold truncate">{selectedNode.name}</h2>
             {state.isEditing ? (
-              <button onClick={handleSave} className="text-muted-foreground hover:text-primary transition-colors shrink-0" title="Guardar">
-                <Save className="h-4 w-4" />
-              </button>
+              <>
+                <button
+                  onClick={handleSave}
+                  className="text-muted-foreground hover:text-primary transition-colors shrink-0"
+                  title="Guardar (Cmd+S)"
+                  aria-label="Guardar"
+                >
+                  <Save className="h-4 w-4" />
+                </button>
+                <button
+                  onClick={handleCancel}
+                  className="text-muted-foreground hover:text-destructive transition-colors shrink-0"
+                  title="Cancelar (Esc)"
+                  aria-label="Cancelar"
+                >
+                  <X className="h-4 w-4" />
+                </button>
+              </>
             ) : (
-              <button onClick={toggleEditing} className="text-muted-foreground hover:text-primary transition-colors shrink-0" title="Editar">
-                <Pencil className="h-4 w-4" />
-              </button>
+              // Solo mostrar el lápiz si el usuario tiene al menos nivel 'editor' en este nodo
+              (() => {
+                const access = getEffectiveAccessForNode(selectedNode.id);
+                const canEdit = access.level === 'editor' || access.level === 'owner';
+                return canEdit ? (
+                  <button
+                    onClick={toggleEditing}
+                    className="text-muted-foreground hover:text-primary transition-colors shrink-0"
+                    title="Editar"
+                    aria-label="Editar"
+                  >
+                    <Pencil className="h-4 w-4" />
+                  </button>
+                ) : null;
+              })()
             )}
           </div>
           <span className="hidden md:flex items-center gap-1 text-xs text-muted-foreground shrink-0">
@@ -702,10 +858,24 @@ export function DocumentViewer() {
             {formatDate(selectedNode.updatedAt)}
           </span>
         </div>
-        <TagEditor
-          tags={selectedNode.tags || []}
-          onChange={tags => updateTags(selectedNode.id, tags)}
-        />
+        {(() => {
+          const access = getEffectiveAccessForNode(selectedNode.id);
+          const canEditTags = access.level === 'editor' || access.level === 'owner';
+          return canEditTags ? (
+            <TagEditor
+              tags={selectedNode.tags || []}
+              onChange={tags => updateTags(selectedNode.id, tags)}
+            />
+          ) : selectedNode.tags && selectedNode.tags.length > 0 ? (
+            <div className="flex flex-wrap gap-1">
+              {selectedNode.tags.map(tag => (
+                <span key={tag} className="inline-flex items-center text-[11px] font-medium px-2 py-0.5 rounded-full bg-muted text-muted-foreground">
+                  {tag}
+                </span>
+              ))}
+            </div>
+          ) : null;
+        })()}
       </div>
 
       {/* Content */}
@@ -719,6 +889,8 @@ export function DocumentViewer() {
         )}
         {state.isEditing ? (
           <div className="flex-1 overflow-y-auto">
+            {/* Metadata table (read-only, visible en ambos modos) */}
+            {selectedNode.metadata && <MetadataTable metadata={selectedNode.metadata} />}
             {showSource ? (
               /* Source mode: raw markdown textarea */
               <textarea
@@ -735,10 +907,17 @@ export function DocumentViewer() {
           </div>
         ) : (
           <div className="flex-1 overflow-y-auto">
-            <ReadOnlyViewer
-              content={selectedNode.content || ''}
-              onContentChange={(md) => updateContent(selectedNode.id, md)}
-            />
+            {/* Metadata table (read-only, visible en ambos modos) */}
+            {selectedNode.metadata && <MetadataTable metadata={selectedNode.metadata} />}
+            {selectedNode.content === undefined ? (
+              /* Skeleton loader mientras el content lazy-loadea desde GitHub */
+              <DocumentSkeleton />
+            ) : (
+              <ReadOnlyViewer
+                content={selectedNode.content}
+                onContentChange={(md) => updateContent(selectedNode.id, md)}
+              />
+            )}
           </div>
         )}
       </div>

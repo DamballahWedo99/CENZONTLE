@@ -54,7 +54,7 @@ export function MatrizPage() {
             <p className="text-sm text-muted-foreground">
               {view === 'timeline'
                 ? 'Timeline de historias por sprint con seguimiento diario'
-                : 'Vista cruzada de épicas por POD con progreso detallado'}
+                : 'Vista cruzada de épicas por Célula con progreso detallado'}
             </p>
           </div>
 

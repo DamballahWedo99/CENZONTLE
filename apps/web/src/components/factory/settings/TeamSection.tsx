@@ -1,6 +1,6 @@
 'use client';
 
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import { toast } from 'sonner';
 import { z } from 'zod';
 import { Button } from '@/components/ui/button';
@@ -55,7 +55,7 @@ import {
 } from '@/components/ui/dialog';
 import { Checkbox } from '@/components/ui/checkbox';
 import { useAuthContext } from '@/context/AuthContext';
-import { mockPods } from '@/data/mock/proyectos/pods';
+import { getPods, type PodResponse } from '@/lib/api/pods';
 import {
   UserRole,
   USER_ROLE_LABELS,
@@ -179,6 +179,11 @@ export function TeamSection() {
   const [inviteOpen, setInviteOpen] = useState(false);
   const [deletingMember, setDeletingMember] = useState<TeamMember | null>(null);
   const [deleting, setDeleting] = useState(false);
+  const [pods, setPods] = useState<PodResponse[]>([]);
+
+  useEffect(() => {
+    getPods().then(setPods).catch(() => {});
+  }, []);
   const [errors, setErrors] = useState<Record<string, string>>({});
 
   const inviteSchema = z.object({
@@ -372,11 +377,11 @@ export function TeamSection() {
         </Select>
         <Select value={filterPod} onValueChange={setFilterPod}>
           <SelectTrigger className="w-[180px] h-8 text-xs">
-            <SelectValue placeholder="Filtrar por pod" />
+            <SelectValue placeholder="Filtrar por célula" />
           </SelectTrigger>
           <SelectContent>
-            <SelectItem value="all">Todos los pods</SelectItem>
-            {mockPods.map((pod) => (
+            <SelectItem value="all">Todas las células</SelectItem>
+            {pods.map((pod) => (
               <SelectItem key={pod.id} value={pod.id}>
                 <div className="flex items-center gap-2">
                   <span className="h-2 w-2 rounded-full" style={{ backgroundColor: pod.color }} />
@@ -427,7 +432,7 @@ export function TeamSection() {
               )}
               <TableHead className="w-[280px]">Miembro</TableHead>
               <TableHead>Rol</TableHead>
-              <TableHead>Pod</TableHead>
+              <TableHead>Célula</TableHead>
               <TableHead>Estado</TableHead>
               <TableHead>Última actividad</TableHead>
               {canManageUsers && <TableHead className="w-[50px]" />}
@@ -486,7 +491,7 @@ export function TeamSection() {
                 </TableCell>
                 <TableCell>
                   {(() => {
-                    const pod = mockPods.find((p) => member.podIds.includes(p.id));
+                    const pod = pods.find((p) => member.podIds.includes(p.id));
                     return pod ? (
                       <div className="flex items-center gap-2 text-sm">
                         <span className="h-2 w-2 rounded-full" style={{ backgroundColor: pod.color }} />
@@ -570,11 +575,11 @@ export function TeamSection() {
                 </Select>
               </div>
               <div className="space-y-1.5">
-                <Label className="text-xs text-muted-foreground font-normal">Pod</Label>
+                <Label className="text-xs text-muted-foreground font-normal">Célula</Label>
                 <Select value={invitePod} onValueChange={setInvitePod}>
-                  <SelectTrigger className="w-full"><SelectValue placeholder="Seleccionar pod" /></SelectTrigger>
+                  <SelectTrigger className="w-full"><SelectValue placeholder="Seleccionar célula" /></SelectTrigger>
                   <SelectContent>
-                    {mockPods.map((pod) => (
+                    {pods.map((pod) => (
                       <SelectItem key={pod.id} value={pod.id}>
                         <div className="flex items-center gap-2">
                           <span className="h-2 w-2 rounded-full" style={{ backgroundColor: pod.color }} />

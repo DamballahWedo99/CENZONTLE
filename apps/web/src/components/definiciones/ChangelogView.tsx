@@ -14,7 +14,7 @@ import TableCell from '@tiptap/extension-table-cell';
 import TableHeader from '@tiptap/extension-table-header';
 import {
   FilePlus, Pencil, Trash2, FileEdit, FolderInput, Tag, ArrowUpDown,
-  Folder, FileText, Clock, ArrowRight, User, Shield,
+  Folder, FileText, Clock, ArrowRight, User, Shield, Loader2,
 } from 'lucide-react';
 import { useDefiniciones, ChangelogAction, ChangelogEntry } from '@/context/DefinicionesContext';
 
@@ -121,14 +121,63 @@ function ContentPreview({ content, label }: { content: string; label: string }) 
   );
 }
 
+function GitDiffPreview({ sha }: { sha: string }) {
+  const [before, setBefore] = useState<string | null>(null);
+  const [after, setAfter] = useState<string | null>(null);
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    setLoading(true);
+    setBefore(null);
+    setAfter(null);
+    import('@/lib/api/vault').then(({ getVaultCommitDetail }) => {
+      getVaultCommitDetail(sha)
+        .then((detail) => {
+          setBefore(detail?.beforeContent ?? null);
+          setAfter(detail?.afterContent ?? null);
+        })
+        .catch(() => {})
+        .finally(() => setLoading(false));
+    });
+  }, [sha]);
+
+  if (loading) {
+    return (
+      <div className="flex-1 flex items-center justify-center text-muted-foreground">
+        <Loader2 className="h-5 w-5 animate-spin" />
+      </div>
+    );
+  }
+
+  // Misma vista "ANTES / DESPUÉS" que los edits de la sesión
+  return (
+    <div className="flex-1 flex min-h-0">
+      <div className="flex-1 border-r border-border/50 flex flex-col min-h-0">
+        <ContentPreview content={before ?? ''} label="Antes" />
+      </div>
+      <div className="flex-1 flex flex-col min-h-0">
+        <ContentPreview content={after ?? ''} label="Después" />
+      </div>
+    </div>
+  );
+}
+
 function DiffPreview({ entry }: { entry: ChangelogEntry }) {
   const { details, action } = entry;
   const config = ACTION_CONFIG[action];
 
   const hasBeforeAfter = details?.previousContent !== undefined || details?.newContent !== undefined;
+  // Git history entries tienen SHA como ID (40 hex chars) y no tienen beforeAfter
+  const isGitCommit = !hasBeforeAfter && /^[0-9a-f]{40}$/i.test(entry.id);
 
   if (!hasBeforeAfter) {
-    // Non-content change: show summary card
+    // Git history entries: solo mostrar diff ANTES/DESPUÉS para ediciones.
+    // Creates, deletes, tags, moves, etc. muestran el summary card.
+    if (isGitCommit && action === 'edit') {
+      return <GitDiffPreview sha={entry.id} />;
+    }
+
+    // Non-content change (rename, move, tags, access): show summary card
     return (
       <div className="flex-1 flex items-center justify-center text-muted-foreground p-6">
         <div className="text-center space-y-3 max-w-sm">

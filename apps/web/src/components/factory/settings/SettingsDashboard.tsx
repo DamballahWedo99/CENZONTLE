@@ -1,13 +1,15 @@
 'use client';
 
-import { useState } from 'react';
+import { useState, useEffect, useCallback } from 'react';
 import { useRouter, useSearchParams } from 'next/navigation';
 import Link from 'next/link';
+import { toast } from 'sonner';
 import { cn } from '@/lib/utils';
 import { Input } from '@/components/ui/input';
 import { Button } from '@/components/ui/button';
 import { Checkbox } from '@/components/ui/checkbox';
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip';
+import { ConfirmDialog } from '@/components/ui/confirm-dialog';
 import {
   Select,
   SelectContent,
@@ -52,20 +54,20 @@ import {
   GripVertical,
   Save,
   Shield,
+  Boxes,
+  Zap,
 } from 'lucide-react';
 import { TeamSection } from './TeamSection';
 import { RolesPermissionsSection } from './RolesPermissionsSection';
-import { useDefiniciones, DefinicionesProvider } from '@/context/DefinicionesContext';
-import type { VaultConfig } from '@cenzontle/shared';
-import { UserRole } from '@cenzontle/shared';
+import { PodsSection } from './PodsSection';
+import { UserRole, AccessLevel, USER_ROLE_LABELS, DEFAULT_ROLE_ACCESS, USER_ROLE_COLORS } from '@cenzontle/shared';
 import { useAuthContext } from '@/context/AuthContext';
-import { mockPods } from '@/data/mock/proyectos/pods';
 
 // ---------------------------------------------------------------------------
 // Types
 // ---------------------------------------------------------------------------
 
-type SettingsSection = 'repository' | 'branches' | 'linear' | 'jira' | 'obsidian' | 'nodes' | 'agents' | 'dod' | 'team' | 'roles';
+type SettingsSection = 'repository' | 'branches' | 'linear' | 'jira' | 'vault' | 'nodes' | 'agents' | 'dod' | 'pods' | 'team' | 'roles';
 
 interface SidebarItem {
   id: SettingsSection;
@@ -79,15 +81,16 @@ const SIDEBAR_ITEMS: SidebarItem[] = [
   { id: 'branches', label: 'Estrategia de ramas', icon: GitBranch, group: 'Control de código' },
   { id: 'linear', label: 'Linear', icon: BarChart3, group: 'Integraciones' },
   { id: 'jira', label: 'Jira', icon: TicketCheck, group: 'Integraciones' },
-  { id: 'obsidian', label: 'Obsidian Vault', icon: BookMarked, group: 'Integraciones' },
+  { id: 'vault', label: 'Vault', icon: BookMarked, group: 'Integraciones' },
   { id: 'nodes', label: 'Nodos de cómputo', icon: Server, group: 'Infraestructura' },
   { id: 'agents', label: 'Agentes', icon: Bot, group: 'Automatización' },
   { id: 'dod', label: 'Definition of Done', icon: ClipboardCheck, group: 'Automatización' },
-  { id: 'team', label: 'Equipo', icon: Users, group: 'Equipo' },
-  { id: 'roles', label: 'Roles y permisos', icon: Shield, group: 'Equipo' },
+  { id: 'pods', label: 'Células', icon: Boxes, group: 'Ecosistema' },
+  { id: 'team', label: 'Equipo', icon: Users, group: 'Ecosistema' },
+  { id: 'roles', label: 'Roles y permisos', icon: Shield, group: 'Ecosistema' },
 ];
 
-const SIDEBAR_GROUPS = ['Control de código', 'Integraciones', 'Infraestructura', 'Automatización', 'Equipo'];
+const SIDEBAR_GROUPS = ['Control de código', 'Integraciones', 'Infraestructura', 'Automatización', 'Ecosistema'];
 
 // ---------------------------------------------------------------------------
 // Shared helpers
@@ -614,85 +617,292 @@ function JiraSection() {
 }
 
 // ---------------------------------------------------------------------------
-// Section: Obsidian Vaults
+// Section: Vault (GitHub-backed)
 // ---------------------------------------------------------------------------
 
-type VaultForm = { name: string; host: string; port: string; apiKey: string; vaultPath: string; allowedPodIds: string[] };
+interface VaultConfigForm {
+  name: string;
+  owner: string;
+  repo: string;
+  branch: string;
+  token: string;
+  allowedPodIds: string[];
+  roleDefaults: Record<string, string>;
+}
 
-function ObsidianSection() {
-  const { vaults, addVault, updateVault, removeVault } = useDefiniciones();
-  const [editingId, setEditingId] = useState<string | null>(null);
-  const [form, setForm] = useState<VaultForm>({ name: '', host: '127.0.0.1', port: '27124', apiKey: '', vaultPath: '', allowedPodIds: [] });
-  const [testingId, setTestingId] = useState<string | null>(null);
+const EMPTY_VAULT_FORM: VaultConfigForm = {
+  name: '',
+  owner: '',
+  repo: '',
+  branch: 'main',
+  token: '',
+  allowedPodIds: [],
+  roleDefaults: Object.fromEntries(
+    Object.values(UserRole)
+      .filter((r) => r !== UserRole.AltaGerencia && r !== UserRole.Viewer)
+      .map((r) => [r, DEFAULT_ROLE_ACCESS[r] || 'viewer']),
+  ),
+};
 
-  function startAdd() {
-    setForm({ name: '', host: '127.0.0.1', port: '27124', apiKey: '', vaultPath: '', allowedPodIds: [] });
-    setEditingId('__new__');
-  }
+function VaultSection() {
+  const [vaults, setVaults] = useState<import('@/lib/api/vault-configs').VaultConfig[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [editingId, setEditingId] = useState<string | null>(null); // '__new__' para crear
+  const [form, setForm] = useState<VaultConfigForm>(EMPTY_VAULT_FORM);
+  const [busyId, setBusyId] = useState<string | null>(null);
+  const [testResults, setTestResults] = useState<Record<string, { ok: boolean; message: string }>>({});
+  const [deleteTarget, setDeleteTarget] = useState<{ id: string; name: string } | null>(null);
+  const [apiPods, setApiPods] = useState<import('@/lib/api/pods').PodResponse[]>([]);
 
-  function startEdit(v: VaultConfig) {
-    setForm({ name: v.name, host: v.host, port: v.port, apiKey: v.apiKey, vaultPath: v.vaultPath, allowedPodIds: v.allowedPodIds });
-    setEditingId(v.id);
-  }
+  useEffect(() => {
+    import('@/lib/api/pods').then(({ getPods }) => getPods().then(setApiPods).catch(() => {}));
+  }, []);
 
-  function handleSave() {
-    if (!form.name.trim()) return;
-    if (editingId === '__new__') {
-      addVault({
-        id: `vault-${crypto.randomUUID()}`,
-        name: form.name,
-        host: form.host,
-        port: form.port,
-        protocol: 'https',
-        apiKey: form.apiKey,
-        vaultPath: form.vaultPath,
-        allowedPodIds: form.allowedPodIds,
-        status: 'disconnected',
-        createdAt: new Date().toISOString(),
-      });
-    } else if (editingId) {
-      const existing = vaults.find(v => v.id === editingId);
-      if (existing) {
-        updateVault({ ...existing, name: form.name, host: form.host, port: form.port, apiKey: form.apiKey, vaultPath: form.vaultPath, allowedPodIds: form.allowedPodIds });
-      }
+  const loadVaults = useCallback(async () => {
+    const { getVaultConfigs } = await import('@/lib/api/vault-configs');
+    try {
+      const data = await getVaultConfigs();
+      setVaults(data);
+    } catch (err: any) {
+      toast.error(`Error cargando vaults: ${err?.message ?? 'error desconocido'}`);
+    } finally {
+      setLoading(false);
     }
-    setEditingId(null);
-  }
+  }, []);
 
-  function handleTest(vaultId: string) {
-    setTestingId(vaultId);
-    const v = vaults.find(vt => vt.id === vaultId);
-    setTimeout(() => {
-      if (v) updateVault({ ...v, status: v.apiKey && v.vaultPath ? 'connected' : 'error' });
-      setTestingId(null);
-    }, 1500);
-  }
+  const handleActivate = async (id: string, name: string) => {
+    setBusyId(id);
+    try {
+      const { activateVaultConfig } = await import('@/lib/api/vault-configs');
+      await activateVaultConfig(id);
+      toast.success(`"${name}" es ahora el vault activo`);
+      await loadVaults();
+    } catch (err: any) {
+      toast.error(err?.message ?? 'Error activando vault');
+    } finally {
+      setBusyId(null);
+    }
+  };
+
+  useEffect(() => {
+    void loadVaults();
+  }, [loadVaults]);
+
+  const startCreate = () => {
+    setForm({ ...EMPTY_VAULT_FORM });
+    setEditingId('__new__');
+  };
+
+  const startEdit = (v: import('@/lib/api/vault-configs').VaultConfig) => {
+    setForm({
+      name: v.name,
+      owner: v.owner,
+      repo: v.repo,
+      branch: v.branch,
+      token: '',
+      allowedPodIds: v.allowedPodIds ?? [],
+      roleDefaults: {
+        // Pre-populate con los valores del vault, o defaults globales si vacío
+        ...Object.fromEntries(
+          Object.values(UserRole)
+            .filter((r) => r !== UserRole.AltaGerencia && r !== UserRole.Viewer)
+            .map((r) => [r, (v.roleDefaults ?? {})[r] || DEFAULT_ROLE_ACCESS[r] || 'viewer']),
+        ),
+      },
+    });
+    setEditingId(v.id);
+  };
+
+  const cancelEdit = () => {
+    setEditingId(null);
+    setForm({ ...EMPTY_VAULT_FORM });
+  };
+
+  const handleSave = async () => {
+    if (!form.name.trim() || !form.owner.trim() || !form.repo.trim()) {
+      toast.error('Nombre, owner y repo son requeridos');
+      return;
+    }
+    if (editingId === '__new__' && !form.token.trim()) {
+      toast.error('Token es requerido para crear un vault');
+      return;
+    }
+
+    const { createVaultConfig, updateVaultConfig } = await import('@/lib/api/vault-configs');
+    try {
+      if (editingId === '__new__') {
+        await createVaultConfig({
+          name: form.name.trim(),
+          owner: form.owner.trim(),
+          repo: form.repo.trim(),
+          branch: form.branch.trim() || 'main',
+          token: form.token.trim(),
+          allowedPodIds: form.allowedPodIds,
+          roleDefaults: form.roleDefaults,
+        });
+        toast.success(`Vault "${form.name}" creado`);
+      } else if (editingId) {
+        const data: Parameters<typeof updateVaultConfig>[1] = {
+          name: form.name.trim(),
+          owner: form.owner.trim(),
+          repo: form.repo.trim(),
+          branch: form.branch.trim() || 'main',
+          allowedPodIds: form.allowedPodIds,
+          roleDefaults: form.roleDefaults,
+        };
+        if (form.token.trim()) data.token = form.token.trim();
+        await updateVaultConfig(editingId, data);
+        toast.success(`Vault "${form.name}" actualizado`);
+      }
+      cancelEdit();
+      await loadVaults();
+    } catch (err: any) {
+      toast.error(err?.message ?? 'Error guardando el vault');
+    }
+  };
+
+  const handleTest = async (id: string) => {
+    setBusyId(id);
+    setTestResults((prev) => ({ ...prev, [id]: { ok: false, message: '' } }));
+    try {
+      const { testVaultConfig } = await import('@/lib/api/vault-configs');
+      const result = await testVaultConfig(id);
+      setTestResults((prev) => ({ ...prev, [id]: result }));
+      if (result.ok) toast.success(result.message);
+      else toast.error(result.message);
+    } catch (err: any) {
+      setTestResults((prev) => ({ ...prev, [id]: { ok: false, message: err?.message ?? 'Error' } }));
+      toast.error(err?.message ?? 'Error probando conexión');
+    } finally {
+      setBusyId(null);
+      setTimeout(() => setTestResults((prev) => {
+        const next = { ...prev };
+        delete next[id];
+        return next;
+      }), 5000);
+    }
+  };
+
+  const requestDelete = (id: string, name: string) => {
+    setDeleteTarget({ id, name });
+  };
+
+  const confirmDelete = async () => {
+    if (!deleteTarget) return;
+    const { id, name } = deleteTarget;
+    setBusyId(id);
+    try {
+      const { deleteVaultConfig } = await import('@/lib/api/vault-configs');
+      await deleteVaultConfig(id);
+      toast.success(`Vault "${name}" eliminado`);
+      await loadVaults();
+      setDeleteTarget(null);
+    } catch (err: any) {
+      toast.error(err?.message ?? 'Error eliminando vault');
+      throw err; // Re-throw para que ConfirmDialog no cierre el modal
+    } finally {
+      setBusyId(null);
+    }
+  };
 
   return (
     <SettingsCard
-      title="Obsidian Vaults"
-      description="Gestiona los vaults de Obsidian conectados a través del plugin Local REST API. Cada vault aparece como opción en el selector del Vault de Definiciones."
+      title="Vault"
+      description="Conecta uno o más repositorios de GitHub como vaults. Los documentos, épicas, historias e iniciativas se guardan como markdown versionado. Puedes restringir el acceso de cada vault a células específicas."
     >
-      <div className="space-y-3">
-        {/* Vault list */}
-        {vaults.map(v => (
-          <div key={v.id} className="rounded-lg border bg-card p-3 space-y-3">
-            {editingId === v.id ? (
-              <VaultFormFields form={form} setForm={setForm} onSave={handleSave} onCancel={() => setEditingId(null)} />
-            ) : (
-              <div className="flex items-center justify-between">
-                <div className="flex items-center gap-3">
-                  <StatusDot status={v.status} />
-                  <div>
-                    <span className="text-sm font-medium">{v.name}</span>
-                    <span className="text-xs text-muted-foreground ml-2">
-                      {v.host}:{v.port}
-                    </span>
+      {loading ? (
+        <div className="flex items-center gap-2 text-sm text-muted-foreground py-6">
+          <Loader2 className="h-4 w-4 animate-spin" />
+          Cargando vaults...
+        </div>
+      ) : (
+        <div className="space-y-3">
+          {/* Lista de vaults existentes */}
+          {vaults.map((v) => (
+            <div
+              key={v.id}
+              className={cn(
+                'rounded-lg border bg-card p-3 space-y-3 transition-colors',
+                v.isActive && 'border-primary/40 bg-primary/[0.02]',
+              )}
+            >
+              {editingId === v.id ? (
+                <VaultConfigForm
+                  form={form}
+                  setForm={setForm}
+                  onSave={handleSave}
+                  onCancel={cancelEdit}
+                  isEditing
+                  apiPods={apiPods}
+                />
+              ) : (
+                <div className="space-y-2">
+                  <div className="flex items-center justify-between gap-3">
+                    <div className="flex items-center gap-3 min-w-0 flex-1">
+                      <div className={cn(
+                        'h-8 w-8 rounded-full flex items-center justify-center shrink-0',
+                        v.isActive ? 'bg-primary/10' : 'bg-green-500/10',
+                      )}>
+                        <Github className={cn('h-4 w-4', v.isActive ? 'text-primary' : 'text-green-600')} />
+                      </div>
+                      <div className="min-w-0 flex-1">
+                        <div className="flex items-center gap-2">
+                          <span className="text-sm font-medium truncate">{v.name}</span>
+                          {v.isActive && (
+                            <span className="shrink-0 inline-flex items-center gap-1 text-[10px] font-semibold uppercase tracking-wider text-primary bg-primary/10 border border-primary/20 rounded-full px-2 py-0.5">
+                              <Check className="h-2.5 w-2.5" />
+                              Activo
+                            </span>
+                          )}
+                        </div>
+                        <div className="text-xs text-muted-foreground truncate">
+                          {v.owner}/{v.repo}
+                          <span className="font-mono ml-2">@{v.branch}</span>
+                        </div>
+                      </div>
+                    </div>
+                    <div className="flex items-center gap-1 shrink-0">
+                      {!v.isActive && (
+                        <Button
+                          variant="outline"
+                          size="sm"
+                          className="h-7 text-xs gap-1.5"
+                          onClick={() => handleActivate(v.id, v.name)}
+                          disabled={busyId === v.id}
+                        >
+                          {busyId === v.id ? <Loader2 className="h-3 w-3 animate-spin" /> : <Zap className="h-3 w-3" />}
+                          Activar
+                        </Button>
+                      )}
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        className="h-7 text-xs gap-1.5 text-muted-foreground"
+                        onClick={() => handleTest(v.id)}
+                        disabled={busyId === v.id}
+                      >
+                        {busyId === v.id ? <Loader2 className="h-3 w-3 animate-spin" /> : <Wifi className="h-3 w-3" />}
+                        Probar
+                      </Button>
+                      <Button variant="ghost" size="icon" className="h-7 w-7 text-muted-foreground" onClick={() => startEdit(v)}>
+                        <Settings className="h-3 w-3" />
+                      </Button>
+                      <Button
+                        variant="ghost"
+                        size="icon"
+                        className="h-7 w-7 text-muted-foreground hover:text-destructive"
+                        onClick={() => requestDelete(v.id, v.name)}
+                        disabled={busyId === v.id}
+                      >
+                        <Trash2 className="h-3 w-3" />
+                      </Button>
+                    </div>
                   </div>
+                  {/* Pod access badges */}
                   {v.allowedPodIds.length > 0 && (
-                    <div className="flex items-center gap-1 ml-1">
+                    <div className="flex items-center gap-1.5 ml-11">
                       {v.allowedPodIds.map(podId => {
-                        const pod = mockPods.find(p => p.id === podId);
+                        const pod = apiPods.find(p => p.id === podId);
                         return pod ? (
                           <span key={podId} className="text-[10px] px-1.5 py-0.5 rounded-full border" style={{ borderColor: `${pod.color}40`, color: pod.color, backgroundColor: `${pod.color}10` }}>
                             {pod.name}
@@ -701,68 +911,87 @@ function ObsidianSection() {
                       })}
                     </div>
                   )}
+                  {v.allowedPodIds.length === 0 && (
+                    <p className="text-[10px] text-muted-foreground/60 ml-11">Todas las células tienen acceso</p>
+                  )}
+                  {testResults[v.id]?.message && (
+                    <div className={cn(
+                      'text-xs rounded px-2 py-1.5 flex items-center gap-1.5',
+                      testResults[v.id].ok
+                        ? 'bg-green-500/10 text-green-700 dark:text-green-400'
+                        : 'bg-destructive/10 text-destructive',
+                    )}>
+                      {testResults[v.id].ok ? <Check className="h-3 w-3" /> : <WifiOff className="h-3 w-3" />}
+                      {testResults[v.id].message}
+                    </div>
+                  )}
                 </div>
-                <div className="flex items-center gap-1">
-                  <Button
-                    variant="ghost"
-                    size="sm"
-                    className="h-7 text-xs gap-1.5 text-muted-foreground"
-                    onClick={() => handleTest(v.id)}
-                    disabled={testingId === v.id}
-                  >
-                    {testingId === v.id ? <Loader2 className="h-3 w-3 animate-spin" /> : <Wifi className="h-3 w-3" />}
-                    Probar
-                  </Button>
-                  <Button variant="ghost" size="icon" className="h-7 w-7 text-muted-foreground" onClick={() => startEdit(v)}>
-                    <Settings className="h-3 w-3" />
-                  </Button>
-                  <Button variant="ghost" size="icon" className="h-7 w-7 text-muted-foreground hover:text-destructive" onClick={() => removeVault(v.id)}>
-                    <Trash2 className="h-3 w-3" />
-                  </Button>
-                </div>
-              </div>
-            )}
-          </div>
-        ))}
+              )}
+            </div>
+          ))}
 
-        {/* Add new vault */}
-        {editingId === '__new__' ? (
-          <div className="rounded-lg border border-dashed bg-card p-3">
-            <VaultFormFields form={form} setForm={setForm} onSave={handleSave} onCancel={() => setEditingId(null)} />
-          </div>
-        ) : (
-          <Button variant="outline" size="sm" className="w-full gap-2" onClick={startAdd}>
-            <Plus className="h-3.5 w-3.5" /> Agregar vault
-          </Button>
-        )}
-      </div>
+          {/* Form para agregar nuevo */}
+          {editingId === '__new__' ? (
+            <div className="rounded-lg border border-dashed bg-card p-3">
+              <VaultConfigForm
+                form={form}
+                setForm={setForm}
+                onSave={handleSave}
+                onCancel={cancelEdit}
+                isEditing={false}
+                apiPods={apiPods}
+              />
+            </div>
+          ) : (
+            <Button variant="outline" size="sm" className="w-full gap-2" onClick={startCreate}>
+              <Plus className="h-3.5 w-3.5" /> Agregar vault
+            </Button>
+          )}
+        </div>
+      )}
 
       <div className="mt-4 rounded-lg border border-border/50 bg-muted/20 p-3 space-y-1.5">
-        <p className="text-xs font-medium text-muted-foreground">Requisitos:</p>
+        <p className="text-xs font-medium text-muted-foreground">Requisitos del token</p>
         <div className="text-[11px] text-muted-foreground space-y-0.5">
-          <p>1. Instalar el plugin &ldquo;Local REST API&rdquo; en Obsidian</p>
-          <p>2. Habilitar el plugin y copiar el API Key desde Settings</p>
-          <p>3. Puerto por defecto: 27124 (HTTPS)</p>
+          <p>1. Crear un Personal Access Token en GitHub (Settings → Developer settings → Tokens)</p>
+          <p>2. Scope requerido: <span className="font-mono">repo</span> (acceso completo al repositorio privado)</p>
+          <p>3. Los tokens se encriptan at-rest con AES-256-GCM antes de guardarse</p>
         </div>
       </div>
+
+      {/* Dialog de confirmación para eliminación destructiva — reemplaza el window.confirm() nativo */}
+      <ConfirmDialog
+        open={deleteTarget !== null}
+        onOpenChange={(next) => !next && setDeleteTarget(null)}
+        title={`Eliminar vault "${deleteTarget?.name ?? ''}"`}
+        description="Esta acción no se puede deshacer. El repositorio de GitHub NO será eliminado — solo se borra la referencia en CENZONTLE. El token encriptado se elimina permanentemente."
+        confirmText="Eliminar vault"
+        cancelText="Cancelar"
+        onConfirm={confirmDelete}
+        destructive
+      />
     </SettingsCard>
   );
 }
 
-function VaultFormFields({
+function VaultConfigForm({
   form,
   setForm,
   onSave,
   onCancel,
+  isEditing,
+  apiPods,
 }: {
-  form: VaultForm;
-  setForm: (f: VaultForm) => void;
+  form: VaultConfigForm;
+  setForm: (f: VaultConfigForm) => void;
   onSave: () => void;
   onCancel: () => void;
+  isEditing: boolean;
+  apiPods: import('@/lib/api/pods').PodResponse[];
 }) {
   function togglePod(podId: string) {
     const next = form.allowedPodIds.includes(podId)
-      ? form.allowedPodIds.filter(id => id !== podId)
+      ? form.allowedPodIds.filter((id) => id !== podId)
       : [...form.allowedPodIds, podId];
     setForm({ ...form, allowedPodIds: next });
   }
@@ -771,58 +1000,128 @@ function VaultFormFields({
     <div className="space-y-3">
       <div className="grid gap-3 sm:grid-cols-2">
         <LabeledInput label="Nombre del vault">
-          <Input value={form.name} onChange={e => setForm({ ...form, name: e.target.value })} placeholder="Mi Vault" className={inputClasses} />
+          <Input
+            value={form.name}
+            onChange={(e) => setForm({ ...form, name: e.target.value })}
+            placeholder="Ej: Ecommerce Prod"
+            className={inputClasses}
+          />
         </LabeledInput>
-        <LabeledInput label="Vault Path">
-          <Input value={form.vaultPath} onChange={e => setForm({ ...form, vaultPath: e.target.value })} placeholder="/ruta/al/vault" className={inputClasses} />
+        <LabeledInput label="Branch">
+          <Input
+            value={form.branch}
+            onChange={(e) => setForm({ ...form, branch: e.target.value })}
+            placeholder="main"
+            className={inputClasses}
+          />
         </LabeledInput>
       </div>
-      <div className="grid gap-3 sm:grid-cols-3">
-        <LabeledInput label="Host">
-          <Input value={form.host} onChange={e => setForm({ ...form, host: e.target.value })} placeholder="127.0.0.1" className={inputClasses} />
+      <div className="grid gap-3 sm:grid-cols-2">
+        <LabeledInput label="Owner (usuario u org)">
+          <Input
+            value={form.owner}
+            onChange={(e) => setForm({ ...form, owner: e.target.value })}
+            placeholder="mi-org"
+            className={inputClasses}
+          />
         </LabeledInput>
-        <LabeledInput label="Puerto">
-          <Input value={form.port} onChange={e => setForm({ ...form, port: e.target.value })} placeholder="27124" className={inputClasses} />
-        </LabeledInput>
-        <LabeledInput label="API Key">
-          <PasswordField value={form.apiKey} onChange={v => setForm({ ...form, apiKey: v })} placeholder="Obsidian API Key" />
+        <LabeledInput label="Repositorio">
+          <Input
+            value={form.repo}
+            onChange={(e) => setForm({ ...form, repo: e.target.value })}
+            placeholder="mi-vault"
+            className={inputClasses}
+          />
         </LabeledInput>
       </div>
+      <LabeledInput label={isEditing ? 'GitHub Token (dejar vacío para no cambiar)' : 'GitHub Token'}>
+        <PasswordField
+          value={form.token}
+          onChange={(v) => setForm({ ...form, token: v })}
+          placeholder={isEditing ? 'ghp_•••••••••• (oculto)' : 'ghp_...'}
+        />
+      </LabeledInput>
 
-      {/* Pod access */}
-      <div>
-        <label className="text-xs font-medium text-muted-foreground mb-2 block">Células con acceso</label>
-        <div className="flex flex-wrap gap-2">
-          {mockPods.map(pod => {
-            const isActive = form.allowedPodIds.includes(pod.id);
-            return (
-              <button
-                key={pod.id}
-                type="button"
-                onClick={() => togglePod(pod.id)}
-                className={cn(
-                  'flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg border text-xs font-medium transition-all',
-                  isActive
-                    ? 'border-transparent shadow-sm'
-                    : 'border-border/50 text-muted-foreground hover:text-foreground hover:border-border',
-                )}
-                style={isActive ? { backgroundColor: `${pod.color}15`, borderColor: `${pod.color}50`, color: pod.color } : undefined}
-              >
-                <span className="w-2 h-2 rounded-full" style={{ backgroundColor: pod.color, opacity: isActive ? 1 : 0.4 }} />
-                {pod.name}
-                {isActive && <Check className="h-3 w-3 ml-0.5" />}
-              </button>
-            );
-          })}
+      {/* Selector de células con acceso */}
+      {apiPods.length > 0 && (
+        <div>
+          <label className="text-xs font-medium text-muted-foreground mb-2 block">Células con acceso</label>
+          <div className="flex flex-wrap gap-2">
+            {apiPods.map((pod) => {
+              const isActive = form.allowedPodIds.includes(pod.id);
+              return (
+                <button
+                  key={pod.id}
+                  type="button"
+                  onClick={() => togglePod(pod.id)}
+                  className={cn(
+                    'flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg border text-xs font-medium transition-all',
+                    isActive
+                      ? 'border-transparent shadow-sm'
+                      : 'border-border/50 text-muted-foreground hover:text-foreground hover:border-border',
+                  )}
+                  style={isActive ? { backgroundColor: `${pod.color}15`, borderColor: `${pod.color}50`, color: pod.color } : undefined}
+                >
+                  <span className="w-2 h-2 rounded-full" style={{ backgroundColor: pod.color, opacity: isActive ? 1 : 0.4 }} />
+                  {pod.name}
+                  {isActive && <Check className="h-3 w-3 ml-0.5" />}
+                </button>
+              );
+            })}
+          </div>
+          {form.allowedPodIds.length === 0 && (
+            <p className="text-[10px] text-muted-foreground/60 mt-1.5">Sin restricción — todas las células tienen acceso.</p>
+          )}
         </div>
-        {form.allowedPodIds.length === 0 && (
-          <p className="text-[11px] text-muted-foreground mt-1.5">Sin restricción — todas las células tienen acceso.</p>
-        )}
+      )}
+
+      {/* Permisos por defecto por rol */}
+      <div>
+        <label className="text-xs font-medium text-muted-foreground mb-2 block">Permisos por defecto</label>
+        <div className="rounded-lg border border-border/50 overflow-hidden text-xs">
+          <div className="grid grid-cols-[1fr_repeat(3,48px)] bg-muted/30 border-b border-border/30">
+            <div className="px-2 py-1.5 text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">Rol</div>
+            {(['owner', 'editor', 'viewer'] as const).map((lvl) => (
+              <div key={lvl} className="text-center py-1.5 text-[9px] font-semibold uppercase tracking-wider text-muted-foreground">
+                {lvl === 'owner' ? 'Admin' : lvl === 'editor' ? 'Editor' : 'Lector'}
+              </div>
+            ))}
+          </div>
+          {Object.values(UserRole)
+            .filter((r) => r !== UserRole.AltaGerencia && r !== UserRole.Viewer)
+            .map((role) => {
+              const current = (form.roleDefaults[role] as AccessLevel) || DEFAULT_ROLE_ACCESS[role] || 'viewer';
+              return (
+                <div key={role} className="grid grid-cols-[1fr_repeat(3,48px)] items-center border-b border-border/20 last:border-0">
+                  <div className="px-2 py-1.5 flex items-center gap-1.5">
+                    <span className="w-2 h-2 rounded-full" style={{ backgroundColor: USER_ROLE_COLORS[role] }} />
+                    <span className="font-medium">{USER_ROLE_LABELS[role]}</span>
+                  </div>
+                  {(['owner', 'editor', 'viewer'] as const).map((lvl) => (
+                    <div key={lvl} className="flex justify-center">
+                      <button
+                        type="button"
+                        onClick={() => setForm({ ...form, roleDefaults: { ...form.roleDefaults, [role]: lvl } })}
+                        className={cn(
+                          'w-5 h-5 rounded-full border-2 transition-all flex items-center justify-center',
+                          current === lvl ? 'border-primary bg-primary/10' : 'border-border/50 hover:border-border',
+                        )}
+                      >
+                        {current === lvl && <Check className="h-2.5 w-2.5 text-primary" />}
+                      </button>
+                    </div>
+                  ))}
+                </div>
+              );
+            })}
+        </div>
       </div>
 
       <div className="flex justify-end gap-2">
         <Button variant="ghost" size="sm" onClick={onCancel}>Cancelar</Button>
-        <Button size="sm" onClick={onSave} disabled={!form.name.trim()}>Guardar</Button>
+        <Button size="sm" onClick={onSave}>
+          {isEditing ? 'Guardar cambios' : 'Crear vault'}
+        </Button>
       </div>
     </div>
   );
@@ -1304,14 +1603,16 @@ function SectionContent({ section }: { section: SettingsSection }) {
       return <LinearSection />;
     case 'jira':
       return <JiraSection />;
-    case 'obsidian':
-      return <DefinicionesProvider><ObsidianSection /></DefinicionesProvider>;
+    case 'vault':
+      return <VaultSection />;
     case 'nodes':
       return <ComputeNodesSection />;
     case 'agents':
       return <AgentsSection />;
     case 'dod':
       return <DodSection />;
+    case 'pods':
+      return <PodsSection />;
     case 'team':
       return <TeamSection />;
     case 'roles':
@@ -1331,6 +1632,11 @@ export function SettingsDashboard() {
   const { hasRole } = useAuthContext();
   const initialSection = (searchParams.get('section') as SettingsSection) || 'repository';
   const [activeSection, setActiveSection] = useState<SettingsSection>(initialSection);
+
+  if (!hasRole(UserRole.AltaGerencia)) {
+    router.replace('/factory');
+    return null;
+  }
 
   return (
     <div className="settings-page flex flex-col bg-background overflow-hidden h-full">
@@ -1361,7 +1667,7 @@ export function SettingsDashboard() {
           {SIDEBAR_GROUPS.map((group) => {
             const items = SIDEBAR_ITEMS.filter((item) => item.group === group)
               .filter((item) => {
-                if (item.group === 'Equipo' && !hasRole(UserRole.AltaGerencia)) return false;
+                if (item.group === 'Ecosistema' && !hasRole(UserRole.AltaGerencia)) return false;
                 return true;
               });
             if (items.length === 0) return null;

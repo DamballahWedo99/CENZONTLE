@@ -1,0 +1,237 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+enum InitiativeStatus {
+  planning
+  active
+  completed
+  on_hold
+}
+
+enum EpicStatus {
+  draft
+  in_progress
+  done
+  blocked
+}
+
+enum Priority {
+  critical
+  high
+  medium
+  low
+}
+
+enum StoryStatus {
+  backlog
+  todo
+  in_progress
+  in_review
+  qa
+  done
+  blocked
+}
+
+model Initiative {
+  id          String           @id @default(uuid())
+  name        String
+  description String
+  status      InitiativeStatus @default(planning)
+  startDate   DateTime
+  targetDate  DateTime
+  owner       String
+  documents   Json             @default("[]")
+
+  // Path to the markdown file in the vault (GitHub repo)
+  vaultPath   String?
+
+  epics       Epic[]
+
+  createdAt   DateTime         @default(now())
+  updatedAt   DateTime         @updatedAt
+
+  @@map("initiatives")
+}
+
+model Epic {
+  id                        String     @id @default(uuid())
+  title                     String
+  description               String
+  status                    EpicStatus @default(draft)
+  priority                  Priority   @default(medium)
+  startDate                 DateTime
+  targetDate                DateTime
+
+  qualitativeBenefits       String     @default("")
+  quantitativeBenefits      String     @default("")
+  benefitsMeasurement       String     @default("")
+  scopeDescription          String     @default("")
+  acceptanceCriteria        String     @default("")
+  technologicalImprovements String     @default("")
+  businessPriority          String     @default("")
+  teamsInvolved             String     @default("")
+  impactedChannels          String     @default("")
+  impactedFlows             String     @default("")
+  impactSabreLevel          String     @default("")
+  thirdPartyDependencies    String     @default("")
+
+  documents                 Json       @default("[]")
+  diagrams                  Json       @default("[]")
+  dependencies              Json       @default("[]")
+  poApproval                Json?
+  tlApproval                Json?
+  qaApproval                Json?
+  qaMatrix                  Json?
+  epicQAMatrix              Json?
+  tracker                   Json?
+
+  // Path to the markdown file in the vault (GitHub repo)
+  vaultPath                 String?
+
+  initiativeId              String
+  initiative                Initiative @relation(fields: [initiativeId], references: [id], onDelete: Cascade)
+  pods                      EpicPod[]
+  stories                   Story[]
+
+  createdAt                 DateTime   @default(now())
+  updatedAt                 DateTime   @updatedAt
+
+  @@map("epics")
+}
+
+model Pod {
+  id          String   @id @default(uuid())
+  name        String   @unique
+  description String
+  color       String
+
+  epics         EpicPod[]
+  productOwners PodProductOwner[]
+  stories       Story[]
+
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  @@map("pods")
+}
+
+model ProductOwner {
+  id        String @id @default(uuid())
+  name      String
+  email     String @unique
+  avatarUrl String @default("")
+
+  pods      PodProductOwner[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@map("product_owners")
+}
+
+model EpicPod {
+  epicId String
+  podId  String
+  epic   Epic @relation(fields: [epicId], references: [id], onDelete: Cascade)
+  pod    Pod  @relation(fields: [podId], references: [id], onDelete: Cascade)
+
+  @@id([epicId, podId])
+  @@map("epic_pods")
+}
+
+model PodProductOwner {
+  podId          String
+  productOwnerId String
+  pod            Pod          @relation(fields: [podId], references: [id], onDelete: Cascade)
+  productOwner   ProductOwner @relation(fields: [productOwnerId], references: [id], onDelete: Cascade)
+
+  @@id([podId, productOwnerId])
+  @@map("pod_product_owners")
+}
+
+model Story {
+  id             String      @id @default(uuid())
+  title          String
+  status         StoryStatus @default(backlog)
+  storyPoints    Int         @default(0)
+
+  epicId         String
+  epic           Epic        @relation(fields: [epicId], references: [id], onDelete: Cascade)
+  podId          String
+  pod            Pod         @relation(fields: [podId], references: [id])
+  productOwnerId String?
+  sprintId       String?
+
+  labels         String[]    @default([])
+  tracker        Json?
+
+  // Path to the markdown file in the vault (GitHub repo)
+  vaultPath      String?
+
+  createdAt      DateTime    @default(now())
+  updatedAt      DateTime    @updatedAt
+
+  @@index([epicId])
+  @@index([podId])
+  @@index([sprintId])
+  @@map("stories")
+}
+
+/// Configuración de un vault de GitHub respaldando el knowledge base de CENZONTLE.
+/// Múltiples vaults pueden existir pero solo uno puede estar activo a la vez
+/// (controlado en el service layer, no en DB).
+///
+/// El token de GitHub se guarda encriptado con AES-256-GCM. Los 3 campos
+/// tokenCiphertext/tokenIv/tokenAuthTag son los outputs del cifrado y los 3 son
+/// necesarios para desencriptar. Nunca se devuelven vía API — solo se usan
+/// internamente en el VaultService para autenticar con GitHub.
+model VaultConfig {
+  id              String   @id @default(uuid())
+  name            String   @unique
+  owner           String
+  repo            String
+  branch          String   @default("main")
+
+  // Token encriptado con AES-256-GCM (nunca plaintext)
+  tokenCiphertext String
+  tokenIv         String
+  tokenAuthTag    String
+
+  isActive        Boolean  @default(false)
+
+  // Permisos por defecto por rol para las carpetas de este vault.
+  // JSON con shape Record<UserRole, AccessLevel>. Si está vacío, usa los defaults globales.
+  // Ej: {"product_owner":"editor","tech_lead":"editor","qa":"viewer"}
+  roleDefaults    Json     @default("{}")
+
+  // Células (pods) con acceso a este vault. Array vacío = sin restricción (todas).
+  allowedPodIds   String[] @default([])
+
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  @@map("vault_configs")
+}
+
+model ChangelogEntry {
+  id          String   @id @default(uuid())
+  timestamp   DateTime @default(now())
+  entityType  String   // initiative | epic | story
+  entityId    String
+  entityTitle String
+  action      String   // created | updated | deleted | approved | rejected
+  field       String?
+  oldValue    String?
+  newValue    String?
+  changedById String?
+  changedByName String?
+
+  @@index([entityType, entityId])
+  @@index([timestamp])
+  @@map("changelog_entries")
+}

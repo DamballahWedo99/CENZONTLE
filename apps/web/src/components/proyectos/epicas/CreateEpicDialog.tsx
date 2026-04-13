@@ -1,6 +1,7 @@
 'use client';
 
 import { useState } from 'react';
+import { toast } from 'sonner';
 import {
   Dialog,
   DialogContent,
@@ -17,8 +18,9 @@ import {
   SelectValue,
 } from '@/components/ui/select';
 import { Checkbox } from '@/components/ui/checkbox';
-import { useProyectos } from '@/context/ProyectosContext';
-import { EpicStatus, Priority, Epic } from '@cenzontle/shared';
+import { useProyectos, mapEpic } from '@/context/ProyectosContext';
+import { EpicStatus, Priority } from '@cenzontle/shared';
+import { createEpic as apiCreateEpic } from '@/lib/api/epics';
 
 interface CreateEpicDialogProps {
   open: boolean;
@@ -50,7 +52,16 @@ export function CreateEpicDialog({ open, onOpenChange }: CreateEpicDialogProps) 
   const [impactSabreLevel, setImpactSabreLevel] = useState('');
   const [thirdPartyDependencies, setThirdPartyDependencies] = useState('');
 
-  const canSubmit = title.trim() && initiativeId && selectedPodIds.length > 0;
+  const [isSubmitting, setIsSubmitting] = useState(false);
+
+  // El backend requiere startDate y targetDate como ISO strings — no pueden estar vacíos.
+  const canSubmit =
+    title.trim() &&
+    initiativeId &&
+    selectedPodIds.length > 0 &&
+    startDate &&
+    targetDate &&
+    !isSubmitting;
 
   const handleTogglePod = (podId: string) => {
     setSelectedPodIds((prev) =>
@@ -58,49 +69,47 @@ export function CreateEpicDialog({ open, onOpenChange }: CreateEpicDialogProps) 
     );
   };
 
-  const handleSubmit = () => {
+  const handleSubmit = async () => {
     if (!canSubmit) return;
 
-    const now = new Date().toISOString();
+    setIsSubmitting(true);
+    try {
+      // El backend genera el UUID y el vaultPath — no los mandamos.
+      const created = await apiCreateEpic({
+        title: title.trim(),
+        description: description.trim(),
+        status: EpicStatus.Draft,
+        priority,
+        startDate,
+        targetDate,
+        initiativeId,
+        podIds: selectedPodIds,
+        // Campos narrativos (van a PG + vault markdown)
+        qualitativeBenefits: qualitativeBenefits.trim(),
+        quantitativeBenefits: quantitativeBenefits.trim(),
+        benefitsMeasurement: benefitsMeasurement.trim(),
+        scopeDescription: scopeDescription.trim(),
+        acceptanceCriteria: acceptanceCriteria.trim(),
+        technologicalImprovements: technologicalImprovements.trim(),
+        businessPriority: businessPriority.trim(),
+        teamsInvolved: teamsInvolved.trim(),
+        impactedChannels: impactedChannels.trim(),
+        impactedFlows: impactedFlows.trim(),
+        impactSabreLevel: impactSabreLevel.trim(),
+        thirdPartyDependencies: thirdPartyDependencies.trim(),
+      });
 
-    const newEpic: Epic = {
-      id: `epic-${Date.now()}`,
-      title: title.trim(),
-      description: description.trim(),
-      qualitativeBenefits: qualitativeBenefits.trim(),
-      quantitativeBenefits: quantitativeBenefits.trim(),
-      benefitsMeasurement: benefitsMeasurement.trim(),
-      scopeDescription: scopeDescription.trim(),
-      acceptanceCriteria: acceptanceCriteria.trim(),
-      technologicalImprovements: technologicalImprovements.trim(),
-      businessPriority: businessPriority.trim(),
-      teamsInvolved: teamsInvolved.trim(),
-      impactedChannels: impactedChannels.trim(),
-      impactedFlows: impactedFlows.trim(),
-      impactSabreLevel: impactSabreLevel.trim(),
-      thirdPartyDependencies: thirdPartyDependencies.trim(),
-      documents: [],
-      diagrams: [],
-      dependencies: [],
-      poApproval: null,
-      tlApproval: null,
-      qaMatrix: null,
-      qaApproval: null,
-      epicQAMatrix: null,
-
-      status: EpicStatus.Draft,
-      priority,
-      initiativeId,
-      podIds: selectedPodIds,
-      startDate: startDate || now.split('T')[0],
-      targetDate: targetDate || '',
-      createdAt: now,
-      updatedAt: now,
-    };
-
-    dispatch({ type: 'CREATE_EPIC', payload: newEpic });
-    resetForm();
-    onOpenChange(false);
+      // Sincronizar el state local con el objeto real que devolvió el backend
+      // (tiene el UUID real, timestamps reales, vaultPath, etc.)
+      dispatch({ type: 'CREATE_EPIC', payload: mapEpic(created) });
+      toast.success('Épica creada');
+      resetForm();
+      onOpenChange(false);
+    } catch (err: any) {
+      toast.error(err?.message || 'Error al crear la épica');
+    } finally {
+      setIsSubmitting(false);
+    }
   };
 
   const resetForm = () => {
@@ -200,7 +209,7 @@ export function CreateEpicDialog({ open, onOpenChange }: CreateEpicDialogProps) 
 
           {/* PODs */}
           <div>
-            <label className="text-sm font-medium mb-1.5 block">PODs asignados</label>
+            <label className="text-sm font-medium mb-1.5 block">Células asignadas</label>
             <div className="space-y-2">
               {state.pods.map((pod) => (
                 <label
@@ -379,11 +388,11 @@ export function CreateEpicDialog({ open, onOpenChange }: CreateEpicDialogProps) 
 
           {/* Actions */}
           <div className="flex justify-end gap-2 pt-2">
-            <Button variant="outline" onClick={handleCancel}>
+            <Button variant="outline" onClick={handleCancel} disabled={isSubmitting}>
               Cancelar
             </Button>
             <Button onClick={handleSubmit} disabled={!canSubmit}>
-              Crear Épica
+              {isSubmitting ? 'Creando...' : 'Crear Épica'}
             </Button>
           </div>
         </div>

@@ -32,7 +32,7 @@ const fieldLabels: Record<string, string> = {
   targetDate: 'fecha objetivo',
   storyPoints: 'story points',
   sprintId: 'sprint',
-  podId: 'POD',
+  podId: 'Célula',
   productOwnerId: 'product owner',
   updatedAt: 'última actualización',
   createdAt: 'fecha de creación',
@@ -223,6 +223,11 @@ export function ChangelogTimeline() {
                           </svg>
                           <ValueChip field={entry.field} value={entry.newValue} variant="new" />
                         </div>
+                      )}
+                      {!entry.oldValue && entry.newValue && (
+                        <p className="mt-1.5 text-xs text-muted-foreground whitespace-pre-wrap break-words">
+                          {entry.newValue}
+                        </p>
                       )}
 
                       {entry.changeReason && (

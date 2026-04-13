@@ -1,6 +1,7 @@
 'use client';
 
 import { useState, useCallback, useRef } from 'react';
+import { toast } from 'sonner';
 import { Initiative, EpicDocument, EpicDocumentSection } from '@cenzontle/shared';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -12,6 +13,7 @@ import {
   DialogDescription,
   DialogFooter,
 } from '@/components/ui/dialog';
+import { ConfirmDialog } from '@/components/ui/confirm-dialog';
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -113,6 +115,7 @@ export function InitiativeDocuments({
 
   // Manual creation dialog
   const [showCreateDialog, setShowCreateDialog] = useState(false);
+  const [deleteDocTarget, setDeleteDocTarget] = useState<EpicDocument | null>(null);
   const [newDocName, setNewDocName] = useState('');
   const [newDocType, setNewDocType] = useState<EpicDocument['type']>('other');
   const [newDocSections, setNewDocSections] = useState<EpicDocumentSection[]>([
@@ -125,7 +128,6 @@ export function InitiativeDocuments({
   const [editSections, setEditSections] = useState<EpicDocumentSection[]>([]);
 
   // Delete confirmation
-  const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null);
 
   // Export loading
   const [exportingDocId, setExportingDocId] = useState<string | null>(null);
@@ -141,28 +143,39 @@ export function InitiativeDocuments({
     return 'other';
   };
 
-  const processFiles = useCallback((files: FileList | File[]) => {
-    Array.from(files).forEach((file) => {
+  const processFiles = useCallback(async (files: FileList | File[]) => {
+    for (const file of Array.from(files)) {
       const ext = file.name.split('.').pop() ?? '';
       const now = new Date().toISOString();
+      const formData = new FormData();
+      formData.append('file', file);
 
-      const doc: EpicDocument = {
-        id: `doc-upload-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
-        name: file.name,
-        type: extensionToDocType(ext),
-        url: URL.createObjectURL(file),
-        uploadedBy: 'Usuario',
-        uploadedAt: now,
-        size: file.size < 1024
-          ? `${file.size}B`
-          : file.size < 1024 * 1024
-            ? `${Math.round(file.size / 1024)}KB`
-            : `${(file.size / (1024 * 1024)).toFixed(1)}MB`,
-        generatedBy: 'manual',
-      };
+      try {
+        const res = await fetch(`/api/proxy/documents/upload?folder=initiatives/${initiative.id}`, { method: 'POST', body: formData });
+        if (!res.ok) throw new Error('Upload failed');
+        const uploaded = await res.json();
 
-      onDocumentAdded(doc);
-    });
+        const API_BASE = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:3001';
+        const doc: EpicDocument = {
+          id: uploaded.key,
+          name: file.name,
+          type: extensionToDocType(ext),
+          url: `${API_BASE}${uploaded.url}`,
+          uploadedBy: 'Usuario',
+          uploadedAt: now,
+          size: file.size < 1024
+            ? `${file.size}B`
+            : file.size < 1024 * 1024
+              ? `${Math.round(file.size / 1024)}KB`
+              : `${(file.size / (1024 * 1024)).toFixed(1)}MB`,
+          generatedBy: 'manual',
+        };
+
+        onDocumentAdded(doc);
+      } catch {
+        toast.error(`Error subiendo ${file.name}`);
+      }
+    }
   }, [onDocumentAdded]);
 
   const handleFileChange = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
@@ -263,7 +276,6 @@ export function InitiativeDocuments({
     setEditingDoc(doc);
     setEditName(doc.name);
     setEditSections(doc.sections ? doc.sections.map((s) => ({ ...s })) : []);
-    setConfirmDeleteId(null);
   }, []);
 
   const handleEditSectionChange = useCallback(
@@ -303,17 +315,6 @@ export function InitiativeDocuments({
     onDocumentUpdated(updated);
     setEditingDoc(null);
   }, [editingDoc, editName, editSections, onDocumentUpdated]);
-
-  const handleDeleteFromEdit = useCallback(() => {
-    if (!editingDoc) return;
-    if (confirmDeleteId !== editingDoc.id) {
-      setConfirmDeleteId(editingDoc.id);
-      return;
-    }
-    onDocumentDeleted(editingDoc.id);
-    setEditingDoc(null);
-    setConfirmDeleteId(null);
-  }, [editingDoc, confirmDeleteId, onDocumentDeleted]);
 
   // --- Export ---
 
@@ -425,49 +426,19 @@ export function InitiativeDocuments({
                     variant="ghost"
                     size="sm"
                     className="h-7 w-7 p-0"
-                    onClick={() => handleOpenEdit(doc)}
-                    aria-label={`Editar ${doc.name}`}
+                    asChild
+                    aria-label={`Descargar ${doc.name}`}
                   >
-                    <Pencil className="h-3 w-3" />
+                    <a href={doc.url} download={doc.name} target="_blank" rel="noopener noreferrer">
+                      <Download className="h-3 w-3" />
+                    </a>
                   </Button>
-
-                  <DropdownMenu>
-                    <DropdownMenuTrigger asChild>
-                      <Button
-                        variant="ghost"
-                        size="sm"
-                        className="h-7 w-7 p-0"
-                        disabled={isExporting}
-                        aria-label={`Exportar ${doc.name}`}
-                      >
-                        {isExporting ? (
-                          <Loader2 className="h-3 w-3 animate-spin" />
-                        ) : (
-                          <Download className="h-3 w-3" />
-                        )}
-                      </Button>
-                    </DropdownMenuTrigger>
-                    <DropdownMenuContent align="end" className="min-w-[120px]">
-                      <DropdownMenuItem className="text-xs gap-2" onClick={() => handleExport(doc, 'pdf')}>
-                        <FileText className="h-3 w-3" /> PDF
-                      </DropdownMenuItem>
-                      <DropdownMenuItem className="text-xs gap-2" onClick={() => handleExport(doc, 'excel')}>
-                        <FileSpreadsheet className="h-3 w-3" /> Excel
-                      </DropdownMenuItem>
-                      <DropdownMenuItem className="text-xs gap-2" onClick={() => handleExport(doc, 'word')}>
-                        <FileText className="h-3 w-3" /> Word
-                      </DropdownMenuItem>
-                      <DropdownMenuItem className="text-xs gap-2" onClick={() => handleExport(doc, 'csv')}>
-                        <File className="h-3 w-3" /> CSV
-                      </DropdownMenuItem>
-                    </DropdownMenuContent>
-                  </DropdownMenu>
 
                   <Button
                     variant="ghost"
                     size="sm"
                     className="h-7 w-7 p-0 text-muted-foreground hover:text-red-600 dark:hover:text-red-400"
-                    onClick={() => onDocumentDeleted(doc.id)}
+                    onClick={() => setDeleteDocTarget(doc)}
                     aria-label={`Eliminar ${doc.name}`}
                   >
                     <Trash2 className="h-3 w-3" />
@@ -583,136 +554,21 @@ export function InitiativeDocuments({
         </DialogContent>
       </Dialog>
 
-      {/* --- View/Edit Dialog --- */}
-      <Dialog
-        open={!!editingDoc}
-        onOpenChange={(open) => {
-          if (!open) {
-            setEditingDoc(null);
-            setConfirmDeleteId(null);
+      {/* --- Delete Confirmation Dialog (componente compartido) --- */}
+      <ConfirmDialog
+        open={!!deleteDocTarget}
+        onOpenChange={(next) => !next && setDeleteDocTarget(null)}
+        title="Eliminar documento"
+        description={deleteDocTarget ? `Se eliminará "${deleteDocTarget.name}" permanentemente. Esta acción no se puede deshacer.` : undefined}
+        confirmText="Eliminar"
+        onConfirm={() => {
+          if (deleteDocTarget) {
+            onDocumentDeleted(deleteDocTarget.id);
+            setDeleteDocTarget(null);
           }
         }}
-      >
-        <DialogContent className="sm:max-w-2xl max-h-[85vh] overflow-y-auto">
-          {editingDoc && (
-            <>
-              <DialogHeader>
-                <DialogTitle className="text-sm sr-only">Editar documento</DialogTitle>
-                <DialogDescription className="sr-only">
-                  Edita el nombre, secciones y contenido del documento.
-                </DialogDescription>
-                <div className="space-y-1.5">
-                  <Input
-                    value={editName}
-                    onChange={(e) => setEditName(e.target.value)}
-                    className="h-8 text-sm font-medium"
-                  />
-                  <div className="flex items-center gap-2 text-[10px] text-muted-foreground">
-                    <span>{docTypeLabels[editingDoc.type]}</span>
-                    <span>·</span>
-                    <span>{editingDoc.size}</span>
-                    <span>·</span>
-                    <span>{editingDoc.uploadedBy}</span>
-                    <span>·</span>
-                    <span>{formatDate(editingDoc.uploadedAt)}</span>
-                    {editingDoc.generatedBy === 'ai' && (
-                      <>
-                        <span>·</span>
-                        <span className="inline-flex items-center rounded-full bg-indigo-100 dark:bg-indigo-950/30 px-1.5 py-0.5 text-[10px] font-medium text-indigo-700 dark:text-indigo-300">
-                          IA
-                        </span>
-                      </>
-                    )}
-                  </div>
-                </div>
-              </DialogHeader>
-
-              <div className="space-y-3 py-2">
-                {editSections.length === 0 && (
-                  <p className="text-xs text-muted-foreground text-center py-4">
-                    Este documento no tiene secciones.
-                  </p>
-                )}
-                {editSections.map((section, idx) => (
-                  <div key={section.id} className="rounded-lg border p-3 space-y-2">
-                    <div className="flex items-center gap-2">
-                      <Input
-                        value={section.title}
-                        onChange={(e) => handleEditSectionChange(idx, 'title', e.target.value)}
-                        placeholder="Titulo de la seccion"
-                        className="h-7 text-xs font-medium flex-1"
-                      />
-                      <Button
-                        variant="ghost"
-                        size="sm"
-                        className="h-7 w-7 p-0 text-muted-foreground hover:text-red-600 dark:hover:text-red-400 shrink-0"
-                        onClick={() => handleRemoveEditSection(idx)}
-                        aria-label="Eliminar seccion"
-                      >
-                        <X className="h-3 w-3" />
-                      </Button>
-                    </div>
-                    <textarea
-                      value={section.content}
-                      onChange={(e) => handleEditSectionChange(idx, 'content', e.target.value)}
-                      placeholder="Contenido..."
-                      rows={Math.max(3, section.content.split('\n').length + 1)}
-                      className="w-full rounded-md border border-input bg-transparent px-3 py-2 text-xs shadow-xs focus-visible:border-ring focus-visible:ring-ring/50 focus-visible:ring-[3px] outline-none resize-y dark:bg-input/30"
-                    />
-                  </div>
-                ))}
-
-                <Button
-                  variant="ghost"
-                  size="sm"
-                  className="h-7 text-xs gap-1.5 w-full border border-dashed"
-                  onClick={handleAddEditSection}
-                >
-                  <Plus className="h-3 w-3" />
-                  Agregar seccion
-                </Button>
-              </div>
-
-              <DialogFooter className="flex-col sm:flex-row gap-2">
-                <div className="flex-1">
-                  <Button
-                    variant="ghost"
-                    size="sm"
-                    className={`h-7 text-xs gap-1.5 ${
-                      confirmDeleteId === editingDoc.id
-                        ? 'bg-red-600 hover:bg-red-700 text-white'
-                        : 'text-red-600 hover:text-red-700 hover:bg-red-50 dark:text-red-400 dark:hover:bg-red-950/30'
-                    }`}
-                    onClick={handleDeleteFromEdit}
-                  >
-                    <Trash2 className="h-3 w-3" />
-                    {confirmDeleteId === editingDoc.id ? 'Confirmar eliminacion' : 'Eliminar'}
-                  </Button>
-                </div>
-
-                <Button
-                  variant="ghost"
-                  size="sm"
-                  className="h-7 text-xs"
-                  onClick={() => {
-                    setEditingDoc(null);
-                    setConfirmDeleteId(null);
-                  }}
-                >
-                  Cancelar
-                </Button>
-                <Button
-                  size="sm"
-                  className="h-7 text-xs gap-1.5"
-                  onClick={handleSaveEdit}
-                >
-                  Guardar cambios
-                </Button>
-              </DialogFooter>
-            </>
-          )}
-        </DialogContent>
-      </Dialog>
+        destructive
+      />
     </div>
   );
 }

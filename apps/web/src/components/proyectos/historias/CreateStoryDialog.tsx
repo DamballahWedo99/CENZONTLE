@@ -1,109 +1,132 @@
 'use client';
 
 import { useState } from 'react';
+import { z } from 'zod';
+import { toast } from 'sonner';
 import {
-  Dialog,
-  DialogContent,
-  DialogHeader,
-  DialogTitle,
+  Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter,
 } from '@/components/ui/dialog';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
+  Select, SelectContent, SelectItem, SelectTrigger, SelectValue,
 } from '@/components/ui/select';
+import { Loader2 } from 'lucide-react';
 import { useProyectos } from '@/context/ProyectosContext';
 import { StoryStatus, UserStory } from '@cenzontle/shared';
+import { createStory as apiCreateStory } from '@/lib/api/stories';
+
+const storySchema = z.object({
+  title: z.string().min(1, 'El título es obligatorio').max(200, 'Máximo 200 caracteres'),
+  epicId: z.string().min(1, 'Selecciona una épica'),
+  podId: z.string().min(1, 'Selecciona una célula'),
+});
+
+type FieldErrors = Partial<Record<keyof z.infer<typeof storySchema>, string>>;
 
 interface CreateStoryDialogProps {
   open: boolean;
   onOpenChange: (open: boolean) => void;
+  defaultEpicId?: string;
 }
 
 const FIBONACCI = [1, 2, 3, 5, 8, 13];
 
-export function CreateStoryDialog({ open, onOpenChange }: CreateStoryDialogProps) {
+export function CreateStoryDialog({ open, onOpenChange, defaultEpicId }: CreateStoryDialogProps) {
   const { state, dispatch } = useProyectos();
 
   const [title, setTitle] = useState('');
   const [description, setDescription] = useState('');
-  const [epicId, setEpicId] = useState('');
+  const [epicId, setEpicId] = useState(defaultEpicId ?? '');
   const [podId, setPodId] = useState('');
   const [storyPoints, setStoryPoints] = useState('3');
   const [sprintId, setSprintId] = useState('');
-
-  const canSubmit = title.trim() && epicId && podId;
-
-  // Current user
-  const currentUser = state.productOwners.find((p) => p.id === state.currentUserId);
-
-  // Only show epics where current user is PO (via shared pods)
-  const availableEpics = currentUser
-    ? state.epics.filter((epic) =>
-        epic.podIds.some((pid) => currentUser.podIds.includes(pid))
-      )
-    : [];
+  const [saving, setSaving] = useState(false);
+  const [errors, setErrors] = useState<FieldErrors>({});
 
   // Filter sprints by selected pod
   const availableSprints = podId
     ? state.sprints.filter((s) => s.podId === podId)
     : state.sprints;
 
-  const handleSubmit = () => {
-    if (!canSubmit) return;
+  // Pods available for the selected epic
+  const selectedEpic = state.epics.find((e) => e.id === epicId);
+  const availablePods = selectedEpic
+    ? state.pods.filter((p) => selectedEpic.podIds.includes(p.id))
+    : state.pods;
 
-    const now = new Date().toISOString();
+  const handleSubmit = async () => {
+    const result = storySchema.safeParse({ title: title.trim(), epicId, podId });
+    if (!result.success) {
+      const fieldErrors: FieldErrors = {};
+      for (const issue of result.error.issues) {
+        const key = issue.path[0] as keyof FieldErrors;
+        if (!fieldErrors[key]) fieldErrors[key] = issue.message;
+      }
+      setErrors(fieldErrors);
+      return;
+    }
 
-    const newStory: UserStory = {
-      id: `story-${Date.now()}`,
-      title: title.trim(),
-      description: description.trim(),
-      status: StoryStatus.Backlog,
-      storyPoints: Number(storyPoints),
-      epicId,
-      podId,
-      productOwnerId: null,
-      sprintId: sprintId || null,
-      labels: [],
-      po: {
-        background: '',
-        objective: '',
-        userStory: description.trim(),
-        whatHowWhen: { what: '', how: '', when: '' },
-        acceptanceCriteria: [],
-        additionalNotes: '',
-      },
-      technical: {
-        architecture: '',
-        integrationFlow: '',
-        validations: [],
-        errorHandling: [],
-        implementationChecklist: [],
-      },
-      qa: {
-        testingStrategy: '',
-        linkedQAMatrixId: null,
-      },
-      createdAt: now,
-      updatedAt: now,
-    };
+    setErrors({});
+    setSaving(true);
+    try {
+      const created = await apiCreateStory({
+        title: title.trim(),
+        epicId,
+        podId,
+        status: StoryStatus.Backlog,
+        storyPoints: Number(storyPoints),
+        sprintId: sprintId || undefined,
+        labels: [],
+        po: {
+          background: '',
+          objective: '',
+          userStory: description.trim(),
+          whatHowWhen: '',
+          acceptanceCriteria: '',
+          additionalNotes: '',
+        },
+      });
 
-    dispatch({ type: 'CREATE_STORY', payload: newStory });
-    resetForm();
-    onOpenChange(false);
+      // Add to local state for instant UI feedback
+      const newStory: UserStory = {
+        id: created.id,
+        title: created.title,
+        description: description.trim(),
+        status: created.status as StoryStatus,
+        storyPoints: created.storyPoints as 1 | 2 | 3 | 5 | 8 | 13,
+        epicId: created.epicId,
+        podId: created.podId,
+        productOwnerId: created.productOwnerId,
+        sprintId: created.sprintId,
+        labels: [],
+        po: { background: '', objective: '', userStory: description.trim(), whatHowWhen: { what: '', how: '', when: '' }, acceptanceCriteria: [], additionalNotes: '' },
+        technical: { architecture: '', integrationFlow: '', validations: [], errorHandling: [], implementationChecklist: [] },
+        qa: { testingStrategy: '', linkedQAMatrixId: null },
+        createdAt: created.createdAt,
+        updatedAt: created.updatedAt,
+      } as UserStory;
+
+      dispatch({ type: 'CREATE_STORY', payload: newStory });
+
+      toast.success('Historia creada correctamente');
+      resetForm();
+      onOpenChange(false);
+    } catch (err: any) {
+      toast.error(err.message || 'Error al crear la historia');
+    } finally {
+      setSaving(false);
+    }
   };
 
   const resetForm = () => {
     setTitle('');
     setDescription('');
-    setEpicId('');
+    setEpicId(defaultEpicId ?? '');
     setPodId('');
     setStoryPoints('3');
     setSprintId('');
+    setErrors({});
   };
 
   const handleCancel = () => {
@@ -123,10 +146,12 @@ export function CreateStoryDialog({ open, onOpenChange }: CreateStoryDialogProps
             <label className="text-sm font-medium mb-1.5 block">Título</label>
             <Input
               value={title}
-              onChange={(e) => setTitle(e.target.value)}
+              onChange={(e) => { setTitle(e.target.value); setErrors((p) => ({ ...p, title: undefined })); }}
               placeholder="Como usuario quiero..."
+              aria-invalid={!!errors.title}
               autoFocus
             />
+            {errors.title && <p className="text-xs text-destructive mt-1">{errors.title}</p>}
           </div>
 
           <div>
@@ -143,33 +168,35 @@ export function CreateStoryDialog({ open, onOpenChange }: CreateStoryDialogProps
           <div className="grid grid-cols-2 gap-3">
             <div>
               <label className="text-sm font-medium mb-1.5 block">Épica</label>
-              <Select value={epicId} onValueChange={setEpicId}>
-                <SelectTrigger className="w-full">
+              <Select value={epicId} onValueChange={(v) => { setEpicId(v); setPodId(''); setErrors((p) => ({ ...p, epicId: undefined })); }}>
+                <SelectTrigger className="w-full" aria-invalid={!!errors.epicId}>
                   <SelectValue placeholder="Seleccionar..." />
                 </SelectTrigger>
                 <SelectContent>
-                  {availableEpics.map((epic) => (
+                  {state.epics.map((epic) => (
                     <SelectItem key={epic.id} value={epic.id}>
-                      {epic.tracker?.externalKey ? `${epic.tracker.externalKey} — ` : ''}{epic.title}
+                      {epic.title}
                     </SelectItem>
                   ))}
                 </SelectContent>
               </Select>
+              {errors.epicId && <p className="text-xs text-destructive mt-1">{errors.epicId}</p>}
             </div>
             <div>
-              <label className="text-sm font-medium mb-1.5 block">POD</label>
-              <Select value={podId} onValueChange={(v) => { setPodId(v); setSprintId(''); }}>
-                <SelectTrigger className="w-full">
+              <label className="text-sm font-medium mb-1.5 block">Célula</label>
+              <Select value={podId} onValueChange={(v) => { setPodId(v); setSprintId(''); setErrors((p) => ({ ...p, podId: undefined })); }}>
+                <SelectTrigger className="w-full" aria-invalid={!!errors.podId}>
                   <SelectValue placeholder="Seleccionar..." />
                 </SelectTrigger>
                 <SelectContent>
-                  {state.pods.map((pod) => (
+                  {availablePods.map((pod) => (
                     <SelectItem key={pod.id} value={pod.id}>
                       {pod.name}
                     </SelectItem>
                   ))}
                 </SelectContent>
               </Select>
+              {errors.podId && <p className="text-xs text-destructive mt-1">{errors.podId}</p>}
             </div>
           </div>
 
@@ -203,16 +230,16 @@ export function CreateStoryDialog({ open, onOpenChange }: CreateStoryDialogProps
               </Select>
             </div>
           </div>
-
-          <div className="flex justify-end gap-2 pt-2">
-            <Button variant="outline" onClick={handleCancel}>
-              Cancelar
-            </Button>
-            <Button onClick={handleSubmit} disabled={!canSubmit}>
-              Crear Historia
-            </Button>
-          </div>
         </div>
+
+        <div className="border-t border-border" />
+        <DialogFooter>
+          <Button variant="outline" onClick={handleCancel}>Cancelar</Button>
+          <Button onClick={handleSubmit} disabled={saving}>
+            {saving && <Loader2 className="h-4 w-4 animate-spin mr-1" />}
+            Crear Historia
+          </Button>
+        </DialogFooter>
       </DialogContent>
     </Dialog>
   );

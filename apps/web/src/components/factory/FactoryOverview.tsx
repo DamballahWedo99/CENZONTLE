@@ -412,7 +412,7 @@ function QueueRow({ batch, position }: { batch: QueuedBatch; position: number })
           <div className="grid grid-cols-[56px_1fr_130px_140px_48px] gap-2 px-4 pl-[60px] py-2 text-[10px] font-medium uppercase tracking-wider text-muted-foreground/60 border-b border-border/50">
             <span>Key</span>
             <span>Título</span>
-            <span>POD</span>
+            <span>Célula</span>
             <span>Product Owner</span>
             <span className="text-right">SP</span>
           </div>

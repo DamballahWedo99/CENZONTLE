@@ -232,12 +232,14 @@ export function AppSidebar({ ...props }: React.ComponentProps<typeof Sidebar>) {
                   </div>
                 </DropdownMenuLabel>
                 <DropdownMenuSeparator />
-                <DropdownMenuItem className="cursor-pointer" asChild>
-                  <Link href="/factory/settings">
-                    <Settings />
-                    Configuración
-                  </Link>
-                </DropdownMenuItem>
+                {currentUser?.role === 'alta_gerencia' && (
+                  <DropdownMenuItem className="cursor-pointer" asChild>
+                    <Link href="/factory/settings">
+                      <Settings />
+                      Configuración
+                    </Link>
+                  </DropdownMenuItem>
+                )}
                 <DropdownMenuSeparator />
                 <DropdownMenuItem className="cursor-pointer" onClick={() => logout()}>
                   <LogOut />

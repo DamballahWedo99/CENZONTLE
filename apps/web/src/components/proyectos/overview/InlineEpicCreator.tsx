@@ -1,7 +1,10 @@
 'use client';
 
 import { useState, useCallback, useRef, useEffect } from 'react';
+import { z } from 'zod';
+import { toast } from 'sonner';
 import { Epic, EpicStatus, Priority, Pod } from '@cenzontle/shared';
+import { createEpic as apiCreateEpic } from '@/lib/api/epics';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Checkbox } from '@/components/ui/checkbox';
@@ -22,6 +25,7 @@ import {
   Ruler,
   Cpu,
   Zap,
+  Loader2,
 } from 'lucide-react';
 
 // --- Labels ---
@@ -39,6 +43,16 @@ const priorityLabels: Record<Priority, string> = {
   [Priority.Medium]: 'Media',
   [Priority.Low]: 'Baja',
 };
+
+const epicSchema = z.object({
+  title: z.string().min(1, 'El título es obligatorio').max(200, 'Máximo 200 caracteres'),
+  description: z.string().min(1, 'La descripción es obligatoria'),
+  selectedPodIds: z.array(z.string()).min(1, 'Selecciona al menos una célula'),
+  startDate: z.string().min(1, 'La fecha de inicio es obligatoria'),
+  targetDate: z.string().min(1, 'La fecha objetivo es obligatoria'),
+});
+
+type EpicFieldErrors = Partial<Record<keyof z.infer<typeof epicSchema>, string>>;
 
 // --- Textarea class ---
 
@@ -112,6 +126,8 @@ export function InlineEpicCreator({
   const [formData, setFormData] = useState<EpicFormData>(emptyForm);
   const [formTab, setFormTab] = useState<string>('benefits');
   const [showDefinition, setShowDefinition] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const [errors, setErrors] = useState<EpicFieldErrors>({});
   const formRef = useRef<HTMLDivElement>(null);
 
   // tracker is optional — assigned when synced with external tracker
@@ -142,49 +158,82 @@ export function InlineEpicCreator({
     }));
   }, []);
 
-  const handleCreate = useCallback(() => {
-    if (!formData.title.trim() || formData.selectedPodIds.length === 0) return;
-    const now = new Date().toISOString();
-
-    const newEpic: Epic = {
-      id: `epic-${Date.now()}`,
+  const handleCreate = useCallback(async () => {
+    const result = epicSchema.safeParse({
       title: formData.title.trim(),
       description: formData.description.trim(),
-      qualitativeBenefits: formData.qualitativeBenefits.trim(),
-      quantitativeBenefits: formData.quantitativeBenefits.trim(),
-      benefitsMeasurement: formData.benefitsMeasurement.trim(),
-      scopeDescription: formData.scopeDescription.trim(),
-      acceptanceCriteria: formData.acceptanceCriteria.trim(),
-      technologicalImprovements: formData.technologicalImprovements.trim(),
-      businessPriority: formData.businessPriority.trim(),
-      teamsInvolved: formData.teamsInvolved.trim(),
-      impactedChannels: formData.impactedChannels.trim(),
-      impactedFlows: formData.impactedFlows.trim(),
-      impactSabreLevel: formData.impactSabreLevel.trim(),
-      thirdPartyDependencies: formData.thirdPartyDependencies.trim(),
-      documents: [],
-      diagrams: [],
-      dependencies: [],
-      poApproval: null,
-      tlApproval: null,
-      qaMatrix: null,
-      qaApproval: null,
-      epicQAMatrix: null,
+      selectedPodIds: formData.selectedPodIds,
+      startDate: formData.startDate,
+      targetDate: formData.targetDate,
+    });
+    if (!result.success) {
+      const fieldErrors: EpicFieldErrors = {};
+      for (const issue of result.error.issues) {
+        const key = issue.path[0] as keyof EpicFieldErrors;
+        if (!fieldErrors[key]) fieldErrors[key] = issue.message;
+      }
+      setErrors(fieldErrors);
+      return;
+    }
+    setErrors({});
+    setSaving(true);
+    try {
+      const created = await apiCreateEpic({
+        title: formData.title.trim(),
+        description: formData.description.trim(),
+        status: formData.status as string,
+        priority: formData.priority as string,
+        initiativeId,
+        podIds: formData.selectedPodIds,
+        startDate: formData.startDate,
+        targetDate: formData.targetDate,
+      });
 
-      status: formData.status,
-      priority: formData.priority,
-      initiativeId,
-      podIds: formData.selectedPodIds,
-      startDate: formData.startDate || now.split('T')[0],
-      targetDate: formData.targetDate || '',
-      createdAt: now,
-      updatedAt: now,
-    };
+      const now = new Date().toISOString();
+      const newEpic: Epic = {
+        id: created.id,
+        title: created.title,
+        description: created.description,
+        qualitativeBenefits: formData.qualitativeBenefits.trim(),
+        quantitativeBenefits: formData.quantitativeBenefits.trim(),
+        benefitsMeasurement: formData.benefitsMeasurement.trim(),
+        scopeDescription: formData.scopeDescription.trim(),
+        acceptanceCriteria: formData.acceptanceCriteria.trim(),
+        technologicalImprovements: formData.technologicalImprovements.trim(),
+        businessPriority: formData.businessPriority.trim(),
+        teamsInvolved: formData.teamsInvolved.trim(),
+        impactedChannels: formData.impactedChannels.trim(),
+        impactedFlows: formData.impactedFlows.trim(),
+        impactSabreLevel: formData.impactSabreLevel.trim(),
+        thirdPartyDependencies: formData.thirdPartyDependencies.trim(),
+        documents: [],
+        diagrams: [],
+        dependencies: [],
+        poApproval: null,
+        tlApproval: null,
+        qaMatrix: null,
+        qaApproval: null,
+        epicQAMatrix: null,
+        status: created.status as EpicStatus,
+        priority: created.priority as Priority,
+        initiativeId,
+        podIds: created.podIds,
+        startDate: created.startDate,
+        targetDate: created.targetDate,
+        createdAt: created.createdAt,
+        updatedAt: created.updatedAt,
+      };
 
-    onCreateEpic(newEpic);
+      toast.success('Épica creada correctamente');
+      onCreateEpic(newEpic);
+    } catch (err: any) {
+      toast.error(err.message || 'Error al crear la épica');
+    } finally {
+      setSaving(false);
+    }
   }, [formData, initiativeId, onCreateEpic]);
 
-  const canSubmit = formData.title.trim() && formData.selectedPodIds.length > 0;
+  const canSubmit = !saving;
 
   return (
     <div
@@ -219,7 +268,7 @@ export function InlineEpicCreator({
           <label className="text-xs font-medium text-muted-foreground">Título *</label>
           <Input
             value={formData.title}
-            onChange={(e) => setFormData((prev) => ({ ...prev, title: e.target.value }))}
+            onChange={(e) => { setFormData((prev) => ({ ...prev, title: e.target.value })); setErrors((p) => ({ ...p, title: undefined })); }}
             onKeyDown={(e) => {
               if (e.key === 'Enter' && canSubmit) {
                 e.preventDefault();
@@ -228,8 +277,10 @@ export function InlineEpicCreator({
             }}
             placeholder="Nombre descriptivo de la épica"
             className="text-sm"
+            aria-invalid={!!errors.title}
             autoFocus
           />
+          {errors.title && <p className="text-xs text-destructive">{errors.title}</p>}
         </div>
 
         {/* Description */}
@@ -237,11 +288,12 @@ export function InlineEpicCreator({
           <label className="text-xs font-medium text-muted-foreground">Descripción</label>
           <textarea
             value={formData.description}
-            onChange={(e) => setFormData((prev) => ({ ...prev, description: e.target.value }))}
+            onChange={(e) => { setFormData((prev) => ({ ...prev, description: e.target.value })); setErrors((p) => ({ ...p, description: undefined })); }}
             placeholder="Describe el alcance y objetivo de esta épica..."
             rows={2}
-            className={inputCls}
+            className={`${inputCls}${errors.description ? ' border-destructive' : ''}`}
           />
+          {errors.description && <p className="text-xs text-destructive">{errors.description}</p>}
         </div>
 
         {/* Meta fields row */}
@@ -283,28 +335,32 @@ export function InlineEpicCreator({
             </Select>
           </div>
           <div className="min-w-0 space-y-1.5">
-            <label className="text-xs font-medium text-muted-foreground">Fecha inicio</label>
+            <label className="text-xs font-medium text-muted-foreground">Fecha inicio *</label>
             <Input
               type="date"
               value={formData.startDate}
-              onChange={(e) => setFormData((prev) => ({ ...prev, startDate: e.target.value }))}
+              onChange={(e) => { setFormData((prev) => ({ ...prev, startDate: e.target.value })); setErrors((p) => ({ ...p, startDate: undefined })); }}
               className="text-sm"
+              aria-invalid={!!errors.startDate}
             />
+            {errors.startDate && <p className="text-xs text-destructive">{errors.startDate}</p>}
           </div>
           <div className="min-w-0 space-y-1.5">
-            <label className="text-xs font-medium text-muted-foreground">Fecha objetivo</label>
+            <label className="text-xs font-medium text-muted-foreground">Fecha objetivo *</label>
             <Input
               type="date"
               value={formData.targetDate}
-              onChange={(e) => setFormData((prev) => ({ ...prev, targetDate: e.target.value }))}
+              onChange={(e) => { setFormData((prev) => ({ ...prev, targetDate: e.target.value })); setErrors((p) => ({ ...p, targetDate: undefined })); }}
               className="text-sm"
+              aria-invalid={!!errors.targetDate}
             />
+            {errors.targetDate && <p className="text-xs text-destructive">{errors.targetDate}</p>}
           </div>
         </div>
 
         {/* PODs */}
         <div className="space-y-1.5">
-          <label className="text-xs font-medium text-muted-foreground">PODs asignados *</label>
+          <label className="text-xs font-medium text-muted-foreground">Células asignadas *</label>
           <div className="flex flex-wrap gap-2">
             {pods.map((pod) => (
               <label
@@ -327,6 +383,7 @@ export function InlineEpicCreator({
               </label>
             ))}
           </div>
+          {errors.selectedPodIds && <p className="text-xs text-destructive mt-1">{errors.selectedPodIds}</p>}
         </div>
 
         {/* Collapsible definition section */}
@@ -518,7 +575,7 @@ export function InlineEpicCreator({
               disabled={!canSubmit}
               className="gap-1.5"
             >
-              <Plus className="h-3.5 w-3.5" />
+              {saving ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Plus className="h-3.5 w-3.5" />}
               Crear épica
             </Button>
           </div>

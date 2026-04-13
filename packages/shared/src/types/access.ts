@@ -12,7 +12,7 @@ export const ACCESS_LEVEL_HIERARCHY: Record<AccessLevel, number> = {
 };
 
 export const ACCESS_LEVEL_LABELS: Record<AccessLevel, string> = {
-  owner: 'Propietario',
+  owner: 'Admin',
   editor: 'Editor',
   viewer: 'Lector',
   none: 'Sin acceso',

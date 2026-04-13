@@ -3,8 +3,10 @@
 import { useState, useMemo, useEffect, useCallback } from 'react';
 import { useRouter } from 'next/navigation';
 import Link from 'next/link';
+import { toast } from 'sonner';
 import { useProyectos } from '@/context/ProyectosContext';
 import { useBreadcrumb } from '@/context/BreadcrumbContext';
+import { updateStory as apiUpdateStory, deleteStory as apiDeleteStory, getStory as apiGetStory } from '@/lib/api/stories';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -162,7 +164,55 @@ function StoryFullPageInner({ storyId }: StoryFullPageProps) {
   const { state, dispatch } = useProyectos();
   const { setBreadcrumb } = useBreadcrumb();
 
-  const story = useMemo(() => state.stories.find((s) => s.id === storyId) ?? null, [storyId, state.stories]);
+  const baseStory = useMemo(() => state.stories.find((s) => s.id === storyId) ?? null, [storyId, state.stories]);
+
+  // Vault content loaded from API (contains the narrative markdown fields)
+  const [vaultContent, setVaultContent] = useState<{ po: any; technical: any; qa: any } | null>(null);
+
+  useEffect(() => {
+    if (!storyId) return;
+    let cancelled = false;
+    apiGetStory(storyId, true)
+      .then((data) => {
+        if (cancelled) return;
+        if (data.content) setVaultContent(data.content);
+      })
+      .catch((err) => {
+        console.error('[StoryFullPage] failed to load vault content', err);
+      });
+    return () => { cancelled = true; };
+  }, [storyId]);
+
+  // Merge base story (from state) with vault content (from API)
+  const story = useMemo(() => {
+    if (!baseStory) return null;
+    if (!vaultContent) return baseStory;
+    return {
+      ...baseStory,
+      po: {
+        ...baseStory.po,
+        background: vaultContent.po?.background ?? '',
+        objective: vaultContent.po?.objective ?? '',
+        userStory: vaultContent.po?.userStory ?? '',
+        whatHowWhen: baseStory.po.whatHowWhen,
+        acceptanceCriteria: vaultContent.po?.acceptanceCriteria
+          ? String(vaultContent.po.acceptanceCriteria).split('\n').filter((s: string) => s.trim())
+          : [],
+        additionalNotes: vaultContent.po?.additionalNotes ?? '',
+      },
+      technical: {
+        architecture: vaultContent.technical?.architecture ?? '',
+        integrationFlow: vaultContent.technical?.integrationFlow ?? '',
+        validations: vaultContent.technical?.validations ?? [],
+        errorHandling: vaultContent.technical?.errorHandling ?? [],
+        implementationChecklist: vaultContent.technical?.implementationChecklist ?? [],
+      },
+      qa: {
+        testingStrategy: vaultContent.qa?.testingStrategy ?? '',
+        linkedQAMatrixId: baseStory.qa.linkedQAMatrixId,
+      },
+    } as UserStory;
+  }, [baseStory, vaultContent]);
   const epic = useMemo(() => (story ? state.epics.find((e) => e.id === story.epicId) ?? null : null), [story, state.epics]);
   const initiative = useMemo(() => (epic ? state.initiatives.find((i) => i.id === epic.initiativeId) ?? null : null), [epic, state.initiatives]);
   const pod = useMemo(() => (story ? state.pods.find((p) => p.id === story.podId) ?? null : null), [story, state.pods]);
@@ -257,35 +307,78 @@ function StoryFullPageInner({ storyId }: StoryFullPageProps) {
     setIsEditing(true);
   }, [story]);
 
-  const handleSave = useCallback(() => {
-    if (!story || !editTitle.trim()) return;
-    dispatch({
-      type: 'UPDATE_STORY',
-      payload: {
-        id: story.id,
-        changes: {
-          title: editTitle.trim(),
-          description: editPO.userStory.trim(),
-          storyPoints: editStoryPoints,
-          status: editStatus,
-          podId: editPodId,
-          productOwnerId: editProductOwnerId || null,
-          labels: editLabels,
-          po: {
-            ...editPO,
-            acceptanceCriteria: editPO.acceptanceCriteria.filter((c) => c.trim()),
-          },
-          technical: {
-            ...editTechnical,
-            validations: editTechnical.validations.filter((v) => v.trim()),
-            errorHandling: editTechnical.errorHandling.filter((e) => e.trim()),
-            implementationChecklist: editTechnical.implementationChecklist.filter((c) => c.trim()),
-          },
-          qa: editQA,
+  const handleSave = useCallback(async () => {
+    if (!story || !editTitle.trim()) {
+      return;
+    }
+
+    const cleanedPO = {
+      ...editPO,
+      acceptanceCriteria: editPO.acceptanceCriteria.filter((c: string) => c.trim()),
+    };
+    const cleanedTechnical = {
+      ...editTechnical,
+      validations: editTechnical.validations.filter((v: string) => v.trim()),
+      errorHandling: editTechnical.errorHandling.filter((e: string) => e.trim()),
+      implementationChecklist: editTechnical.implementationChecklist.filter((c: string) => c.trim()),
+    };
+
+    // Convert PO fields to API shape (acceptanceCriteria joined, whatHowWhen flattened)
+    const poForApi = {
+      background: cleanedPO.background,
+      objective: cleanedPO.objective,
+      userStory: cleanedPO.userStory,
+      whatHowWhen: typeof (cleanedPO as any).whatHowWhen === 'string'
+        ? (cleanedPO as any).whatHowWhen
+        : [
+            (cleanedPO as any).whatHowWhen?.what,
+            (cleanedPO as any).whatHowWhen?.how,
+            (cleanedPO as any).whatHowWhen?.when,
+          ].filter(Boolean).join(' / '),
+      acceptanceCriteria: cleanedPO.acceptanceCriteria.join('\n'),
+      additionalNotes: cleanedPO.additionalNotes,
+    };
+
+    try {
+      const result = await apiUpdateStory(story.id, {
+        title: editTitle.trim(),
+        status: editStatus as string,
+        storyPoints: editStoryPoints,
+        podId: editPodId,
+        productOwnerId: editProductOwnerId || undefined,
+        labels: editLabels,
+        po: poForApi,
+        technical: cleanedTechnical,
+        qa: {
+          testingStrategy: editQA.testingStrategy,
+          linkedQAMatrixId: editQA.linkedQAMatrixId ?? undefined,
         },
-      },
-    });
-    setIsEditing(false);
+      });
+      dispatch({
+        type: 'UPDATE_STORY',
+        payload: {
+          id: story.id,
+          changes: {
+            title: editTitle.trim(),
+            description: editPO.userStory.trim(),
+            storyPoints: editStoryPoints,
+            status: editStatus,
+            podId: editPodId,
+            productOwnerId: editProductOwnerId || null,
+            labels: editLabels,
+            po: cleanedPO,
+            technical: cleanedTechnical,
+            qa: editQA,
+          },
+        },
+      });
+
+      toast.success('Historia actualizada');
+      setIsEditing(false);
+    } catch (err: any) {
+      console.error('[StoryFullPage] apiUpdateStory FAILED', err);
+      toast.error(err.message || 'Error al actualizar historia');
+    }
   }, [story, editTitle, editStoryPoints, editStatus, editPodId, editProductOwnerId, editLabels, editPO, editTechnical, editQA, dispatch]);
 
   const addLabel = useCallback(() => {

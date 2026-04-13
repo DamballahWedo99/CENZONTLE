@@ -153,7 +153,7 @@ export function ProyectosFilters({ portalContainer }: { portalContainer?: HTMLEl
       />
 
       <FilterDropdown
-        label="POD"
+        label="Célula"
         options={podOptions}
         selected={filters.podIds}
         onToggle={(v) => toggleArrayFilter('podIds', v)}

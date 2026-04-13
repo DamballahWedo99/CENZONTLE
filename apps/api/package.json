@@ -12,6 +12,8 @@
     "type-check": "tsc --noEmit"
   },
   "dependencies": {
+    "@aws-sdk/client-s3": "^3.1027.0",
+    "@aws-sdk/s3-request-presigner": "^3.1027.0",
     "@cenzontle/shared": "workspace:*",
     "@nestjs/common": "^11.0.0",
     "@nestjs/config": "^4.0.0",
@@ -20,13 +22,21 @@
     "@nestjs/platform-socket.io": "^11.1.17",
     "@nestjs/swagger": "^11.0.0",
     "@nestjs/websockets": "^11.1.17",
+    "@octokit/rest": "^22.0.1",
+    "@prisma/adapter-pg": "^7.7.0",
+    "@prisma/client": "^7.7.0",
     "class-transformer": "^0.5.1",
     "class-validator": "^0.15.1",
     "jose": "^6.2.2",
+    "mime-types": "^3.0.2",
     "node-pty": "^1.1.0",
+    "pg": "^8.20.0",
     "reflect-metadata": "^0.2.0",
     "rxjs": "^7.8.0",
     "socket.io": "^4.8.3"
+  },
+  "prisma": {
+    "seed": "ts-node --compiler-options {\"module\":\"CommonJS\"} prisma/seed.ts"
   },
   "devDependencies": {
     "@cenzontle/ts-config": "workspace:*",
@@ -36,13 +46,17 @@
     "@nestjs/testing": "^11.0.0",
     "@types/express": "^5.0.0",
     "@types/jest": "^29.5.0",
+    "@types/mime-types": "^3.0.1",
     "@types/multer": "^2.1.0",
     "@types/node": "^20",
+    "@types/pg": "^8.20.0",
     "eslint": "^9",
     "globals": "^17.4.0",
     "jest": "^29.7.0",
+    "prisma": "^7.7.0",
     "ts-jest": "^29.2.0",
     "ts-loader": "^9.5.0",
+    "ts-node": "^10.9.2",
     "typescript": "^5",
     "typescript-eslint": "^8.57.2"
   }

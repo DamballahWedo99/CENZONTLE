@@ -254,10 +254,16 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     window.location.href = '/auth/logout';
   }, []);
 
+  // Auth está "cargando" hasta que AMBOS el hook de Auth0 Y el fetch de members terminaron.
+  // Sin esto, isLoading=false llega ~200ms antes que membersLoaded=true, y durante esa
+  // ventana currentUser.role es el fallback 'viewer' (incorrecto) porque el Management API
+  // aún no resolvió el rol real.
+  const isFullyLoaded = !isLoading && (!auth0User || state.membersLoaded);
+
   const value = useMemo(
     () => ({
       currentUser,
-      isLoading,
+      isLoading: !isFullyLoaded,
       members: state.members,
       membersLoaded: state.membersLoaded,
       rolePermissions: state.rolePermissions,

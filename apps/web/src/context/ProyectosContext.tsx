@@ -1,16 +1,105 @@
 'use client';
 
-import React, { createContext, useContext, useReducer, useMemo, ReactNode } from 'react';
+import React, { createContext, useContext, useReducer, useMemo, useEffect, useCallback, useRef, ReactNode } from 'react';
 import {
   Initiative, Epic, UserStory, Pod, ProductOwner, Sprint, ChangelogEntry,
-  SprintCeremony,
+  SprintCeremony, InitiativeStatus, EpicStatus as SharedEpicStatus, Priority,
   ProyectosFilters, DEFAULT_FILTERS, EpicWithRelations, MatrizRow, MatrizCell,
   StoryStatus, EpicStatus, ChangelogAction, ChangelogEntityType, QAMatrix, EpicQAMatrix,
 } from '@cenzontle/shared';
 import {
-  mockInitiatives, mockEpics, mockStories, mockPods,
-  mockProductOwners, mockSprints, mockChangelog, mockCeremonies,
+  mockSprints, mockCeremonies,
 } from '@/data/mock/proyectos';
+import { getInitiatives, createInitiative as apiCreateInitiative, updateInitiative as apiUpdateInitiative } from '@/lib/api/initiatives';
+import { getEpics, createEpic as apiCreateEpic, updateEpic as apiUpdateEpic } from '@/lib/api/epics';
+import { getStories, type StoryResponse } from '@/lib/api/stories';
+import { getPods } from '@/lib/api/pods';
+import { getProductOwners } from '@/lib/api/product-owners';
+import { useAuthContext } from '@/context/AuthContext';
+import { getChangelog, createChangelogEntry as apiCreateChangelog, type ChangelogEntryResponse } from '@/lib/api/changelog';
+import type { InitiativeResponse } from '@/lib/api/initiatives';
+import type { EpicResponse } from '@/lib/api/epics';
+import type { PodResponse } from '@/lib/api/pods';
+import type { ProductOwnerResponse } from '@/lib/api/product-owners';
+
+// === API → Domain mappers ===
+function toDateStr(iso: string): string {
+  return iso ? iso.slice(0, 10) : '';
+}
+
+function mapInitiative(r: InitiativeResponse): Initiative {
+  return {
+    id: r.id,
+    name: r.name,
+    description: r.description,
+    status: r.status as InitiativeStatus,
+    startDate: toDateStr(r.startDate),
+    targetDate: toDateStr(r.targetDate),
+    owner: r.owner,
+    epicIds: r.epics.map((e) => e.id),
+    documents: r.documents ?? [],
+  };
+}
+
+export function mapEpic(r: EpicResponse): Epic {
+  return {
+    ...r,
+    status: r.status as SharedEpicStatus,
+    priority: r.priority as Priority,
+    startDate: toDateStr(r.startDate),
+    targetDate: toDateStr(r.targetDate),
+    documents: r.documents ?? [],
+    diagrams: r.diagrams ?? [],
+    dependencies: r.dependencies ?? [],
+    createdAt: r.createdAt,
+    updatedAt: r.updatedAt,
+  } as Epic;
+}
+
+function mapPod(r: PodResponse): Pod {
+  return { id: r.id, name: r.name, description: r.description, color: r.color, productOwnerIds: r.productOwnerIds };
+}
+
+function mapStory(r: StoryResponse): UserStory {
+  return {
+    id: r.id,
+    title: r.title,
+    description: '',
+    po: { background: '', objective: '', userStory: '', whatHowWhen: { what: '', how: '', when: '' }, acceptanceCriteria: [], additionalNotes: '' },
+    technical: { architecture: '', integrationFlow: '', validations: [], errorHandling: [], implementationChecklist: [] },
+    qa: { testingStrategy: '', linkedQAMatrixId: null },
+    status: r.status as StoryStatus,
+    storyPoints: r.storyPoints as 1 | 2 | 3 | 5 | 8 | 13,
+    epicId: r.epicId,
+    podId: r.podId,
+    productOwnerId: r.productOwnerId,
+    sprintId: r.sprintId,
+    labels: r.labels ?? [],
+    tracker: r.tracker ?? null,
+    createdAt: r.createdAt,
+    updatedAt: r.updatedAt,
+  } as unknown as UserStory;
+}
+
+function mapProductOwner(r: ProductOwnerResponse): ProductOwner {
+  return { id: r.id, name: r.name, email: r.email, avatarUrl: r.avatarUrl, podIds: r.podIds };
+}
+
+function mapChangelog(r: ChangelogEntryResponse): ChangelogEntry {
+  return {
+    id: r.id,
+    timestamp: r.timestamp,
+    entityType: r.entityType as ChangelogEntityType,
+    entityId: r.entityId,
+    entityTitle: r.entityTitle,
+    action: r.action as ChangelogAction,
+    field: r.field,
+    oldValue: r.oldValue,
+    newValue: r.newValue,
+    changedBy: r.changedByName ? { id: r.changedById ?? '', name: r.changedByName, avatarUrl: '' } : { id: '', name: 'Sistema', avatarUrl: '' },
+    changeReason: null,
+  };
+}
 
 // === STATE ===
 interface ProyectosState {
@@ -24,21 +113,27 @@ interface ProyectosState {
   changelog: ChangelogEntry[];
   filters: ProyectosFilters;
   activeTab: 'overview' | 'epicas' | 'historias';
-  currentUserId: string; // simulates the logged-in PO
+  currentUserId: string;
+  currentUserName: string;
+  loading: boolean;
+  error: string | null;
 }
 
 const initialState: ProyectosState = {
-  initiatives: mockInitiatives,
-  epics: mockEpics,
-  stories: mockStories,
-  pods: mockPods,
-  productOwners: mockProductOwners,
+  initiatives: [],
+  epics: [],
+  stories: [],
+  pods: [],
+  productOwners: [],
   sprints: mockSprints,
   ceremonies: mockCeremonies,
-  changelog: mockChangelog,
+  changelog: [],
   filters: DEFAULT_FILTERS,
   activeTab: 'overview',
-  currentUserId: 'po-1', // Carlos Méndez — simulated logged-in user
+  currentUserId: '',
+  currentUserName: 'Sistema',
+  loading: true,
+  error: null,
 };
 
 // === CHANGELOG HELPER ===
@@ -50,6 +145,7 @@ function createChangelogEntry(
   field: string | null,
   oldValue: string | null,
   newValue: string | null,
+  userName?: string,
 ): ChangelogEntry {
   return {
     id: `cl-auto-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
@@ -61,13 +157,19 @@ function createChangelogEntry(
     field,
     oldValue,
     newValue,
-    changedBy: { id: 'current-user', name: 'Usuario Actual', avatarUrl: '' },
+    changedBy: { id: 'current-user', name: userName ?? _currentUserName, avatarUrl: '' },
     changeReason: null,
   };
 }
 
+// Module-level ref updated by the provider — lets the pure helper access the user name
+let _currentUserName = 'Sistema';
+
 // === ACTIONS ===
 type ProyectosAction =
+  | { type: 'LOAD_DATA'; payload: { initiatives: Initiative[]; epics: Epic[]; stories: UserStory[]; pods: Pod[]; productOwners: ProductOwner[]; changelog: ChangelogEntry[]; currentUserName: string } }
+  | { type: 'SET_LOADING'; payload: boolean }
+  | { type: 'SET_ERROR'; payload: string | null }
   | { type: 'SET_FILTERS'; payload: Partial<ProyectosFilters> }
   | { type: 'RESET_FILTERS' }
   | { type: 'SET_ACTIVE_TAB'; payload: ProyectosState['activeTab'] }
@@ -104,6 +206,14 @@ type ProyectosAction =
 
 function proyectosReducer(state: ProyectosState, action: ProyectosAction): ProyectosState {
   switch (action.type) {
+    case 'LOAD_DATA': {
+      const { initiatives, epics, stories, pods, productOwners, changelog, currentUserName } = action.payload;
+      return { ...state, initiatives, epics, stories, pods, productOwners, changelog, currentUserName, loading: false, error: null, currentUserId: productOwners[0]?.id ?? '' };
+    }
+    case 'SET_LOADING':
+      return { ...state, loading: action.payload };
+    case 'SET_ERROR':
+      return { ...state, error: action.payload, loading: false };
     case 'SET_FILTERS':
       return { ...state, filters: { ...state.filters, ...action.payload } };
     case 'RESET_FILTERS':
@@ -573,6 +683,7 @@ function proyectosReducer(state: ProyectosState, action: ProyectosAction): Proye
 interface ProyectosContextValue {
   state: ProyectosState;
   dispatch: React.Dispatch<ProyectosAction>;
+  reload: () => Promise<void>;
   // Computed values
   filteredStories: UserStory[];
   filteredEpics: Epic[];
@@ -597,6 +708,65 @@ const ProyectosContext = createContext<ProyectosContextValue | null>(null);
 // === PROVIDER ===
 export function ProyectosProvider({ children }: { children: ReactNode }) {
   const [state, dispatch] = useReducer(proyectosReducer, initialState);
+  const { currentUser } = useAuthContext();
+
+  // Keep module-level user name in sync for the changelog helper
+  _currentUserName = currentUser?.name || 'Sistema';
+
+  // Fetch all data from API. Exposed as `reload` so consumers (e.g. vault switch) can trigger it.
+  const reload = useCallback(async () => {
+    dispatch({ type: 'SET_LOADING', payload: true });
+    try {
+      const [initiativesRaw, epicsRaw, storiesRaw, podsRaw, productOwnersRaw, changelogRaw] = await Promise.all([
+        getInitiatives(),
+        getEpics(),
+        getStories(),
+        getPods(),
+        getProductOwners(),
+        getChangelog(),
+      ]);
+      dispatch({
+        type: 'LOAD_DATA',
+        payload: {
+          initiatives: initiativesRaw.map(mapInitiative),
+          epics: epicsRaw.map(mapEpic),
+          stories: storiesRaw.map(mapStory),
+          pods: podsRaw.map(mapPod),
+          productOwners: productOwnersRaw.map(mapProductOwner),
+          changelog: changelogRaw.map(mapChangelog),
+          currentUserName: currentUser?.name || 'Sistema',
+        },
+      });
+    } catch (err) {
+      console.error('Failed to load data from API:', err);
+      dispatch({ type: 'SET_ERROR', payload: err instanceof Error ? err.message : 'Error cargando datos' });
+    }
+  }, [currentUser?.name]);
+
+  // Fetch on mount
+  useEffect(() => {
+    reload();
+  }, []);
+
+  // Persist new changelog entries to backend (deduped)
+  const persistedIdsRef = useRef(new Set<string>());
+  useEffect(() => {
+    const newEntries = state.changelog.filter(
+      (e) => e.id.startsWith('cl-auto-') && !persistedIdsRef.current.has(e.id),
+    );
+    for (const entry of newEntries) {
+      persistedIdsRef.current.add(entry.id);
+      apiCreateChangelog({
+        entityType: entry.entityType,
+        entityId: entry.entityId,
+        entityTitle: entry.entityTitle,
+        action: entry.action,
+        field: entry.field ?? undefined,
+        oldValue: entry.oldValue ?? undefined,
+        newValue: entry.newValue ?? undefined,
+      }).catch(() => {});
+    }
+  }, [state.changelog, currentUser]);
 
   const filteredStories = useMemo(() => {
     const { filters, stories } = state;
@@ -702,8 +872,8 @@ export function ProyectosProvider({ children }: { children: ReactNode }) {
   }, [state.initiatives, state.epics, state.stories]);
 
   const value = useMemo(
-    () => ({ state, dispatch, filteredStories, filteredEpics, epicsWithRelations, matrizRows, stats }),
-    [state, dispatch, filteredStories, filteredEpics, epicsWithRelations, matrizRows, stats]
+    () => ({ state, dispatch, reload, filteredStories, filteredEpics, epicsWithRelations, matrizRows, stats }),
+    [state, dispatch, reload, filteredStories, filteredEpics, epicsWithRelations, matrizRows, stats]
   );
 
   return (

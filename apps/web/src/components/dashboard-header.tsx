@@ -7,11 +7,13 @@ import { Button } from "@/components/ui/button"
 import { ThemeToggle } from "@/components/theme-toggle"
 import { useBreadcrumb } from "@/context/BreadcrumbContext"
 import { useHeaderActions } from "@/context/HeaderActionsContext"
+import { useAuthContext } from "@/context/AuthContext"
 
 export function DashboardHeader() {
   const { toggleSidebar } = useSidebar()
   const { breadcrumb } = useBreadcrumb()
   const { actions } = useHeaderActions()
+  const { currentUser } = useAuthContext()
 
   return (
     <header className="sticky top-0 z-50 w-full border-b bg-background/95 backdrop-blur supports-[backdrop-filter]:bg-background/60">
@@ -35,12 +37,14 @@ export function DashboardHeader() {
         {/* Right: Page-injected actions + Theme Toggle */}
         <div className="flex items-center gap-1">
           {actions}
-          <Button variant="ghost" size="icon" asChild className="hover:bg-accent shrink-0">
-            <Link href="/factory/settings">
-              <Settings className="h-5 w-5" />
-              <span className="sr-only">Configuración</span>
-            </Link>
-          </Button>
+          {currentUser?.role === 'alta_gerencia' && (
+            <Button variant="ghost" size="icon" asChild className="hover:bg-accent shrink-0">
+              <Link href="/factory/settings">
+                <Settings className="h-5 w-5" />
+                <span className="sr-only">Configuración</span>
+              </Link>
+            </Button>
+          )}
           <ThemeToggle />
         </div>
       </div>

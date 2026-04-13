@@ -5,6 +5,7 @@ import { UserRole, Permission, ROLE_PERMISSIONS, TeamMember } from '@cenzontle/s
 import { auth0 } from '@/lib/auth0';
 import {
   fetchAllUsers,
+  fetchUserRole,
   createUser,
   updateUserRole,
   blockUser,
@@ -26,7 +27,16 @@ async function requirePermission(permission: Permission): Promise<string> {
   const session = await auth0.getSession();
   if (!session?.user) throw new Error('Not authenticated');
 
-  const role = (session.user['https://cenzontle.app/role'] as UserRole) || UserRole.Viewer;
+  // Fast path: leer rol del JWT claim (funciona si el Post-Login Action está configurado)
+  let role = session.user['https://cenzontle.app/role'] as UserRole | undefined;
+
+  // Fallback: si el claim no viene en el JWT (action no configurada, binding perdido,
+  // o cualquier otro issue de Auth0), leer directamente del Management API.
+  // Esto hace 1 API call pero se cachea por 5 minutos.
+  if (!role) {
+    role = await fetchUserRole(session.user.sub as string);
+  }
+
   const permissions = ROLE_PERMISSIONS[role] ?? [];
 
   if (!permissions.includes(permission)) {

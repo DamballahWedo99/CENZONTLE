@@ -87,6 +87,36 @@ function mapToTeamMember(u: Auth0User): TeamMember {
   };
 }
 
+/**
+ * Obtiene el rol de un usuario directamente del app_metadata en Auth0.
+ * Usado como fallback cuando el Post-Login Action no inyecta los claims
+ * custom en el JWT (ej. action no configurada, binding perdido, etc.).
+ * Cachea por 5 minutos para no hacer un API call por cada permission check.
+ */
+const roleCache = new Map<string, { role: UserRole; expiresAt: number }>();
+
+export async function fetchUserRole(userId: string): Promise<UserRole> {
+  const cached = roleCache.get(userId);
+  if (cached && cached.expiresAt > Date.now()) return cached.role;
+
+  try {
+    const user = await mgmtFetch<Auth0User>(
+      `/users/${encodeURIComponent(userId)}?fields=app_metadata`,
+    );
+    const roleClaim = user.app_metadata?.role;
+    const role =
+      roleClaim && VALID_ROLES.includes(roleClaim)
+        ? (roleClaim as UserRole)
+        : UserRole.Viewer;
+
+    roleCache.set(userId, { role, expiresAt: Date.now() + 5 * 60 * 1000 });
+    return role;
+  } catch (err) {
+    console.error('[fetchUserRole] Failed to fetch role from Management API:', err);
+    return UserRole.Viewer;
+  }
+}
+
 export async function fetchAllUsers(): Promise<TeamMember[]> {
   const users = await mgmtFetch<Auth0User[]>(
     '/users?per_page=100&include_totals=false&sort=created_at:-1',

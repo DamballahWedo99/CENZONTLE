@@ -2,7 +2,9 @@
 
 import { useState, useMemo, useCallback } from 'react';
 import { useRouter } from 'next/navigation';
+import { toast } from 'sonner';
 import { useProyectos } from '@/context/ProyectosContext';
+import { updateStory as apiUpdateStory, deleteStory as apiDeleteStory } from '@/lib/api/stories';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import {
@@ -299,35 +301,75 @@ export function HistoriasList() {
     setEditingStoryId(null);
   }, []);
 
-  const saveEditing = useCallback(() => {
+  const saveEditing = useCallback(async () => {
     if (!editingStoryId || !formData.title.trim()) return;
-    dispatch({
-      type: 'UPDATE_STORY',
-      payload: {
-        id: editingStoryId,
-        changes: {
-          title: formData.title.trim(),
-          description: formData.po.userStory.trim(),
-          storyPoints: formData.storyPoints,
-          status: formData.status,
-          podId: formData.podId,
-          productOwnerId: formData.productOwnerId || null,
-          labels: formData.labels,
-          po: {
-            ...formData.po,
-            acceptanceCriteria: formData.po.acceptanceCriteria.filter((c) => c.trim()),
-          },
-          technical: {
-            ...formData.technical,
-            validations: formData.technical.validations.filter((v) => v.trim()),
-            errorHandling: formData.technical.errorHandling.filter((e) => e.trim()),
-            implementationChecklist: formData.technical.implementationChecklist.filter((c) => c.trim()),
-          },
-          qa: formData.qa,
+
+    const cleanedPO = {
+      ...formData.po,
+      acceptanceCriteria: formData.po.acceptanceCriteria.filter((c: string) => c.trim()),
+    };
+    const cleanedTechnical = {
+      ...formData.technical,
+      validations: formData.technical.validations.filter((v: string) => v.trim()),
+      errorHandling: formData.technical.errorHandling.filter((e: string) => e.trim()),
+      implementationChecklist: formData.technical.implementationChecklist.filter((c: string) => c.trim()),
+    };
+
+    const poForApi = {
+      background: cleanedPO.background,
+      objective: cleanedPO.objective,
+      userStory: cleanedPO.userStory,
+      whatHowWhen: typeof (cleanedPO as any).whatHowWhen === 'string'
+        ? (cleanedPO as any).whatHowWhen
+        : [
+            (cleanedPO as any).whatHowWhen?.what,
+            (cleanedPO as any).whatHowWhen?.how,
+            (cleanedPO as any).whatHowWhen?.when,
+          ].filter(Boolean).join(' / '),
+      acceptanceCriteria: cleanedPO.acceptanceCriteria.join('\n'),
+      additionalNotes: cleanedPO.additionalNotes,
+    };
+
+    try {
+      await apiUpdateStory(editingStoryId, {
+        title: formData.title.trim(),
+        status: formData.status as string,
+        storyPoints: formData.storyPoints,
+        podId: formData.podId,
+        productOwnerId: formData.productOwnerId || undefined,
+        labels: formData.labels,
+        po: poForApi,
+        technical: cleanedTechnical,
+        qa: {
+          testingStrategy: formData.qa.testingStrategy,
+          linkedQAMatrixId: formData.qa.linkedQAMatrixId ?? undefined,
         },
-      },
-    });
-    setEditingStoryId(null);
+      });
+
+      dispatch({
+        type: 'UPDATE_STORY',
+        payload: {
+          id: editingStoryId,
+          changes: {
+            title: formData.title.trim(),
+            description: formData.po.userStory.trim(),
+            storyPoints: formData.storyPoints,
+            status: formData.status,
+            podId: formData.podId,
+            productOwnerId: formData.productOwnerId || null,
+            labels: formData.labels,
+            po: cleanedPO,
+            technical: cleanedTechnical,
+            qa: formData.qa,
+          },
+        },
+      });
+
+      toast.success('Historia actualizada');
+      setEditingStoryId(null);
+    } catch (err: any) {
+      toast.error(err.message || 'Error al actualizar historia');
+    }
   }, [editingStoryId, formData, dispatch]);
 
   // --- Labels ---
@@ -825,7 +867,7 @@ export function HistoriasList() {
         <SortHeader field="trackerKey">Key</SortHeader>
         <SortHeader field="title">Título</SortHeader>
         <div>Épica</div>
-        <div>POD</div>
+        <div>Célula</div>
         <div>Product Owner</div>
         <SortHeader field="status">Status</SortHeader>
         <SortHeader field="storyPoints">SP</SortHeader>
@@ -909,11 +951,17 @@ export function HistoriasList() {
                             <Button
                               size="sm"
                               variant="ghost"
-                              onClick={() => {
-                                dispatch({ type: 'DELETE_STORY', payload: { id: story.id } });
-                                setDeleteConfirmId(null);
-                                if (editingStoryId === story.id) setEditingStoryId(null);
-                                if (expandedStoryId === story.id) setExpandedStoryId(null);
+                              onClick={async () => {
+                                try {
+                                  await apiDeleteStory(story.id);
+                                  dispatch({ type: 'DELETE_STORY', payload: { id: story.id } });
+                                  toast.success('Historia eliminada');
+                                  setDeleteConfirmId(null);
+                                  if (editingStoryId === story.id) setEditingStoryId(null);
+                                  if (expandedStoryId === story.id) setExpandedStoryId(null);
+                                } catch (err: any) {
+                                  toast.error(err.message || 'Error al eliminar historia');
+                                }
                               }}
                               className="h-7 w-7 p-0 text-red-500 hover:text-red-600 hover:bg-red-500/10"
                               title="Confirmar eliminación"

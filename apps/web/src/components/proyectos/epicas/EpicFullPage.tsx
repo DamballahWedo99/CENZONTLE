@@ -5,7 +5,9 @@ import { useRouter, useSearchParams } from 'next/navigation';
 import Link from 'next/link';
 import { useProyectos } from '@/context/ProyectosContext';
 import { useBreadcrumb } from '@/context/BreadcrumbContext';
-import { useHeaderActions } from '@/context/HeaderActionsContext';
+import { updateEpic as apiUpdateEpic } from '@/lib/api/epics';
+import { createStory as apiCreateStory, updateStory as apiUpdateStory, deleteStory as apiDeleteStory } from '@/lib/api/stories';
+import { toast } from 'sonner';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -36,8 +38,6 @@ import { EpicDocuments } from './EpicDocuments';
 import { EpicDependencies } from './EpicDependencies';
 import { IntegrationSettingsDialog } from '../settings/IntegrationSettingsDialog';
 import { EpicStoryList } from './EpicStoryList';
-import { CopilotSidebar } from '../shared/CopilotSidebar';
-import { getSuggestedPrompts, type CopilotContext } from '@/lib/doc-copilot-agent';
 import { generateStories } from '@/lib/story-agent';
 import {
   Calendar,
@@ -60,7 +60,6 @@ import {
   MessageSquare,
   ListChecks,
   ClipboardCheck,
-  Brain,
   GitBranch,
   Upload,
 } from 'lucide-react';
@@ -256,6 +255,7 @@ function EpicFullPageInner({ epicId }: { epicId: string }) {
   const router = useRouter();
   const searchParams = useSearchParams();
   const { state, dispatch } = useProyectos();
+  const { setBreadcrumb } = useBreadcrumb();
 
   const rawEpic = useMemo(() => state.epics.find((e) => e.id === epicId) ?? null, [epicId, state.epics]);
 
@@ -285,8 +285,6 @@ function EpicFullPageInner({ epicId }: { epicId: string }) {
   const [showRejectForm, setShowRejectForm] = useState(false);
   const [activeTab, setActiveTab] = useState(() => searchParams.get('tab') ?? 'definicion');
   const [showChecklist, setShowChecklist] = useState(false);
-  const [copilotOpen, setCopilotOpen] = useState(false);
-  const [copilotWidth, setCopilotWidth] = useState(420);
 
   const epicProductOwners = useMemo(() => {
     if (!epic) return [];
@@ -429,6 +427,25 @@ function EpicFullPageInner({ epicId }: { epicId: string }) {
     setActiveTab(tabMap[stepId] ?? 'definicion');
   };
 
+  // Inject breadcrumb into app header
+  useEffect(() => {
+    if (!epic) return;
+    setBreadcrumb(
+      <div className="flex items-center gap-2 text-sm">
+        <Link href="/proyectos" className="text-muted-foreground hover:text-foreground transition-colors">
+          Proyectos
+        </Link>
+        <span className="text-muted-foreground/40">/</span>
+        <Link href={`/proyectos/iniciativas/${epic.initiative.id}`} className="text-muted-foreground hover:text-foreground transition-colors truncate max-w-[200px]">
+          {epic.initiative.name}
+        </Link>
+        <span className="text-muted-foreground/40">/</span>
+        <span className="text-foreground truncate max-w-[300px]">{epic.title}</span>
+      </div>
+    );
+    return () => setBreadcrumb(null);
+  }, [epic, setBreadcrumb]);
+
   if (!epic) {
     return (
       <div className="flex flex-col items-center justify-center py-20 text-muted-foreground">
@@ -462,7 +479,7 @@ function EpicFullPageInner({ epicId }: { epicId: string }) {
     setIsEditing(true);
   };
 
-  const handleSave = () => {
+  const handleSave = async () => {
     const changes: Record<string, unknown> = {};
     if (editTitle !== epic.title) changes.title = editTitle;
     if (editDescription !== epic.description) changes.description = editDescription;
@@ -481,10 +498,29 @@ function EpicFullPageInner({ epicId }: { epicId: string }) {
         }
       }
     }
-    if (Object.keys(changes).length > 0) {
-      dispatch({ type: 'UPDATE_EPIC', payload: { id: epic.id, changes } });
+
+    if (Object.keys(changes).length === 0) {
+      setIsEditing(false);
+      return;
     }
+
+    // Optimistic update local primero para UX responsiva
+    dispatch({ type: 'UPDATE_EPIC', payload: { id: epic.id, changes } });
     setIsEditing(false);
+
+    // Persistir al backend (PG + vault). Si falla, revertir el optimistic update.
+    try {
+      await apiUpdateEpic(epic.id, changes);
+      toast.success('Épica actualizada');
+    } catch (err: any) {
+      // Rollback: regresar los valores originales al state local
+      const rollback: Record<string, unknown> = {};
+      for (const key of Object.keys(changes)) {
+        rollback[key] = (epic as any)[key];
+      }
+      dispatch({ type: 'UPDATE_EPIC', payload: { id: epic.id, changes: rollback } });
+      toast.error(err?.message || 'Error al guardar la épica');
+    }
   };
 
   const updateBusinessField = (key: BusinessFieldKey, value: string) => {
@@ -528,84 +564,11 @@ function EpicFullPageInner({ epicId }: { epicId: string }) {
     setShowRejectForm(false);
   };
 
-  // Inject breadcrumb into app header
-  const { setBreadcrumb } = useBreadcrumb();
-  useEffect(() => {
-    setBreadcrumb(
-      <div className="flex items-center gap-2 text-sm">
-        <Link href="/proyectos" className="text-muted-foreground hover:text-foreground transition-colors">
-          Proyectos
-        </Link>
-        <span className="text-muted-foreground/40">/</span>
-        <Link href={`/proyectos/iniciativas/${epic.initiative.id}`} className="text-muted-foreground hover:text-foreground transition-colors truncate max-w-[200px]">
-          {epic.initiative.name}
-        </Link>
-        <span className="text-muted-foreground/40">/</span>
-        <span className="text-foreground truncate max-w-[300px]">{epic.title}</span>
-      </div>
-    );
-    return () => setBreadcrumb(null);
-  }, [epic.title, epic.initiative.id, epic.initiative.name, setBreadcrumb]);
-
-  // Inject copilot toggle into app header
-  const { setActions } = useHeaderActions();
-  useEffect(() => {
-    setActions(
-      <Button
-        variant="ghost"
-        size="icon"
-        onClick={() => setCopilotOpen(prev => !prev)}
-        className={`relative h-9 w-9 rounded-lg transition-colors ${
-          copilotOpen
-            ? 'bg-indigo-100 text-indigo-700 hover:bg-indigo-200 dark:bg-indigo-950/40 dark:text-indigo-300 dark:hover:bg-indigo-950/60'
-            : 'text-muted-foreground hover:text-foreground hover:bg-accent'
-        }`}
-        aria-label="Toggle Doc Copilot"
-      >
-        <Brain className="h-5 w-5" />
-        {copilotOpen && (
-          <span className="absolute top-1.5 right-1.5 h-1.5 w-1.5 rounded-full bg-indigo-500" />
-        )}
-      </Button>
-    );
-    return () => setActions(null);
-  }, [copilotOpen, setActions]);
-
-  // Make parent <main> a non-scrolling container so we control scroll inside our flex layout
-  useEffect(() => {
-    const main = document.querySelector('main');
-    if (!main) return;
-    // overflow:hidden prevents main's own scrollbar; h-full + min-h-0 lets
-    // this component's flex children resolve percentage/flex heights correctly.
-    main.style.overflow = 'hidden';
-    main.style.height = '100%';
-    main.style.minHeight = '0';
-    return () => {
-      main.style.overflow = '';
-      main.style.height = '';
-      main.style.minHeight = '';
-    };
-  }, []);
-
-  // Push the entire layout (header + main) left when sidebar is open
-  useEffect(() => {
-    const main = document.querySelector('main');
-    const layoutWrapper = main?.parentElement;
-    if (!layoutWrapper) return;
-    const mr = copilotOpen ? `${copilotWidth}px` : '0px';
-    layoutWrapper.style.transition = 'margin-right 300ms ease-in-out';
-    layoutWrapper.style.marginRight = mr;
-    return () => {
-      layoutWrapper.style.transition = '';
-      layoutWrapper.style.marginRight = '';
-    };
-  }, [copilotOpen, copilotWidth]);
-
   return (
     <div className="h-full min-h-0">
       {/* Scrollable content */}
       <div className="h-full min-h-0 overflow-y-auto">
-        <div className={`mx-auto px-6 py-8 transition-[max-width] duration-300 ease-in-out ${copilotOpen ? 'max-w-5xl' : 'max-w-6xl'}`}>
+        <div className="mx-auto px-6 py-8 max-w-6xl">
         {/* Title + metadata header */}
         <div className="mb-8">
           <div className="flex items-start gap-2">
@@ -964,9 +927,72 @@ function EpicFullPageInner({ epicId }: { epicId: string }) {
                   pods={state.pods}
                   productOwners={state.productOwners}
                   qaMatrix={rawEpic!.qaMatrix}
-                  onCreateStory={(story) => dispatch({ type: 'CREATE_STORY', payload: story })}
-                  onUpdateStory={(id, changes) => dispatch({ type: 'UPDATE_STORY', payload: { id, changes } })}
-                  onDeleteStory={(id) => dispatch({ type: 'DELETE_STORY', payload: { id } })}
+                  onCreateStory={async (story) => {
+                    try {
+                      const po: any = story.po ?? {};
+                      const created = await apiCreateStory({
+                        title: story.title,
+                        epicId: story.epicId,
+                        podId: story.podId,
+                        status: story.status as string,
+                        storyPoints: story.storyPoints,
+                        productOwnerId: story.productOwnerId ?? undefined,
+                        sprintId: story.sprintId ?? undefined,
+                        labels: story.labels ?? [],
+                        po: {
+                          background: po.background ?? '',
+                          objective: po.objective ?? '',
+                          userStory: po.userStory ?? '',
+                          whatHowWhen: typeof po.whatHowWhen === 'string' ? po.whatHowWhen : '',
+                          acceptanceCriteria: Array.isArray(po.acceptanceCriteria) ? po.acceptanceCriteria.join('\n') : (po.acceptanceCriteria ?? ''),
+                          additionalNotes: po.additionalNotes ?? '',
+                        },
+                      });
+                      dispatch({ type: 'CREATE_STORY', payload: { ...story, id: created.id } });
+                      toast.success('Historia creada');
+                    } catch (err: any) {
+                      toast.error(err.message || 'Error al crear historia');
+                    }
+                  }}
+                  onUpdateStory={async (id, changes) => {
+                    try {
+                      const po: any = (changes as any).po ?? {};
+                      const technical: any = (changes as any).technical ?? {};
+                      const qa: any = (changes as any).qa ?? {};
+                      await apiUpdateStory(id, {
+                        title: changes.title,
+                        status: changes.status as string | undefined,
+                        storyPoints: changes.storyPoints,
+                        podId: changes.podId,
+                        productOwnerId: changes.productOwnerId ?? undefined,
+                        sprintId: changes.sprintId ?? undefined,
+                        labels: changes.labels,
+                        po: Object.keys(po).length ? {
+                          background: po.background,
+                          objective: po.objective,
+                          userStory: po.userStory,
+                          whatHowWhen: typeof po.whatHowWhen === 'string' ? po.whatHowWhen : '',
+                          acceptanceCriteria: Array.isArray(po.acceptanceCriteria) ? po.acceptanceCriteria.join('\n') : po.acceptanceCriteria,
+                          additionalNotes: po.additionalNotes,
+                        } : undefined,
+                        technical: Object.keys(technical).length ? technical : undefined,
+                        qa: Object.keys(qa).length ? qa : undefined,
+                      });
+                      dispatch({ type: 'UPDATE_STORY', payload: { id, changes } });
+                      toast.success('Historia actualizada');
+                    } catch (err: any) {
+                      toast.error(err.message || 'Error al actualizar historia');
+                    }
+                  }}
+                  onDeleteStory={async (id) => {
+                    try {
+                      await apiDeleteStory(id);
+                      dispatch({ type: 'DELETE_STORY', payload: { id } });
+                      toast.success('Historia eliminada');
+                    } catch (err: any) {
+                      toast.error(err.message || 'Error al eliminar historia');
+                    }
+                  }}
                 />
 
                 {/* PO Approval Section */}
@@ -1115,10 +1141,26 @@ function EpicFullPageInner({ epicId }: { epicId: string }) {
                 <EpicDocuments
                   epic={rawEpic!}
                   documents={rawEpic!.documents}
-                  onDocumentGenerated={(doc) => dispatch({ type: 'ADD_EPIC_DOCUMENT', payload: { epicId: rawEpic!.id, document: doc } })}
-                  onDocumentUpdated={(doc) => dispatch({ type: 'UPDATE_EPIC_DOCUMENT', payload: { epicId: rawEpic!.id, document: doc } })}
-                  onDocumentDeleted={(docId) => dispatch({ type: 'DELETE_EPIC_DOCUMENT', payload: { epicId: rawEpic!.id, documentId: docId } })}
-                  onDocumentAdded={(doc) => dispatch({ type: 'ADD_EPIC_DOCUMENT', payload: { epicId: rawEpic!.id, document: doc } })}
+                  onDocumentGenerated={async (doc) => {
+                    const newDocs = [...rawEpic!.documents, doc];
+                    await apiUpdateEpic(rawEpic!.id, { documents: newDocs }).catch(() => {});
+                    dispatch({ type: 'ADD_EPIC_DOCUMENT', payload: { epicId: rawEpic!.id, document: doc } });
+                  }}
+                  onDocumentUpdated={async (doc) => {
+                    const newDocs = rawEpic!.documents.map((d) => d.id === doc.id ? doc : d);
+                    await apiUpdateEpic(rawEpic!.id, { documents: newDocs }).catch(() => {});
+                    dispatch({ type: 'UPDATE_EPIC_DOCUMENT', payload: { epicId: rawEpic!.id, document: doc } });
+                  }}
+                  onDocumentDeleted={async (docId) => {
+                    const newDocs = rawEpic!.documents.filter((d) => d.id !== docId);
+                    await apiUpdateEpic(rawEpic!.id, { documents: newDocs }).catch(() => {});
+                    dispatch({ type: 'DELETE_EPIC_DOCUMENT', payload: { epicId: rawEpic!.id, documentId: docId } });
+                  }}
+                  onDocumentAdded={async (doc) => {
+                    const newDocs = [...rawEpic!.documents, doc];
+                    await apiUpdateEpic(rawEpic!.id, { documents: newDocs }).catch(() => {});
+                    dispatch({ type: 'ADD_EPIC_DOCUMENT', payload: { epicId: rawEpic!.id, document: doc } });
+                  }}
                 />
               </TabsContent>
 
@@ -1146,11 +1188,22 @@ function EpicFullPageInner({ epicId }: { epicId: string }) {
                       const isStoryChange = entry.entityType === ChangelogEntityType.Story;
                       const fn = humanizeFieldName(entry.field);
 
+                      // Para acciones Created sobre la propia épica (field=null), el newValue
+                      // es el título de la épica — redundante dentro de su propia vista.
+                      // Para Created sobre sub-entidades (documento, diagrama, etc.) el newValue
+                      // es el nombre del artefacto — sí vale la pena mostrarlo.
+                      const isEpicSelfCreation =
+                        entry.action === ChangelogAction.Created &&
+                        entry.entityType === ChangelogEntityType.Epic &&
+                        !entry.field;
+                      const showNewValueLine =
+                        !entry.oldValue && entry.newValue && !isEpicSelfCreation;
+
                       return (
                         <div key={entry.id} className="py-3 first:pt-0 last:pb-0">
                           <div className="flex items-baseline justify-between gap-3">
                             <p className="text-sm">
-                              <span className="font-medium">{entry.changedBy.name.split(' ')[0]}</span>
+                              <span className="font-medium">{entry.changedBy.name}</span>
                               <span className="text-muted-foreground"> {verb}{fn ? ` ${fn}` : ''}</span>
                               {isStoryChange && (
                                 <span className="text-muted-foreground"> en <span className="text-foreground/70">{entry.entityTitle}</span></span>
@@ -1169,8 +1222,10 @@ function EpicFullPageInner({ epicId }: { epicId: string }) {
                               <ValueChip field={entry.field} value={entry.newValue} variant="new" />
                             </div>
                           )}
-                          {!entry.oldValue && entry.newValue && entry.action !== ChangelogAction.Created && (
-                            <p className="text-xs text-muted-foreground mt-1">{entry.newValue}</p>
+                          {showNewValueLine && (
+                            <p className="text-xs text-muted-foreground mt-1 whitespace-pre-wrap break-words">
+                              {entry.newValue}
+                            </p>
                           )}
                         </div>
                       );
@@ -1183,46 +1238,6 @@ function EpicFullPageInner({ epicId }: { epicId: string }) {
         </div>
       </div>
 
-      {/* Copilot Sidebar — in-flow flex child */}
-      <CopilotSidebar
-        open={copilotOpen}
-        onOpenChange={setCopilotOpen}
-        context={{
-          entityType: 'epic',
-          entityTitle: rawEpic!.title,
-          entityDescription: rawEpic!.description,
-          entityLabel: rawEpic!.tracker?.externalKey || '',
-          fields: {
-            scopeDescription: rawEpic!.scopeDescription || '',
-            acceptanceCriteria: rawEpic!.acceptanceCriteria || '',
-            technologicalImprovements: rawEpic!.technologicalImprovements || '',
-            thirdPartyDependencies: rawEpic!.thirdPartyDependencies || '',
-            teamsInvolved: rawEpic!.teamsInvolved || '',
-            impactSabreLevel: rawEpic!.impactSabreLevel || '',
-            impactedChannels: rawEpic!.impactedChannels || '',
-            impactedFlows: rawEpic!.impactedFlows || '',
-            qualitativeBenefits: rawEpic!.qualitativeBenefits || '',
-            quantitativeBenefits: rawEpic!.quantitativeBenefits || '',
-            benefitsMeasurement: rawEpic!.benefitsMeasurement || '',
-            businessPriority: rawEpic!.businessPriority || '',
-            startDate: rawEpic!.startDate || '',
-            targetDate: rawEpic!.targetDate || '',
-            trackerKey: rawEpic!.tracker?.externalKey || '',
-          },
-          items: state.stories.filter((s) => s.epicId === rawEpic!.id).map((s) => s.title),
-          diagramTypes: rawEpic!.diagrams?.map((d) => d.type) ?? [],
-          existingDocs: rawEpic!.documents.map((d) => d.name),
-        }}
-        suggestedPrompts={getSuggestedPrompts('epic')}
-        title="Copilot de Épica"
-        description="Pregunta sobre historias, arquitectura, QA o genera documentación basada en el contexto completo de la épica."
-        contextLabel={rawEpic!.tracker?.externalKey ? `${rawEpic!.tracker.externalKey} · ${rawEpic!.title}` : rawEpic!.title}
-        onDocumentAccepted={(doc) =>
-          dispatch({ type: 'ADD_EPIC_DOCUMENT', payload: { epicId: rawEpic!.id, document: doc } })
-        }
-        width={copilotWidth}
-        onWidthChange={setCopilotWidth}
-      />
     </div>
   );
 }

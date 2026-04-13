@@ -55,7 +55,7 @@ const fieldLabels: Record<string, string> = {
   targetDate: 'fecha objetivo',
   storyPoints: 'story points',
   sprintId: 'sprint',
-  podId: 'POD',
+  podId: 'Célula',
   productOwnerId: 'product owner',
   updatedAt: 'última actualización',
   createdAt: 'fecha de creación',
@@ -572,7 +572,7 @@ export function EpicDetail({ epic, onClose }: EpicDetailProps) {
                       </span>
                     </div>
                     <div>
-                      <span className="text-[11px] text-muted-foreground block mb-0.5">PODs asignados</span>
+                      <span className="text-[11px] text-muted-foreground block mb-0.5">Células asignadas</span>
                       <div className="flex flex-wrap gap-1.5 mt-0.5">
                         {epic.pods.map((pod) => (
                           <PodBadge key={pod.id} name={pod.name} color={pod.color} />

@@ -1,6 +1,6 @@
 'use client';
 
-import React, { useState, useRef, useEffect } from 'react';
+import React, { useState, useRef, useEffect, useMemo } from 'react';
 import {
   ChevronRight, ChevronDown, FileText, Folder, FolderOpen,
   Plus, FolderPlus, MoreHorizontal, Pencil, Trash2, AlertTriangle,
@@ -8,11 +8,6 @@ import {
 } from 'lucide-react';
 import { DefinicionNode } from '@/types/definiciones';
 import { useDefiniciones, type SortOption } from '@/context/DefinicionesContext';
-import {
-  DndContext, DragOverlay, useDraggable, useDroppable,
-  PointerSensor, useSensor, useSensors,
-  type DragStartEvent, type DragEndEvent,
-} from '@dnd-kit/core';
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -151,13 +146,10 @@ function RenameInput({ value, onChange, onSubmit, onCancel }: {
   );
 }
 
-function RootDropZone({ children, onClick }: { children: React.ReactNode; onClick: () => void }) {
-  const { setNodeRef, isOver } = useDroppable({ id: 'drop-root' });
-
+function TreeContainer({ children, onClick }: { children: React.ReactNode; onClick: () => void }) {
   return (
     <div
-      ref={setNodeRef}
-      className={`flex-1 overflow-y-auto py-1 ${isOver ? 'bg-primary/5' : ''}`}
+      className="flex-1 overflow-y-auto py-1"
       onClick={onClick}
     >
       {children}
@@ -172,62 +164,15 @@ function TreeNode({ node, depth, inlineInput, setInlineInput, onRequestDelete }:
   setInlineInput: (input: InlineInput | null) => void;
   onRequestDelete: (target: DeleteTarget) => void;
 }) {
-  const { state, selectNode, toggleFolder, addFolder, addDocument, renameNode, expandFolder } = useDefiniciones();
+  const { state, selectNode, toggleFolder, addFolder, addDocument, renameNode, expandFolder, getEffectiveAccessForNode } = useDefiniciones();
   const [isRenaming, setIsRenaming] = useState(false);
   const [renameValue, setRenameValue] = useState(node.name);
+  const [menuOpen, setMenuOpen] = useState(false);
   const skipNextClickRef = useRef(false);
 
   const isExpanded = state.expandedFolders.has(node.id);
   const isSelected = state.selectedId === node.id;
   const isFolder = node.type === 'folder';
-
-  const dropRef = useRef<HTMLDivElement>(null);
-  const [dropPosition, setDropPosition] = useState<'before' | 'inside' | 'after' | null>(null);
-
-  const { attributes, listeners, setNodeRef: setDragRef, isDragging } = useDraggable({
-    id: node.id,
-    data: { node },
-  });
-
-  const { setNodeRef: setDropNodeRef, isOver } = useDroppable({
-    id: `drop-${node.id}`,
-    data: { node },
-  });
-
-  // Combine drop refs
-  const setDropRefCombined = (el: HTMLDivElement | null) => {
-    (dropRef as React.MutableRefObject<HTMLDivElement | null>).current = el;
-    setDropNodeRef(el);
-  };
-
-  // Calculate drop position based on cursor position within the node
-  useEffect(() => {
-    if (!isOver || !dropRef.current) {
-      setDropPosition(null);
-      return;
-    }
-
-    const el = dropRef.current;
-    const handlePointerMove = (e: PointerEvent) => {
-      const rect = el.getBoundingClientRect();
-      const y = e.clientY - rect.top;
-      const ratio = y / rect.height;
-
-      if (isFolder) {
-        // Folders: top 25% = before, middle 50% = inside, bottom 25% = after
-        if (ratio < 0.25) setDropPosition('before');
-        else if (ratio > 0.75) setDropPosition('after');
-        else setDropPosition('inside');
-      } else {
-        // Documents: top 50% = before, bottom 50% = after
-        if (ratio < 0.5) setDropPosition('before');
-        else setDropPosition('after');
-      }
-    };
-
-    window.addEventListener('pointermove', handlePointerMove);
-    return () => window.removeEventListener('pointermove', handlePointerMove);
-  }, [isOver, isFolder]);
 
   const handleClick = (e: React.MouseEvent) => {
     e.stopPropagation();
@@ -276,27 +221,14 @@ function TreeNode({ node, depth, inlineInput, setInlineInput, onRequestDelete }:
   };
 
   return (
-    <div ref={setDropRefCombined} className="relative">
-      {/* Reorder indicator line — before */}
-      {isOver && dropPosition === 'before' && (
-        <div className="absolute top-0 left-2 right-2 h-0.5 bg-primary rounded-full shadow-[0_0_6px_var(--color-primary)] z-10" />
-      )}
-      {/* Reorder indicator line — after */}
-      {isOver && dropPosition === 'after' && (
-        <div className="absolute bottom-0 left-2 right-2 h-0.5 bg-primary rounded-full shadow-[0_0_6px_var(--color-primary)] z-10" />
-      )}
+    <div className="relative">
       <div
-        ref={setDragRef}
         data-node-id={node.id}
         className={`group flex items-center gap-1 py-1 px-2 rounded-md cursor-pointer text-sm transition-colors
-          ${isSelected ? 'bg-sidebar-accent text-sidebar-accent-foreground' : 'hover:bg-muted/50'}
-          ${isDragging ? 'opacity-30' : ''}
-          ${isOver && dropPosition === 'inside' ? 'ring-1 ring-primary/50 bg-primary/10' : ''}
+          ${isSelected || menuOpen ? 'bg-sidebar-accent text-sidebar-accent-foreground' : 'hover:bg-muted/50'}
         `}
         style={{ paddingLeft: `${depth * 16 + 8}px` }}
         onClick={handleClick}
-        {...listeners}
-        {...attributes}
       >
         {isFolder ? (
           <span className="shrink-0 w-4 h-4 flex items-center justify-center text-muted-foreground">
@@ -324,14 +256,15 @@ function TreeNode({ node, depth, inlineInput, setInlineInput, onRequestDelete }:
           <span className="flex-1 truncate">{node.name}</span>
         )}
 
-        <DropdownMenu>
+        {(getEffectiveAccessForNode(node.id).level === 'editor' || getEffectiveAccessForNode(node.id).level === 'owner') && (
+        <DropdownMenu onOpenChange={setMenuOpen}>
           <DropdownMenuTrigger asChild onClick={e => e.stopPropagation()}>
-            <button className="shrink-0 opacity-0 group-hover:opacity-100 transition-opacity p-0.5 rounded hover:bg-muted">
+            <button className={`shrink-0 transition-opacity p-0.5 rounded hover:bg-muted ${menuOpen ? 'opacity-100' : 'opacity-0 group-hover:opacity-100'}`}>
               <MoreHorizontal className="h-3.5 w-3.5 text-muted-foreground" />
             </button>
           </DropdownMenuTrigger>
           <DropdownMenuContent align="start" className="w-48" onCloseAutoFocus={e => e.preventDefault()}>
-            {isFolder && (
+            {isFolder && (getEffectiveAccessForNode(node.id).level === 'editor' || getEffectiveAccessForNode(node.id).level === 'owner') && (
               <>
                 <DropdownMenuItem onClick={handleNewDocument} className={MENU_ITEM_CLASS}>
                   <Plus className="h-4 w-4 mr-2" />
@@ -341,23 +274,32 @@ function TreeNode({ node, depth, inlineInput, setInlineInput, onRequestDelete }:
                   <FolderPlus className="h-4 w-4 mr-2" />
                   Nueva carpeta
                 </DropdownMenuItem>
-                <DropdownMenuSeparator />
               </>
             )}
-            <DropdownMenuItem onClick={() => { suppressNextClick(); setRenameValue(node.name); setIsRenaming(true); }} className={MENU_ITEM_CLASS}>
-              <Pencil className="h-4 w-4 mr-2" />
-              Renombrar
-            </DropdownMenuItem>
-            <DropdownMenuSeparator />
-            <DropdownMenuItem
-              onClick={() => onRequestDelete({ id: node.id, name: node.name, isFolder })}
-              className="text-destructive focus:text-destructive focus:bg-muted"
-            >
-              <Trash2 className="h-4 w-4 mr-2" />
-              Eliminar
-            </DropdownMenuItem>
+            {(getEffectiveAccessForNode(node.id).level === 'editor' || getEffectiveAccessForNode(node.id).level === 'owner') && (
+              <>
+                {isFolder && <DropdownMenuSeparator />}
+                <DropdownMenuItem onClick={() => { suppressNextClick(); setRenameValue(node.name); setIsRenaming(true); }} className={MENU_ITEM_CLASS}>
+                  <Pencil className="h-4 w-4 mr-2" />
+                  Renombrar
+                </DropdownMenuItem>
+              </>
+            )}
+            {getEffectiveAccessForNode(node.id).level === 'owner' && (
+              <>
+                <DropdownMenuSeparator />
+                <DropdownMenuItem
+                  onClick={() => onRequestDelete({ id: node.id, name: node.name, isFolder })}
+                  className="text-destructive focus:text-destructive focus:bg-muted"
+                >
+                  <Trash2 className="h-4 w-4 mr-2" />
+                  Eliminar
+                </DropdownMenuItem>
+              </>
+            )}
           </DropdownMenuContent>
         </DropdownMenu>
+        )}
       </div>
 
       {isFolder && isExpanded && (
@@ -379,10 +321,26 @@ function TreeNode({ node, depth, inlineInput, setInlineInput, onRequestDelete }:
 }
 
 export function FolderTree() {
-  const { state, filteredTree, addFolder, addDocument, collapseAll, expandFolder, deleteNode, selectNode, moveNode, reorderNode, setSortBy } = useDefiniciones();
+  const { state, filteredTree, addFolder, addDocument, collapseAll, expandFolder, deleteNode, selectNode, setSortBy, getEffectiveAccessForNode: getAccess } = useDefiniciones();
+
+  // Los botones de crear se habilitan según el contexto actual:
+  // - Si hay un folder seleccionado → check acceso de ESE folder
+  // - Si hay un doc seleccionado → check acceso del parent folder
+  // - Si nada seleccionado → check si el vault default permite editor
+  const canCreate = useMemo(() => {
+    if (!state.selectedId) {
+      // Nada seleccionado: verificar si al menos un nodo raíz permite editor
+      return filteredTree.some((n) => {
+        const level = getAccess(n.id).level;
+        return level === 'editor' || level === 'owner';
+      });
+    }
+    // Verificar acceso del nodo seleccionado (o su padre si es documento)
+    const level = getAccess(state.selectedId).level;
+    return level === 'editor' || level === 'owner';
+  }, [state.selectedId, filteredTree, getAccess]);
   const [inlineInput, setInlineInput] = useState<InlineInput | null>(null);
   const [deleteTarget, setDeleteTarget] = useState<DeleteTarget | null>(null);
-  const [draggedNode, setDraggedNode] = useState<DefinicionNode | null>(null);
 
   useEffect(() => {
     if (!state.selectedId) return;
@@ -391,77 +349,6 @@ export function FolderTree() {
       el?.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
     });
   }, [state.selectedId]);
-
-  const sensors = useSensors(
-    useSensor(PointerSensor, { activationConstraint: { distance: 8 } }),
-  );
-
-  const handleDragStart = (event: DragStartEvent) => {
-    setDraggedNode(event.active.data.current?.node ?? null);
-  };
-
-  const handleDragEnd = (event: DragEndEvent) => {
-    setDraggedNode(null);
-    const { active, over } = event;
-    if (!over || !active) return;
-
-    const draggedId = active.id as string;
-    const rawOverId = over.id as string;
-
-    // Drop on root zone
-    if (rawOverId === 'drop-root') {
-      moveNode(draggedId, null);
-      return;
-    }
-
-    const overId = rawOverId.replace('drop-', '');
-    if (draggedId === overId) return;
-
-    const overNode = over.data.current?.node as DefinicionNode | undefined;
-    if (!overNode) return;
-
-    // Determine action based on cursor position within target node
-    const overEl = over.rect;
-    const pointerY = event.activatorEvent instanceof PointerEvent ? event.activatorEvent.clientY : 0;
-    // We use the drop data from the droppable — but since dropPosition is local state in TreeNode,
-    // we need to recalculate here based on the over rect
-    const rect = overEl;
-    const cursorY = (event as any).delta?.y ?? 0;
-
-    // Use the over element's rect to determine position
-    const overRect = over.rect;
-    const activeRect = active.rect.current.translated;
-    if (!activeRect || !overRect) {
-      // Fallback: move into folder or reorder
-      if (overNode.type === 'folder') {
-        moveNode(draggedId, overId);
-      } else {
-        reorderNode(draggedId, overId, 'after');
-      }
-      return;
-    }
-
-    const activeCenterY = activeRect.top + activeRect.height / 2;
-    const overTop = overRect.top;
-    const overHeight = overRect.height;
-    const ratio = (activeCenterY - overTop) / overHeight;
-
-    if (overNode.type === 'folder') {
-      if (ratio < 0.25) {
-        reorderNode(draggedId, overId, 'before');
-      } else if (ratio > 0.75) {
-        reorderNode(draggedId, overId, 'after');
-      } else {
-        moveNode(draggedId, overId);
-      }
-    } else {
-      if (ratio < 0.5) {
-        reorderNode(draggedId, overId, 'before');
-      } else {
-        reorderNode(draggedId, overId, 'after');
-      }
-    }
-  };
 
   const getSelectedFolder = (): { id: string; depth: number } | null => {
     const selectedId = state.selectedId;
@@ -512,7 +399,6 @@ export function FolderTree() {
   };
 
   return (
-    <DndContext sensors={sensors} onDragStart={handleDragStart} onDragEnd={handleDragEnd}>
     <TooltipProvider>
       <div className="flex flex-col h-full min-h-0">
         <div className="flex items-center justify-between px-3 py-2 border-b border-border/50">
@@ -564,24 +450,24 @@ export function FolderTree() {
             </DropdownMenu>
             <Tooltip>
               <TooltipTrigger asChild>
-                <Button variant="ghost" size="icon" className="h-6 w-6" onClick={handleNewDocument}>
+                <Button variant="ghost" size="icon" className="h-6 w-6" onClick={handleNewDocument} disabled={!canCreate}>
                   <Plus className="h-3.5 w-3.5" />
                 </Button>
               </TooltipTrigger>
-              <TooltipContent side="bottom">Nuevo documento</TooltipContent>
+              <TooltipContent side="bottom">{canCreate ? 'Nuevo documento' : 'Sin permisos para crear'}</TooltipContent>
             </Tooltip>
             <Tooltip>
               <TooltipTrigger asChild>
-                <Button variant="ghost" size="icon" className="h-6 w-6" onClick={handleNewFolder}>
+                <Button variant="ghost" size="icon" className="h-6 w-6" onClick={handleNewFolder} disabled={!canCreate}>
                   <FolderPlus className="h-3.5 w-3.5" />
                 </Button>
               </TooltipTrigger>
-              <TooltipContent side="bottom">Nueva carpeta</TooltipContent>
+              <TooltipContent side="bottom">{canCreate ? 'Nueva carpeta' : 'Sin permisos para crear'}</TooltipContent>
             </Tooltip>
           </div>
         </div>
 
-        <RootDropZone onClick={() => selectNode(null)}>
+        <TreeContainer onClick={() => selectNode(null)}>
           {filteredTree.length === 0 && !inlineInput ? (
             <div className="px-4 py-8 text-center text-muted-foreground text-sm">
               No se encontraron resultados
@@ -600,7 +486,7 @@ export function FolderTree() {
               )}
             </>
           )}
-        </RootDropZone>
+        </TreeContainer>
       </div>
 
       {/* Delete confirmation dialog */}
@@ -629,20 +515,6 @@ export function FolderTree() {
         </DialogContent>
       </Dialog>
     </TooltipProvider>
-
-    {/* Drag overlay */}
-    <DragOverlay dropAnimation={null}>
-      {draggedNode && (
-        <div className="flex items-center gap-1.5 py-1 px-3 bg-card border border-border rounded-md shadow-lg text-sm opacity-90">
-          {draggedNode.type === 'folder'
-            ? <Folder className="h-4 w-4 text-muted-foreground" />
-            : <FileText className="h-4 w-4 text-muted-foreground" />
-          }
-          <span>{draggedNode.name}</span>
-        </div>
-      )}
-    </DragOverlay>
-    </DndContext>
   );
 }
 

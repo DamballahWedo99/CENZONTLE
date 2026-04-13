@@ -25,11 +25,11 @@ interface InitiativeEconomicAnalysisProps {
   doneStories: UserStory[];
   totalPoints: number;
   donePoints: number;
-  onOpenCopilot: () => void;
-  analyses: AnalysisResponse[];
-  selectedAnalysisId: string | null;
-  onSelectAnalysis: (id: string) => void;
-  onDeleteAnalysis: (id: string) => void;
+  onOpenCopilot?: () => void;
+  analyses?: AnalysisResponse[];
+  selectedAnalysisId?: string | null;
+  onSelectAnalysis?: (id: string) => void;
+  onDeleteAnalysis?: (id: string) => void;
   globalVizPreference?: VisualizationType[];
 }
 
@@ -1109,8 +1109,8 @@ export function InitiativeEconomicAnalysis({
   totalPoints,
   donePoints,
   onOpenCopilot,
-  analyses,
-  selectedAnalysisId,
+  analyses = [],
+  selectedAnalysisId = null,
   onSelectAnalysis,
   onDeleteAnalysis,
   globalVizPreference = [],
@@ -1167,8 +1167,8 @@ export function InitiativeEconomicAnalysis({
         <AnalysisHistoryList
           analyses={analyses}
           selectedId={selectedAnalysisId}
-          onSelect={onSelectAnalysis}
-          onDelete={onDeleteAnalysis}
+          onSelect={onSelectAnalysis ?? (() => {})}
+          onDelete={onDeleteAnalysis ?? (() => {})}
         />
       )}
 
