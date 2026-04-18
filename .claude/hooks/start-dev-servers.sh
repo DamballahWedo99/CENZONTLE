@@ -225,22 +225,17 @@ setup_worktree() {
     did_work=1
   fi
 
-  # 3. Prisma generate — required for PrismaService types at runtime.
-  # Detect by presence of the generated client types under pnpm's virtual store.
-  # Path layout: node_modules/.pnpm/@prisma+client@<ver>_.../node_modules/@prisma/client/default.d.ts
+  # 3. Prisma generate — always run when schema exists. Reliable "already
+  # generated" detection is brittle (default.d.ts from the base @prisma/client
+  # package exists even without generate, masking a stale client). When the
+  # generated client is already up-to-date, Prisma completes in ~60ms, so the
+  # overhead is negligible compared to the pain of a stale PrismaService type.
   if [[ -f "$WORKTREE/apps/api/prisma/schema.prisma" ]]; then
-    local prisma_ok=0
-    shopt -s nullglob
-    local generated=( "$WORKTREE/node_modules/.pnpm/@prisma+client@"*/node_modules/@prisma/client/default.d.ts )
-    shopt -u nullglob
-    (( ${#generated[@]} > 0 )) && prisma_ok=1
-    if (( prisma_ok == 0 )); then
-      echo "[hook] setup: prisma generate" >> "$LOG_DIR/hook.log"
-      if ! (cd "$WORKTREE" && pnpm --filter api exec prisma generate) >>"$setup_log" 2>&1; then
-        echo "[hook] setup WARN: prisma generate failed (api may not start) — see $setup_log" >> "$LOG_DIR/hook.log"
-      else
-        did_work=1
-      fi
+    echo "[hook] setup: prisma generate" >> "$LOG_DIR/hook.log"
+    if ! (cd "$WORKTREE" && pnpm --filter api exec prisma generate) >>"$setup_log" 2>&1; then
+      echo "[hook] setup WARN: prisma generate failed (api may not start) — see $setup_log" >> "$LOG_DIR/hook.log"
+    else
+      did_work=1
     fi
   fi
 
