@@ -18,6 +18,7 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { StatusBadge } from '../shared/StatusBadge';
 import { StoryPointsBadge } from '../shared/StoryPointsBadge';
 import { PodBadge } from '../shared/PodBadge';
+import { DownloadMenu } from '../shared/DownloadMenu';
 import {
   ArrowUpDown,
   ChevronRight,
@@ -822,6 +823,15 @@ export function HistoriasList() {
 
   return (
     <div className="space-y-3">
+      <div className="flex items-center justify-between">
+        <span className="text-xs text-muted-foreground">
+          {sorted.length} {sorted.length === 1 ? 'historia' : 'historias'}
+        </span>
+        <DownloadMenu
+          entity={{ kind: 'stories-list', stories: sorted }}
+          variant="button"
+        />
+      </div>
       {/* Header row */}
       <div className="grid grid-cols-[60px_1fr_180px_160px_90px_32px_100px_60px_28px] gap-2 items-center px-4 py-2 text-xs font-medium text-muted-foreground border-b">
         <SortHeader field="trackerKey">Key</SortHeader>

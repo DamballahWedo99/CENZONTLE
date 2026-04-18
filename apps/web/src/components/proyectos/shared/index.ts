@@ -3,3 +3,4 @@ export { PriorityIndicator } from './PriorityIndicator';
 export { StoryPointsBadge } from './StoryPointsBadge';
 export { PodBadge } from './PodBadge';
 export { ProgressBar } from './ProgressBar';
+export { DownloadMenu } from './DownloadMenu';

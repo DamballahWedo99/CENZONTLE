@@ -32,6 +32,7 @@ import { PriorityIndicator } from '../shared/PriorityIndicator';
 import { PodBadge } from '../shared/PodBadge';
 import { ProgressBar } from '../shared/ProgressBar';
 import { StoryPointsBadge } from '../shared/StoryPointsBadge';
+import { DownloadMenu } from '../shared/DownloadMenu';
 import { EpicDiagrams } from './EpicDiagrams';
 import { EpicQAMatrix } from './EpicQAMatrix';
 import { EpicDocuments } from './EpicDocuments';
@@ -569,6 +570,7 @@ function EpicFullPageInner({ epicId }: { epicId: string }) {
             <div className="flex gap-1 shrink-0 mt-1">
               {!isEditing ? (
                 <>
+                  <DownloadMenu entity={{ kind: 'epic', epic }} fetchFullContent />
                   <Button
                     variant="ghost"
                     size="icon"

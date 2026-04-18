@@ -29,6 +29,7 @@ import {
 import { StatusBadge } from '../shared/StatusBadge';
 import { PodBadge } from '../shared/PodBadge';
 import { StoryPointsBadge } from '../shared/StoryPointsBadge';
+import { DownloadMenu } from '../shared/DownloadMenu';
 import {
   Calendar,
 
@@ -431,9 +432,12 @@ function StoryFullPageInner({ storyId }: StoryFullPageProps) {
               )}
               <div className="flex gap-1 shrink-0 mt-1">
                 {!isEditing ? (
-                  <Button variant="ghost" size="icon" onClick={handleStartEdit} className="text-muted-foreground hover:text-foreground">
-                    <Pencil className="h-4 w-4" />
-                  </Button>
+                  <>
+                    <DownloadMenu entity={{ kind: 'story', story }} fetchFullContent />
+                    <Button variant="ghost" size="icon" onClick={handleStartEdit} className="text-muted-foreground hover:text-foreground">
+                      <Pencil className="h-4 w-4" />
+                    </Button>
+                  </>
                 ) : (
                   <>
                     <Button variant="ghost" size="icon" onClick={() => setIsEditing(false)} className="text-muted-foreground hover:text-foreground">

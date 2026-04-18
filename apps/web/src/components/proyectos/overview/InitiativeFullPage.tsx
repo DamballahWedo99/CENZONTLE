@@ -26,6 +26,7 @@ import { StatusBadge } from '../shared/StatusBadge';
 import { PodBadge } from '../shared/PodBadge';
 import { ProgressBar } from '../shared/ProgressBar';
 import { StoryPointsBadge } from '../shared/StoryPointsBadge';
+import { DownloadMenu } from '../shared/DownloadMenu';
 import { InitiativeEconomicAnalysis } from './InitiativeEconomicAnalysis';
 import { InitiativeDocuments } from './InitiativeDocuments';
 import { generateEpics } from '@/lib/epic-agent';
@@ -249,9 +250,12 @@ function InitiativeFullPageInner({ initiativeId }: InitiativeFullPageProps) {
               )}
               <div className="flex gap-1 shrink-0 mt-1">
                 {!isEditing ? (
-                  <Button variant="ghost" size="icon" onClick={handleStartEdit} className="text-muted-foreground hover:text-foreground">
-                    <Pencil className="h-4 w-4" />
-                  </Button>
+                  <>
+                    <DownloadMenu entity={{ kind: 'initiative', initiative }} />
+                    <Button variant="ghost" size="icon" onClick={handleStartEdit} className="text-muted-foreground hover:text-foreground">
+                      <Pencil className="h-4 w-4" />
+                    </Button>
+                  </>
                 ) : (
                   <>
                     <Button variant="ghost" size="icon" onClick={() => setIsEditing(false)} className="text-muted-foreground hover:text-foreground">

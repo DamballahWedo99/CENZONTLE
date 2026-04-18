@@ -6,6 +6,7 @@ import { StatusBadge } from '../shared/StatusBadge';
 import { PriorityIndicator } from '../shared/PriorityIndicator';
 import { PodBadge } from '../shared/PodBadge';
 import { ProgressBar } from '../shared/ProgressBar';
+import { DownloadMenu } from '../shared/DownloadMenu';
 import { ChevronRight } from 'lucide-react';
 
 const gridCols = 'grid-cols-[60px_1fr_260px_100px_80px_200px_120px_60px_28px]';
@@ -16,6 +17,15 @@ export function EpicasList() {
 
   return (
     <div className="space-y-1">
+      <div className="flex items-center justify-between pb-2">
+        <span className="text-xs text-muted-foreground">
+          {epicsWithRelations.length} {epicsWithRelations.length === 1 ? 'épica' : 'épicas'}
+        </span>
+        <DownloadMenu
+          entity={{ kind: 'epics-list', epics: epicsWithRelations }}
+          variant="button"
+        />
+      </div>
       {/* Header row */}
       <div className={`grid ${gridCols} gap-2 items-center px-4 py-2 text-xs font-medium text-muted-foreground border-b`}>
         <div>Key</div>
