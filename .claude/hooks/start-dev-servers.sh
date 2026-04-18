@@ -84,7 +84,7 @@ if [[ "$WORKTREE" != "$MAIN_REPO" ]]; then
   copy_if_missing "$MAIN_REPO/apps/api/.env"       "$WORKTREE/apps/api/.env"
 fi
 
-# --- 4. Port ownership helpers ------------------------------------------------
+# --- 4. Port ownership & sibling reclaim --------------------------------------
 port_pid() { lsof -nP -iTCP:"$1" -sTCP:LISTEN -t 2>/dev/null | head -1; }
 
 # Returns the cwd of a PID, normalized (symlinks resolved).
@@ -110,24 +110,41 @@ port_owner() {
   fi
 }
 
-# Kill a specific PID, BUT re-verify its cwd is still under MAIN_REPO first.
-# Closes the TOCTOU window between port_owner and the actual kill: if the
-# sibling died and an unrelated process got the PID or the port, we bail out.
-kill_if_still_sibling() {
-  local pid="$1" cwd
-  cwd="$(pid_cwd "$pid" 2>/dev/null)" || return 0  # process gone — nothing to do
-  if [[ -z "$cwd" || "$cwd" != "$MAIN_REPO"* ]]; then
-    echo "[hook] pid $pid no longer a CENZONTLE process — refusing to kill" >> "$LOG_DIR/hook.log"
-    return 1
+# Find ALL PIDs whose cwd is inside MAIN_REPO but NOT inside WORKTREE.
+# Captures supervisors (turbo, pnpm, nest, next), their children, AND zombies
+# from previous sessions — essential because killing just the port-binder
+# leaves the supervisor, which instantly respawns a new binder.
+# Filtered by command signature to avoid touching unrelated node processes.
+find_sibling_pids() {
+  local candidates pids_csv pid cwd ncwd
+  candidates="$(pgrep -f '(pnpm( |$)|turbo( |$)|next dev|next-server|nest( |$)|@nestjs/cli|next/dist/bin/next)' 2>/dev/null)"
+  [[ -z "$candidates" ]] && return 0
+  pids_csv="$(echo "$candidates" | paste -sd, -)"
+  lsof -p "$pids_csv" 2>/dev/null | awk '$4=="cwd"{print $2, $NF}' | while read -r pid cwd; do
+    [[ -z "$cwd" ]] && continue
+    ncwd="$(cd "$cwd" 2>/dev/null && pwd -P)" || continue
+    if [[ "$ncwd" == "$MAIN_REPO"/* && "$ncwd" != "$WORKTREE"* && "$ncwd" != "$WORKTREE" ]]; then
+      echo "$pid"
+    fi
+  done | sort -u
+}
+
+# Kill every sibling process (tree + zombies) and verify ports free up.
+reclaim_siblings() {
+  local pids
+  pids="$(find_sibling_pids)"
+  [[ -z "$pids" ]] && return 0
+  local count
+  count=$(echo "$pids" | wc -l | tr -d ' ')
+  echo "[hook] reclaiming $count sibling pids: $(echo "$pids" | tr '\n' ' ')" >> "$LOG_DIR/hook.log"
+  echo "$pids" | xargs kill -TERM 2>/dev/null || true
+  sleep 2
+  pids="$(find_sibling_pids)"
+  if [[ -n "$pids" ]]; then
+    echo "[hook] SIGKILL stubborn siblings: $(echo "$pids" | tr '\n' ' ')" >> "$LOG_DIR/hook.log"
+    echo "$pids" | xargs kill -9 2>/dev/null || true
+    sleep 1
   fi
-  kill -TERM "$pid" 2>/dev/null || true
-  sleep 1
-  if kill -0 "$pid" 2>/dev/null; then
-    # Re-verify again before SIGKILL (ultra-paranoid, very short TOCTOU window).
-    cwd="$(pid_cwd "$pid" 2>/dev/null)" || return 0
-    [[ "$cwd" == "$MAIN_REPO"* ]] && kill -9 "$pid" 2>/dev/null || true
-  fi
-  return 0
 }
 
 start_bg() {
@@ -162,10 +179,8 @@ ensure_server() {
       echo "[hook] $name port $port already owned by this worktree — skipping" >> "$LOG_DIR/hook.log"
       ;;
     sibling)
-      echo "[hook] $name port $port held by sibling CENZONTLE worktree (pid $pid) — reclaiming" >> "$LOG_DIR/hook.log"
-      if kill_if_still_sibling "$pid"; then
-        start_bg "$name" "$filter" "$port"
-      fi
+      # Shouldn't happen here — reclaim_siblings ran first. Log and skip.
+      echo "[hook] $name port $port still held by sibling (pid $pid) after reclaim — skipping" >> "$LOG_DIR/hook.log"
       ;;
     foreign)
       echo "[hook] $name port $port held by foreign process (pid $pid) — leaving alone" >> "$LOG_DIR/hook.log"
@@ -173,7 +188,23 @@ ensure_server() {
   esac
 }
 
-# --- 5. Start servers ---------------------------------------------------------
+# --- 5. Reclaim siblings first (tree-wide) ------------------------------------
+# Pre-classify: only reclaim if at least one target port is sibling-owned.
+owner_api="$(port_owner 3001)"; kind_api="${owner_api%%:*}"
+owner_web="$(port_owner 3000)"; kind_web="${owner_web%%:*}"
+if [[ "$kind_api" == "sibling" || "$kind_web" == "sibling" ]]; then
+  reclaim_siblings
+fi
+
+# --- 6. Preflight: node_modules must exist ------------------------------------
+# A fresh worktree has no node_modules; pnpm would fail with "next: command
+# not found" in the background log where nobody sees it.
+if [[ ! -d "$WORKTREE/node_modules" ]]; then
+  echo "[hook] ABORT: $WORKTREE/node_modules missing — run 'pnpm install' in this worktree to enable dev servers" >> "$LOG_DIR/hook.log"
+  exit 0
+fi
+
+# --- 7. Start servers ---------------------------------------------------------
 ensure_server "api" "api" 3001
 ensure_server "web" "web" 3000
 
