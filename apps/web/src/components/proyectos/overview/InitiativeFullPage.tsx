@@ -7,9 +7,25 @@ import { toast } from 'sonner';
 import { useProyectos } from '@/context/ProyectosContext';
 import { useBreadcrumb } from '@/context/BreadcrumbContext';
 import { updateInitiative as apiUpdateInitiative, deleteInitiative as apiDeleteInitiative } from '@/lib/api/initiatives';
-import { deleteEpic as apiDeleteEpic } from '@/lib/api/epics';
+import { deleteEpic as apiDeleteEpic, getEpic } from '@/lib/api/epics';
 import { TypeToConfirmDialog } from '@/components/ui/type-to-confirm-dialog';
-import { ConfirmDialog } from '@/components/ui/confirm-dialog';
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuSeparator,
+  DropdownMenuSub,
+  DropdownMenuSubContent,
+  DropdownMenuSubTrigger,
+  DropdownMenuTrigger,
+} from '@/components/ui/dropdown-menu';
+import {
+  ALL_FORMATS,
+  FORMAT_LABELS,
+  buildFilename,
+  dispatchEpic,
+  type ExportFormat,
+} from '@/lib/proyectos-exporter';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -61,6 +77,10 @@ import {
   Trash2,
   Download,
   ExternalLink,
+  FileType,
+  FileSpreadsheet,
+  FileCode,
+  FileJson,
 } from 'lucide-react';
 
 const initiativeStatusConfig: Record<InitiativeStatus, { label: string; className: string }> = {
@@ -146,8 +166,9 @@ function InitiativeFullPageInner({ initiativeId }: InitiativeFullPageProps) {
   const [activeTab, setActiveTab] = useState('descripcion');
   const [isCreatingEpic, setIsCreatingEpic] = useState(false);
   const [epicContextMenu, setEpicContextMenu] = useState<{ epicId: string; x: number; y: number } | null>(null);
-  const [deleteEpicConfirmId, setDeleteEpicConfirmId] = useState<string | null>(null);
-  const epicContextMenuRef = useRef<HTMLDivElement>(null);
+  const [deleteEpicId, setDeleteEpicId] = useState<string | null>(null);
+  const [deleteEpicOpen, setDeleteEpicOpen] = useState(false);
+  const [exportingEpicFormat, setExportingEpicFormat] = useState<ExportFormat | null>(null);
 
   // AI agent states
   const [agentMode, setAgentMode] = useState<'idle' | 'prompting' | 'streaming' | 'staging'>('idle');
@@ -212,6 +233,55 @@ function InitiativeFullPageInner({ initiativeId }: InitiativeFullPageProps) {
     return () => setBreadcrumb(null);
   }, [initiative, setBreadcrumb]);
 
+  const handleOpenEpicInNewTab = useCallback((epicId: string) => {
+    window.open(`/proyectos/epicas/${epicId}`, '_blank', 'noopener,noreferrer');
+    setEpicContextMenu(null);
+  }, []);
+
+  const handleExportEpicFormat = useCallback(async (epicId: string, format: ExportFormat) => {
+    const baseEpic = state.epics.find((e) => e.id === epicId);
+    if (!baseEpic) return;
+    setExportingEpicFormat(format);
+    try {
+      const api = await getEpic(epicId, true);
+      const epic: Epic = {
+        ...baseEpic,
+        qualitativeBenefits: api.qualitativeBenefits ?? baseEpic.qualitativeBenefits,
+        quantitativeBenefits: api.quantitativeBenefits ?? baseEpic.quantitativeBenefits,
+        benefitsMeasurement: api.benefitsMeasurement ?? baseEpic.benefitsMeasurement,
+        scopeDescription: api.scopeDescription ?? baseEpic.scopeDescription,
+        acceptanceCriteria: api.acceptanceCriteria ?? baseEpic.acceptanceCriteria,
+        technologicalImprovements: api.technologicalImprovements ?? baseEpic.technologicalImprovements,
+        businessPriority: api.businessPriority ?? baseEpic.businessPriority,
+        teamsInvolved: api.teamsInvolved ?? baseEpic.teamsInvolved,
+        impactedChannels: api.impactedChannels ?? baseEpic.impactedChannels,
+        impactedFlows: api.impactedFlows ?? baseEpic.impactedFlows,
+        impactSabreLevel: api.impactSabreLevel ?? baseEpic.impactSabreLevel,
+        thirdPartyDependencies: api.thirdPartyDependencies ?? baseEpic.thirdPartyDependencies,
+      };
+      const initiativeForEpic = state.initiatives.find((i) => i.id === epic.initiativeId) ?? null;
+      const filename = buildFilename({ kind: 'epic', epic }, format);
+      await dispatchEpic(format, epic, initiativeForEpic, state.pods, state.stories, filename);
+      toast.success('Archivo descargado');
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : 'Error al exportar');
+    } finally {
+      setExportingEpicFormat(null);
+      setEpicContextMenu(null);
+    }
+  }, [state.epics, state.initiatives, state.pods, state.stories]);
+
+  const handleDeleteEpic = useCallback(async () => {
+    if (!deleteEpicId) return;
+    try {
+      await apiDeleteEpic(deleteEpicId);
+      dispatch({ type: 'DELETE_EPIC', payload: { id: deleteEpicId } });
+      toast.success('Épica eliminada');
+    } catch (err: any) {
+      toast.error(err.message || 'Error al eliminar épica');
+      throw err;
+    }
+  }, [dispatch, deleteEpicId]);
 
   if (!initiative) {
     return (
@@ -406,102 +476,6 @@ function InitiativeFullPageInner({ initiativeId }: InitiativeFullPageProps) {
   const handleRefinePrompt = () => {
     setAgentMode('prompting');
   };
-
-  const handleOpenEpicInNewTab = useCallback((epicId: string) => {
-    window.open(`/proyectos/epicas/${epicId}`, '_blank', 'noopener,noreferrer');
-    setEpicContextMenu(null);
-  }, []);
-
-  const handleDownloadEpic = useCallback((epicId: string) => {
-    const epic = state.epics.find((e) => e.id === epicId);
-    if (!epic) return;
-
-    const sections: Array<[string, string]> = [
-      ['Descripción', epic.description],
-      ['Beneficios cualitativos', epic.qualitativeBenefits],
-      ['Beneficios cuantitativos', epic.quantitativeBenefits],
-      ['Medición de beneficios', epic.benefitsMeasurement],
-      ['Alcance', epic.scopeDescription],
-      ['Criterios de aceptación', epic.acceptanceCriteria],
-      ['Mejoras tecnológicas', epic.technologicalImprovements],
-      ['Prioridad de negocio', epic.businessPriority],
-      ['Equipos involucrados', epic.teamsInvolved],
-      ['Canales impactados', epic.impactedChannels],
-      ['Flujos impactados', epic.impactedFlows],
-      ['Nivel de impacto Sabre', epic.impactSabreLevel],
-      ['Dependencias con terceros', epic.thirdPartyDependencies],
-    ];
-
-    const frontMatter = [
-      '---',
-      `id: ${epic.id}`,
-      `title: ${JSON.stringify(epic.title)}`,
-      `status: ${epic.status}`,
-      `priority: ${epic.priority}`,
-      epic.tracker?.externalKey ? `tracker: ${epic.tracker.externalKey}` : null,
-      '---',
-    ].filter(Boolean).join('\n');
-
-    const escapeBody = (value: string) => value.replace(/^(#{1,6})\s/gm, '\\$1 ');
-
-    const body = sections
-      .filter(([, value]) => value && value.trim().length > 0)
-      .map(([heading, value]) => `## ${heading}\n\n${escapeBody(value)}`)
-      .join('\n\n');
-
-    const content = `${frontMatter}\n\n# ${epic.title}\n\n${body}\n`;
-    const safeName = (epic.tracker?.externalKey || epic.title)
-      .toLowerCase()
-      .replace(/[^a-z0-9]+/g, '-')
-      .replace(/^-+|-+$/g, '') || 'epic';
-
-    const blob = new Blob([content], { type: 'text/markdown;charset=utf-8' });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = `${safeName}.md`;
-    document.body.appendChild(a);
-    a.click();
-    document.body.removeChild(a);
-    setTimeout(() => URL.revokeObjectURL(url), 1000);
-
-    toast.success('Épica descargada');
-    setEpicContextMenu(null);
-  }, [state.epics]);
-
-  const handleDeleteEpic = useCallback(async (epicId: string) => {
-    try {
-      await apiDeleteEpic(epicId);
-      dispatch({ type: 'DELETE_EPIC', payload: { id: epicId } });
-      toast.success('Épica eliminada');
-    } catch (err: any) {
-      toast.error(err.message || 'Error al eliminar épica');
-      throw err;
-    }
-  }, [dispatch]);
-
-  useEffect(() => {
-    if (!epicContextMenu) return;
-    const close = () => setEpicContextMenu(null);
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') close();
-    };
-    const onClick = (e: MouseEvent) => {
-      if (epicContextMenuRef.current && !epicContextMenuRef.current.contains(e.target as Node)) {
-        close();
-      }
-    };
-    window.addEventListener('keydown', onKey);
-    window.addEventListener('mousedown', onClick);
-    window.addEventListener('scroll', close, true);
-    window.addEventListener('resize', close);
-    return () => {
-      window.removeEventListener('keydown', onKey);
-      window.removeEventListener('mousedown', onClick);
-      window.removeEventListener('scroll', close, true);
-      window.removeEventListener('resize', close);
-    };
-  }, [epicContextMenu]);
 
   function formatShortDate(dateStr: string): string {
     return new Date(dateStr).toLocaleDateString('es-MX', { day: 'numeric', month: 'short', year: 'numeric' });
@@ -1110,67 +1084,105 @@ function InitiativeFullPageInner({ initiativeId }: InitiativeFullPageProps) {
         onConfirm={handleDelete}
       />
 
-      {epicContextMenu && (
-        <div
-          ref={epicContextMenuRef}
-          role="menu"
-          className="fixed z-50 min-w-[200px] rounded-md border bg-popover text-popover-foreground shadow-md p-1 text-sm animate-in fade-in-0 zoom-in-95"
-          style={{ top: epicContextMenu.y, left: epicContextMenu.x }}
+      <DropdownMenu
+        open={epicContextMenu !== null}
+        onOpenChange={(open) => { if (!open) setEpicContextMenu(null); }}
+      >
+        <DropdownMenuTrigger asChild>
+          <span
+            aria-hidden
+            className="pointer-events-none"
+            style={{
+              position: 'fixed',
+              top: epicContextMenu?.y ?? -9999,
+              left: epicContextMenu?.x ?? -9999,
+              width: 1,
+              height: 1,
+            }}
+          />
+        </DropdownMenuTrigger>
+        <DropdownMenuContent
+          align="start"
+          side="bottom"
+          sideOffset={2}
+          className="min-w-[220px]"
+          onCloseAutoFocus={(e) => e.preventDefault()}
         >
-          <button
-            type="button"
-            role="menuitem"
-            onClick={() => handleOpenEpicInNewTab(epicContextMenu.epicId)}
-            className="w-full flex items-center gap-2 rounded-sm px-2 py-1.5 hover:bg-accent hover:text-accent-foreground text-left"
+          <DropdownMenuItem
+            onSelect={() => epicContextMenu && handleOpenEpicInNewTab(epicContextMenu.epicId)}
           >
             <ExternalLink className="h-4 w-4" />
             Abrir en nueva pestaña
-          </button>
-          <button
-            type="button"
-            role="menuitem"
-            onClick={() => handleDownloadEpic(epicContextMenu.epicId)}
-            className="w-full flex items-center gap-2 rounded-sm px-2 py-1.5 hover:bg-accent hover:text-accent-foreground text-left"
-          >
-            <Download className="h-4 w-4" />
-            Descargar archivo
-          </button>
-          <div className="h-px my-1 bg-border" />
-          <button
-            type="button"
-            role="menuitem"
-            onClick={() => {
-              setDeleteEpicConfirmId(epicContextMenu.epicId);
+          </DropdownMenuItem>
+          <DropdownMenuSub>
+            <DropdownMenuSubTrigger disabled={exportingEpicFormat !== null}>
+              {exportingEpicFormat ? (
+                <Loader2 className="h-4 w-4 animate-spin" />
+              ) : (
+                <Download className="h-4 w-4" />
+              )}
+              Descargar archivo
+            </DropdownMenuSubTrigger>
+            <DropdownMenuSubContent className="min-w-[160px]">
+              {ALL_FORMATS.map((format) => {
+                const Icon = {
+                  pdf: FileType,
+                  excel: FileSpreadsheet,
+                  word: FileText,
+                  csv: FileCode,
+                  json: FileJson,
+                }[format];
+                return (
+                  <DropdownMenuItem
+                    key={format}
+                    disabled={exportingEpicFormat !== null}
+                    onSelect={(e) => {
+                      e.preventDefault();
+                      if (epicContextMenu) handleExportEpicFormat(epicContextMenu.epicId, format);
+                    }}
+                  >
+                    <Icon className="h-4 w-4" />
+                    {FORMAT_LABELS[format]}
+                  </DropdownMenuItem>
+                );
+              })}
+            </DropdownMenuSubContent>
+          </DropdownMenuSub>
+          <DropdownMenuSeparator />
+          <DropdownMenuItem
+            variant="destructive"
+            onSelect={() => {
+              if (!epicContextMenu) return;
+              setDeleteEpicId(epicContextMenu.epicId);
+              setDeleteEpicOpen(true);
               setEpicContextMenu(null);
             }}
-            className="w-full flex items-center gap-2 rounded-sm px-2 py-1.5 text-destructive hover:bg-destructive/10 text-left"
           >
             <Trash2 className="h-4 w-4" />
             Eliminar épica
-          </button>
-        </div>
-      )}
+          </DropdownMenuItem>
+        </DropdownMenuContent>
+      </DropdownMenu>
 
-      <ConfirmDialog
-        open={deleteEpicConfirmId !== null}
-        onOpenChange={(open) => !open && setDeleteEpicConfirmId(null)}
-        title="Eliminar épica"
-        description={(() => {
-          const epic = state.epics.find((e) => e.id === deleteEpicConfirmId);
-          if (!epic) return 'Esta acción no se puede deshacer.';
-          const storyCount = state.stories.filter((s) => s.epicId === epic.id).length;
-          const storySuffix = storyCount > 0
-            ? ` También se eliminarán ${storyCount} ${storyCount === 1 ? 'historia asociada' : 'historias asociadas'}.`
-            : '';
-          return `Vas a eliminar "${epic.title}". Esta acción no se puede deshacer.${storySuffix}`;
-        })()}
-        confirmText="Eliminar"
-        destructive
-        onConfirm={async () => {
-          if (!deleteEpicConfirmId) return;
-          await handleDeleteEpic(deleteEpicConfirmId);
-        }}
-      />
+      {deleteEpicId && (() => {
+        const epicToDelete = state.epics.find((e) => e.id === deleteEpicId);
+        if (!epicToDelete) return null;
+        return (
+          <TypeToConfirmDialog
+            open={deleteEpicOpen}
+            onOpenChange={(open) => {
+              setDeleteEpicOpen(open);
+              if (!open) setDeleteEpicId(null);
+            }}
+            title="Eliminar épica"
+            resourceLabel="épica"
+            expectedValue={epicToDelete.title}
+            description="Esto eliminará la épica junto con todas sus historias, diagramas, documentos y dependencias. La acción es permanente y no se puede deshacer."
+            confirmText="Eliminar épica"
+            onConfirm={handleDeleteEpic}
+          />
+        );
+      })()}
     </div>
   );
 }
