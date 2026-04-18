@@ -56,6 +56,8 @@ import {
   Shield,
   Boxes,
   Zap,
+  Code,
+  RefreshCw,
 } from 'lucide-react';
 import { TeamSection } from './TeamSection';
 import { RolesPermissionsSection } from './RolesPermissionsSection';
@@ -67,7 +69,7 @@ import { useAuthContext } from '@/context/AuthContext';
 // Types
 // ---------------------------------------------------------------------------
 
-type SettingsSection = 'repository' | 'branches' | 'linear' | 'jira' | 'vault' | 'nodes' | 'agents' | 'dod' | 'pods' | 'team' | 'roles';
+type SettingsSection = 'repository' | 'branches' | 'linear' | 'jira' | 'vault' | 'codigo' | 'nodes' | 'agents' | 'dod' | 'pods' | 'team' | 'roles';
 
 interface SidebarItem {
   id: SettingsSection;
@@ -82,6 +84,7 @@ const SIDEBAR_ITEMS: SidebarItem[] = [
   { id: 'linear', label: 'Linear', icon: BarChart3, group: 'Integraciones' },
   { id: 'jira', label: 'Jira', icon: TicketCheck, group: 'Integraciones' },
   { id: 'vault', label: 'Vault', icon: BookMarked, group: 'Integraciones' },
+  { id: 'codigo', label: 'Código', icon: Code, group: 'Integraciones' },
   { id: 'nodes', label: 'Nodos de cómputo', icon: Server, group: 'Infraestructura' },
   { id: 'agents', label: 'Agentes', icon: Bot, group: 'Automatización' },
   { id: 'dod', label: 'Definition of Done', icon: ClipboardCheck, group: 'Automatización' },
@@ -650,6 +653,7 @@ function VaultSection() {
   const [editingId, setEditingId] = useState<string | null>(null); // '__new__' para crear
   const [form, setForm] = useState<VaultConfigForm>(EMPTY_VAULT_FORM);
   const [busyId, setBusyId] = useState<string | null>(null);
+  const [syncing, setSyncing] = useState<string | null>(null);
   const [testResults, setTestResults] = useState<Record<string, { ok: boolean; message: string }>>({});
   const [deleteTarget, setDeleteTarget] = useState<{ id: string; name: string } | null>(null);
   const [apiPods, setApiPods] = useState<import('@/lib/api/pods').PodResponse[]>([]);
@@ -687,6 +691,34 @@ function VaultSection() {
   useEffect(() => {
     void loadVaults();
   }, [loadVaults]);
+
+  // Polling: si algún vault está 'cloning', refrescar cada 2s hasta que termine.
+  // Mismo patrón que CodigoSection — así el badge pasa de "Clonando…" a "Listo"
+  // sin intervención del usuario.
+  useEffect(() => {
+    const anyCloning = vaults.some((v) => v.cloneStatus === 'cloning');
+    if (!anyCloning) return;
+    const interval = setInterval(() => { void loadVaults(); }, 2000);
+    return () => clearInterval(interval);
+  }, [vaults, loadVaults]);
+
+  const handleSync = async (id: string, name: string) => {
+    setSyncing(id);
+    try {
+      const { syncVaultConfig } = await import('@/lib/api/vault-configs');
+      const result = await syncVaultConfig(id);
+      if (result.ok) {
+        toast.success(`Vault "${name}" sincronizado${result.sha ? ` (${result.sha.slice(0, 7)})` : ''}`);
+      } else {
+        toast.error(result.message ?? 'Error sincronizando vault');
+      }
+      await loadVaults();
+    } catch (err: any) {
+      toast.error(err?.message ?? 'Error sincronizando vault');
+    } finally {
+      setSyncing(null);
+    }
+  };
 
   const startCreate = () => {
     setForm({ ...EMPTY_VAULT_FORM });
@@ -806,6 +838,7 @@ function VaultSection() {
   };
 
   return (
+    <TooltipProvider delayDuration={300}>
     <SettingsCard
       title="Vault"
       description="Conecta uno o más repositorios de GitHub como vaults. Los documentos, épicas, historias e iniciativas se guardan como markdown versionado. Puedes restringir el acceso de cada vault a células específicas."
@@ -846,12 +879,42 @@ function VaultSection() {
                         <Github className={cn('h-4 w-4', v.isActive ? 'text-primary' : 'text-green-600')} />
                       </div>
                       <div className="min-w-0 flex-1">
-                        <div className="flex items-center gap-2">
+                        <div className="flex items-center gap-2 flex-wrap">
                           <span className="text-sm font-medium truncate">{v.name}</span>
                           {v.isActive && (
-                            <span className="shrink-0 inline-flex items-center gap-1 text-[10px] font-semibold uppercase tracking-wider text-primary bg-primary/10 border border-primary/20 rounded-full px-2 py-0.5">
+                            <span className="shrink-0 inline-flex items-center gap-0.5 text-[10px] text-primary bg-primary/10 border border-primary/20 rounded-full px-1.5 py-0.5">
                               <Check className="h-2.5 w-2.5" />
-                              Activo
+                              Vinculado
+                            </span>
+                          )}
+                          {v.cloneStatus === 'cloning' && (
+                            <span className="shrink-0 inline-flex items-center gap-1 text-[10px] px-1.5 py-0.5 rounded-full bg-primary/10 text-primary">
+                              <Loader2 className="h-2.5 w-2.5 animate-spin" />
+                              Clonando…
+                            </span>
+                          )}
+                          {v.cloneStatus === 'ready' && (
+                            <span className="shrink-0 inline-flex items-center gap-1 text-[10px] px-1.5 py-0.5 rounded-full bg-green-500/10 text-green-700 dark:text-green-400 border border-green-500/30">
+                              <Check className="h-2.5 w-2.5" />
+                              Clone listo
+                              {v.lastSyncedSha && ` · ${v.lastSyncedSha.slice(0, 7)}`}
+                            </span>
+                          )}
+                          {v.cloneStatus === 'error' && (
+                            <Tooltip>
+                              <TooltipTrigger asChild>
+                                <span className="shrink-0 inline-flex items-center gap-1 text-[10px] px-1.5 py-0.5 rounded-full bg-destructive/10 text-destructive cursor-help">
+                                  Error de clone
+                                </span>
+                              </TooltipTrigger>
+                              <TooltipContent className="max-w-xs">
+                                {v.lastSyncError ?? 'Error desconocido'}
+                              </TooltipContent>
+                            </Tooltip>
+                          )}
+                          {v.cloneStatus === 'stale' && (
+                            <span className="shrink-0 inline-flex items-center gap-1 text-[10px] px-1.5 py-0.5 rounded-full bg-amber-500/10 text-amber-700 dark:text-amber-400 border border-amber-500/30">
+                              Desactualizado
                             </span>
                           )}
                         </div>
@@ -863,17 +926,45 @@ function VaultSection() {
                     </div>
                     <div className="flex items-center gap-1 shrink-0">
                       {!v.isActive && (
-                        <Button
-                          variant="outline"
-                          size="sm"
-                          className="h-7 text-xs gap-1.5"
-                          onClick={() => handleActivate(v.id, v.name)}
-                          disabled={busyId === v.id}
-                        >
-                          {busyId === v.id ? <Loader2 className="h-3 w-3 animate-spin" /> : <Zap className="h-3 w-3" />}
-                          Activar
-                        </Button>
+                        <Tooltip>
+                          <TooltipTrigger asChild>
+                            <Button
+                              variant="outline"
+                              size="sm"
+                              className="h-7 text-xs gap-1.5"
+                              onClick={() => handleActivate(v.id, v.name)}
+                              disabled={busyId === v.id}
+                            >
+                              {busyId === v.id ? <Loader2 className="h-3 w-3 animate-spin" /> : <Zap className="h-3 w-3" />}
+                              Vincular
+                            </Button>
+                          </TooltipTrigger>
+                          <TooltipContent side="top" className="max-w-[260px] text-center">
+                            Establece este vault como fuente activa para el dashboard de Proyectos
+                          </TooltipContent>
+                        </Tooltip>
                       )}
+                      <Tooltip>
+                        <TooltipTrigger asChild>
+                          <Button
+                            variant="ghost"
+                            size="sm"
+                            className="h-7 text-xs gap-1.5 text-muted-foreground"
+                            onClick={() => handleSync(v.id, v.name)}
+                            disabled={syncing === v.id || v.cloneStatus === 'cloning'}
+                          >
+                            {syncing === v.id || v.cloneStatus === 'cloning' ? (
+                              <Loader2 className="h-3 w-3 animate-spin" />
+                            ) : (
+                              <RefreshCw className="h-3 w-3" />
+                            )}
+                            Sincronizar
+                          </Button>
+                        </TooltipTrigger>
+                        <TooltipContent side="top" className="max-w-[260px] text-center">
+                          Clona o actualiza el repositorio local. Las tools del agente (vault_glob/grep/read) leen de este clone cuando el vault está vinculado.
+                        </TooltipContent>
+                      </Tooltip>
                       <Button
                         variant="ghost"
                         size="sm"
@@ -971,6 +1062,7 @@ function VaultSection() {
         destructive
       />
     </SettingsCard>
+    </TooltipProvider>
   );
 }
 
@@ -1121,6 +1213,389 @@ function VaultConfigForm({
         <Button variant="ghost" size="sm" onClick={onCancel}>Cancelar</Button>
         <Button size="sm" onClick={onSave}>
           {isEditing ? 'Guardar cambios' : 'Crear vault'}
+        </Button>
+      </div>
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Section: Código (repositorios GitHub para exploración por agentes IA)
+// ---------------------------------------------------------------------------
+
+function formatRelativeTime(iso: string | null): string {
+  if (!iso) return '';
+  const diff = Date.now() - new Date(iso).getTime();
+  const mins = Math.floor(diff / 60_000);
+  if (mins < 1) return 'hace menos de 1 min';
+  if (mins < 60) return `hace ${mins} min`;
+  const hrs = Math.floor(mins / 60);
+  if (hrs < 24) return `hace ${hrs} h`;
+  const days = Math.floor(hrs / 24);
+  return `hace ${days} d`;
+}
+
+function CloneStatusBadge({ repo }: { repo: import('@/lib/api/code-repositories').CodeRepository }) {
+  const { cloneStatus, lastSyncedSha, lastPulledAt, lastSyncError } = repo;
+
+  if (cloneStatus === 'pending') {
+    return (
+      <span className="inline-flex items-center gap-1 text-[10px] px-1.5 py-0.5 rounded-full bg-muted/60 text-muted-foreground">
+        Pendiente
+      </span>
+    );
+  }
+  if (cloneStatus === 'cloning') {
+    return (
+      <span className="inline-flex items-center gap-1 text-[10px] px-1.5 py-0.5 rounded-full bg-primary/10 text-primary">
+        <Loader2 className="h-2.5 w-2.5 animate-spin" />
+        Clonando…
+      </span>
+    );
+  }
+  if (cloneStatus === 'ready') {
+    return (
+      <span className="inline-flex items-center gap-1 text-[10px] px-1.5 py-0.5 rounded-full bg-green-500/10 text-green-700 dark:text-green-400 border border-green-500/30">
+        <Check className="h-2.5 w-2.5" />
+        Listo
+        {lastSyncedSha && ` · ${lastSyncedSha.slice(0, 7)}`}
+        {lastPulledAt && ` · ${formatRelativeTime(lastPulledAt)}`}
+      </span>
+    );
+  }
+  if (cloneStatus === 'error') {
+    return (
+      <TooltipProvider>
+        <Tooltip>
+          <TooltipTrigger asChild>
+            <span className="inline-flex items-center gap-1 text-[10px] px-1.5 py-0.5 rounded-full bg-destructive/10 text-destructive cursor-help">
+              Error
+            </span>
+          </TooltipTrigger>
+          <TooltipContent className="max-w-xs">
+            {lastSyncError ?? 'Error desconocido'}
+          </TooltipContent>
+        </Tooltip>
+      </TooltipProvider>
+    );
+  }
+  return (
+    <span className="inline-flex items-center gap-1 text-[10px] px-1.5 py-0.5 rounded-full bg-amber-500/10 text-amber-700 dark:text-amber-400 border border-amber-500/30">
+      Desactualizado
+    </span>
+  );
+}
+
+function CodigoSection() {
+  const [repos, setRepos] = useState<import('@/lib/api/code-repositories').CodeRepository[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [editingId, setEditingId] = useState<string | null>(null);
+  const [isCreating, setIsCreating] = useState(false);
+  const [testing, setTesting] = useState<string | null>(null);
+  const [testResults, setTestResults] = useState<Record<string, { ok: boolean; message: string }>>({});
+  const [syncing, setSyncing] = useState<string | null>(null);
+  const [deleteTarget, setDeleteTarget] = useState<import('@/lib/api/code-repositories').CodeRepository | null>(null);
+
+  const loadRepos = useCallback(async () => {
+    try {
+      const { getCodeRepositories } = await import('@/lib/api/code-repositories');
+      setRepos(await getCodeRepositories());
+    } catch (err: any) {
+      toast.error(`Error cargando repositorios: ${err?.message ?? 'error desconocido'}`);
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    loadRepos();
+  }, [loadRepos]);
+
+  // Polling: si algún repo está 'cloning', refrescar cada 2s hasta que no queden.
+  useEffect(() => {
+    const anyCloning = repos.some((r) => r.cloneStatus === 'cloning');
+    if (!anyCloning) return;
+    const interval = setInterval(loadRepos, 2000);
+    return () => clearInterval(interval);
+  }, [repos, loadRepos]);
+
+  const handleToggleEnabled = async (id: string, name: string, currentlyEnabled: boolean) => {
+    try {
+      const { enableCodeRepository, disableCodeRepository } = await import('@/lib/api/code-repositories');
+      if (currentlyEnabled) {
+        await disableCodeRepository(id);
+        toast.success(`"${name}" deshabilitado`);
+      } else {
+        await enableCodeRepository(id);
+        toast.success(`"${name}" habilitado`);
+      }
+      await loadRepos();
+    } catch (err: any) {
+      toast.error(err?.message ?? 'Error cambiando estado del repositorio');
+    }
+  };
+
+  const handleTest = async (id: string) => {
+    setTesting(id);
+    try {
+      const { testCodeRepository } = await import('@/lib/api/code-repositories');
+      const result = await testCodeRepository(id);
+      setTestResults((prev) => ({ ...prev, [id]: result }));
+    } catch (err: any) {
+      setTestResults((prev) => ({ ...prev, [id]: { ok: false, message: err?.message ?? 'Error' } }));
+    } finally {
+      setTesting(null);
+    }
+  };
+
+  const handleSync = async (id: string) => {
+    setSyncing(id);
+    try {
+      const { syncCodeRepository } = await import('@/lib/api/code-repositories');
+      const result = await syncCodeRepository(id);
+      if (result.ok) toast.success(`Sincronizado: ${result.sha?.slice(0, 7) ?? ''}`);
+      else toast.error(`Error al sincronizar: ${result.message ?? 'desconocido'}`);
+      await loadRepos();
+    } catch (err: any) {
+      toast.error(err?.message ?? 'Error al sincronizar');
+    } finally {
+      setSyncing(null);
+    }
+  };
+
+  const handleDelete = async () => {
+    if (!deleteTarget) return;
+    try {
+      const { deleteCodeRepository } = await import('@/lib/api/code-repositories');
+      await deleteCodeRepository(deleteTarget.id);
+      toast.success(`Repositorio "${deleteTarget.name}" eliminado`);
+      setDeleteTarget(null);
+      await loadRepos();
+    } catch (err: any) {
+      toast.error(err?.message ?? 'Error eliminando repositorio');
+    }
+  };
+
+  return (
+    <SettingsCard
+      title="Código"
+      description="Conecta repositorios de GitHub para que los agentes IA puedan explorar código fuente real (glob, grep, read) con ripgrep. Puedes habilitar múltiples repositorios al mismo tiempo — el agente busca en paralelo sobre todos los habilitados y puede filtrar a uno específico cuando lo necesite."
+    >
+      {loading ? (
+        <div className="flex items-center gap-2 text-sm text-muted-foreground py-8">
+          <Loader2 className="h-4 w-4 animate-spin" />
+          Cargando repositorios...
+        </div>
+      ) : (
+        <div className="space-y-3">
+          {repos.map((r) => (
+            <div key={r.id} className={cn(
+              'rounded-lg border p-4 space-y-2',
+              r.isActive ? 'border-primary/40 bg-primary/[0.02]' : 'border-border/50 bg-card/50',
+            )}>
+              <div className="flex items-start gap-3">
+                <Github className="h-4 w-4 mt-0.5 text-muted-foreground shrink-0" />
+                <div className="flex-1 min-w-0">
+                  <div className="flex items-center gap-2 flex-wrap">
+                    <span className="font-medium text-sm">{r.name}</span>
+                    {r.isActive ? (
+                      <span className="inline-flex items-center gap-1 text-[10px] px-1.5 py-0.5 rounded-full bg-primary/10 text-primary">
+                        <Check className="h-2.5 w-2.5" />
+                        Habilitado
+                      </span>
+                    ) : (
+                      <span className="inline-flex items-center gap-1 text-[10px] px-1.5 py-0.5 rounded-full bg-muted/60 text-muted-foreground">
+                        Deshabilitado
+                      </span>
+                    )}
+                    <CloneStatusBadge repo={r} />
+                  </div>
+                  <div className="text-xs text-muted-foreground font-mono mt-0.5">
+                    {r.owner}/{r.repo} <span className="text-muted-foreground/60">@{r.branch}</span>
+                  </div>
+                  {testResults[r.id] && (
+                    <div className={cn(
+                      'text-[11px] mt-1.5',
+                      testResults[r.id].ok ? 'text-green-600 dark:text-green-400' : 'text-destructive',
+                    )}>
+                      {testResults[r.id].ok ? <Wifi className="h-3 w-3 inline mr-1" /> : <WifiOff className="h-3 w-3 inline mr-1" />}
+                      {testResults[r.id].message}
+                    </div>
+                  )}
+                </div>
+                <div className="flex items-center gap-1 shrink-0">
+                  <Button
+                    size="sm"
+                    variant={r.isActive ? 'ghost' : 'default'}
+                    onClick={() => handleToggleEnabled(r.id, r.name, r.isActive)}
+                    className="gap-1 text-xs"
+                  >
+                    <Zap className="h-3.5 w-3.5" />
+                    {r.isActive ? 'Deshabilitar' : 'Habilitar'}
+                  </Button>
+                  <Button
+                    size="sm"
+                    variant="ghost"
+                    onClick={() => handleSync(r.id)}
+                    disabled={syncing === r.id || r.cloneStatus === 'cloning'}
+                    className="gap-1 text-xs"
+                  >
+                    <RefreshCw className={cn('h-3.5 w-3.5', syncing === r.id && 'animate-spin')} />
+                    Sincronizar
+                  </Button>
+                  <Button
+                    size="sm"
+                    variant="ghost"
+                    onClick={() => handleTest(r.id)}
+                    disabled={testing === r.id}
+                    className="gap-1 text-xs"
+                  >
+                    {testing === r.id ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Wifi className="h-3.5 w-3.5" />}
+                    Probar
+                  </Button>
+                  <Button size="sm" variant="ghost" onClick={() => setEditingId(r.id)} className="gap-1 text-xs">
+                    <Settings className="h-3.5 w-3.5" />
+                  </Button>
+                  <Button size="sm" variant="ghost" onClick={() => setDeleteTarget(r)} className="gap-1 text-xs text-destructive hover:text-destructive">
+                    <Trash2 className="h-3.5 w-3.5" />
+                  </Button>
+                </div>
+              </div>
+              {editingId === r.id && (
+                <CodeRepositoryForm
+                  existing={r}
+                  onCancel={() => setEditingId(null)}
+                  onSaved={async () => {
+                    setEditingId(null);
+                    await loadRepos();
+                  }}
+                />
+              )}
+            </div>
+          ))}
+
+          {isCreating ? (
+            <CodeRepositoryForm
+              onCancel={() => setIsCreating(false)}
+              onSaved={async () => {
+                setIsCreating(false);
+                await loadRepos();
+              }}
+            />
+          ) : (
+            <Button
+              variant="outline"
+              onClick={() => setIsCreating(true)}
+              className="w-full gap-2 text-sm border-dashed"
+            >
+              <Plus className="h-3.5 w-3.5" /> Agregar repositorio
+            </Button>
+          )}
+        </div>
+      )}
+
+      <ConfirmDialog
+        open={!!deleteTarget}
+        onOpenChange={(open) => !open && setDeleteTarget(null)}
+        title={`Eliminar repositorio "${deleteTarget?.name ?? ''}"`}
+        description="Esto eliminará la configuración y el clone local. Esta acción no se puede deshacer."
+        confirmText="Eliminar repositorio"
+        onConfirm={handleDelete}
+      />
+    </SettingsCard>
+  );
+}
+
+function CodeRepositoryForm({
+  existing,
+  onCancel,
+  onSaved,
+}: {
+  existing?: import('@/lib/api/code-repositories').CodeRepository;
+  onCancel: () => void;
+  onSaved: () => Promise<void>;
+}) {
+  const isEditing = !!existing;
+  const [name, setName] = useState(existing?.name ?? '');
+  const [owner, setOwner] = useState(existing?.owner ?? '');
+  const [repo, setRepo] = useState(existing?.repo ?? '');
+  const [branch, setBranch] = useState(existing?.branch ?? 'main');
+  const [token, setToken] = useState('');
+  const [showToken, setShowToken] = useState(false);
+  const [saving, setSaving] = useState(false);
+
+  const handleSave = async () => {
+    if (!name || !owner || !repo) {
+      toast.error('Nombre, owner y repo son requeridos');
+      return;
+    }
+    if (!isEditing && !token) {
+      toast.error('Token es requerido al crear un repositorio');
+      return;
+    }
+    setSaving(true);
+    try {
+      const { createCodeRepository, updateCodeRepository } = await import('@/lib/api/code-repositories');
+      if (isEditing && existing) {
+        const payload: import('@/lib/api/code-repositories').UpdateCodeRepositoryInput = {
+          name, owner, repo, branch,
+        };
+        if (token) payload.token = token;
+        await updateCodeRepository(existing.id, payload);
+        toast.success('Repositorio actualizado');
+      } else {
+        await createCodeRepository({ name, owner, repo, branch, token });
+        toast.success('Repositorio creado — el clone inicial se está ejecutando en background');
+      }
+      await onSaved();
+    } catch (err: any) {
+      toast.error(err?.message ?? 'Error guardando el repositorio');
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return (
+    <div className="mt-2 p-3 rounded-lg border border-primary/30 bg-primary/[0.02] space-y-3">
+      <div className="grid grid-cols-2 gap-3">
+        <LabeledInput label="Nombre">
+          <Input value={name} onChange={(e) => setName(e.target.value)} placeholder="mi-backend" />
+        </LabeledInput>
+        <LabeledInput label="Branch">
+          <Input value={branch} onChange={(e) => setBranch(e.target.value)} placeholder="main" />
+        </LabeledInput>
+      </div>
+      <div className="grid grid-cols-2 gap-3">
+        <LabeledInput label="Owner">
+          <Input value={owner} onChange={(e) => setOwner(e.target.value)} placeholder="AeromexicoTech" />
+        </LabeledInput>
+        <LabeledInput label="Repositorio">
+          <Input value={repo} onChange={(e) => setRepo(e.target.value)} placeholder="booking-service" />
+        </LabeledInput>
+      </div>
+      <LabeledInput label={isEditing ? 'Nuevo token (opcional)' : 'GitHub Personal Access Token'}>
+        <div className="relative">
+          <Input
+            type={showToken ? 'text' : 'password'}
+            value={token}
+            onChange={(e) => setToken(e.target.value)}
+            placeholder={isEditing ? 'Dejar vacío para mantener el actual' : 'ghp_xxxxxxxxxxxxxxxxxxxx'}
+            className="pr-9"
+          />
+          <button
+            type="button"
+            onClick={() => setShowToken((v) => !v)}
+            className="absolute right-2 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground"
+          >
+            {showToken ? <EyeOff className="h-3.5 w-3.5" /> : <Eye className="h-3.5 w-3.5" />}
+          </button>
+        </div>
+      </LabeledInput>
+      <div className="flex items-center justify-end gap-2">
+        <Button variant="ghost" size="sm" onClick={onCancel}>Cancelar</Button>
+        <Button size="sm" onClick={handleSave} disabled={saving} className="gap-1.5">
+          {saving ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Save className="h-3.5 w-3.5" />}
+          {isEditing ? 'Guardar cambios' : 'Crear repositorio'}
         </Button>
       </div>
     </div>
@@ -1605,6 +2080,8 @@ function SectionContent({ section }: { section: SettingsSection }) {
       return <JiraSection />;
     case 'vault':
       return <VaultSection />;
+    case 'codigo':
+      return <CodigoSection />;
     case 'nodes':
       return <ComputeNodesSection />;
     case 'agents':
@@ -1633,10 +2110,14 @@ export function SettingsDashboard() {
   const initialSection = (searchParams.get('section') as SettingsSection) || 'repository';
   const [activeSection, setActiveSection] = useState<SettingsSection>(initialSection);
 
-  if (!hasRole(UserRole.AltaGerencia)) {
-    router.replace('/factory');
-    return null;
-  }
+  // Redirect como efecto, no durante render — evita ReferenceError: location is not defined
+  // en SSR cuando el contexto aún no está hidratado.
+  const authorized = hasRole(UserRole.AltaGerencia);
+  useEffect(() => {
+    if (!authorized) router.replace('/factory');
+  }, [authorized, router]);
+
+  if (!authorized) return null;
 
   return (
     <div className="settings-page flex flex-col bg-background overflow-hidden h-full">

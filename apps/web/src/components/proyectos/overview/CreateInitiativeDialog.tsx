@@ -11,6 +11,7 @@ import { Input } from '@/components/ui/input';
 import {
   Select, SelectContent, SelectItem, SelectTrigger, SelectValue,
 } from '@/components/ui/select';
+import { DatePicker } from '@/components/ui/date-picker';
 import { Loader2 } from 'lucide-react';
 import { useProyectos } from '@/context/ProyectosContext';
 import { useAuthContext } from '@/context/AuthContext';
@@ -188,21 +189,21 @@ export function CreateInitiativeDialog({ open, onOpenChange }: CreateInitiativeD
           <div className="grid grid-cols-2 gap-3">
             <div>
               <label className="text-sm font-medium mb-1.5 block">Fecha inicio</label>
-              <Input
-                type="date"
+              <DatePicker
                 value={startDate}
-                onChange={(e) => { setStartDate(e.target.value); setErrors((p) => ({ ...p, startDate: undefined })); }}
+                onChange={(v) => { setStartDate(v); setErrors((p) => ({ ...p, startDate: undefined })); }}
                 aria-invalid={!!errors.startDate}
+                maxDate={targetDate || undefined}
               />
               <FieldError message={errors.startDate} />
             </div>
             <div>
               <label className="text-sm font-medium mb-1.5 block">Fecha objetivo</label>
-              <Input
-                type="date"
+              <DatePicker
                 value={targetDate}
-                onChange={(e) => { setTargetDate(e.target.value); setErrors((p) => ({ ...p, targetDate: undefined })); }}
+                onChange={(v) => { setTargetDate(v); setErrors((p) => ({ ...p, targetDate: undefined })); }}
                 aria-invalid={!!errors.targetDate}
+                minDate={startDate || undefined}
               />
               <FieldError message={errors.targetDate} />
             </div>

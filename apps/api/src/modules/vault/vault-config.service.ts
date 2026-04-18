@@ -22,6 +22,12 @@ export interface VaultConfigPublic {
   roleDefaults: Record<string, string>;
   createdAt: Date;
   updatedAt: Date;
+  // Clone lifecycle — expuesto al frontend para que VaultSection pueda
+  // mostrar badge de estado + botón Sincronizar sin un endpoint extra.
+  cloneStatus: 'pending' | 'cloning' | 'ready' | 'error' | 'stale';
+  lastSyncedSha: string | null;
+  lastPulledAt: Date | null;
+  lastSyncError: string | null;
 }
 
 export interface VaultConfigCreateInput {
@@ -157,9 +163,22 @@ export class VaultConfigService implements OnModuleInit {
   async getActiveWithToken(): Promise<{ config: VaultConfig; token: string } | null> {
     const vault = await this.prisma.vaultConfig.findFirst({ where: { isActive: true } });
     if (!vault) return null;
-    if (!vault.tokenCiphertext || !vault.tokenIv || !vault.tokenAuthTag) {
-      return null;
-    }
+    return this.decryptRow(vault);
+  }
+
+  /**
+   * Devuelve un vault por ID con su token en plaintext. Usado por VaultCloneService
+   * para clonar/pull incluso cuando no es el activo (ej: scheduled clone tras create).
+   * Solo para uso interno — NUNCA exponer vía HTTP.
+   */
+  async getByIdWithToken(id: string): Promise<{ config: VaultConfig; token: string } | null> {
+    const vault = await this.prisma.vaultConfig.findUnique({ where: { id } });
+    if (!vault) return null;
+    return this.decryptRow(vault);
+  }
+
+  private decryptRow(vault: VaultConfig): { config: VaultConfig; token: string } | null {
+    if (!vault.tokenCiphertext || !vault.tokenIv || !vault.tokenAuthTag) return null;
     const token = this.crypto.decrypt({
       ciphertext: vault.tokenCiphertext,
       iv: vault.tokenIv,
@@ -389,6 +408,10 @@ export class VaultConfigService implements OnModuleInit {
       roleDefaults: (vault.roleDefaults as Record<string, string>) ?? {},
       createdAt: vault.createdAt,
       updatedAt: vault.updatedAt,
+      cloneStatus: vault.cloneStatus,
+      lastSyncedSha: vault.lastSyncedSha,
+      lastPulledAt: vault.lastPulledAt,
+      lastSyncError: vault.lastSyncError,
     };
   }
 }

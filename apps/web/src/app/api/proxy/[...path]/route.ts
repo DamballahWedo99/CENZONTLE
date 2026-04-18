@@ -72,6 +72,20 @@ async function proxyRequest(
 
     if (res.status === 204) return new NextResponse(null, { status: 204 });
 
+    // SSE streaming: if the backend returns text/event-stream, pipe the
+    // response body directly to the client without buffering.
+    const resContentType = res.headers.get('content-type') || '';
+    if (resContentType.includes('text/event-stream') && res.body) {
+      return new NextResponse(res.body as ReadableStream, {
+        status: res.status,
+        headers: {
+          'Content-Type': 'text/event-stream',
+          'Cache-Control': 'no-cache',
+          Connection: 'keep-alive',
+        },
+      });
+    }
+
     const text = await res.text();
     try {
       return NextResponse.json(JSON.parse(text), { status: res.status });

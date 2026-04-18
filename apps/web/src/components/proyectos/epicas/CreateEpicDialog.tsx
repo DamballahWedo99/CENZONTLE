@@ -10,6 +10,7 @@ import {
 } from '@/components/ui/dialog';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
+import { DatePicker } from '@/components/ui/date-picker';
 import {
   Select,
   SelectContent,
@@ -234,11 +235,11 @@ export function CreateEpicDialog({ open, onOpenChange }: CreateEpicDialogProps) 
           <div className="grid grid-cols-2 gap-3">
             <div>
               <label className="text-sm font-medium mb-1.5 block">Fecha inicio</label>
-              <Input type="date" value={startDate} onChange={(e) => setStartDate(e.target.value)} />
+              <DatePicker value={startDate} onChange={setStartDate} maxDate={targetDate || undefined} />
             </div>
             <div>
               <label className="text-sm font-medium mb-1.5 block">Fecha objetivo</label>
-              <Input type="date" value={targetDate} onChange={(e) => setTargetDate(e.target.value)} />
+              <DatePicker value={targetDate} onChange={setTargetDate} minDate={startDate || undefined} />
             </div>
           </div>
 

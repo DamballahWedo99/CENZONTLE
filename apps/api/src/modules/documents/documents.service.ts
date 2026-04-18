@@ -2,7 +2,7 @@ import 'dotenv/config';
 import { Injectable, NotFoundException } from '@nestjs/common';
 import { randomUUID } from 'crypto';
 import { existsSync, mkdirSync, writeFileSync, unlinkSync, readFileSync } from 'fs';
-import { join, resolve } from 'path';
+import { join, resolve, sep } from 'path';
 import { homedir } from 'os';
 
 const STORAGE_ROOT = process.env.DOCUMENTS_DIR || join(homedir(), '.cenzontle', 'documents');
@@ -43,7 +43,10 @@ export class DocumentsService {
 
   getFilePath(key: string): { path: string; exists: boolean } {
     const filePath = join(STORAGE_ROOT, key);
-    if (!resolve(filePath).startsWith(resolve(STORAGE_ROOT))) {
+    const resolvedRoot = resolve(STORAGE_ROOT);
+    const resolvedFile = resolve(filePath);
+    const rootWithSep = resolvedRoot.endsWith(sep) ? resolvedRoot : resolvedRoot + sep;
+    if (resolvedFile !== resolvedRoot && !resolvedFile.startsWith(rootWithSep)) {
       throw new NotFoundException('Invalid key');
     }
     return { path: filePath, exists: existsSync(filePath) };

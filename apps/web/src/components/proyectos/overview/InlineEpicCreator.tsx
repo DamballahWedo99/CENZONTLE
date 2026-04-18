@@ -7,6 +7,7 @@ import { Epic, EpicStatus, Priority, Pod } from '@cenzontle/shared';
 import { createEpic as apiCreateEpic } from '@/lib/api/epics';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
+import { DatePicker } from '@/components/ui/date-picker';
 import { Checkbox } from '@/components/ui/checkbox';
 import {
   Select,
@@ -61,7 +62,7 @@ const inputCls =
 
 // --- Form state ---
 
-interface EpicFormData {
+export interface EpicFormData {
   title: string;
   description: string;
   priority: Priority;
@@ -112,6 +113,7 @@ interface InlineEpicCreatorProps {
   initiativeId: string;
   pods: Pod[];
   existingEpicCount: number;
+  initialData?: Partial<EpicFormData>;
   onCreateEpic: (epic: Epic) => void;
   onCancel: () => void;
 }
@@ -120,10 +122,13 @@ export function InlineEpicCreator({
   initiativeId,
   pods,
   existingEpicCount,
+  initialData,
   onCreateEpic,
   onCancel,
 }: InlineEpicCreatorProps) {
-  const [formData, setFormData] = useState<EpicFormData>(emptyForm);
+  const [formData, setFormData] = useState<EpicFormData>(() =>
+    initialData ? { ...emptyForm, ...initialData } : emptyForm,
+  );
   const [formTab, setFormTab] = useState<string>('benefits');
   const [showDefinition, setShowDefinition] = useState(false);
   const [saving, setSaving] = useState(false);
@@ -336,10 +341,10 @@ export function InlineEpicCreator({
           </div>
           <div className="min-w-0 space-y-1.5">
             <label className="text-xs font-medium text-muted-foreground">Fecha inicio *</label>
-            <Input
-              type="date"
+            <DatePicker
               value={formData.startDate}
-              onChange={(e) => { setFormData((prev) => ({ ...prev, startDate: e.target.value })); setErrors((p) => ({ ...p, startDate: undefined })); }}
+              onChange={(v) => { setFormData((prev) => ({ ...prev, startDate: v })); setErrors((p) => ({ ...p, startDate: undefined })); }}
+              maxDate={formData.targetDate || undefined}
               className="text-sm"
               aria-invalid={!!errors.startDate}
             />
@@ -347,10 +352,10 @@ export function InlineEpicCreator({
           </div>
           <div className="min-w-0 space-y-1.5">
             <label className="text-xs font-medium text-muted-foreground">Fecha objetivo *</label>
-            <Input
-              type="date"
+            <DatePicker
               value={formData.targetDate}
-              onChange={(e) => { setFormData((prev) => ({ ...prev, targetDate: e.target.value })); setErrors((p) => ({ ...p, targetDate: undefined })); }}
+              onChange={(v) => { setFormData((prev) => ({ ...prev, targetDate: v })); setErrors((p) => ({ ...p, targetDate: undefined })); }}
+              minDate={formData.startDate || undefined}
               className="text-sm"
               aria-invalid={!!errors.targetDate}
             />

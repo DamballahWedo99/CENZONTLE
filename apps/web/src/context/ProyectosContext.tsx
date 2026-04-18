@@ -171,6 +171,8 @@ type ProyectosAction =
   | { type: 'CREATE_STORY'; payload: UserStory }
   | { type: 'UPDATE_STORY'; payload: { id: string; changes: Partial<UserStory> } }
   | { type: 'DELETE_STORY'; payload: { id: string } }
+  | { type: 'DELETE_EPIC'; payload: { id: string } }
+  | { type: 'DELETE_INITIATIVE'; payload: { id: string } }
   | { type: 'SAVE_EPIC_DIAGRAM'; payload: { epicId: string; diagram: import('@cenzontle/shared').EpicDiagram } }
   | { type: 'BULK_CREATE_STORIES'; payload: { epicId: string; stories: UserStory[] } }
   | { type: 'APPROVE_EPIC_STORIES'; payload: { epicId: string; poId: string; poName: string } }
@@ -316,6 +318,43 @@ function proyectosReducer(state: ProyectosState, action: ProyectosAction): Proye
       return {
         ...state,
         stories: state.stories.filter((s) => s.id !== id),
+        changelog: [changelogEntry, ...state.changelog],
+      };
+    }
+    case 'DELETE_EPIC': {
+      // Cascada: al borrar la épica, también purgamos sus historias huérfanas
+      // en memoria. La DB ya maneja la cascada real; esto mantiene el state sync.
+      const { id } = action.payload;
+      const epic = state.epics.find((e) => e.id === id);
+      if (!epic) return state;
+      const changelogEntry = createChangelogEntry(
+        ChangelogEntityType.Epic, id, epic.title,
+        ChangelogAction.Deleted, null, null, null,
+      );
+      return {
+        ...state,
+        epics: state.epics.filter((e) => e.id !== id),
+        stories: state.stories.filter((s) => s.epicId !== id),
+        changelog: [changelogEntry, ...state.changelog],
+      };
+    }
+    case 'DELETE_INITIATIVE': {
+      // Cascada doble: la iniciativa → sus épicas → sus historias.
+      const { id } = action.payload;
+      const initiative = state.initiatives.find((i) => i.id === id);
+      if (!initiative) return state;
+      const orphanedEpicIds = new Set(
+        state.epics.filter((e) => e.initiativeId === id).map((e) => e.id),
+      );
+      const changelogEntry = createChangelogEntry(
+        ChangelogEntityType.Initiative, id, initiative.name,
+        ChangelogAction.Deleted, null, null, null,
+      );
+      return {
+        ...state,
+        initiatives: state.initiatives.filter((i) => i.id !== id),
+        epics: state.epics.filter((e) => e.initiativeId !== id),
+        stories: state.stories.filter((s) => !orphanedEpicIds.has(s.epicId)),
         changelog: [changelogEntry, ...state.changelog],
       };
     }

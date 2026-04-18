@@ -1,7 +1,8 @@
 import 'dotenv/config';
-import { Injectable, InternalServerErrorException, Logger } from '@nestjs/common';
+import { Inject, Injectable, InternalServerErrorException, Logger, forwardRef } from '@nestjs/common';
 import { Octokit } from '@octokit/rest';
 import { VaultConfigService } from './vault-config.service';
+import { VaultCloneService } from './vault-clone.service';
 
 export interface VaultNote {
   path: string;
@@ -33,6 +34,7 @@ export interface VaultConfigInfo {
  * el token del activo via el controller (ver `invalidateActiveConfig()`).
  */
 interface ActiveContext {
+  configId: string;  // ID del VaultConfig activo — usado para scheduleClone tras writes
   owner: string;
   repo: string;
   branch: string;
@@ -53,7 +55,14 @@ export class VaultService {
   private readonly configCacheTtlMs = 30_000; // 30 segundos por context activo
   private activeContext: ActiveContext | null = null;
 
-  constructor(private readonly vaultConfigs: VaultConfigService) {
+  constructor(
+    private readonly vaultConfigs: VaultConfigService,
+    // forwardRef por seguridad: VaultCloneService depende de VaultConfigService
+    // (igual que nosotros), no hay ciclo real hoy pero el forwardRef protege
+    // contra futuros cambios que lo introduzcan.
+    @Inject(forwardRef(() => VaultCloneService))
+    private readonly vaultClone: VaultCloneService,
+  ) {
     this.logger.log('[ctor] VaultService initialized (dynamic config via VaultConfigService)');
   }
 
@@ -75,6 +84,7 @@ export class VaultService {
     }
 
     const ctx: ActiveContext = {
+      configId: active.config.id,
       owner: active.config.owner,
       repo: active.config.repo,
       branch: active.config.branch,
@@ -176,6 +186,13 @@ export class VaultService {
       const note: VaultNote = { path, content, sha: newSha, updatedAt: new Date().toISOString() };
 
       this.cache.set(path, { note, expiresAt: Date.now() + this.cacheTtlMs });
+
+      // Fire-and-forget: invalidar el clone local para que las tools vault_*
+      // vean el nuevo contenido en la siguiente búsqueda. Sin esto, el agente
+      // que consulta un epic recién editado vería contenido stale hasta el
+      // próximo ensureFresh (5 min). Con esto, <500ms de lag típico.
+      this.vaultClone.scheduleClone(ctx.configId);
+
       return note;
     } catch (err: any) {
       this.logger.error(`[writeNote] FAILED path=${path} status=${err?.status} message=${err?.message}`);
@@ -216,6 +233,9 @@ export class VaultService {
       });
 
       this.cache.delete(path);
+
+      // Fire-and-forget: invalidar clone local. Ver writeNote para el razonamiento.
+      this.vaultClone.scheduleClone(ctx.configId);
     } catch (err: any) {
       if (err.status === 404) return;
       this.logger.error(`Error deleting note ${path}`, err);

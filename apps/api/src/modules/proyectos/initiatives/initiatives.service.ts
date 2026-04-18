@@ -167,17 +167,53 @@ export class InitiativesService {
   }
 
   async remove(id: string) {
-    const initiative = await this.prisma.initiative.findUnique({ where: { id } });
+    // Incluimos épicas con sus historias para poder limpiar recursivamente
+    // los archivos del vault ANTES de que Postgres cascade borre las rows.
+    // Si omitiéramos esto, Prisma borra epics/stories en PG por ON DELETE CASCADE
+    // pero los markdown files quedan huérfanos en GitHub (cascade de DB no
+    // ejecuta código de aplicación).
+    const initiative = await this.prisma.initiative.findUnique({
+      where: { id },
+      include: {
+        epics: {
+          select: {
+            id: true,
+            title: true,
+            vaultPath: true,
+            stories: { select: { id: true, title: true, vaultPath: true } },
+          },
+        },
+      },
+    });
     if (!initiative) throw new NotFoundException('Iniciativa no encontrada');
 
-    // Delete vault note (best effort)
+    // Borrado bottom-up en el vault: historias → épicas → iniciativa.
+    // Todas las llamadas a deleteNote son best-effort: si una falla por rate
+    // limit de GitHub o race condition, loggeamos y seguimos — el delete en
+    // DB no depende del éxito del vault cleanup.
+    for (const epic of initiative.epics) {
+      for (const story of epic.stories) {
+        if (story.vaultPath) {
+          await this.vault
+            .deleteNote(story.vaultPath, `feat(story): delete "${story.title}" [${story.id}] (cascade from initiative)`)
+            .catch((err) => this.logger.warn(`Failed to delete vault note ${story.vaultPath}: ${err?.message}`));
+        }
+      }
+      if (epic.vaultPath) {
+        await this.vault
+          .deleteNote(epic.vaultPath, `feat(epic): delete "${epic.title}" [${epic.id}] (cascade from initiative)`)
+          .catch((err) => this.logger.warn(`Failed to delete vault note ${epic.vaultPath}: ${err?.message}`));
+      }
+    }
     if (initiative.vaultPath) {
       await this.vault
         .deleteNote(initiative.vaultPath, `feat(initiative): delete "${initiative.name}" [${id}]`)
-        .catch((err) => this.logger.warn(`Failed to delete vault note ${initiative.vaultPath}`, err));
+        .catch((err) => this.logger.warn(`Failed to delete vault note ${initiative.vaultPath}: ${err?.message}`));
     }
 
+    // Postgres ON DELETE CASCADE se encarga de borrar epics + stories en DB.
     await this.prisma.initiative.delete({ where: { id } });
+    this.logger.log(`[remove] initiative=${id} cleaned ${initiative.epics.length} epics + ${initiative.epics.reduce((n, e) => n + e.stories.length, 0)} stories from vault`);
   }
 
   // ─── Markdown serialization ───

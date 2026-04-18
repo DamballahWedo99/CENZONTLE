@@ -186,10 +186,68 @@ model VaultConfig {
   // Células (pods) con acceso a este vault. Array vacío = sin restricción (todas).
   allowedPodIds   String[] @default([])
 
+  // Clone lifecycle para la búsqueda con ripgrep (tools vault_glob/grep/read).
+  // Todos nullable/default para backward compatibility con Vaults existentes.
+  cloneStatus     VaultCloneStatus @default(pending)
+  clonedAtPath    String?
+  lastPulledAt    DateTime?
+  lastSyncedSha   String?
+  lastSyncError   String?
+
   createdAt       DateTime @default(now())
   updatedAt       DateTime @updatedAt
 
   @@map("vault_configs")
+}
+
+/// Estados del clone local del Vault en disco. Separado de CodeRepoCloneStatus
+/// porque son dominios distintos aunque el shape sea idéntico — ver plan doc.
+enum VaultCloneStatus {
+  pending
+  cloning
+  ready
+  error
+  stale
+}
+
+enum CodeRepoCloneStatus {
+  pending
+  cloning
+  ready
+  error
+  stale
+}
+
+model CodeRepository {
+  id              String   @id @default(uuid())
+  name            String   @unique
+  owner           String
+  repo            String
+  branch          String   @default("main")
+
+  // Token encriptado con el mismo esquema que VaultConfig (AES-256-GCM).
+  // Reutiliza VAULT_ENCRYPTION_KEY vía CryptoService.
+  tokenCiphertext String
+  tokenIv         String
+  tokenAuthTag    String
+
+  // Solo un repo "activo" a la vez (análogo a VaultConfig.isActive).
+  isActive        Boolean  @default(false)
+
+  // Lifecycle del clone local en disco
+  cloneStatus     CodeRepoCloneStatus @default(pending)
+  clonedAtPath    String?
+  lastPulledAt    DateTime?
+  lastSyncedSha   String?
+  lastSyncError   String?
+
+  // Pods con acceso (array vacío = sin restricción, igual que VaultConfig).
+  allowedPodIds   String[] @default([])
+
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  @@map("code_repositories")
 }
 
 model ChangelogEntry {
