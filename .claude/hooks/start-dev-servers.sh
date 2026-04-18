@@ -196,11 +196,60 @@ if [[ "$kind_api" == "sibling" || "$kind_web" == "sibling" ]]; then
   reclaim_siblings
 fi
 
-# --- 6. Preflight: node_modules must exist ------------------------------------
-# A fresh worktree has no node_modules; pnpm would fail with "next: command
-# not found" in the background log where nobody sees it.
-if [[ ! -d "$WORKTREE/node_modules" ]]; then
-  echo "[hook] ABORT: $WORKTREE/node_modules missing — run 'pnpm install' in this worktree to enable dev servers" >> "$LOG_DIR/hook.log"
+# --- 6. Fresh-worktree setup: pnpm install, build shared, prisma generate -----
+# A new worktree from `git worktree add` has no node_modules, no compiled
+# packages/shared, and no generated Prisma client. Starting the dev servers
+# without these fails silently in background. Run each step only if missing.
+setup_worktree() {
+  local did_work=0
+  local setup_log="$LOG_DIR/setup.log"
+
+  # 1. pnpm install — creates node_modules with links to the pnpm store.
+  if [[ ! -d "$WORKTREE/node_modules" ]]; then
+    echo "[hook] setup: pnpm install (fresh worktree)" >> "$LOG_DIR/hook.log"
+    if ! (cd "$WORKTREE" && pnpm install --prefer-offline) >>"$setup_log" 2>&1; then
+      echo "[hook] setup ERROR: pnpm install failed — see $setup_log" >> "$LOG_DIR/hook.log"
+      return 1
+    fi
+    did_work=1
+  fi
+
+  # 2. Build @cenzontle/shared — the api and web import from its dist output.
+  if [[ -f "$WORKTREE/packages/shared/package.json" ]] && \
+     [[ ! -f "$WORKTREE/packages/shared/dist/index.js" ]]; then
+    echo "[hook] setup: build @cenzontle/shared" >> "$LOG_DIR/hook.log"
+    if ! (cd "$WORKTREE" && pnpm --filter @cenzontle/shared build) >>"$setup_log" 2>&1; then
+      echo "[hook] setup ERROR: shared build failed — see $setup_log" >> "$LOG_DIR/hook.log"
+      return 1
+    fi
+    did_work=1
+  fi
+
+  # 3. Prisma generate — required for PrismaService types at runtime.
+  # Detect by presence of the generated client types under pnpm's virtual store.
+  # Path layout: node_modules/.pnpm/@prisma+client@<ver>_.../node_modules/@prisma/client/default.d.ts
+  if [[ -f "$WORKTREE/apps/api/prisma/schema.prisma" ]]; then
+    local prisma_ok=0
+    shopt -s nullglob
+    local generated=( "$WORKTREE/node_modules/.pnpm/@prisma+client@"*/node_modules/@prisma/client/default.d.ts )
+    shopt -u nullglob
+    (( ${#generated[@]} > 0 )) && prisma_ok=1
+    if (( prisma_ok == 0 )); then
+      echo "[hook] setup: prisma generate" >> "$LOG_DIR/hook.log"
+      if ! (cd "$WORKTREE" && pnpm --filter api exec prisma generate) >>"$setup_log" 2>&1; then
+        echo "[hook] setup WARN: prisma generate failed (api may not start) — see $setup_log" >> "$LOG_DIR/hook.log"
+      else
+        did_work=1
+      fi
+    fi
+  fi
+
+  [[ "$did_work" == "1" ]] && echo "[hook] setup complete" >> "$LOG_DIR/hook.log"
+  return 0
+}
+
+if ! setup_worktree; then
+  echo "[hook] ABORT: setup failed" >> "$LOG_DIR/hook.log"
   exit 0
 fi
 
