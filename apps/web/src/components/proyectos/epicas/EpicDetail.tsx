@@ -10,6 +10,7 @@ import {
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
+import { DatePicker } from '@/components/ui/date-picker';
 import {
   Select,
   SelectContent,
@@ -548,11 +549,11 @@ export function EpicDetail({ epic, onClose }: EpicDetailProps) {
                     </div>
                     <div>
                       <label className="text-xs font-medium text-muted-foreground mb-1.5 block">Fecha inicio</label>
-                      <Input type="date" value={editStartDate} onChange={(e) => setEditStartDate(e.target.value)} />
+                      <DatePicker value={editStartDate} onChange={setEditStartDate} maxDate={editTargetDate || undefined} />
                     </div>
                     <div>
                       <label className="text-xs font-medium text-muted-foreground mb-1.5 block">Fecha objetivo</label>
-                      <Input type="date" value={editTargetDate} onChange={(e) => setEditTargetDate(e.target.value)} />
+                      <DatePicker value={editTargetDate} onChange={setEditTargetDate} minDate={editStartDate || undefined} />
                     </div>
                   </div>
                 ) : (

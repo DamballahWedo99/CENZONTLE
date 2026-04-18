@@ -13,6 +13,7 @@ import {
 import { useProyectos } from '@/context/ProyectosContext';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
+import { DatePicker } from '@/components/ui/date-picker';
 import {
   Select,
   SelectContent,
@@ -570,10 +571,9 @@ export function EpicDependencies({
               </div>
               <div>
                 <label className="text-xs font-medium text-muted-foreground">Fecha límite</label>
-                <Input
-                  type="date"
+                <DatePicker
                   value={form.dueDate ?? ''}
-                  onChange={(e) => updateField('dueDate', e.target.value || null)}
+                  onChange={(v) => updateField('dueDate', v || null)}
                   className="mt-1"
                 />
               </div>

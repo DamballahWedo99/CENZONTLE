@@ -1,5 +1,7 @@
 import { apiFetch } from './client';
 
+export type VaultCloneStatus = 'pending' | 'cloning' | 'ready' | 'error' | 'stale';
+
 export interface VaultConfig {
   id: string;
   name: string;
@@ -13,6 +15,16 @@ export interface VaultConfig {
   roleDefaults: Record<string, string>;
   createdAt: string;
   updatedAt: string;
+  cloneStatus: VaultCloneStatus;
+  lastSyncedSha: string | null;
+  lastPulledAt: string | null;
+  lastSyncError: string | null;
+}
+
+export interface VaultSyncResult {
+  ok: boolean;
+  sha?: string;
+  message?: string;
 }
 
 export interface CreateVaultConfigInput {
@@ -76,4 +88,17 @@ export function activateVaultConfig(id: string) {
 
 export function testVaultConfig(id: string) {
   return apiFetch<TestConnectionResult>(`/vault/configs/${id}/test`, { method: 'POST' });
+}
+
+export function syncVaultConfig(id: string) {
+  return apiFetch<VaultSyncResult>(`/vault/configs/${id}/sync`, { method: 'POST' });
+}
+
+export function getVaultCloneStatus(id: string) {
+  return apiFetch<{
+    status: VaultCloneStatus;
+    lastPulledAt: string | null;
+    sha: string | null;
+    error: string | null;
+  }>(`/vault/configs/${id}/status`);
 }

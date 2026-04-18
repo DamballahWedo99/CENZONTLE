@@ -339,6 +339,49 @@ export interface Epic {
   updatedAt: string;
 }
 
+/** Epica propuesta por el agente IA, antes de ser persistida. */
+export type ProposedEpic = Omit<
+  Epic,
+  | 'id' | 'createdAt' | 'updatedAt'
+  | 'documents' | 'diagrams' | 'dependencies'
+  | 'poApproval' | 'tlApproval' | 'qaMatrix' | 'qaApproval' | 'epicQAMatrix'
+  | 'tracker'
+> & {
+  clientId: string; // ID local para tracking en staging
+};
+
+/** Fases del agente de generacion de epicas. */
+export type EpicGenerationPhase = 'idle' | 'researching' | 'analyzing' | 'proposing' | 'done';
+
+/** Base fields present on every SSE event. */
+interface EpicGenerationEventBase {
+  timestamp?: string;
+}
+
+/** Eventos SSE emitidos durante la generacion de epicas. */
+export type EpicGenerationEvent =
+  | (EpicGenerationEventBase & { type: 'run_started' })
+  | (EpicGenerationEventBase & { type: 'run_finished'; totalDurationMs: number })
+  | (EpicGenerationEventBase & { type: 'phase_change'; phase: EpicGenerationPhase; label: string })
+  | (EpicGenerationEventBase & { type: 'thinking'; delta: string })
+  | (EpicGenerationEventBase & { type: 'step_start'; step: string; label?: string; tool?: string; toolArgs?: Record<string, unknown> })
+  | (EpicGenerationEventBase & { type: 'step_done'; step: string; tool?: string; summary?: string; durationMs?: number; resultPreview?: string })
+  | (EpicGenerationEventBase & { type: 'tool_progress'; tool: string; detail: string })
+  | (EpicGenerationEventBase & { type: 'proposal_ready'; epic: ProposedEpic })
+  | (EpicGenerationEventBase & { type: 'done' })
+  | (EpicGenerationEventBase & { type: 'error'; message: string });
+
+/** Cached generation session stored in Redis. */
+export interface CachedGenerationSession {
+  initiativeId: string;
+  status: 'streaming' | 'staging';
+  proposals: ProposedEpic[];
+  events: EpicGenerationEvent[];
+  createdAt: string;
+  completedAt?: string;
+  ttlSeconds: number;
+}
+
 // --- Story section types ---
 
 export interface StoryPOFields {
@@ -503,3 +546,4 @@ export const DEFAULT_FILTERS: ProyectosFilters = {
   searchQuery: '',
   trackerKey: '',
 };
+

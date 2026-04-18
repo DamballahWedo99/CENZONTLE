@@ -12,6 +12,7 @@
     "type-check": "tsc --noEmit"
   },
   "dependencies": {
+    "@anthropic-ai/sdk": "^0.88.0",
     "@aws-sdk/client-s3": "^3.1027.0",
     "@aws-sdk/s3-request-presigner": "^3.1027.0",
     "@cenzontle/shared": "workspace:*",
@@ -27,12 +28,15 @@
     "@prisma/client": "^7.7.0",
     "class-transformer": "^0.5.1",
     "class-validator": "^0.15.1",
+    "ioredis": "^5.10.1",
     "jose": "^6.2.2",
     "mime-types": "^3.0.2",
     "node-pty": "^1.1.0",
     "pg": "^8.20.0",
     "reflect-metadata": "^0.2.0",
     "rxjs": "^7.8.0",
+    "sharp": "^0.33.5",
+    "simple-git": "^3.36.0",
     "socket.io": "^4.8.3"
   },
   "prisma": {

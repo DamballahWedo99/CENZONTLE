@@ -7,6 +7,7 @@ import { toast } from 'sonner';
 import { useProyectos } from '@/context/ProyectosContext';
 import { useBreadcrumb } from '@/context/BreadcrumbContext';
 import { updateStory as apiUpdateStory, deleteStory as apiDeleteStory, getStory as apiGetStory } from '@/lib/api/stories';
+import { TypeToConfirmDialog } from '@/components/ui/type-to-confirm-dialog';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -33,6 +34,7 @@ import {
   Calendar,
 
   Pencil,
+  Trash2,
   X,
   Check,
   History,
@@ -219,6 +221,20 @@ function StoryFullPageInner({ storyId }: StoryFullPageProps) {
   const sprint = useMemo(() => (story?.sprintId ? state.sprints.find((s) => s.id === story.sprintId) ?? null : null), [story, state.sprints]);
 
   const [isEditing, setIsEditing] = useState(false);
+  const [deleteOpen, setDeleteOpen] = useState(false);
+
+  const handleDelete = async () => {
+    if (!story) return;
+    try {
+      await apiDeleteStory(story.id);
+      dispatch({ type: 'DELETE_STORY', payload: { id: story.id } });
+      toast.success('Historia eliminada');
+      router.push(`/proyectos/epicas/${story.epicId}`);
+    } catch (err: any) {
+      toast.error(err.message || 'Error al eliminar historia');
+      throw err;
+    }
+  };
   const [activeTab, setActiveTab] = useState('po');
   const [editTitle, setEditTitle] = useState('');
   const [editStatus, setEditStatus] = useState<StoryStatus>(StoryStatus.Backlog);
@@ -431,9 +447,14 @@ function StoryFullPageInner({ storyId }: StoryFullPageProps) {
               )}
               <div className="flex gap-1 shrink-0 mt-1">
                 {!isEditing ? (
-                  <Button variant="ghost" size="icon" onClick={handleStartEdit} className="text-muted-foreground hover:text-foreground">
-                    <Pencil className="h-4 w-4" />
-                  </Button>
+                  <>
+                    <Button variant="ghost" size="icon" onClick={handleStartEdit} className="text-muted-foreground hover:text-foreground">
+                      <Pencil className="h-4 w-4" />
+                    </Button>
+                    <Button variant="ghost" size="icon" onClick={() => setDeleteOpen(true)} className="text-muted-foreground hover:text-destructive">
+                      <Trash2 className="h-4 w-4" />
+                    </Button>
+                  </>
                 ) : (
                   <>
                     <Button variant="ghost" size="icon" onClick={() => setIsEditing(false)} className="text-muted-foreground hover:text-foreground">
@@ -952,6 +973,18 @@ function StoryFullPageInner({ storyId }: StoryFullPageProps) {
           )}
         </div>
       </div>
+      {story && (
+        <TypeToConfirmDialog
+          open={deleteOpen}
+          onOpenChange={setDeleteOpen}
+          title="Eliminar historia"
+          resourceLabel="historia"
+          expectedValue={story.title}
+          description="Esto eliminará la historia y toda su información asociada (criterios de aceptación, notas técnicas, QA). La acción es permanente y no se puede deshacer."
+          confirmText="Eliminar historia"
+          onConfirm={handleDelete}
+        />
+      )}
     </div>
   );
 }

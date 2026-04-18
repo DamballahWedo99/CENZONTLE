@@ -36,6 +36,16 @@ services:
       mc anonymous set download local/cenzontle-documents;
       "
 
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    command: redis-server --appendonly yes --maxmemory 256mb --maxmemory-policy allkeys-lru
+
 volumes:
   pgdata:
   minio_data:
+  redis_data:

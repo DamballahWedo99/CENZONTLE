@@ -227,17 +227,33 @@ export class EpicsService {
   }
 
   async remove(id: string) {
-    const epic = await this.prisma.epic.findUnique({ where: { id } });
+    // Traemos las historias junto con la épica para poder limpiar sus vault
+    // files. Mismo razonamiento que en InitiativesService.remove: Postgres
+    // cascade borra rows pero no toca GitHub.
+    const epic = await this.prisma.epic.findUnique({
+      where: { id },
+      include: {
+        stories: { select: { id: true, title: true, vaultPath: true } },
+      },
+    });
     if (!epic) throw new NotFoundException('Épica no encontrada');
 
-    // Delete vault note (best effort)
+    // Borrar primero las historias del vault (best effort), luego la épica.
+    for (const story of epic.stories) {
+      if (story.vaultPath) {
+        await this.vault
+          .deleteNote(story.vaultPath, `feat(story): delete "${story.title}" [${story.id}] (cascade from epic)`)
+          .catch((err) => this.logger.warn(`Failed to delete vault note ${story.vaultPath}: ${err?.message}`));
+      }
+    }
     if (epic.vaultPath) {
       await this.vault
         .deleteNote(epic.vaultPath, `feat(epic): delete "${epic.title}" [${id}]`)
-        .catch((err) => this.logger.warn(`Failed to delete vault note ${epic.vaultPath}`, err));
+        .catch((err) => this.logger.warn(`Failed to delete vault note ${epic.vaultPath}: ${err?.message}`));
     }
 
     await this.prisma.epic.delete({ where: { id } });
+    this.logger.log(`[remove] epic=${id} cleaned ${epic.stories.length} stories from vault`);
   }
 
   // ─── Narrative extraction ───

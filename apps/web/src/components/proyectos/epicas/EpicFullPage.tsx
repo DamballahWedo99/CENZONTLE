@@ -5,12 +5,14 @@ import { useRouter, useSearchParams } from 'next/navigation';
 import Link from 'next/link';
 import { useProyectos } from '@/context/ProyectosContext';
 import { useBreadcrumb } from '@/context/BreadcrumbContext';
-import { updateEpic as apiUpdateEpic } from '@/lib/api/epics';
+import { updateEpic as apiUpdateEpic, deleteEpic as apiDeleteEpic } from '@/lib/api/epics';
+import { TypeToConfirmDialog } from '@/components/ui/type-to-confirm-dialog';
 import { createStory as apiCreateStory, updateStory as apiUpdateStory, deleteStory as apiDeleteStory } from '@/lib/api/stories';
 import { toast } from 'sonner';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
+import { DatePicker } from '@/components/ui/date-picker';
 import {
   Select,
   SelectContent,
@@ -42,6 +44,7 @@ import { generateStories } from '@/lib/story-agent';
 import {
   Calendar,
   Pencil,
+  Trash2,
   X,
   Check,
   History,
@@ -269,6 +272,20 @@ function EpicFullPageInner({ epicId }: { epicId: string }) {
   }, [rawEpic, state.initiatives, state.pods, state.stories]);
 
   const [isEditing, setIsEditing] = useState(false);
+  const [deleteOpen, setDeleteOpen] = useState(false);
+
+  const handleDelete = async () => {
+    if (!rawEpic) return;
+    try {
+      await apiDeleteEpic(rawEpic.id);
+      dispatch({ type: 'DELETE_EPIC', payload: { id: rawEpic.id } });
+      toast.success('Épica eliminada');
+      router.push(`/proyectos/iniciativas/${rawEpic.initiativeId}`);
+    } catch (err: any) {
+      toast.error(err.message || 'Error al eliminar épica');
+      throw err;
+    }
+  };
   const [showIntegrationDialog, setShowIntegrationDialog] = useState(false);
   const [editTitle, setEditTitle] = useState('');
   const [editDescription, setEditDescription] = useState('');
@@ -590,6 +607,9 @@ function EpicFullPageInner({ epicId }: { epicId: string }) {
                   <Button variant="ghost" size="icon" onClick={handleStartEdit} className="text-muted-foreground hover:text-foreground">
                     <Pencil className="h-4 w-4" />
                   </Button>
+                  <Button variant="ghost" size="icon" onClick={() => setDeleteOpen(true)} className="text-muted-foreground hover:text-destructive">
+                    <Trash2 className="h-4 w-4" />
+                  </Button>
                 </>
               ) : (
                 <>
@@ -661,11 +681,11 @@ function EpicFullPageInner({ epicId }: { epicId: string }) {
                     </div>
                     <div>
                       <label className="text-xs font-medium text-muted-foreground mb-1.5 block">Fecha inicio</label>
-                      <Input type="date" value={editStartDate} onChange={(e) => setEditStartDate(e.target.value)} className="h-8 text-xs" />
+                      <DatePicker value={editStartDate} onChange={setEditStartDate} maxDate={editTargetDate || undefined} className="h-8 text-xs" />
                     </div>
                     <div>
                       <label className="text-xs font-medium text-muted-foreground mb-1.5 block">Fecha objetivo</label>
-                      <Input type="date" value={editTargetDate} onChange={(e) => setEditTargetDate(e.target.value)} className="h-8 text-xs" />
+                      <DatePicker value={editTargetDate} onChange={setEditTargetDate} minDate={editStartDate || undefined} className="h-8 text-xs" />
                     </div>
                   </div>
                   <div className="grid grid-cols-2 gap-3">
@@ -1213,6 +1233,18 @@ function EpicFullPageInner({ epicId }: { epicId: string }) {
         </div>
       </div>
 
+      {rawEpic && (
+        <TypeToConfirmDialog
+          open={deleteOpen}
+          onOpenChange={setDeleteOpen}
+          title="Eliminar épica"
+          resourceLabel="épica"
+          expectedValue={rawEpic.title}
+          description="Esto eliminará la épica junto con todas sus historias, diagramas, documentos y dependencias. La acción es permanente y no se puede deshacer."
+          confirmText="Eliminar épica"
+          onConfirm={handleDelete}
+        />
+      )}
     </div>
   );
 }

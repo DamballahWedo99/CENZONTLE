@@ -1,15 +1,17 @@
 'use client';
 
-import { useState, useMemo, useEffect, useCallback } from 'react';
+import { useState, useMemo, useEffect, useCallback, useRef } from 'react';
 import { useRouter } from 'next/navigation';
 import Link from 'next/link';
 import { toast } from 'sonner';
 import { useProyectos } from '@/context/ProyectosContext';
 import { useBreadcrumb } from '@/context/BreadcrumbContext';
-import { updateInitiative as apiUpdateInitiative } from '@/lib/api/initiatives';
+import { updateInitiative as apiUpdateInitiative, deleteInitiative as apiDeleteInitiative } from '@/lib/api/initiatives';
+import { TypeToConfirmDialog } from '@/components/ui/type-to-confirm-dialog';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
+import { DatePicker } from '@/components/ui/date-picker';
 import {
   Select,
   SelectContent,
@@ -21,6 +23,7 @@ import {
   InitiativeStatus,
   StoryStatus,
   ChangelogEntityType,
+  Priority,
 } from '@cenzontle/shared';
 import { StatusBadge } from '../shared/StatusBadge';
 import { PodBadge } from '../shared/PodBadge';
@@ -28,8 +31,14 @@ import { ProgressBar } from '../shared/ProgressBar';
 import { StoryPointsBadge } from '../shared/StoryPointsBadge';
 import { InitiativeEconomicAnalysis } from './InitiativeEconomicAnalysis';
 import { InitiativeDocuments } from './InitiativeDocuments';
-import { generateEpics } from '@/lib/epic-agent';
+import { streamEpicProposals } from '@/lib/epic-agent';
 import { InlineEpicCreator } from './InlineEpicCreator';
+import { EpicAgentPromptBar } from './EpicAgentPromptBar';
+import { AgentThinkingDisplay } from './agent-thinking';
+import { EpicProposalList } from './EpicProposalList';
+import type { ProposedEpic, EpicGenerationEvent, Epic } from '@cenzontle/shared';
+import { createEpic as apiCreateEpic } from '@/lib/api/epics';
+import { getCachedSession, invalidateCache, removeCachedProposal } from '@/lib/api/epic-generation';
 import {
   Calendar,
   Pencil,
@@ -46,6 +55,7 @@ import {
   Plus,
   BriefcaseBusiness,
   Paperclip,
+  Trash2,
 } from 'lucide-react';
 
 const initiativeStatusConfig: Record<InitiativeStatus, { label: string; className: string }> = {
@@ -53,6 +63,20 @@ const initiativeStatusConfig: Record<InitiativeStatus, { label: string; classNam
   [InitiativeStatus.Active]: { label: 'Active', className: 'bg-blue-100 text-blue-700 dark:bg-blue-900/50 dark:text-blue-300' },
   [InitiativeStatus.Completed]: { label: 'Completed', className: 'bg-green-100 text-green-700 dark:bg-green-900/50 dark:text-green-300' },
   [InitiativeStatus.OnHold]: { label: 'On Hold', className: 'bg-amber-100 text-amber-700 dark:bg-amber-900/50 dark:text-amber-300' },
+};
+
+const priorityStyles: Record<Priority, string> = {
+  [Priority.Critical]: 'text-red-600 bg-red-50 border-red-200 dark:bg-red-950/30 dark:border-red-900/40',
+  [Priority.High]: 'text-orange-600 bg-orange-50 border-orange-200 dark:bg-orange-950/30 dark:border-orange-900/40',
+  [Priority.Medium]: 'text-blue-600 bg-blue-50 border-blue-200 dark:bg-blue-950/30 dark:border-blue-900/40',
+  [Priority.Low]: 'text-slate-600 bg-slate-50 border-slate-200 dark:bg-slate-800/30 dark:border-slate-700/40',
+};
+
+const priorityLabels: Record<Priority, string> = {
+  [Priority.Critical]: 'Crítica',
+  [Priority.High]: 'Alta',
+  [Priority.Medium]: 'Media',
+  [Priority.Low]: 'Baja',
 };
 
 interface InitiativeFullPageProps {
@@ -105,8 +129,9 @@ function InitiativeFullPageInner({ initiativeId }: InitiativeFullPageProps) {
     return Array.from(map.values());
   }, [stories, state.pods]);
 
-  // Edit state
+  // Edit + delete state
   const [isEditing, setIsEditing] = useState(false);
+  const [deleteOpen, setDeleteOpen] = useState(false);
   const [editName, setEditName] = useState('');
   const [editDescription, setEditDescription] = useState('');
   const [editStatus, setEditStatus] = useState<InitiativeStatus>(InitiativeStatus.Planning);
@@ -114,8 +139,40 @@ function InitiativeFullPageInner({ initiativeId }: InitiativeFullPageProps) {
   const [editStartDate, setEditStartDate] = useState('');
   const [editTargetDate, setEditTargetDate] = useState('');
   const [activeTab, setActiveTab] = useState('descripcion');
-  const [isGeneratingEpics, setIsGeneratingEpics] = useState(false);
   const [isCreatingEpic, setIsCreatingEpic] = useState(false);
+
+  // AI agent states
+  const [agentMode, setAgentMode] = useState<'idle' | 'prompting' | 'streaming' | 'staging'>('idle');
+  const [proposals, setProposals] = useState<ProposedEpic[]>([]);
+  const [agentEvents, setAgentEvents] = useState<EpicGenerationEvent[]>([]);
+  const [acceptingId, setAcceptingId] = useState<string | null>(null);
+  const [editingProposal, setEditingProposal] = useState<ProposedEpic | null>(null);
+  const abortRef = useRef<AbortController | null>(null);
+  const proposalsRef = useRef(proposals);
+  proposalsRef.current = proposals;
+
+  // Recover cached session on mount (survives page refresh)
+  useEffect(() => {
+    if (!initiative) return;
+    let cancelled = false;
+
+    (async () => {
+      try {
+        const result = await getCachedSession(initiative.id);
+        if (cancelled || !result?.session) return;
+        const { session } = result;
+        if (session.proposals.length > 0) {
+          setAgentEvents(session.events);
+          setProposals(session.proposals);
+          setAgentMode('staging');
+        }
+      } catch {
+        // Cache unavailable — stay idle
+      }
+    })();
+
+    return () => { cancelled = true; };
+  }, [initiative?.id]);
 
   // Changelog filtered to this initiative and its epics
   const changelog = useMemo(() => {
@@ -171,6 +228,18 @@ function InitiativeFullPageInner({ initiativeId }: InitiativeFullPageProps) {
     setIsEditing(true);
   };
 
+  const handleDelete = async () => {
+    try {
+      await apiDeleteInitiative(initiative.id);
+      dispatch({ type: 'DELETE_INITIATIVE', payload: { id: initiative.id } });
+      toast.success('Iniciativa eliminada');
+      router.push('/proyectos');
+    } catch (err: any) {
+      toast.error(err.message || 'Error al eliminar iniciativa');
+      throw err; // re-throw para que el dialog se quede abierto
+    }
+  };
+
   const handleSave = async () => {
     const changes: Record<string, string> = {};
     if (editName !== initiative.name) changes.name = editName;
@@ -192,17 +261,142 @@ function InitiativeFullPageInner({ initiativeId }: InitiativeFullPageProps) {
     setIsEditing(false);
   };
 
-  const handleGenerateEpics = async () => {
+  const handleStartAgent = () => setAgentMode('prompting');
+
+  const handleCancelAgent = () => {
+    abortRef.current?.abort();
+    abortRef.current = null;
+    setAgentMode(proposalsRef.current.length > 0 ? 'staging' : 'idle');
+    setAgentEvents([]);
+  };
+
+  const handleSubmitPrompt = async (prompt: string, webSearch: boolean) => {
     if (!initiative) return;
-    setIsGeneratingEpics(true);
+    setAgentMode('streaming');
+    setAgentEvents([]);
+
+    const controller = new AbortController();
+    abortRef.current = controller;
+
     try {
-      const newEpics = await generateEpics(initiative, state.pods, state.epics.length);
-      for (const epic of newEpics) {
-        dispatch({ type: 'CREATE_EPIC', payload: epic });
+      for await (const event of streamEpicProposals(initiative.id, { prompt, webSearch, signal: controller.signal })) {
+        setAgentEvents((prev) => [...prev, event]);
+
+        if (event.type === 'proposal_ready') {
+          setProposals((prev) => [...prev, event.epic]);
+        }
+        if (event.type === 'done') {
+          setAgentMode('staging');
+        }
+        if (event.type === 'error') {
+          toast.error(event.message);
+          setAgentMode(proposalsRef.current.length > 0 ? 'staging' : 'idle');
+        }
+      }
+      // Stream ended naturally
+      setAgentMode((m) => m === 'streaming' ? 'staging' : m);
+    } catch (err: any) {
+      if (err.name !== 'AbortError') {
+        toast.error(err.message || 'Error generando épicas');
+        setAgentMode('idle');
       }
     } finally {
-      setIsGeneratingEpics(false);
+      abortRef.current = null;
     }
+  };
+
+  const handleAcceptProposal = async (proposal: ProposedEpic) => {
+    setAcceptingId(proposal.clientId);
+    try {
+      const created = await apiCreateEpic({
+        title: proposal.title,
+        description: proposal.description,
+        status: proposal.status,
+        priority: proposal.priority,
+        initiativeId: proposal.initiativeId,
+        podIds: proposal.podIds,
+        startDate: proposal.startDate,
+        targetDate: proposal.targetDate,
+        qualitativeBenefits: proposal.qualitativeBenefits,
+        quantitativeBenefits: proposal.quantitativeBenefits,
+        benefitsMeasurement: proposal.benefitsMeasurement,
+        scopeDescription: proposal.scopeDescription,
+        acceptanceCriteria: proposal.acceptanceCriteria,
+        technologicalImprovements: proposal.technologicalImprovements,
+        businessPriority: proposal.businessPriority,
+        teamsInvolved: proposal.teamsInvolved,
+        impactedChannels: proposal.impactedChannels,
+        impactedFlows: proposal.impactedFlows,
+        impactSabreLevel: proposal.impactSabreLevel,
+        thirdPartyDependencies: proposal.thirdPartyDependencies,
+      });
+
+      dispatch({
+        type: 'CREATE_EPIC',
+        payload: {
+          ...created,
+          podIds: proposal.podIds,
+          documents: [],
+          diagrams: [],
+          dependencies: [],
+          poApproval: null,
+          tlApproval: null,
+          qaMatrix: null,
+          qaApproval: null,
+          epicQAMatrix: null,
+        } as Epic,
+      });
+
+      setProposals((prev) => prev.filter((p) => p.clientId !== proposal.clientId));
+      removeCachedProposal(initiative.id, proposal.clientId).catch(() => {});
+      toast.success(`Épica "${proposal.title}" creada`);
+    } catch (err: any) {
+      toast.error(err.message || 'Error creando épica');
+    } finally {
+      setAcceptingId(null);
+    }
+  };
+
+  const handleAcceptAll = async () => {
+    const snapshot = [...proposals];
+    let accepted = 0;
+    for (const p of snapshot) {
+      try {
+        await handleAcceptProposal(p);
+        accepted++;
+      } catch {
+        // handleAcceptProposal already toasts the error
+        break;
+      }
+    }
+    if (accepted > 0 && accepted < snapshot.length) {
+      toast.info(`${accepted} de ${snapshot.length} épicas creadas — el resto falló`);
+    }
+  };
+
+  const handleDiscardProposal = (clientId: string) => {
+    setProposals((prev) => prev.filter((p) => p.clientId !== clientId));
+    if (initiative) removeCachedProposal(initiative.id, clientId).catch(() => {});
+  };
+
+  const handleDiscardAll = () => {
+    setProposals([]);
+    setAgentMode('idle');
+    if (initiative) invalidateCache(initiative.id).catch(() => {});
+  };
+
+  const handleEditProposal = (proposal: ProposedEpic) => {
+    setEditingProposal(proposal);
+    setIsCreatingEpic(true);
+  };
+
+  const handleRegenerateProposal = (proposal: ProposedEpic) => {
+    handleDiscardProposal(proposal.clientId);
+    setAgentMode('prompting');
+  };
+
+  const handleRefinePrompt = () => {
+    setAgentMode('prompting');
   };
 
   function formatShortDate(dateStr: string): string {
@@ -249,9 +443,14 @@ function InitiativeFullPageInner({ initiativeId }: InitiativeFullPageProps) {
               )}
               <div className="flex gap-1 shrink-0 mt-1">
                 {!isEditing ? (
-                  <Button variant="ghost" size="icon" onClick={handleStartEdit} className="text-muted-foreground hover:text-foreground">
-                    <Pencil className="h-4 w-4" />
-                  </Button>
+                  <>
+                    <Button variant="ghost" size="icon" onClick={handleStartEdit} className="text-muted-foreground hover:text-foreground">
+                      <Pencil className="h-4 w-4" />
+                    </Button>
+                    <Button variant="ghost" size="icon" onClick={() => setDeleteOpen(true)} className="text-muted-foreground hover:text-destructive">
+                      <Trash2 className="h-4 w-4" />
+                    </Button>
+                  </>
                 ) : (
                   <>
                     <Button variant="ghost" size="icon" onClick={() => setIsEditing(false)} className="text-muted-foreground hover:text-foreground">
@@ -286,11 +485,11 @@ function InitiativeFullPageInner({ initiativeId }: InitiativeFullPageProps) {
                   </div>
                   <div>
                     <label className="text-xs font-medium text-muted-foreground mb-1.5 block">Fecha inicio</label>
-                    <Input type="date" value={editStartDate} onChange={(e) => setEditStartDate(e.target.value)} className="h-8 text-xs" />
+                    <DatePicker value={editStartDate} onChange={setEditStartDate} maxDate={editTargetDate || undefined} className="h-8 text-xs" />
                   </div>
                   <div>
                     <label className="text-xs font-medium text-muted-foreground mb-1.5 block">Fecha objetivo</label>
-                    <Input type="date" value={editTargetDate} onChange={(e) => setEditTargetDate(e.target.value)} className="h-8 text-xs" />
+                    <DatePicker value={editTargetDate} onChange={setEditTargetDate} minDate={editStartDate || undefined} className="h-8 text-xs" />
                   </div>
                 </div>
               </div>
@@ -433,12 +632,11 @@ function InitiativeFullPageInner({ initiativeId }: InitiativeFullPageProps) {
                   {epics.length} {epics.length === 1 ? 'épica' : 'épicas'}
                 </p>
                 <div className="flex gap-2">
-                  {epics.length === 0 && !isGeneratingEpics && (
+                  {agentMode === 'idle' && (
                     <Button
                       variant="outline"
                       size="sm"
-                      onClick={handleGenerateEpics}
-                      disabled={isGeneratingEpics}
+                      onClick={handleStartAgent}
                       className="gap-1.5 text-xs"
                     >
                       <Sparkles className="h-3.5 w-3.5" />
@@ -448,7 +646,7 @@ function InitiativeFullPageInner({ initiativeId }: InitiativeFullPageProps) {
                   <Button
                     size="sm"
                     variant="outline"
-                    onClick={() => setIsCreatingEpic(true)}
+                    onClick={() => { setEditingProposal(null); setIsCreatingEpic(true); }}
                     disabled={isCreatingEpic}
                     className="gap-1.5 text-xs"
                   >
@@ -458,19 +656,42 @@ function InitiativeFullPageInner({ initiativeId }: InitiativeFullPageProps) {
                 </div>
               </div>
 
-              {isGeneratingEpics && (
-                <div className="flex items-center gap-3 rounded-lg bg-muted/50 px-4 py-3 text-sm">
-                  <Loader2 className="h-4 w-4 animate-spin text-muted-foreground" />
-                  <span className="text-muted-foreground">
-                    El agente está analizando la iniciativa para generar épicas...
-                  </span>
-                </div>
+              {/* Agent prompt bar / streaming timeline */}
+              {(agentMode === 'prompting' || agentMode === 'streaming') && (
+                <EpicAgentPromptBar
+                  mode={agentMode}
+                  events={agentEvents}
+                  onSubmit={handleSubmitPrompt}
+                  onCancel={handleCancelAgent}
+                />
+              )}
+
+              {/* Persistent thinking chain — visible in staging mode */}
+              {agentMode === 'staging' && agentEvents.length > 0 && (
+                <AgentThinkingDisplay events={agentEvents} isStreaming={false} />
+              )}
+
+              {/* Staging area for proposals */}
+              {proposals.length > 0 && agentMode !== 'streaming' && (
+                <EpicProposalList
+                  initiativeId={initiative.id}
+                  proposals={proposals}
+                  pods={state.pods}
+                  acceptingId={acceptingId}
+                  onAccept={handleAcceptProposal}
+                  onAcceptAll={handleAcceptAll}
+                  onEdit={handleEditProposal}
+                  onRegenerate={handleRegenerateProposal}
+                  onDiscard={handleDiscardProposal}
+                  onDiscardAll={handleDiscardAll}
+                  onRefinePrompt={handleRefinePrompt}
+                />
               )}
 
               {/* Epic list */}
               {!isCreatingEpic && (
                 <div className="space-y-2">
-                  {epics.length === 0 && !isGeneratingEpics ? (
+                  {epics.length === 0 && agentMode === 'idle' && proposals.length === 0 ? (
                     <div className="rounded-xl border-2 border-dashed py-12 flex flex-col items-center gap-3 text-center">
                       <Layers className="h-8 w-8 text-muted-foreground/30" />
                       <p className="text-sm text-muted-foreground">No hay épicas asociadas a esta iniciativa</p>
@@ -495,7 +716,7 @@ function InitiativeFullPageInner({ initiativeId }: InitiativeFullPageProps) {
                           <div className="flex items-center gap-3 px-4 py-3">
                             <span className="font-mono text-xs text-muted-foreground w-20 shrink-0">{epic.tracker?.externalKey ?? '—'}</span>
                             <span className="truncate flex-1 text-sm font-medium">{epic.title}</span>
-                            <div className="flex gap-1 shrink-0">
+                            <div className="flex gap-1 shrink-0 w-28 justify-center">
                               {epicPods.slice(0, 2).map((pod) => (
                                 <PodBadge key={pod.id} name={pod.name} color={pod.color} />
                               ))}
@@ -504,6 +725,11 @@ function InitiativeFullPageInner({ initiativeId }: InitiativeFullPageProps) {
                                   +{epicPods.length - 2}
                                 </span>
                               )}
+                            </div>
+                            <div className="w-14 shrink-0 flex justify-center">
+                              <span className={`text-[10px] px-1.5 py-0.5 rounded-full border ${priorityStyles[epic.priority]}`}>
+                                {priorityLabels[epic.priority]}
+                              </span>
                             </div>
                             <StatusBadge status={epic.status} type="epic" />
                             <StoryPointsBadge points={epicPoints} />
@@ -528,11 +754,37 @@ function InitiativeFullPageInner({ initiativeId }: InitiativeFullPageProps) {
                   initiativeId={initiative.id}
                   pods={state.pods}
                   existingEpicCount={state.epics.length}
+                  initialData={editingProposal ? {
+                    title: editingProposal.title,
+                    description: editingProposal.description,
+                    priority: editingProposal.priority,
+                    status: editingProposal.status,
+                    selectedPodIds: editingProposal.podIds,
+                    startDate: editingProposal.startDate,
+                    targetDate: editingProposal.targetDate,
+                    qualitativeBenefits: editingProposal.qualitativeBenefits,
+                    quantitativeBenefits: editingProposal.quantitativeBenefits,
+                    benefitsMeasurement: editingProposal.benefitsMeasurement,
+                    scopeDescription: editingProposal.scopeDescription,
+                    acceptanceCriteria: editingProposal.acceptanceCriteria,
+                    technologicalImprovements: editingProposal.technologicalImprovements,
+                    businessPriority: editingProposal.businessPriority,
+                    teamsInvolved: editingProposal.teamsInvolved,
+                    impactedChannels: editingProposal.impactedChannels,
+                    impactedFlows: editingProposal.impactedFlows,
+                    impactSabreLevel: editingProposal.impactSabreLevel,
+                    thirdPartyDependencies: editingProposal.thirdPartyDependencies,
+                  } : undefined}
                   onCreateEpic={(epic) => {
                     dispatch({ type: 'CREATE_EPIC', payload: epic });
+                    // Remove from proposals if editing a proposal
+                    if (editingProposal) {
+                      setProposals((prev) => prev.filter((p) => p.clientId !== editingProposal.clientId));
+                      setEditingProposal(null);
+                    }
                     setIsCreatingEpic(false);
                   }}
-                  onCancel={() => setIsCreatingEpic(false)}
+                  onCancel={() => { setIsCreatingEpic(false); setEditingProposal(null); }}
                 />
               )}
             </TabsContent>
@@ -734,6 +986,16 @@ function InitiativeFullPageInner({ initiativeId }: InitiativeFullPageProps) {
         </div>
       </div>
 
+      <TypeToConfirmDialog
+        open={deleteOpen}
+        onOpenChange={setDeleteOpen}
+        title="Eliminar iniciativa"
+        resourceLabel="iniciativa"
+        expectedValue={initiative.name}
+        description="Esto eliminará la iniciativa junto con todas sus épicas, historias y documentos asociados. La acción es permanente y no se puede deshacer."
+        confirmText="Eliminar iniciativa"
+        onConfirm={handleDelete}
+      />
     </div>
   );
 }
