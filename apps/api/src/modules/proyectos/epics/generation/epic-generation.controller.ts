@@ -6,6 +6,7 @@ import { Permissions } from '../../../auth/decorators';
 import { EpicGenerationService } from './epic-generation.service';
 import { ProposalCacheService } from './proposal-cache.service';
 import { GenerateEpicsQueryDto } from './dto/generate-epics.dto';
+import { sanitizeForLog } from '../../../../common/utils/sanitize-llm-input.util';
 import type { Request, Response } from 'express';
 
 @ApiTags('Épicas — Generación IA')
@@ -69,7 +70,8 @@ export class EpicGenerationController {
     @Res() res: Response,
   ) {
     const webSearchEnabled = query.webSearch === true;
-    this.logger.log(`[generate] initiative=${initiativeId} prompt="${query.prompt ?? ''}" count=${query.count ?? 5} webSearch=${webSearchEnabled}`);
+    const safePromptForLog = query.prompt ? sanitizeForLog(query.prompt) : '';
+    this.logger.log(`[generate] initiative=${initiativeId} prompt="${safePromptForLog}" count=${query.count ?? 5} webSearch=${webSearchEnabled}`);
 
     res.setHeader('Content-Type', 'text/event-stream');
     res.setHeader('Cache-Control', 'no-cache');
