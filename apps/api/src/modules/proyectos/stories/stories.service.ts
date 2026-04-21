@@ -11,6 +11,8 @@ import { randomUUID } from 'crypto';
 import {
   storyFolderPath,
   storyIndexPath,
+  initiativeDocumentPath,
+  epicDependencyPath,
   type InitiativeRef,
   type EpicRef,
   type StoryRef,
@@ -118,12 +120,25 @@ export class StoriesService {
       `[StoryVault:create] fileSet built: ${fileSet.size} files\n  - ${Array.from(fileSet.keys()).join('\n  - ')}`,
     );
 
-    // 1. Escribir todos los archivos al vault. writeFileSet hace rollback interno
-    // si alguno falla a mitad; aqui solo propagamos el error al caller.
+    // 1. Escribir los archivos CORE de la historia al vault (index + 3 definiciones).
+    // writeFileSet hace rollback interno si alguno falla.
+    // EN PARALELO: escribir docs y deps a nivel INICIATIVA/EPICA (compartidos
+    // entre historias hermanas, con dedup por contenido). Los artefactos epic-level
+    // son best-effort: si fallan, se loguea pero no aborta la historia porque los
+    // 4 archivos core ya son la data critica.
     const writesStart = Date.now();
-    const writtenPaths = await this.writeFileSet(fileSet);
+    const [writtenPaths] = await Promise.all([
+      this.writeFileSet(fileSet),
+      this.writeEpicLevelArtifacts(
+        iniRef,
+        epicRef,
+        id,
+        dto.relatedDocuments,
+        dto.discoveredDependencies,
+      ),
+    ]);
     this.logger.log(
-      `[StoryVault:create] ✓ vault writes OK (${writtenPaths.length} files in ${Date.now() - writesStart}ms)`,
+      `[StoryVault:create] ✓ vault writes OK (${writtenPaths.length} story files in ${Date.now() - writesStart}ms, plus epic-level artifacts in parallel)`,
     );
 
     // 2. Crear fila en PG. Si falla, rollback completo del vault.
@@ -377,27 +392,79 @@ export class StoriesService {
       commitMsg: `docs(story): qa strategy [${data.id}]`,
     });
 
-    // documentos-epica/<slug>.md
-    for (const doc of data.relatedDocuments ?? []) {
-      const docSlug = this.slugify(doc.docName) || 'documento';
-      const path = `${folderPath}/documentos-epica/${docSlug}.md`;
-      set.set(path, {
-        content: this.buildDocReferenceMarkdown(doc),
-        commitMsg: `docs(story): link doc ${docSlug} [${data.id}]`,
-      });
-    }
-
-    // dependencias/<slug>.md
-    for (const dep of data.discoveredDependencies ?? []) {
-      const depSlug = this.slugify(dep.title) || 'dependencia';
-      const path = `${folderPath}/dependencias/${depSlug}.md`;
-      set.set(path, {
-        content: this.buildDependencyMarkdown(dep),
-        commitMsg: `docs(story): record dependency ${depSlug} [${data.id}]`,
-      });
-    }
-
+    // NOTA: los relatedDocuments y discoveredDependencies NO se escriben dentro
+    // del folder de la historia — antes se duplicaban en cada historia del batch
+    // (todas las historias de un PO batch tienen los mismos docs/deps relevantes).
+    // Ahora van a nivel iniciativa/epica via writeEpicLevelArtifacts() — UNA copia
+    // compartida por todas las historias hermanas.
     return set;
+  }
+
+  /**
+   * Escribe los relatedDocuments a nivel INICIATIVA y las discoveredDependencies
+   * a nivel EPICA, con dedup por path. Si el archivo ya existe con el mismo
+   * contenido, se skip. Si existe con contenido distinto, se actualiza.
+   *
+   * Best-effort: errores se loguean pero no abortan la creacion de la historia
+   * (los archivos core de la historia ya se escribieron en writeFileSet). El
+   * vault queda en estado parcial si alguno falla — es aceptable porque el
+   * contenido de docs/deps se puede re-escribir en el proximo accept de otra
+   * historia del mismo batch.
+   */
+  private async writeEpicLevelArtifacts(
+    iniRef: InitiativeRef,
+    epicRef: EpicRef,
+    storyId: string,
+    relatedDocuments?: RelatedDocumentDto[],
+    discoveredDependencies?: DiscoveredDependencyDto[],
+  ): Promise<void> {
+    const docPromises = (relatedDocuments ?? []).map(async (doc) => {
+      const path = initiativeDocumentPath(iniRef, doc.docName);
+      try {
+        const existing = await this.vault.readNote(path).catch(() => null);
+        const newContent = this.buildDocReferenceMarkdown(doc);
+        if (existing && existing.content === newContent) {
+          this.logger.log(`[StoryVault:epic-artifacts] doc ${path} already exists with same content — skip`);
+          return;
+        }
+        const commitMsg = existing
+          ? `docs(initiative): update doc reference "${doc.docName}" [from story ${storyId}]`
+          : `docs(initiative): link doc "${doc.docName}" [from story ${storyId}]`;
+        await this.vault.writeNote(path, newContent, commitMsg);
+        this.logger.log(
+          `[StoryVault:epic-artifacts] ✓ doc ${existing ? 'updated' : 'created'} at ${path}`,
+        );
+      } catch (err: any) {
+        this.logger.warn(
+          `[StoryVault:epic-artifacts] ✗ doc ${path} failed (best-effort, story creation continues): ${err?.message}`,
+        );
+      }
+    });
+
+    const depPromises = (discoveredDependencies ?? []).map(async (dep) => {
+      const path = epicDependencyPath(iniRef, epicRef, dep.title);
+      try {
+        const existing = await this.vault.readNote(path).catch(() => null);
+        const newContent = this.buildDependencyMarkdown(dep);
+        if (existing && existing.content === newContent) {
+          this.logger.log(`[StoryVault:epic-artifacts] dep ${path} already exists with same content — skip`);
+          return;
+        }
+        const commitMsg = existing
+          ? `docs(epic): update dependency "${dep.title}" [from story ${storyId}]`
+          : `docs(epic): record dependency "${dep.title}" [from story ${storyId}]`;
+        await this.vault.writeNote(path, newContent, commitMsg);
+        this.logger.log(
+          `[StoryVault:epic-artifacts] ✓ dep ${existing ? 'updated' : 'created'} at ${path}`,
+        );
+      } catch (err: any) {
+        this.logger.warn(
+          `[StoryVault:epic-artifacts] ✗ dep ${path} failed (best-effort, story creation continues): ${err?.message}`,
+        );
+      }
+    });
+
+    await Promise.allSettled([...docPromises, ...depPromises]);
   }
 
   private async writeFileSet(fileSet: Map<string, StoryFileEntry>): Promise<string[]> {
