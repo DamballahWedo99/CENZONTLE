@@ -144,6 +144,17 @@ export interface DiagramRef {
  * diagram-generation antes de asignar el id). En ese caso cae a `<type>.md`.
  * Esa forma NO se debe usar en codepaths que iteran una lista de diagramas.
  */
+/**
+ * Charset valido para ids de diagramas. UUIDs son `[a-f0-9-]`; aceptamos
+ * tambien uppercase para tolerar ids provenientes de sistemas externos que
+ * normalicen distinto. Cualquier otro caracter (especialmente `/`, `.`, `\`,
+ * whitespace, unicode) se rechaza antes de construir el path — sin este
+ * guard, un `id = "a/../x"` produciria escape del folder `diagramas/` al
+ * resolverse contra el repo del vault, permitiendo overwrite de archivos
+ * hermanos (`index.md`, `definicion.md`, etc.).
+ */
+const DIAGRAM_ID_RE = /^[a-fA-F0-9-]+$/;
+
 export function epicDiagramPath(
   ini: InitiativeRef,
   epic: EpicRef,
@@ -153,6 +164,9 @@ export function epicDiagramPath(
     return `${epicFolderPath(ini, epic)}/diagramas/${kindOrDiagram}.md`;
   }
   const { type, id } = kindOrDiagram;
+  if (!DIAGRAM_ID_RE.test(id)) {
+    throw new Error(`epicDiagramPath: diagram id invalido (charset fuera de [a-fA-F0-9-])`);
+  }
   const suffix = id.length >= 6 ? `-${id.slice(-6)}` : '';
   return `${epicFolderPath(ini, epic)}/diagramas/${type}${suffix}.md`;
 }

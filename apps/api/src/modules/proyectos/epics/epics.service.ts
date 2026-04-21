@@ -72,10 +72,45 @@ const FIELD_LABELS: Record<NarrativeField, string> = {
   thirdPartyDependencies: 'Dependencias de terceros',
 };
 
+/**
+ * Invalida punteros stale a archivos del vault en formato legacy.
+ *
+ * El endpoint admin de limpieza de roots legacy (commit e89b796) borro los
+ * folders `epics/`, `initiatives/` y `stories/` que existian antes del
+ * rewrite de paths a la estructura anidada `iniciativas/.../epics/.../`.
+ * Los diagramas generados antes de ese rewrite guardaron su
+ * `integrationFlowDocPath` apuntando a rutas legacy (ej:
+ * `epics/<id>-<slug>/diagrams/business.md`). Esos archivos ya no existen,
+ * pero el puntero quedo en el JSONB del epic.
+ *
+ * Al mapear el epic, detectamos esos paths y los invalidamos (omitimos
+ * `integrationFlowDocPath` + `integrationFlowGeneratedAt` del objeto
+ * devuelto). Asi el frontend muestra "Sin documento de flujo" en vez de
+ * un link "Ver documento completo" que 404. El user puede entonces
+ * disparar el backfill que re-escribe al path canonico nuevo.
+ */
+function sanitizeDiagramPaths(diagrams: unknown): unknown {
+  if (!Array.isArray(diagrams)) return diagrams;
+  return diagrams.map((d) => {
+    if (!d || typeof d !== 'object') return d;
+    const diag = d as { integrationFlowDocPath?: string };
+    if (isLegacyVaultPath(diag.integrationFlowDocPath)) {
+      const {
+        integrationFlowDocPath: _path,
+        integrationFlowGeneratedAt: _generatedAt,
+        ...rest
+      } = d as Record<string, unknown>;
+      return rest;
+    }
+    return d;
+  });
+}
+
 function mapEpic(raw: any) {
-  const { pods, ...epic } = raw;
+  const { pods, diagrams, ...epic } = raw;
   return {
     ...epic,
+    diagrams: sanitizeDiagramPaths(diagrams),
     podIds: pods.map((p: any) => p.podId),
     pods: pods.map((p: any) => p.pod),
   };
@@ -181,12 +216,21 @@ export class EpicsService {
 
     // 2. Create PG row (rollback ambos archivos on failure).
     try {
-      const { podIds, startDate, targetDate, ...data } = dto;
+      const { podIds, startDate, targetDate, diagrams, ...data } = dto;
+      // `diagrams` se extrae del spread y se reasigna como JSON. El DTO
+      // valida solo `id` de cada diagrama (critico para seguridad path
+      // traversal en epicDiagramPath); el resto del shape es free-form y
+      // se persiste as-is en el campo JSONB. Prisma requiere
+      // `InputJsonValue` — cast via `unknown` porque un class-validator
+      // DTO no declara la index signature de InputJsonObject.
       const epic = await this.prisma.$transaction(async (tx) => {
         const created = await tx.epic.create({
           data: {
             id,
             ...data,
+            ...(diagrams !== undefined
+              ? { diagrams: diagrams as unknown as Prisma.InputJsonValue }
+              : {}),
             startDate: new Date(startDate),
             targetDate: new Date(targetDate),
             vaultPath: indexPath,

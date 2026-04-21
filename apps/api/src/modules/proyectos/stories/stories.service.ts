@@ -720,7 +720,31 @@ export class StoriesService {
     );
   }
 
+  /**
+   * Acorta nombres de archivos user-uploaded quitando timestamps verbosos y
+   * la extension. Mantiene la fecha si existe.
+   *
+   * Ejemplos:
+   *   "Captura de pantalla 2026-04-21 a las 2.18.26 a. m..png"
+   *   -> "Captura de pantalla 2026-04-21"
+   *
+   *   "Reporte Q4 2024 final.pdf"
+   *   -> "Reporte Q4 2024 final"
+   *
+   * Nota: duplicado intencional de `shortenUserUploadedName` en
+   * `apps/web/src/lib/definiciones-display.ts`. Si se necesita en un tercer
+   * lugar, promover a `packages/shared`.
+   */
+  private shortenDocName(name: string): string {
+    let out = name;
+    out = out.replace(/\s+a\s+las\s+.+$/i, '');
+    out = out.replace(/\.[a-z0-9]{2,4}$/i, '');
+    out = out.replace(/\.+$/, '').trim();
+    return out || name;
+  }
+
   private buildDocReferenceMarkdown(doc: RelatedDocumentDto): string {
+    const shortName = this.shortenDocName(doc.docName);
     const frontmatter = [
       '---',
       `id: ${doc.docId}`,
@@ -733,7 +757,7 @@ export class StoriesService {
     ].join('\n');
     return (
       frontmatter +
-      `# ${doc.docName}\n\n` +
+      `# ${shortName}\n\n` +
       `**Ubicacion en bucket:** [\`${doc.bucketUrl}\`](${doc.bucketUrl})\n\n` +
       `**Document ID:** \`${doc.docId}\`\n\n` +
       `## Relevancia para la historia\n\n${doc.relevanceSummary}\n`

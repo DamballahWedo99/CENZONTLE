@@ -46,56 +46,29 @@ const DEFAULT_FORCES: ForceSettings = {
 const FORCES_STORAGE_KEY = 'definiciones:graph-forces:v1';
 
 function loadForcesFromStorage(): ForceSettings {
-  if (typeof window === 'undefined') {
-    // eslint-disable-next-line no-console
-    console.log('[GraphView] loadForcesFromStorage: SSR, returning DEFAULT_FORCES');
-    return DEFAULT_FORCES;
-  }
+  if (typeof window === 'undefined') return DEFAULT_FORCES;
   try {
     const raw = window.localStorage.getItem(FORCES_STORAGE_KEY);
-    // eslint-disable-next-line no-console
-    console.log('[GraphView] loadForcesFromStorage: raw from localStorage:', raw);
-    if (!raw) {
-      // eslint-disable-next-line no-console
-      console.log('[GraphView] loadForcesFromStorage: no data, returning DEFAULT_FORCES');
-      return DEFAULT_FORCES;
-    }
+    if (!raw) return DEFAULT_FORCES;
     const parsed = JSON.parse(raw) as Partial<ForceSettings>;
-    const result = {
+    return {
       centerStrength: typeof parsed.centerStrength === 'number' ? parsed.centerStrength : DEFAULT_FORCES.centerStrength,
       repelStrength: typeof parsed.repelStrength === 'number' ? parsed.repelStrength : DEFAULT_FORCES.repelStrength,
       linkStrength: typeof parsed.linkStrength === 'number' ? parsed.linkStrength : DEFAULT_FORCES.linkStrength,
       linkDistance: typeof parsed.linkDistance === 'number' ? parsed.linkDistance : DEFAULT_FORCES.linkDistance,
       nodeSize: typeof parsed.nodeSize === 'number' ? parsed.nodeSize : DEFAULT_FORCES.nodeSize,
     };
-    // eslint-disable-next-line no-console
-    console.log('[GraphView] loadForcesFromStorage: parsed result:', result);
-    return result;
-  } catch (err) {
-    // eslint-disable-next-line no-console
-    console.error('[GraphView] loadForcesFromStorage: error parsing:', err);
+  } catch {
     return DEFAULT_FORCES;
   }
 }
 
 function saveForcesToStorage(forces: ForceSettings): void {
-  if (typeof window === 'undefined') {
-    // eslint-disable-next-line no-console
-    console.log('[GraphView] saveForcesToStorage: SSR, skipping');
-    return;
-  }
+  if (typeof window === 'undefined') return;
   try {
-    const serialized = JSON.stringify(forces);
-    window.localStorage.setItem(FORCES_STORAGE_KEY, serialized);
-    // eslint-disable-next-line no-console
-    console.log('[GraphView] saveForcesToStorage: saved:', forces);
-    // Verificacion inmediata — leer de vuelta para confirmar que se persistio
-    const readBack = window.localStorage.getItem(FORCES_STORAGE_KEY);
-    // eslint-disable-next-line no-console
-    console.log('[GraphView] saveForcesToStorage: readback:', readBack);
-  } catch (err) {
-    // eslint-disable-next-line no-console
-    console.error('[GraphView] saveForcesToStorage: error:', err);
+    window.localStorage.setItem(FORCES_STORAGE_KEY, JSON.stringify(forces));
+  } catch {
+    /* ignore — quota exceeded o disabled */
   }
 }
 
@@ -194,6 +167,12 @@ export function GraphView({ showForceControls = false, onNavigateToNode }: { sho
   // no solo por referencia.
   const prevNodeIdsRef = useRef<string>('');
   const prevLinkIdsRef = useRef<string>('');
+  // True solo cuando el user mueve sliders o dispara reset; false durante
+  // hidratacion inicial y mount. Los useEffects de resize y update-forces
+  // usan esto como guard para no hacer alpha().restart() parasitos que
+  // interrumpirian la convergencia del main D3 useEffect (Issue #94 +
+  // stacking de restarts interrumpe la fase de convergencia inicial).
+  const hasUserInteractedRef = useRef(false);
   const { state, selectNode, filteredTree } = useDefiniciones();
   const [hoveredNode, setHoveredNode] = useState<string | null>(null);
   const [focusedNodeId, setFocusedNodeId] = useState<string | null>(null);
@@ -217,9 +196,6 @@ export function GraphView({ showForceControls = false, onNavigateToNode }: { sho
   // convergencia visual.
   useEffect(() => {
     const stored = loadForcesFromStorage();
-    // eslint-disable-next-line no-console
-    console.log('[GraphView] hydration useEffect: loaded from storage:', stored);
-    // Sync ref tambien para que el main D3 tenga acceso sincrono.
     forcesRef.current = stored;
     setForces(stored);
     setIsHydrated(true);
@@ -290,33 +266,14 @@ export function GraphView({ showForceControls = false, onNavigateToNode }: { sho
     const svg = d3.select(svgRef.current);
     const { width, height } = dimensionsRef.current;
 
-    // CRITICAL: leer localStorage SINCRONAMENTE aqui en vez de depender del
-    // state `forces` o `forcesRef`. Razon:
-    //
-    // Este useEffect corre al mount, pero el hydration useEffect que hidrata
-    // el state desde localStorage corre DESPUES (ambos al mount, pero el
-    // main D3 esta antes en el orden de declaracion — o al menos corre en
-    // el primer commit con state inicial = DEFAULT_FORCES).
-    //
-    // Leyendo localStorage aqui directamente garantizamos que la simulacion
-    // inicial use los valores persistidos SIN depender del orden de
-    // useEffects. Tambien sincronizamos el state para que los sliders del
-    // panel de Fuerzas muestren los valores correctos (sin esto el sim
-    // tendria valores correctos pero los sliders mostrarian defaults).
-    // eslint-disable-next-line no-console
-    console.log('[GraphView] main D3 useEffect fired. isHydrated=', isHydrated, 'nodes=', nodes.length, 'links=', links.length);
-
-    // BLOQUEO: no crear la sim hasta que isHydrated=true. El hydration
-    // useEffect arriba lee localStorage y actualiza forces + isHydrated.
-    // Mientras tanto, NO hacemos nada — esto garantiza que la primera
-    // creacion de la sim sea con los valores correctos.
-    if (!isHydrated) {
-      // eslint-disable-next-line no-console
-      console.log('[GraphView] main D3: WAITING for hydration — skipping sim creation');
-      return;
-    }
+    // BLOQUEO hasta hydration: el hydration useEffect lee localStorage y
+    // setea forces + isHydrated. Hasta entonces no creamos la sim para que
+    // la PRIMERA creacion use los valores persistidos (no DEFAULT_FORCES).
+    if (!isHydrated) return;
 
     // Early return si nodes/links no cambiaron semanticamente (solo ref).
+    // Esto evita re-crear la sim y perder el layout convergido cuando el
+    // arbol del vault se re-fetcha pero los IDs son los mismos.
     const newNodeIds = nodes.map((n) => n.id).sort().join('|');
     const newLinkIds = links
       .map((l) => {
@@ -331,18 +288,12 @@ export function GraphView({ showForceControls = false, onNavigateToNode }: { sho
       prevNodeIdsRef.current === newNodeIds &&
       prevLinkIdsRef.current === newLinkIds
     ) {
-      // eslint-disable-next-line no-console
-      console.log('[GraphView] main D3: nodes/links unchanged by ID — skipping recreation');
       return;
     }
     prevNodeIdsRef.current = newNodeIds;
     prevLinkIdsRef.current = newLinkIds;
 
-    // Post-hydration: forces ya tiene los valores correctos (stored o default).
     const currentForces = forces;
-
-    // eslint-disable-next-line no-console
-    console.log('[GraphView] main D3 useEffect: using currentForces=', currentForces);
 
     simulationRef.current?.stop();
     svg.selectAll('*').remove();
@@ -370,8 +321,28 @@ export function GraphView({ showForceControls = false, onNavigateToNode }: { sho
     const g = svg.append('g').attr('opacity', 0);
     g.transition().duration(300).attr('opacity', 1);
 
+    // Zoom + pan behavior estilo Figma/ReactFlow/Excalidraw.
+    //
+    // Regla: wheel sin modifier = PAN horizontal/vertical. Con Cmd/Ctrl = ZOOM.
+    // Es exactamente como se comporta el DiagramViewer de epicas (ReactFlow
+    // con props `panOnScroll` + `zoomOnScroll={false}`). d3.zoom por default
+    // hace wheel→zoom, invertir el mapping requiere:
+    //   1. `filter()` rechaza wheel events SIN modifier (no llegan a d3.zoom).
+    //   2. `wheel.pan` listener los intercepta y hace translateBy manual.
+    //   3. `filter()` acepta wheel events CON modifier → d3.zoom zoomea.
+    // Drag (click en espacio vacio) sigue haciendo pan como siempre.
     const zoom = d3.zoom<SVGSVGElement, unknown>()
       .scaleExtent([0.1, 4])
+      .filter((event: Event) => {
+        // Rechazar right-click (button 2) siempre.
+        if ('button' in event && (event as MouseEvent).button !== 0 && event.type !== 'wheel') return false;
+        // Wheel: solo con modifier (zoom). Sin modifier lo maneja wheel.pan.
+        if (event.type === 'wheel') {
+          const we = event as WheelEvent;
+          return we.ctrlKey || we.metaKey;
+        }
+        return true;
+      })
       .on('start', () => {
         svg.select('.pan-background').style('cursor', 'grabbing');
       })
@@ -383,6 +354,16 @@ export function GraphView({ showForceControls = false, onNavigateToNode }: { sho
       });
 
     svg.call(zoom as unknown as (selection: typeof svg) => void);
+
+    // Pan-on-scroll: sin Cmd/Ctrl, el wheel mueve el canvas (no zoomea).
+    // translateBy trabaja en unidades del viewport — el deltaX/deltaY del
+    // trackpad ya vienen en esas unidades. Negamos porque un scroll "hacia
+    // abajo" significa "el contenido sube" (como en cualquier scroll normal).
+    svg.on('wheel.pan', (event: WheelEvent) => {
+      if (event.ctrlKey || event.metaKey) return;
+      event.preventDefault();
+      zoom.translateBy(svg as never, -event.deltaX, -event.deltaY);
+    });
 
     // Deep copy nodes/links for D3 mutation. CRITICAL: explicitamente
     // limpiar fx/fy de los nodos. Si quedaron seteados de una sesion
@@ -403,31 +384,38 @@ export function GraphView({ showForceControls = false, onNavigateToNode }: { sho
     });
     const simLinks: GraphLink[] = links.map(l => ({ ...l, source: l.source as string, target: l.target as string }));
 
-    // Force simulation
+    // Force simulation.
+    //
+    // IMPORTANTE: `forceCollide.radius` se calcula dinamicamente en funcion
+    // de `linkDistance` para evitar el conflicto fisico descrito en la doc
+    // de d3-force: collide es un separador DURO que garantiza
+    // `dist(a,b) >= radius(a)+radius(b)`. Con nodos de radio base ~10-20px,
+    // `r+4` obliga a >= 48px minimo entre pares — imposible con
+    // linkDistance=30.
+    //
+    // Solucion: tope el radio de colision a `linkDistance * 0.35` para que
+    // linkDistance pequenios (cluster compacto) realmente produzcan nodos
+    // cercanos. linkDistance grande no aplica tope porque `baseRadius+4`
+    // lo cumple naturalmente.
+    const collideRadius = (d: GraphNode): number => {
+      const baseRadius = getNodeRadius(d, currentForces.nodeSize) + 4;
+      const distanceCap = currentForces.linkDistance * 0.35;
+      return Math.min(baseRadius, distanceCap);
+    };
+
     const simulation = d3.forceSimulation<GraphNode>(simNodes)
       .force('center', d3.forceCenter(width / 2, height / 2).strength(currentForces.centerStrength))
       .force('charge', d3.forceManyBody().strength(currentForces.repelStrength).distanceMax(350))
       .force('link', d3.forceLink<GraphNode, GraphLink>(simLinks).id(d => d.id).strength(currentForces.linkStrength).distance(currentForces.linkDistance))
-      .force('collision', d3.forceCollide().radius(d => getNodeRadius(d as GraphNode, currentForces.nodeSize) + 4))
+      .force('collision', d3.forceCollide<GraphNode>().radius(collideRadius).iterations(2))
       .alphaDecay(0.02);
 
     simulationRef.current = simulation;
 
-    // Force re-initialize cada fuerza con los nodos frescos + alpha=1
-    // restart. Segun Issue #94 de d3-force, cuando los parametros difieren
-    // sustancialmente de los defaults o de la sim anterior, el simple
-    // alpha(0.5) no es suficiente — los nodos quedan con layout de la sim
-    // anterior. Con alpha(1) forzamos una convergencia COMPLETA desde
-    // positions random (que las tienen tras el delete de x/y arriba).
+    // Issue #94 de d3-force: con params distintos de los defaults anteriores
+    // de la sim, alpha bajo no alcanza a reorganizar. alpha(1).restart()
+    // fuerza convergencia completa desde positions random (limpiadas arriba).
     simulation.alpha(1).restart();
-
-    // eslint-disable-next-line no-console
-    console.log('[GraphView] sim created. forces applied:', {
-      center: (simulation.force('center') as d3.ForceCenter<GraphNode>)?.strength?.(),
-      charge: (simulation.force('charge') as d3.ForceManyBody<GraphNode>)?.strength?.(),
-      link_strength: (simulation.force('link') as d3.ForceLink<GraphNode, GraphLink>)?.strength?.(),
-      link_distance: (simulation.force('link') as d3.ForceLink<GraphNode, GraphLink>)?.distance?.(),
-    });
 
     // Draw links
     const link = g.append('g')
@@ -529,7 +517,7 @@ export function GraphView({ showForceControls = false, onNavigateToNode }: { sho
 
         d3.select(event.currentTarget).select('circle')
           .transition().duration(150)
-          .attr('r', getNodeRadius(d, DEFAULT_FORCES.nodeSize) * 1.3)
+          .attr('r', getNodeRadius(d, forcesRef.current.nodeSize) * 1.3)
           .attr('fill', NODE_COLORS.highlighted.fill)
           .attr('stroke', NODE_COLORS.highlighted.stroke);
       })
@@ -540,7 +528,7 @@ export function GraphView({ showForceControls = false, onNavigateToNode }: { sho
         node.select('circle')
           .transition().duration(300)
           .attr('opacity', 0.9)
-          .attr('r', n => getNodeRadius(n, DEFAULT_FORCES.nodeSize))
+          .attr('r', n => getNodeRadius(n, forcesRef.current.nodeSize))
           .attr('fill', n => n.type === 'folder' ? NODE_COLORS.folder.fill : NODE_COLORS.document.fill)
           .attr('stroke', n => n.type === 'folder' ? NODE_COLORS.folder.stroke : NODE_COLORS.document.stroke);
         node.select('text')
@@ -567,23 +555,27 @@ export function GraphView({ showForceControls = false, onNavigateToNode }: { sho
       node.attr('transform', d => `translate(${d.x},${d.y})`);
     });
 
-    // Initial zoom to fit
+    // AUTO-FIT ZOOM DESACTIVADO:
+    // El auto-fit calcula el bounding box del grafo y escala el zoom para
+    // que llene el viewport. Esto OCULTABA las diferencias de layout entre
+    // configs de fuerzas distintas — si las fuerzas hacian los nodos mas
+    // compactos, el zoom in compensaba; si mas dispersos, zoom out. Net:
+    // el grafo se veia "igual" visualmente, aunque las fuerzas SI se
+    // aplicaban correctamente.
+    //
+    // El user tiene pan+zoom manual (tipo Figma) para ajustar viewport.
+    // Con scale=1 como default, las diferencias de fuerzas son visibles
+    // naturalmente — el grafo compacto se ve chico en el centro, el
+    // disperso se extiende mas alla del viewport.
+    //
+    // Si en el futuro se quisiera un auto-fit opcional, debe ser
+    // triggered manualmente (boton "Centrar") no auto.
     const zoomTimer = setTimeout(() => {
-      const bounds = (g.node() as SVGGElement)?.getBBox();
-      if (bounds && bounds.width > 0) {
-        const padding = 60;
-        const scale = Math.min(
-          (width - padding * 2) / bounds.width,
-          (height - padding * 2) / bounds.height,
-          1.5,
-        );
-        const tx = width / 2 - (bounds.x + bounds.width / 2) * scale;
-        const ty = height / 2 - (bounds.y + bounds.height / 2) * scale;
-        svg.transition().duration(500).call(
-          zoom.transform as unknown as (transition: d3.Transition<SVGSVGElement, unknown, null, undefined>) => void,
-          d3.zoomIdentity.translate(tx, ty).scale(scale),
-        );
-      }
+      // Centra el grafo en el viewport con scale=1 (no escala).
+      svg.transition().duration(500).call(
+        zoom.transform as unknown as (transition: d3.Transition<SVGSVGElement, unknown, null, undefined>) => void,
+        d3.zoomIdentity.translate(width / 2, height / 2).scale(1),
+      );
     }, 800);
 
     return () => {
@@ -591,16 +583,25 @@ export function GraphView({ showForceControls = false, onNavigateToNode }: { sho
       simulationRef.current = null;
       clearTimeout(zoomTimer);
       svg.on('.zoom', null);
+      svg.on('wheel.pan', null);
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [nodes, links, isHydrated]);
 
 
-  // Handle resize without recreating the simulation
+  // Handle resize without recreating the simulation.
+  //
+  // GUARD: al mount, ResizeObserver dispara cuando el contenedor recibe sus
+  // dimensiones reales. Si re-kickeamos alpha aqui (0.1), INTERRUMPIMOS la
+  // convergencia del main D3 (alpha=1). Solo ajustamos el SVG width/height
+  // en ese caso. Una vez que el user interactuo, ya podemos aplicar el
+  // kick por resize porque la sim ya convergio.
   useEffect(() => {
     if (!svgRef.current) return;
     const svg = d3.select(svgRef.current);
     svg.attr('width', dimensions.width).attr('height', dimensions.height);
+
+    if (!hasUserInteractedRef.current) return;
 
     const sim = simulationRef.current;
     if (sim) {
@@ -610,23 +611,33 @@ export function GraphView({ showForceControls = false, onNavigateToNode }: { sho
   }, [dimensions]);
 
   // Update forces imperatively — reacciona a cambios de sliders del user.
-  // No dispara sobrescrituras al mount porque espera a isHydrated=true y
-  // a simulationRef.current (la sim se crea con valores correctos).
+  //
+  // GUARD: skip durante la hidratacion inicial. El main D3 useEffect ya
+  // crea la sim con `forces=stored` y hace `alpha(1).restart()`. Si este
+  // useEffect tambien corre al post-hydration render (porque `forces`
+  // cambio de DEFAULT a stored), su `alpha(0.5).restart()` INTERRUMPE la
+  // convergencia antes de que termine, dejando el layout semi-convergido.
+  // Solo aplicamos cambios cuando el user mueve sliders manualmente.
   useEffect(() => {
     if (!isHydrated) return;
+    if (!hasUserInteractedRef.current) return;
     const sim = simulationRef.current;
     if (!sim) return;
-    // eslint-disable-next-line no-console
-    console.log('[GraphView] update forces useEffect fired. forces=', forces);
     sim.force('center', d3.forceCenter(dimensionsRef.current.width / 2, dimensionsRef.current.height / 2).strength(forces.centerStrength));
     sim.force('charge', d3.forceManyBody().strength(forces.repelStrength).distanceMax(350));
     (sim.force('link') as d3.ForceLink<GraphNode, GraphLink>)
       ?.strength(forces.linkStrength)
       .distance(forces.linkDistance);
+    // Actualizar collide radius con linkDistance nuevo (mismo algoritmo que
+    // la creacion inicial). Sin esto, bajar linkDistance no se reflejaria
+    // porque el collide seguiria con el radio absoluto viejo.
+    (sim.force('collision') as d3.ForceCollide<GraphNode>)
+      ?.radius((d) => Math.min(getNodeRadius(d, forces.nodeSize) + 4, forces.linkDistance * 0.35));
     sim.alpha(0.5).restart();
   }, [forces, isHydrated]);
 
   const updateForce = useCallback(<K extends keyof ForceSettings>(key: K, value: ForceSettings[K]) => {
+    hasUserInteractedRef.current = true;
     setForces(prev => ({ ...prev, [key]: value }));
   }, []);
 
@@ -636,8 +647,7 @@ export function GraphView({ showForceControls = false, onNavigateToNode }: { sho
    * DEFAULT_FORCES del codigo.
    */
   const saveAsDefault = useCallback(() => {
-    // eslint-disable-next-line no-console
-    console.log('[GraphView] saveAsDefault CLICKED. current forces=', forces);
+    hasUserInteractedRef.current = true;
     saveForcesToStorage(forces);
     setJustSaved(true);
     toast.success('Configuración guardada como predeterminada');
@@ -648,6 +658,7 @@ export function GraphView({ showForceControls = false, onNavigateToNode }: { sho
    * Restablece a los defaults del codigo y limpia el localStorage.
    */
   const resetToDefaults = useCallback(() => {
+    hasUserInteractedRef.current = true;
     setForces(DEFAULT_FORCES);
     try {
       window.localStorage.removeItem(FORCES_STORAGE_KEY);
