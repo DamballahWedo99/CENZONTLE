@@ -42,18 +42,51 @@ const SHORT_ID_SUFFIX = /-[a-z0-9]{6}$/;
  * del agente donde cada caracter importa (especialmente para identificar
  * versiones, timestamps, extensions).
  */
+/**
+ * Acorta nombres de archivos user-uploaded quitando timestamps verbosos y
+ * la extension final. El nombre completo queda preservado en el markdown
+ * del archivo (frontmatter + body con `# {docName}` + `Ubicacion en bucket`
+ * + `Document ID`) — el display es solo una version compacta para UX.
+ *
+ * Ejemplos:
+ *   "Captura de pantalla 2026-04-21 a las 2.18.26 a. m..png"
+ *   -> "Captura de pantalla 2026-04-21"
+ *
+ *   "Reporte Q4 2024 final.pdf"
+ *   -> "Reporte Q4 2024 final"
+ *
+ *   "screenshot (1).png"
+ *   -> "screenshot (1)"
+ */
+function shortenUserUploadedName(baseName: string): string {
+  let out = baseName;
+
+  // 1. Strip timestamp pattern tipo " a las HH.MM.SS a. m." (lang: es).
+  //    Cubre variantes: "a las 2:18", "a las 14.30", "a las 2.18.26 a. m.",
+  //    "a las 2.18.26 p. m.". Regex greedy hasta fin de string.
+  out = out.replace(/\s+a\s+las\s+.+$/i, '');
+
+  // 2. Strip final extension tipo `.png`, `.pdf`, `.jpeg`. 2-4 chars
+  //    para evitar false positives en dominios reales del nombre.
+  out = out.replace(/\.[a-z0-9]{2,4}$/i, '');
+
+  // 3. Trim puntos y espacios colgantes.
+  out = out.replace(/\.+$/, '').trim();
+
+  return out || baseName; // si quedo vacio por alguna razon, fallback al original
+}
+
 export function formatDisplayName(name: string, isFolder = true): string {
   if (!name) return name;
   const baseName = name.endsWith('.md') ? name.slice(0, -3) : name;
 
-  // Heuristica robusta: si el name contiene chars que un slug NO produciria
-  // (espacios, puntos internos, mayusculas con acentos, caracteres
-  // especiales como `_`), es user-uploaded — preservar tal cual.
-  // Esto cubre archivos tipo "Captura de pantalla 2026-04-21 a las 2.18.26 a. m..png"
-  // aun cuando el node.type por alguna razon se clasifique como 'folder'.
+  // Heuristica: si el name contiene chars que un slug NO produciria
+  // (espacios, puntos internos, mayusculas, underscores), es user-uploaded.
   const looksUserUploaded = /[\s._]/.test(baseName) || /[A-Z]/.test(baseName);
   if (looksUserUploaded) {
-    return baseName;
+    // User-uploaded: acortar timestamps + extension para UX limpia.
+    // La info completa sigue disponible en la metadata del archivo.
+    return shortenUserUploadedName(baseName);
   }
 
   if (!isFolder) {
