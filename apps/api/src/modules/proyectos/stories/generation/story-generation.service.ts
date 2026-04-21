@@ -184,7 +184,7 @@ export class StoryGenerationService {
   generate(
     epicId: string,
     prompt?: string,
-    count = 5,
+    count?: number,
     signal?: AbortSignal,
     webSearch = false,
   ): Subject<{ data: StoryGenerationEvent }> {
@@ -212,14 +212,14 @@ export class StoryGenerationService {
   private async runOrchestrator(
     epicId: string,
     userPrompt: string | undefined,
-    count: number,
+    count: number | undefined,
     subject: Subject<{ data: StoryGenerationEvent }>,
     signal: AbortSignal | undefined,
     webSearch: boolean,
   ) {
     const runStartTime = Date.now();
     this.logger.log(
-      `[StoryGen] ═══ START orchestrator epic=${epicId} count=${count} webSearch=${webSearch} hasPrompt=${!!userPrompt}`,
+      `[StoryGen] ═══ START orchestrator epic=${epicId} count=${count ?? 'auto'} webSearch=${webSearch} hasPrompt=${!!userPrompt}`,
     );
     subject.next({ data: { type: 'run_started', timestamp: new Date().toISOString() } });
 
@@ -677,7 +677,7 @@ Esta epica no tiene folder en el nuevo formato del vault (legacy o sin migrar). 
     common: CommonContext,
     commonContextBlock: string,
     userPrompt: string | undefined,
-    count: number,
+    count: number | undefined,
     webSearch: boolean,
     signal: AbortSignal | undefined,
     subject: Subject<{ data: StoryGenerationEvent }>,
@@ -694,7 +694,9 @@ Esta epica no tiene folder en el nuevo formato del vault (legacy o sin migrar). 
         properties: {
           stories: {
             type: 'array',
-            description: `Entre 3 y ${count} outlines de historia. Cada uno con metadata + seccion PO completa.`,
+            description: count
+              ? `Aproximadamente ${count} outlines de historia (tolerancia ±2 si el scope real lo requiere). Cada uno con metadata + seccion PO completa.`
+              : `Las historias NECESARIAS para cubrir el alcance completo de la epica. Tipicamente 3-10, puede ser mas si el scope es extenso (hasta 15). Cada una con metadata + seccion PO completa. NO inventes historias para rellenar — tampoco las omitas por pereza.`,
             items: {
               type: 'object',
               properties: {
@@ -779,7 +781,7 @@ Esta epica no tiene folder en el nuevo formato del vault (legacy o sin migrar). 
       `Proceso obligatorio:
 1. Si hay documentos de iniciativa, LEELOS con read_initiative_documents (lista primero sin documentId, luego individualmente).
 2. Busca definiciones/reglas de negocio en el vault (vault_grep/vault_read) si la epica menciona conceptos con terminologia propia.
-3. Propon ${count} historias con secciones PO completas (minimo 3 criterios de aceptacion cada una).
+3. Propon ${count ? `aproximadamente ${count}` : `las`} historias ${count ? '' : 'necesarias (segun el alcance real de la epica, no un numero fijo) '}con secciones PO completas (minimo 3 criterios de aceptacion cada una).
 4. Identifica cuales de los documentos anteriores son especialmente relevantes a estas historias y arma \`relatedDocuments\`.
 5. Llama submit_po_outline UNA sola vez con todo listo.
 
@@ -807,8 +809,13 @@ NO disenes tecnicamente ni propongas tests — eso es trabajo del Tech Lead y de
     const rawStories = Array.isArray((output as any).stories) ? (output as any).stories : [];
     const rawDocs = Array.isArray((output as any).relatedDocuments) ? (output as any).relatedDocuments : [];
 
+    // Cap duro de 15 historias por presupuesto de tokens del TL/QA (cada historia
+    // agrega ~2500 output tokens en QA). Si el usuario paso `count`, respetamos
+    // ese numero como tope de seguridad (±2); si no, tope defensivo de 15.
+    // Este cap NO es censurio — es para no explotar el contexto del siguiente agente.
+    const storyCap = count !== undefined ? Math.min(count + 2, 15) : 15;
     const outlines: StoryOutline[] = rawStories
-      .slice(0, count)
+      .slice(0, storyCap)
       .map((raw: Record<string, unknown>) => this.normalizeOutline(raw, common))
       .filter((o: StoryOutline | null): o is StoryOutline => o !== null);
 
@@ -1678,14 +1685,28 @@ NO cambies PO ni technical. Si una historia es inviable de testear, dejalo claro
     }
   }
 
-  private buildPOSystemPrompt(count: number, webSearch: boolean): string {
+  private buildPOSystemPrompt(count: number | undefined, webSearch: boolean): string {
     const webStep = webSearch
       ? 'Puedes usar `web_search` si necesitas validar estandares externos o referencias de industria (maximo 3 usos).'
       : 'NO tienes acceso a `web_search`. Basate solo en tools locales.';
 
+    // La directiva del numero de historias es dinamica:
+    //  - Si el usuario paso un `count` via query param, lo tratamos como sugerencia
+    //    (aproximadamente ±2) — el agente aun puede ajustar si el scope lo pide.
+    //  - Si NO se paso count, el agente decide segun el alcance real de la epica.
+    //    Esto es el comportamiento por defecto y se alinea con la intencion del
+    //    usuario de "las que sean necesarias, no un numero fijo".
+    const storyCountDirective = count
+      ? `Apunta a aproximadamente ${count} historias (±2 si el scope real de la epica lo requiere). El usuario sugirio ese numero pero tu juicio de scope prevalece.`
+      : `Redacta las historias NECESARIAS para cubrir el alcance completo de la epica — ni mas ni menos. Tipicamente 3-10 pero puede ser mas si el scope es extenso (limite duro 15 por presupuesto de tokens). NO fuerces un numero: ni dividas artificialmente en historias triviales, ni consolides scope en pocas historias gigantes.`;
+
     return `Eres un **Agente Product Owner** disenando historias de usuario orientadas a valor de negocio.
 
-TU MISION: redactar outlines de ${count} historias a partir del contexto comun (epica + iniciativa). El output va LITERALMENTE al Agente Tech Lead — no disenes codigo ni tests.
+TU MISION: redactar outlines de historias a partir del contexto comun (epica + iniciativa). El output va LITERALMENTE al Agente Tech Lead — no disenes codigo ni tests.
+
+## Numero de historias
+
+${storyCountDirective}
 
 ## Que compones por historia
 
@@ -1771,7 +1792,7 @@ Idioma: espanol. Codigo en ingles si el repo lo usa asi.`;
 
 TU MISION: para cada historia, redactar testingStrategy enfocada en PRUEBAS UNITARIAS e integracion a nivel de historia. Identificar dependencias transversales descubiertas.
 
-⚠️ PRESUPUESTO: 16384 tokens TOTAL para N strategies + dependencies. ~2500 tokens por testingStrategy si son 5 historias. SE CONCISO — listas en vez de prosa, sin headings markdown decorativos. Cada bullet max 20 palabras.
+⚠️ PRESUPUESTO: 16384 tokens TOTAL para N strategies + dependencies (donde N es el numero de historias que el PO propuso — puede ser 3, 8 o 15). ~1500-2500 tokens por testingStrategy. SE CONCISO — listas en vez de prosa, sin headings markdown decorativos. Cada bullet max 20 palabras.
 
 ## Que compones por historia (en qa.testingStrategy)
 

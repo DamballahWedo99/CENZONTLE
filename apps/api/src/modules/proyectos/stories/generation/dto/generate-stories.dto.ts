@@ -9,12 +9,17 @@ export class GenerateStoriesQueryDto {
   @MaxLength(2000)
   prompt?: string;
 
-  @ApiPropertyOptional({ description: 'Número máximo de historias a generar (3-10)', default: 5 })
+  @ApiPropertyOptional({
+    description:
+      'Sugerencia (opcional) del numero aproximado de historias a generar. Si se omite, el agente PO decide ' +
+      'segun el alcance REAL de la epica (typical 3-10, puede ser mas si el scope lo requiere). El cap duro ' +
+      'de 15 es defensivo para evitar explosion de tokens, no un limite artistico.',
+  })
   @IsOptional()
   @Transform(({ value }) => (typeof value === 'string' ? parseInt(value, 10) : value))
   @IsInt()
   @Min(1)
-  @Max(10)
+  @Max(15)
   count?: number;
 
   @ApiPropertyOptional({

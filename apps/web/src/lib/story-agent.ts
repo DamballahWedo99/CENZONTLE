@@ -354,7 +354,7 @@ export async function* streamStoryProposals(
   const url = `/api/proxy/proyectos/story-generation/${epicId}?${params}`;
 
   // eslint-disable-next-line no-console
-  console.log(`[StoryAgent] ═══ CONNECT epic=${epicId} prompt="${opts.prompt ?? ''}" count=${opts.count ?? 5} webSearch=${!!opts.webSearch}`);
+  console.log(`[StoryAgent] ═══ CONNECT epic=${epicId} prompt="${opts.prompt ?? ''}" count=${opts.count ?? 'auto'} webSearch=${!!opts.webSearch}`);
 
   const response = await fetch(url, {
     headers: { Accept: 'text/event-stream' },

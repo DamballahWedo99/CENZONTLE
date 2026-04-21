@@ -155,7 +155,7 @@ export class StoryGenerationController {
     // evita que credenciales pegadas accidentalmente en el prompt lleguen a logs externos.
     const promptForLog = query.prompt ? sanitizeForLog(query.prompt) : '';
     this.logger.log(
-      `[SSE:story-gen] ═══ CONNECT user=${user.sub} role=${user.role} epic=${epicId} prompt="${promptForLog}" count=${query.count ?? 5} webSearch=${webSearchEnabled}`,
+      `[SSE:story-gen] ═══ CONNECT user=${user.sub} role=${user.role} epic=${epicId} prompt="${promptForLog}" count=${query.count ?? 'auto'} webSearch=${webSearchEnabled}`,
     );
 
     res.setHeader('Content-Type', 'text/event-stream');
