@@ -298,8 +298,15 @@ export function GraphView({ showForceControls = false, onNavigateToNode }: { sho
     console.log('[GraphView] main D3 useEffect: using currentForces=', currentForces, 'forcesRef.current=', forcesRef.current, 'state forces=', forces);
 
     // Sync el state una sola vez tras hydration — para que los sliders del
-    // panel muestren los valores cargados. No re-triggers el effect porque
-    // deps son [nodes, links].
+    // panel muestren los valores cargados.
+    //
+    // CRITICAL: actualizar forcesRef.current SINCRONAMENTE aqui. Razon:
+    // este useEffect puede re-dispararse (porque filteredTree del context
+    // genera nuevas refs de nodes/links entre renders, aun sin cambios
+    // semanticos). En el re-run, didHydrateRef es true -> usa
+    // forcesRef.current. Sin el sync manual, forcesRef aun tendria
+    // DEFAULT porque setForces es async y no commit hasta el siguiente
+    // render. Con el sync manual, el re-run crea la sim con stored.
     if (!didHydrateRef.current) {
       didHydrateRef.current = true;
       const needsSync =
@@ -311,8 +318,12 @@ export function GraphView({ showForceControls = false, onNavigateToNode }: { sho
       // eslint-disable-next-line no-console
       console.log('[GraphView] hydration: needsSync=', needsSync);
       if (needsSync) {
+        // Sync manual del ref ANTES del setForces — el re-run del effect
+        // (que ocurre entre setForces call y commit) encontrara el valor
+        // correcto en el ref.
+        forcesRef.current = currentForces;
         // eslint-disable-next-line no-console
-        console.log('[GraphView] calling setForces with:', currentForces);
+        console.log('[GraphView] calling setForces with:', currentForces, '+ ref synced');
         setForces(currentForces);
       }
     }
