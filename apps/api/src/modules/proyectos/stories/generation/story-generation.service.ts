@@ -43,17 +43,17 @@ const VALID_STORY_POINTS = [1, 2, 3, 5, 8, 13] as const;
 
 // Presupuestos por agente — tuned para equilibrio entre profundidad y costo.
 //
-// max_tokens: el SDK de Anthropic Sonnet 4 acepta hasta 8192 stable. El terminal
-// tool de cada agente (5 historias × N campos markdown) puede excederse de 6144,
-// causando stop_reason='max_tokens' que TRUNCA el JSON del tool call (sin JSON
-// valido el agente devuelve {} y la consolidacion produce shells vacios).
-// Ver bug observado: TL+QA generaron designs=0 / strategies=0 con stop=max_tokens.
+// max_tokens: con beta header 'output-128k-2025-02-19' (config en constructor),
+// Sonnet 4 soporta hasta 64K output. Para evitar stop_reason='max_tokens' que
+// TRUNCA el JSON del tool_use, damos margen generoso a TL/QA donde el
+// output escala con el count de historias (5 historias × 6 subsecciones).
+// PO es mas ligero (outlines + background + criteria) y 8192 le sobra.
 const PO_MAX_ITERATIONS = 8;
 const TL_MAX_ITERATIONS = 8;
 const QA_MAX_ITERATIONS = 6;
 const PO_MAX_TOKENS = 8192;
-const TL_MAX_TOKENS = 8192;
-const QA_MAX_TOKENS = 8192;
+const TL_MAX_TOKENS = 16384;
+const QA_MAX_TOKENS = 16384;
 
 // Caps defensivos alineados con DTO (apps/api/.../stories/dto/story-content.dto.ts).
 const MAX_FIELD_LEN = 20_000;
@@ -158,7 +158,15 @@ export class StoryGenerationService {
     if (!apiKey) {
       this.logger.warn('ANTHROPIC_API_KEY not configured — story generation will fail at runtime');
     }
-    this.client = new Anthropic({ apiKey: apiKey || undefined });
+    // Beta header 'output-128k-2025-02-19' desbloquea max_tokens hasta 64K en
+    // Sonnet 4 (default stable es 8192). Necesario para el agente QA que con
+    // 5 historias × 6 subsecciones + dependencies excede 8192 facil y trunca
+    // el JSON del tool_use silenciosamente. Sin impacto negativo si el agente
+    // genera menos — el presupuesto es un ceiling, no un target.
+    this.client = new Anthropic({
+      apiKey: apiKey || undefined,
+      defaultHeaders: { 'anthropic-beta': 'output-128k-2025-02-19' },
+    });
 
     // PO lee contexto de negocio (docs de iniciativa + vault de definiciones).
     this.poToolset = [initDocsTool, vaultGlob, vaultGrep, vaultRead];
@@ -616,24 +624,45 @@ ${existingStoriesSummary}
       parts.push('<existing_stories>\nNinguna — primera generacion para esta epica.\n</existing_stories>');
     }
 
-    // Archivos del vault de la épica — el agente PO los lee con vault_read para entender el flujo.
-    // Defensivo: los paths vienen del vault (controlados por slugify), pero el vault tambien
-    // puede contener archivos creados manualmente via GitHub Web UI con caracteres especiales.
-    // Escapamos <,> para evitar que un nombre de archivo malicioso cierre el tag <epic_vault_files>
-    // y emita instrucciones adversariales al modelo (prompt injection via filesystem).
+    // Folder base de la epica en el vault (extraido del vaultPath que apunta al index.md).
+    // El agente PO lo usa como prefijo para vault_glob: `<folder>/**/*.md` descubre
+    // diagramas/documentos/dependencias/matrices que existen REALMENTE (no cached).
+    // Defensivo: escapamos <,> por si un path mal-formado intenta cerrar tags del prompt.
     const escapeForPrompt = (s: string) => s.replace(/</g, '&lt;').replace(/>/g, '&gt;');
-    if (epicVaultFiles.length > 0) {
-      const fileLines = epicVaultFiles.map((f) => {
-        const size = f.sizeBytes !== undefined ? ` (${(f.sizeBytes / 1024).toFixed(1)} KB)` : '';
-        return `- ${escapeForPrompt(f.path)}${size} — ${f.kind}`;
-      });
+    const epicFolderBase = epic.vaultPath && epic.vaultPath.endsWith('/index.md')
+      ? epic.vaultPath.slice(0, -'/index.md'.length)
+      : null;
+
+    if (epicFolderBase && epicVaultFiles.length > 0) {
+      // Hay folder valido Y ya hicimos un pre-scan: damos el folder base como ancla
+      // + un hint de que tipos de artefactos existen (para guiar el grep). NO damos
+      // los paths exactos como prescripcion — el agente los redescubre con vault_glob.
+      const counts = epicVaultFiles.reduce<Record<string, number>>((acc, f) => {
+        acc[f.kind] = (acc[f.kind] || 0) + 1;
+        return acc;
+      }, {});
+      const summary = Object.entries(counts)
+        .map(([kind, n]) => `${n} ${kind}${n !== 1 ? 's' : ''}`)
+        .join(', ');
       parts.push(`<epic_vault_files>
-Archivos del vault asociados a esta epica. Usa vault_read con estos paths para leer su contenido.
-${fileLines.join('\n')}
+Folder de la epica en el vault: \`${escapeForPrompt(epicFolderBase)}\`
+Artefactos presentes (pre-scan): ${summary}.
+
+Usa este folder como prefijo en \`vault_glob\` para descubrir los paths reales y pasarlos a \`vault_read\`.
+Ejemplo: \`vault_glob\` con pattern \`${escapeForPrompt(epicFolderBase)}/**/*.md\` → lista los .md dentro del folder.
+</epic_vault_files>`);
+    } else if (epicFolderBase) {
+      // Folder existe pero pre-scan vacio. Aun asi, el agente puede hacer vault_glob
+      // por si se escribieron archivos nuevos despues del snapshot del pre-scan.
+      parts.push(`<epic_vault_files>
+Folder de la epica en el vault: \`${escapeForPrompt(epicFolderBase)}\`
+El pre-scan no encontro artefactos todavia (sin diagramas/matrices/deps generados). Puedes intentar \`vault_glob\` con pattern \`${escapeForPrompt(epicFolderBase)}/**/*.md\` por si hay archivos nuevos; si devuelve vacio, salta al paso 1.
 </epic_vault_files>`);
     } else {
+      // Sin folder (epica legacy sin vaultPath nuevo o sin vaultPath). El agente debe
+      // basarse solo en el markdown de la epica ya incluido arriba.
       parts.push(`<epic_vault_files>
-Sin archivos en el vault para esta epica (formato legacy o vault vacio). Basate en los documentos de la iniciativa y el markdown de la epica.
+Esta epica no tiene folder en el nuevo formato del vault (legacy o sin migrar). NO uses \`vault_glob\`/\`vault_grep\`/\`vault_read\` para artefactos de epica — basate en el markdown completo y los documentos de la iniciativa.
 </epic_vault_files>`);
     }
 
@@ -1682,16 +1711,17 @@ Aparte de los outlines, identifica cuales de los documentos listados en \`<initi
 
 ${webStep}
 
-0. **PRIMERO**: consulta la lista \`<epic_vault_files>\` y LEE con \`vault_read\` al menos:
-   - TODOS los archivos de tipo "diagrama" (cruciales para entender el flujo de la epica).
-   - Hasta 2 archivos de tipo "documento" mas relevantes al titulo de la epica.
-   - Si hay archivos de tipo "matriz", leerlos para evitar duplicar scenarios de testing ya cubiertos.
-   (Si \`<epic_vault_files>\` indica que no hay archivos, omite este paso y continua con el paso 1.)
+0. **Explora el vault de la epica (vault_glob > vault_grep > vault_read). MAX 3-4 tool calls antes del terminal — no sobre-explores.**
+   - PRIMERO \`vault_glob\` con el path del folder de la epica (ver \`<epic_vault_files>\` para el folder base; si no hay, la epica no tiene artefactos en el vault todavia).
+     Patron: \`"<folder-epica>/**/*.md"\` — descubre diagramas, matrices, deps y docs reales del vault.
+   - LUEGO \`vault_grep\` con regex si los paths del glob mencionan terminos especificos de negocio de la epica (\`"(termino1|termino2|concepto)"\` con \`-i: true\`).
+   - FINALMENTE \`vault_read\` SOLO con paths que devolvio \`vault_glob\` — nunca construyas ni infieras paths. Lee maximo 2-3 archivos (prioriza diagramas sobre matrices sobre documentos).
+   - Si \`vault_glob\` retorna 0 archivos: no hay artefactos todavia, omite grep/read y salta al paso 1.
+   - Si \`vault_read\` devuelve "File not found": NO reintentes el mismo path — abandona ese archivo.
 
-1. Si hay documentos, lista (read_initiative_documents sin documentId) y lee los que parezcan mas relevantes (con documentId).
-2. Busca en el vault (vault_grep/vault_read) si la epica menciona conceptos de negocio con terminologia propia.
-3. Propon las historias respetando el alcance de la epica — no inventes alcance que no este en la epica.
-4. Llama \`submit_po_outline\` UNA sola vez con stories[] y relatedDocuments[].
+1. Si hay documentos en la iniciativa, lista (\`read_initiative_documents\` sin documentId) y lee los que parezcan mas relevantes (con documentId).
+2. Propon las historias respetando el alcance de la epica — no inventes alcance que no este en la epica.
+3. Llama \`submit_po_outline\` UNA sola vez con stories[] y relatedDocuments[].
 
 ## Anti-patrones a evitar
 
@@ -1741,7 +1771,7 @@ Idioma: espanol. Codigo en ingles si el repo lo usa asi.`;
 
 TU MISION: para cada historia, redactar testingStrategy enfocada en PRUEBAS UNITARIAS e integracion a nivel de historia. Identificar dependencias transversales descubiertas.
 
-⚠️ PRESUPUESTO: 8192 tokens TOTAL para N strategies + dependencies. ~1200 tokens por testingStrategy si son 5 historias. SE CONCISO. Listas en vez de prosa. Sin headings markdown decorativos.
+⚠️ PRESUPUESTO: 16384 tokens TOTAL para N strategies + dependencies. ~2500 tokens por testingStrategy si son 5 historias. SE CONCISO — listas en vez de prosa, sin headings markdown decorativos. Cada bullet max 20 palabras.
 
 ## Que compones por historia (en qa.testingStrategy)
 
