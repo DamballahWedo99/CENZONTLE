@@ -595,18 +595,19 @@ function reducer(state: DefinicionesState, action: DefinicionesAction): Definici
     case 'SELECT_NODE': {
       // Al seleccionar un nodo (desde cualquier fuente — click en tree,
       // click en content area card, link de graph/changelog), auto-expandimos
-      // todos sus ancestors para que sea visible en el explorador. Patron
-      // "reveal in tree" tipo VSCode.
+      // solo sus ANCESTORS para que el nodo sea visible en el tree.
+      //
+      // IMPORTANTE: NO expandimos el folder seleccionado mismo — si lo
+      // hicieramos, el flujo `toggleFolder(id) + selectNode(id)` del click
+      // en tree se anularia (toggle colapsa, select re-expande). El user
+      // puede hacer click en el chevron / carpeta misma para controlar la
+      // expansion del nodo; este reducer solo revela la ruta hasta el.
       if (action.id === null) {
         return { ...state, selectedId: null, isEditing: false };
       }
       const ancestors = findAncestorIds(state.tree, action.id);
       const nextExpanded = new Set(state.expandedFolders);
       for (const ancestorId of ancestors) nextExpanded.add(ancestorId);
-      // Si el nodo seleccionado ES un folder, tambien lo expandimos para que
-      // el usuario vea su contenido inmediato en el tree.
-      const selected = findNodeById(state.tree, action.id);
-      if (selected?.type === 'folder') nextExpanded.add(action.id);
       return {
         ...state,
         selectedId: action.id,

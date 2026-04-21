@@ -154,7 +154,9 @@ export class EpicsService {
       description: dto.description,
     });
     const definitionMd = this.buildEpicDefinitionMarkdown({
+      id,
       title: dto.title,
+      initiativeId: dto.initiativeId,
       narrative,
     });
 
@@ -427,8 +429,11 @@ export class EpicsService {
       created: existingCreated,
     });
     const definitionMd = this.buildEpicDefinitionMarkdown({
+      id: existing.id,
       title: newTitle,
+      initiativeId: existing.initiativeId,
       narrative: mergedNarrative,
+      created: existingCreated,
     });
 
     await this.vault.writeNote(
@@ -466,13 +471,16 @@ export class EpicsService {
       const folder = existing.vaultPath.slice(0, existing.vaultPath.lastIndexOf('/'));
       const definitionPath = `${folder}/definicion.md`;
 
+      // Leemos el `created` del index UNA vez para reutilizar en los dos
+      // writes posibles (index y definicion) sin doble lectura.
+      this.vault.invalidateCache(existing.vaultPath);
+      const existingIndexNote = await this.vault.readNote(existing.vaultPath);
+      const existingCreated = existingIndexNote
+        ? this.extractCreatedDate(existingIndexNote.content)
+        : undefined;
+
       // Index: solo si cambio title o description.
       if (newTitle !== existing.title || newDescription !== existing.description) {
-        this.vault.invalidateCache(existing.vaultPath);
-        const existingIndexNote = await this.vault.readNote(existing.vaultPath);
-        const existingCreated = existingIndexNote
-          ? this.extractCreatedDate(existingIndexNote.content)
-          : undefined;
         const indexMd = this.buildEpicIndexMarkdown({
           id: existing.id,
           title: newTitle,
@@ -496,8 +504,11 @@ export class EpicsService {
           : {};
         const mergedNarrative: NarrativeContent = { ...existingNarrative, ...incomingNarrative };
         const definitionMd = this.buildEpicDefinitionMarkdown({
+          id: existing.id,
           title: newTitle,
+          initiativeId: existing.initiativeId,
           narrative: mergedNarrative,
+          created: existingCreated,
         });
         await this.vault.writeNote(
           definitionPath,
@@ -613,18 +624,36 @@ export class EpicsService {
     );
   }
 
-  /** definicion.md — los 12 campos narrativos del epic. */
+  /**
+   * `definicion.md` — los 12 campos narrativos del epic con frontmatter YAML.
+   * El frontmatter es consistente con `index.md` del epic y con los archivos
+   * de historia (para que el parser del Vault renderice la seccion METADATA).
+   */
   private buildEpicDefinitionMarkdown(data: {
+    id: string;
     title: string;
+    initiativeId: string;
     narrative: NarrativeContent;
+    created?: string;
   }): string {
+    const frontmatter = [
+      '---',
+      `id: ${data.id}`,
+      'type: epic-definition',
+      `initiativeId: ${data.initiativeId}`,
+      `title: ${JSON.stringify(data.title)}`,
+      `created: ${data.created ?? new Date().toISOString().slice(0, 10)}`,
+      '---',
+      '',
+    ].join('\n');
+
     const narrativeSections = NARRATIVE_FIELDS.map((field) => {
       const value = data.narrative[field] ?? '';
       const label = FIELD_LABELS[field];
       return `## ${label}\n\n${value}\n`;
     }).join('\n');
 
-    return `# ${data.title} — Definición\n\n` + narrativeSections;
+    return frontmatter + `# ${data.title} — Definición\n\n` + narrativeSections;
   }
 
   /**

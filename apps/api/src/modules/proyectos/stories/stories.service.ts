@@ -271,10 +271,22 @@ export class StoriesService {
         });
       }
 
+      const updateMeta = {
+        id: existing.id,
+        title: mergedTitle,
+        epicId: existing.epicId,
+        // En update preservamos el created del index.md original para no
+        // sobrescribir la fecha de creacion. Si no lo podemos leer, usamos hoy.
+        created: await this.vault
+          .readNote(`${folderPath}/index.md`)
+          .then((n) => (n ? this.extractCreatedDate(n.content) : undefined))
+          .catch(() => undefined),
+      };
+
       if (po !== undefined) {
         const mergedPO = { ...currentContent.po, ...po };
         partialSet.set(`${folderPath}/definicion-negocio.md`, {
-          content: this.buildPOMarkdown(mergedPO),
+          content: this.buildPOMarkdown(mergedPO, updateMeta),
           commitMsg: `docs(story): update business definition [${id}]`,
         });
       }
@@ -282,7 +294,7 @@ export class StoriesService {
       if (technical !== undefined) {
         const mergedTech = { ...currentContent.technical, ...technical };
         partialSet.set(`${folderPath}/definicion-tecnica.md`, {
-          content: this.buildTechnicalMarkdown(mergedTech),
+          content: this.buildTechnicalMarkdown(mergedTech, updateMeta),
           commitMsg: `docs(story): update technical design [${id}]`,
         });
       }
@@ -290,7 +302,7 @@ export class StoriesService {
       if (qa !== undefined) {
         const mergedQA = { ...currentContent.qa, ...qa };
         partialSet.set(`${folderPath}/testing-strategy.md`, {
-          content: this.buildQAMarkdown(mergedQA),
+          content: this.buildQAMarkdown(mergedQA, updateMeta),
           commitMsg: `docs(story): update qa strategy [${id}]`,
         });
       }
@@ -374,21 +386,28 @@ export class StoriesService {
       commitMsg: `feat(story): create "${data.title}" [${data.id}]`,
     });
 
-    // definicion-negocio.md
+    const sectionMeta = {
+      id: data.id,
+      title: data.title,
+      epicId: data.epicId,
+      created: data.created,
+    };
+
+    // definicion-negocio.md — seccion PO
     set.set(`${folderPath}/definicion-negocio.md`, {
-      content: this.buildPOMarkdown(data.po ?? {}),
+      content: this.buildPOMarkdown(data.po ?? {}, sectionMeta),
       commitMsg: `docs(story): business definition [${data.id}]`,
     });
 
-    // definicion-tecnica.md
+    // definicion-tecnica.md — seccion Tech Lead
     set.set(`${folderPath}/definicion-tecnica.md`, {
-      content: this.buildTechnicalMarkdown(data.technical ?? {}),
+      content: this.buildTechnicalMarkdown(data.technical ?? {}, sectionMeta),
       commitMsg: `docs(story): technical design [${data.id}]`,
     });
 
-    // testing-strategy.md
+    // testing-strategy.md — seccion QA
     set.set(`${folderPath}/testing-strategy.md`, {
-      content: this.buildQAMarkdown(data.qa ?? {}),
+      content: this.buildQAMarkdown(data.qa ?? {}, sectionMeta),
       commitMsg: `docs(story): qa strategy [${data.id}]`,
     });
 
@@ -627,11 +646,38 @@ export class StoriesService {
     );
   }
 
-  private buildPOMarkdown(po: Partial<StoryPoFieldsDto>): string {
+  /**
+   * Construye el bloque YAML frontmatter para una seccion de historia (PO/TL/QA).
+   * El parser del frontend del Vault detecta el `---\n...\n---` y lo renderiza
+   * como seccion METADATA colapsable (el mismo patron que usa el index.md).
+   * Cada seccion tiene `type` distinto (story-po, story-technical, story-qa)
+   * para que la UI pueda filtrar o renderizar diferencialmente si hace falta.
+   */
+  private buildSectionFrontmatter(
+    meta: { id: string; title: string; epicId: string; created?: string },
+    sectionType: 'story-po' | 'story-technical' | 'story-qa',
+  ): string {
+    return [
+      '---',
+      `id: ${meta.id}`,
+      `type: ${sectionType}`,
+      `storyTitle: ${JSON.stringify(meta.title)}`,
+      `epicId: ${meta.epicId}`,
+      `created: ${meta.created ?? new Date().toISOString().slice(0, 10)}`,
+      '---',
+      '',
+    ].join('\n');
+  }
+
+  private buildPOMarkdown(
+    po: Partial<StoryPoFieldsDto>,
+    meta: { id: string; title: string; epicId: string; created?: string },
+  ): string {
     const whw = typeof po.whatHowWhen === 'string' ? po.whatHowWhen : '';
     // Si llego como string (DTO), lo emitimos inline. Si algun dia migra a objeto,
     // el parser inverso sabe distinguir por la presencia de etiquetas **What:**.
     return (
+      this.buildSectionFrontmatter(meta, 'story-po') +
       `# Definicion de Negocio\n\n` +
       `## Background\n${po.background ?? ''}\n\n` +
       `## Objetivo\n${po.objective ?? ''}\n\n` +
@@ -642,13 +688,17 @@ export class StoriesService {
     );
   }
 
-  private buildTechnicalMarkdown(tech: Partial<StoryTechnicalFieldsDto>): string {
+  private buildTechnicalMarkdown(
+    tech: Partial<StoryTechnicalFieldsDto>,
+    meta: { id: string; title: string; epicId: string; created?: string },
+  ): string {
     const list = (items?: string[]) =>
       (items ?? []).length === 0 ? '' : (items ?? []).map((v) => `- ${v}`).join('\n');
     const checklist = (items?: string[]) =>
       (items ?? []).length === 0 ? '' : (items ?? []).map((v) => `- [ ] ${v}`).join('\n');
 
     return (
+      this.buildSectionFrontmatter(meta, 'story-technical') +
       `# Definicion Tecnica\n\n` +
       `## Arquitectura\n${tech.architecture ?? ''}\n\n` +
       `## Flujo de integracion\n${tech.integrationFlow ?? ''}\n\n` +
@@ -658,8 +708,12 @@ export class StoriesService {
     );
   }
 
-  private buildQAMarkdown(qa: Partial<StoryQaFieldsDto>): string {
+  private buildQAMarkdown(
+    qa: Partial<StoryQaFieldsDto>,
+    meta: { id: string; title: string; epicId: string; created?: string },
+  ): string {
     return (
+      this.buildSectionFrontmatter(meta, 'story-qa') +
       `# Testing Strategy\n\n` +
       `${qa.testingStrategy ?? ''}\n` +
       (qa.linkedQAMatrixId ? `\n---\n\n**QA Matrix vinculada:** \`${qa.linkedQAMatrixId}\`\n` : '')
