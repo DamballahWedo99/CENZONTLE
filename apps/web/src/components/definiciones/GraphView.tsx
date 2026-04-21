@@ -4,8 +4,9 @@ import React, { useRef, useEffect, useState, useMemo, useCallback } from 'react'
 import * as d3 from 'd3';
 import { useDefiniciones } from '@/context/DefinicionesContext';
 import { DefinicionNode } from '@/types/definiciones';
-import { Network, Maximize2, Focus, ExternalLink } from 'lucide-react';
+import { Network, Maximize2, Focus, ExternalLink, Save, RotateCcw, Check } from 'lucide-react';
 import { Button } from '@/components/ui/button';
+import { toast } from 'sonner';
 
 interface GraphNode extends d3.SimulationNodeDatum {
   id: string;
@@ -36,6 +37,41 @@ const DEFAULT_FORCES: ForceSettings = {
   linkDistance: 100,
   nodeSize: 1,
 };
+
+/**
+ * localStorage key para persistir configuracion de fuerzas del grafo.
+ * Versionado por si el shape de ForceSettings cambia en el futuro — al
+ * bumpear la version se ignoran valores viejos y se usan los defaults.
+ */
+const FORCES_STORAGE_KEY = 'definiciones:graph-forces:v1';
+
+function loadForcesFromStorage(): ForceSettings {
+  if (typeof window === 'undefined') return DEFAULT_FORCES;
+  try {
+    const raw = window.localStorage.getItem(FORCES_STORAGE_KEY);
+    if (!raw) return DEFAULT_FORCES;
+    const parsed = JSON.parse(raw) as Partial<ForceSettings>;
+    // Merge con defaults para tolerar keys faltantes en versiones viejas.
+    return {
+      centerStrength: typeof parsed.centerStrength === 'number' ? parsed.centerStrength : DEFAULT_FORCES.centerStrength,
+      repelStrength: typeof parsed.repelStrength === 'number' ? parsed.repelStrength : DEFAULT_FORCES.repelStrength,
+      linkStrength: typeof parsed.linkStrength === 'number' ? parsed.linkStrength : DEFAULT_FORCES.linkStrength,
+      linkDistance: typeof parsed.linkDistance === 'number' ? parsed.linkDistance : DEFAULT_FORCES.linkDistance,
+      nodeSize: typeof parsed.nodeSize === 'number' ? parsed.nodeSize : DEFAULT_FORCES.nodeSize,
+    };
+  } catch {
+    return DEFAULT_FORCES;
+  }
+}
+
+function saveForcesToStorage(forces: ForceSettings): void {
+  if (typeof window === 'undefined') return;
+  try {
+    window.localStorage.setItem(FORCES_STORAGE_KEY, JSON.stringify(forces));
+  } catch {
+    // Storage puede estar lleno / en modo privado — silenciamos.
+  }
+}
 
 function extractGraphData(tree: DefinicionNode[]): { nodes: GraphNode[]; links: GraphLink[] } {
   const nodes: GraphNode[] = [];
@@ -125,7 +161,12 @@ export function GraphView({ showForceControls = false, onNavigateToNode }: { sho
   const [hoveredNode, setHoveredNode] = useState<string | null>(null);
   const [focusedNodeId, setFocusedNodeId] = useState<string | null>(null);
   const [dimensions, setDimensions] = useState({ width: 800, height: 600 });
-  const [forces, setForces] = useState<ForceSettings>(DEFAULT_FORCES);
+  // Carga lazy desde localStorage al mount — si el user ya guardo su config,
+  // arranca con ella en vez de con los defaults.
+  const [forces, setForces] = useState<ForceSettings>(() => loadForcesFromStorage());
+  // Flash de confirmacion cuando el user guarda — el boton muestra el check
+  // por 1.5 seg antes de volver al icono de Save.
+  const [justSaved, setJustSaved] = useState(false);
 
   dimensionsRef.current = dimensions;
   forcesRef.current = forces;
@@ -198,13 +239,36 @@ export function GraphView({ showForceControls = false, onNavigateToNode }: { sho
     // Empty state
     if (nodes.length === 0) return;
 
+    // Background rect transparente que cubre todo el SVG. Captura eventos de
+    // pan (mousedown+drag en espacios vacios) + zoom (wheel). Sin este rect,
+    // D3 zoom solo recibe eventos cuando el mouse esta sobre un nodo, y los
+    // `d3.drag` de los nodos tienen precedencia — resultado: solo podias
+    // mover nodos individuales, nunca hacer pan del canvas (como Figma).
+    //
+    // Con fill='transparent' el rect es invisible pero intercepta pointer
+    // events. pointer-events='all' asegura que capte incluso cuando no tiene
+    // fill real (quirk de SVG).
+    svg.append('rect')
+      .attr('class', 'pan-background')
+      .attr('width', '100%')
+      .attr('height', '100%')
+      .attr('fill', 'transparent')
+      .style('pointer-events', 'all')
+      .style('cursor', 'grab');
+
     const g = svg.append('g').attr('opacity', 0);
     g.transition().duration(300).attr('opacity', 1);
 
     const zoom = d3.zoom<SVGSVGElement, unknown>()
       .scaleExtent([0.1, 4])
+      .on('start', () => {
+        svg.select('.pan-background').style('cursor', 'grabbing');
+      })
       .on('zoom', (event) => {
         g.attr('transform', event.transform);
+      })
+      .on('end', () => {
+        svg.select('.pan-background').style('cursor', 'grab');
       });
 
     svg.call(zoom as unknown as (selection: typeof svg) => void);
@@ -418,6 +482,31 @@ export function GraphView({ showForceControls = false, onNavigateToNode }: { sho
     setForces(prev => ({ ...prev, [key]: value }));
   }, []);
 
+  /**
+   * Guarda la config actual como predeterminada en localStorage — la proxima
+   * vez que el user abra el grafo arranca con estos valores en vez de los
+   * DEFAULT_FORCES del codigo.
+   */
+  const saveAsDefault = useCallback(() => {
+    saveForcesToStorage(forces);
+    setJustSaved(true);
+    toast.success('Configuración guardada como predeterminada');
+    setTimeout(() => setJustSaved(false), 1500);
+  }, [forces]);
+
+  /**
+   * Restablece a los defaults del codigo y limpia el localStorage.
+   */
+  const resetToDefaults = useCallback(() => {
+    setForces(DEFAULT_FORCES);
+    try {
+      window.localStorage.removeItem(FORCES_STORAGE_KEY);
+    } catch {
+      /* ignore */
+    }
+    toast.info('Configuración restablecida a los valores originales');
+  }, []);
+
   const hoveredInfo = useMemo(() => {
     if (!hoveredNode) return null;
     return nodes.find(n => n.id === hoveredNode) || null;
@@ -487,6 +576,38 @@ export function GraphView({ showForceControls = false, onNavigateToNode }: { sho
             onChange={v => updateForce('linkStrength', v)} />
           <ForceSlider label="Distancia" value={forces.linkDistance} min={30} max={300} step={5}
             onChange={v => updateForce('linkDistance', v)} />
+
+          {/* Botones de persistencia */}
+          <div className="flex gap-1.5 mt-3 pt-2 border-t border-border/40">
+            <Button
+              variant="default"
+              size="sm"
+              className="flex-1 h-7 gap-1 text-xs"
+              onClick={saveAsDefault}
+              disabled={justSaved}
+            >
+              {justSaved ? (
+                <>
+                  <Check className="h-3 w-3" />
+                  Guardado
+                </>
+              ) : (
+                <>
+                  <Save className="h-3 w-3" />
+                  Guardar
+                </>
+              )}
+            </Button>
+            <Button
+              variant="outline"
+              size="sm"
+              className="h-7 gap-1 text-xs px-2"
+              onClick={resetToDefaults}
+              title="Restablecer valores originales"
+            >
+              <RotateCcw className="h-3 w-3" />
+            </Button>
+          </div>
         </div>
       )}
 
