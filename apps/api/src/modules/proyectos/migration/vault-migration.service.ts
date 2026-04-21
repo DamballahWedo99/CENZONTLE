@@ -51,6 +51,13 @@ export interface MigrationReport {
   errors: MigrationError[];
 }
 
+export interface OrphanCleanupReport {
+  orphansDetected: number;
+  foldersDeleted: number;
+  errors: Array<{ folder: string; error: string }>;
+  orphanPaths: string[];
+}
+
 // ─────────────────────────────────────────────────────────────────────
 //   VaultMigrationService
 // ─────────────────────────────────────────────────────────────────────
@@ -717,5 +724,104 @@ export class VaultMigrationService {
       err instanceof Error ? err.stack : undefined,
     );
     report.errors.push({ entity, id, error: message });
+  }
+
+  // ─────────────────────────────────────────────────────────────────────
+  //   Cleanup de folders huerfanos
+  // ─────────────────────────────────────────────────────────────────────
+
+  /**
+   * Detecta y borra folders de historias huerfanos en el vault — folders que
+   * existen en GitHub pero cuyo shortId (ultimos 6 chars del slug del folder)
+   * NO corresponde a ninguna story en PG.
+   *
+   * Origen de los huerfanos: intentos fallidos de create story donde el
+   * writeFileSet fallo parcialmente (p.ej. 409 Conflict bajo concurrencia)
+   * y el rollback tambien fallo, dejando archivos en vault sin fila en PG.
+   *
+   * Idempotente: correr multiples veces es safe. Si alguien re-usa un shortId
+   * (astronomicamente improbable con UUIDs), NO se borra nada.
+   *
+   * El matching es por SHORT ID (6 chars sufijo del folder) comparado contra
+   * el `id.slice(-6)` de las stories en PG. Esto alinea con el formato
+   * `<slug>-<id6>` de storyFolderPath.
+   */
+  async cleanupOrphanStories(): Promise<OrphanCleanupReport> {
+    this.logger.log('[VaultCleanup] ===== INICIO cleanup de folders huerfanos =====');
+
+    // 1. Cargar todos los shortIds validos desde PG
+    const allStories = await this.prisma.story.findMany({
+      select: { id: true, vaultPath: true, title: true },
+    });
+    const validShortIds = new Set(
+      allStories.filter((s) => s.id.length >= 6).map((s) => s.id.slice(-6)),
+    );
+    this.logger.log(`[VaultCleanup] ${allStories.length} stories en PG, ${validShortIds.size} shortIds validos`);
+
+    // 2. Listar el tree completo bajo iniciativas/ y detectar folders en historias/
+    const tree = await this.vault.listTree('iniciativas').catch(() => []);
+    const orphanPaths: string[] = [];
+
+    const walk = (nodes: typeof tree, insideHistorias: boolean) => {
+      for (const node of nodes) {
+        const isHistoriasFolder = node.type === 'folder' && node.path.endsWith('/historias');
+        const isStoryFolder =
+          node.type === 'folder' &&
+          insideHistorias &&
+          /\/historias\/[^/]+$/.test(node.path);
+
+        if (isStoryFolder) {
+          // Extraer shortId del nombre del folder (ultimos 6 chars del slug)
+          const folderName = node.path.split('/').pop() ?? '';
+          const shortId = folderName.slice(-6);
+          if (!validShortIds.has(shortId)) {
+            orphanPaths.push(node.path);
+          }
+          // No recursamos dentro de un story folder — no hay mas story folders
+          // anidados (solo archivos).
+          continue;
+        }
+
+        // Recursa manteniendo el flag de si estamos dentro de historias/
+        if (node.children && node.children.length > 0) {
+          walk(node.children, insideHistorias || isHistoriasFolder);
+        }
+      }
+    };
+    walk(tree, false);
+
+    this.logger.log(
+      `[VaultCleanup] detectados ${orphanPaths.length} folder(s) huerfano(s)`,
+    );
+
+    // 3. Borrar cada folder huerfano. El mutex queue del VaultService serializa
+    //    las operaciones — no habra 409s por concurrencia interna.
+    const errors: Array<{ folder: string; error: string }> = [];
+    let foldersDeleted = 0;
+    for (const folder of orphanPaths) {
+      try {
+        await this.vaultFolder.deleteFolder(
+          folder,
+          `cleanup(vault): remove orphan story folder ${folder.split('/').pop()}`,
+        );
+        foldersDeleted++;
+        this.logger.log(`[VaultCleanup] ✓ deleted orphan: ${folder}`);
+      } catch (err: any) {
+        const message = err instanceof Error ? err.message : String(err);
+        errors.push({ folder, error: message });
+        this.logger.warn(`[VaultCleanup] ✗ failed to delete ${folder}: ${message}`);
+      }
+    }
+
+    this.logger.log(
+      `[VaultCleanup] ===== FIN cleanup: ${foldersDeleted}/${orphanPaths.length} borrados, ${errors.length} errores =====`,
+    );
+
+    return {
+      orphansDetected: orphanPaths.length,
+      foldersDeleted,
+      errors,
+      orphanPaths,
+    };
   }
 }

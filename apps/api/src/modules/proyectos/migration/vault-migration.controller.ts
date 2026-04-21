@@ -4,7 +4,7 @@ import { Permission } from '@cenzontle/shared';
 import type { AuthenticatedUser } from '@cenzontle/shared';
 import { CurrentUser, Permissions } from '../../auth/decorators';
 import { sanitizeForLog } from '../../../common/utils/sanitize-llm-input.util';
-import { VaultMigrationService, MigrationReport } from './vault-migration.service';
+import { VaultMigrationService, MigrationReport, OrphanCleanupReport } from './vault-migration.service';
 
 /**
  * Endpoint de administración para ejecutar la migración big-bang del vault
@@ -39,5 +39,27 @@ export class VaultMigrationController {
       `[VaultMigration] ejecutada por user=${sanitizeForLog(user.sub)} email=${sanitizeForLog(user.email ?? 'unknown')}`,
     );
     return this.migration.migrateAll(user.sub);
+  }
+
+  /**
+   * Detecta folders de historias en el vault cuyo shortId NO corresponde a
+   * ninguna story en PG — huerfanos de intentos fallidos de create. Los borra.
+   *
+   * Idempotente: correr multiples veces es safe. No toca PG (solo vault).
+   */
+  @Post('cleanup-orphans')
+  @Permissions(Permission.MANAGE_USERS)
+  @ApiOperation({
+    summary: 'Limpiar folders de historias huerfanos en el vault',
+    description:
+      'Detecta y borra folders bajo iniciativas/<slug>/epics/<slug>/historias/<slug>-<id6>/ cuyo ' +
+      'shortId no corresponde a ninguna story en PG. Origen: intentos fallidos de create con ' +
+      'rollback incompleto. Operacion idempotente.',
+  })
+  async cleanupOrphans(@CurrentUser() user: AuthenticatedUser): Promise<OrphanCleanupReport> {
+    this.logger.log(
+      `[VaultCleanup] ejecutada por user=${sanitizeForLog(user.sub)} email=${sanitizeForLog(user.email ?? 'unknown')}`,
+    );
+    return this.migration.cleanupOrphanStories();
   }
 }
