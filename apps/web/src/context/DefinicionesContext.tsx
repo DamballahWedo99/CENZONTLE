@@ -145,6 +145,28 @@ function findNodeById(nodes: DefinicionNode[], id: string): DefinicionNode | nul
   return null;
 }
 
+/**
+ * Devuelve los ids de todos los folders ancestors de un nodo dado.
+ * Ejemplo: para un doc en `root/carpeta-A/carpeta-B/doc.md`, retorna
+ * [rootId, carpetaAId, carpetaBId] — todos los folders que hay que expandir
+ * para que el nodo sea visible en el tree.
+ *
+ * Si el nodo no existe, retorna []. Si el nodo es root (sin padre), retorna [].
+ */
+function findAncestorIds(nodes: DefinicionNode[], targetId: string): string[] {
+  const walk = (list: DefinicionNode[], trail: string[]): string[] | null => {
+    for (const node of list) {
+      if (node.id === targetId) return trail;
+      if (node.type === 'folder' && node.children) {
+        const found = walk(node.children, [...trail, node.id]);
+        if (found) return found;
+      }
+    }
+    return null;
+  };
+  return walk(nodes, []) ?? [];
+}
+
 function updateNodeInTree(nodes: DefinicionNode[], id: string, updater: (node: DefinicionNode) => DefinicionNode): DefinicionNode[] {
   return nodes.map(node => {
     if (node.id === id) return updater(node);
@@ -570,8 +592,28 @@ function reducer(state: DefinicionesState, action: DefinicionesAction): Definici
         })),
       };
 
-    case 'SELECT_NODE':
-      return { ...state, selectedId: action.id, isEditing: false };
+    case 'SELECT_NODE': {
+      // Al seleccionar un nodo (desde cualquier fuente — click en tree,
+      // click en content area card, link de graph/changelog), auto-expandimos
+      // todos sus ancestors para que sea visible en el explorador. Patron
+      // "reveal in tree" tipo VSCode.
+      if (action.id === null) {
+        return { ...state, selectedId: null, isEditing: false };
+      }
+      const ancestors = findAncestorIds(state.tree, action.id);
+      const nextExpanded = new Set(state.expandedFolders);
+      for (const ancestorId of ancestors) nextExpanded.add(ancestorId);
+      // Si el nodo seleccionado ES un folder, tambien lo expandimos para que
+      // el usuario vea su contenido inmediato en el tree.
+      const selected = findNodeById(state.tree, action.id);
+      if (selected?.type === 'folder') nextExpanded.add(action.id);
+      return {
+        ...state,
+        selectedId: action.id,
+        isEditing: false,
+        expandedFolders: nextExpanded,
+      };
+    }
 
     case 'TOGGLE_FOLDER': {
       const next = new Set(state.expandedFolders);
