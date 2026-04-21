@@ -721,7 +721,18 @@ export class StoriesService {
   }
 
   private buildDocReferenceMarkdown(doc: RelatedDocumentDto): string {
+    const frontmatter = [
+      '---',
+      `id: ${doc.docId}`,
+      'type: document-reference',
+      `docName: ${JSON.stringify(doc.docName)}`,
+      `bucketUrl: ${JSON.stringify(doc.bucketUrl)}`,
+      `created: ${new Date().toISOString().slice(0, 10)}`,
+      '---',
+      '',
+    ].join('\n');
     return (
+      frontmatter +
       `# ${doc.docName}\n\n` +
       `**Ubicacion en bucket:** [\`${doc.bucketUrl}\`](${doc.bucketUrl})\n\n` +
       `**Document ID:** \`${doc.docId}\`\n\n` +
@@ -730,7 +741,19 @@ export class StoriesService {
   }
 
   private buildDependencyMarkdown(dep: DiscoveredDependencyDto): string {
+    const frontmatter = [
+      '---',
+      `id: ${dep.id}`,
+      'type: dependency',
+      `title: ${JSON.stringify(dep.title)}`,
+      `severity: ${dep.severity}`,
+      `depType: ${dep.type}`,
+      `created: ${new Date().toISOString().slice(0, 10)}`,
+      '---',
+      '',
+    ].join('\n');
     return (
+      frontmatter +
       `# ${dep.title}\n\n` +
       `**Severidad:** ${dep.severity}  \n` +
       `**Tipo:** ${dep.type}  \n` +
