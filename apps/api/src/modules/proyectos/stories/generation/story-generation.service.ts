@@ -349,11 +349,25 @@ export class StoryGenerationService {
     } catch (err: any) {
       // Failsafe: si un agente arroja inesperadamente, emitimos error claro antes
       // de run_finished para que la UI no quede colgada en "drafting_*".
-      this.logger.error(`Orchestrator failure: ${err?.message}`, err?.stack);
+      // CRITICO: loguear tambien el nombre del error y status HTTP si es de la SDK
+      // de Anthropic — ayuda a distinguir 400 (bad request), 429 (rate limit),
+      // 529 (overloaded), 500 (server error).
+      const errName = err?.name ?? 'UnknownError';
+      const errStatus = err?.status ?? err?.response?.status ?? 'n/a';
+      const errBody = err?.error?.error?.message ?? err?.response?.data?.error?.message ?? err?.message ?? String(err);
+      this.logger.error(
+        `Orchestrator failure: name=${errName} status=${errStatus} msg="${errBody}"`,
+        err?.stack,
+      );
+      // Mensaje seguro al frontend: incluye el mensaje real PERO truncado y sanitizado.
+      // Sin info del SO, stack traces o secrets — solo la causa humano-legible.
+      const safeMsg = typeof errBody === 'string'
+        ? errBody.slice(0, 300).replace(/[\r\n\t]/g, ' ')
+        : 'Error desconocido';
       subject.next({
         data: {
           type: 'error',
-          message: 'Error en la orquestacion de agentes. Revisa los logs del servidor.',
+          message: `Error del agente: ${safeMsg}${errStatus !== 'n/a' ? ` (HTTP ${errStatus})` : ''}`,
           timestamp: new Date().toISOString(),
         },
       });
