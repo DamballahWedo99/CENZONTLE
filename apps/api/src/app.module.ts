@@ -8,6 +8,7 @@ import { AuthModule } from "./modules/auth/auth.module";
 import { DocumentsModule } from "./modules/documents/documents.module";
 import { VaultModule } from "./modules/vault/vault.module";
 import { CodeRepositoriesModule } from "./modules/code-repositories/code-repositories.module";
+import { DiagramThemeSettingsModule } from "./modules/diagram-theme-settings/diagram-theme-settings.module";
 import { HealthController } from "./health.controller";
 
 @Module({
@@ -21,6 +22,7 @@ import { HealthController } from "./health.controller";
     FactoryModule,
     AuthModule,
     DocumentsModule,
+    DiagramThemeSettingsModule,
   ],
   controllers: [HealthController],
 })

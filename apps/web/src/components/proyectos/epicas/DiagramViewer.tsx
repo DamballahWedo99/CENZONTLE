@@ -1,705 +1,1569 @@
 'use client';
 
-import { useState, useCallback, useMemo, useRef } from 'react';
+import { useState, useCallback, useEffect, useMemo, useRef } from 'react';
 import {
   ReactFlow,
   Background,
   Controls,
-  MiniMap,
   useNodesState,
   useEdgesState,
   Node,
   Edge,
-  Position,
-  MarkerType,
-  Handle,
   Connection,
+  ConnectionMode,
   addEdge,
   Panel,
   NodeChange,
   EdgeChange,
+  type ReactFlowInstance,
 } from '@xyflow/react';
 import '@xyflow/react/dist/style.css';
-import dagre from 'dagre';
 import { EpicDiagram, DiagramNode, DiagramEdge, DiagramNodeType } from '@cenzontle/shared';
+import { toast } from 'sonner';
 import { Button } from '@/components/ui/button';
-import { Input } from '@/components/ui/input';
 import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from '@/components/ui/select';
-import { Plus, Trash2, Type, Save, RotateCcw, MousePointer2 } from 'lucide-react';
+  Tooltip,
+  TooltipContent,
+  TooltipProvider,
+  TooltipTrigger,
+} from '@/components/ui/tooltip';
+import { Save, RotateCcw, MousePointer2, Shuffle } from 'lucide-react';
+import { resetDiagramLayout } from '@/lib/diagram-agent';
 
-// --- Handle style ---
-const handleStyle = { background: 'rgba(255,255,255,0.3)', width: 6, height: 6, border: 'none' };
-const handleStyleEditing = { background: 'rgba(99,102,241,0.7)', width: 8, height: 8, border: '1px solid rgba(99,102,241,1)' };
+// Layout pipeline extraído a diagram-layout/
+import { nodeTypes } from './diagram-layout/nodes';
+import {
+  canonicalSourceHandle,
+  canonicalTargetHandle,
+  shapeToNodeType,
+  makeEdgeStyle,
+} from './diagram-layout/layout-constants';
+import { useGroupedLayout } from './diagram-layout/useGroupedLayout';
+import { resolveCollisions, snapToGrid } from './diagram-layout/resolve-collisions';
+// `ClusterBackground` desmontado — deshabilitamos los fondos por grupo.
+// El componente sigue existiendo en `diagram-layout/cluster-background.tsx`
+// por si se reactiva más adelante; solo no lo importamos acá.
+// import { ClusterBackground } from './diagram-layout/cluster-background';
 
-// --- Service / Process / Gateway Node (dark rectangle) ---
-function ServiceNode({ data, selected }: { data: { label: string; description?: string; nodeType: DiagramNodeType; editing?: boolean }; selected?: boolean }) {
-  const isFilled = ['service', 'process', 'gateway', 'queue'].includes(data.nodeType);
-  const hs = data.editing ? handleStyleEditing : handleStyle;
-  return (
-    <>
-      <Handle type="target" position={Position.Top} id="top" style={hs} />
-      <Handle type="target" position={Position.Left} id="left" style={hs} />
-      <div
-        className={`flex flex-col items-center justify-center text-center px-4 py-3 min-w-[120px] max-w-[160px] rounded-lg border transition-shadow ${
-          selected ? 'ring-2 ring-indigo-500 shadow-lg shadow-indigo-500/20' : ''
-        } ${
-          isFilled
-            ? 'bg-zinc-900 border-zinc-600 text-white dark:bg-zinc-800 dark:border-zinc-600'
-            : 'bg-zinc-800/60 border-zinc-500 border-dashed text-zinc-200 dark:bg-zinc-800/40'
-        }`}
-      >
-        <span className="text-[11px] font-semibold leading-tight">{data.label}</span>
-        {data.description && (
-          <span className="text-[9px] text-zinc-400 leading-tight mt-0.5">{data.description}</span>
-        )}
-      </div>
-      <Handle type="source" position={Position.Bottom} id="bottom" style={hs} />
-      <Handle type="source" position={Position.Right} id="right" style={hs} />
-    </>
-  );
-}
+/**
+ * Tamaño del grid para snap al arrastrar nodos. Debe coincidir con
+ * `SNAP_GRID_SIZE` en useGroupedLayout.ts para que el drag produzca
+ * posiciones consistentes con el layout inicial.
+ */
+const DRAG_SNAP_GRID_SIZE = 40;
+import { useMeasuredDimensions } from './diagram-layout/useMeasuredDimensions';
+import { SmartStepEdge } from './diagram-layout/edges/SmartStepEdge';
+import { WaypointEdge } from './diagram-layout/edges/WaypointEdge';
+/*
+ * libavoid-js (vía `avoid-nodes-edge`) — routing ortogonal con obstacle
+ * avoidance genuino. El motor C++ original de draw.io/Inkscape/Dia,
+ * compilado a WASM, corriendo en Web Worker para no bloquear el hilo
+ * principal. Reemplaza el routing ortogonal que ELK provee via
+ * `edgeRouting: ORTHOGONAL` — ELK asume layered, libavoid no (A* sobre
+ * visibility graph del espacio 2D entero, más nudging de edges paralelos).
+ *
+ * Licencia: avoid-nodes-edge MIT con restricción de no-republicación en
+ * registries (OK para uso interno en CENZONTLE). libavoid-js (dep
+ * transitiva): LGPL-2.1-or-later — attribution en NOTICES.md.
+ *
+ * El .wasm se sirve desde `/libavoid.wasm` en Next.js (copiado por
+ * `scripts/copy-libavoid-wasm.cjs` via postinstall).
+ */
+import { AvoidNodesEdge } from 'avoid-nodes-edge/edge';
+import { useAvoidNodesRouterFromWorker } from 'avoid-nodes-edge';
+import { useDiagramTheme, isLightColor } from './diagram-layout/useDiagramTheme';
+import { useOrgDiagramTheme } from './diagram-layout/useOrgDiagramTheme';
+import { DiagramThemePanel } from './diagram-layout/DiagramThemePanel';
+import { ColorLegend } from './diagram-layout/ColorLegend';
+import { useDiagramEditor } from './diagram-layout/editor/useDiagramEditor';
+import { EditToolbar } from './diagram-layout/editor/EditToolbar';
+import { PropertyPanel } from './diagram-layout/editor/PropertyPanel';
+import { useDropNode } from './diagram-layout/editor/useDropNode';
+import { useDiagramHistory } from './diagram-layout/editor/useDiagramHistory';
+import { useDiagramKeyboard } from './diagram-layout/editor/useDiagramKeyboard';
+import { ValidationPanel } from './diagram-layout/editor/ValidationPanel';
+import { DiagramContextMenu, useContextMenu } from './diagram-layout/editor/DiagramContextMenu';
+import { useDiagramAutoSave } from './diagram-layout/editor/useDiagramAutoSave';
+import { SaveIndicator } from './diagram-layout/editor/SaveIndicator';
 
-// --- Decision Node (diamond) ---
-function DecisionNode({ data, selected }: { data: { label: string; description?: string; editing?: boolean }; selected?: boolean }) {
-  const hs = data.editing ? handleStyleEditing : handleStyle;
-  return (
-    <div className="relative" style={{ width: 120, height: 120 }}>
-      <Handle type="target" position={Position.Top} id="top" style={{ ...hs, top: -3 }} />
-      <Handle type="target" position={Position.Left} id="left" style={{ ...hs, left: -3 }} />
-      <div
-        className={`absolute bg-zinc-900 border border-zinc-500 dark:bg-zinc-800 transition-shadow ${
-          selected ? 'ring-2 ring-indigo-500 shadow-lg shadow-indigo-500/20' : ''
-        }`}
-        style={{
-          width: 84,
-          height: 84,
-          transform: 'rotate(45deg)',
-          borderRadius: 4,
-          top: 18,
-          left: 18,
-        }}
-      />
-      <div className="absolute inset-0 flex flex-col items-center justify-center text-center z-10">
-        <span className="text-[10px] font-bold text-white leading-tight max-w-[76px]">{data.label}</span>
-      </div>
-      <Handle type="source" position={Position.Bottom} id="bottom" style={{ ...hs, bottom: -3 }} />
-      <Handle type="source" position={Position.Right} id="right" style={{ ...hs, right: -3 }} />
-      <Handle type="source" position={Position.Left} id="left-out" style={{ ...hs, left: -3, top: '60%' }} />
-    </div>
-  );
-}
+// Registro de edge types:
+//  - `avoidNodes` (activo por default): routing ortogonal con obstacle
+//    avoidance real vía libavoid-js (WASM + Web Worker). Las aristas dan
+//    la vuelta alrededor de cualquier nodo que no sea source/target,
+//    aristas paralelas se separan automáticamente (nudging). Usa el
+//    hook `useAvoidNodesRouterFromWorker` más abajo.
+//  - `waypoint` (fallback, usado por cache persistido): consume los
+//    bendPoints que ELK calcula durante `elk.edgeRouting: ORTHOGONAL`.
+//    Se mantiene registrado por compatibilidad con diagramas viejos en
+//    Redis cache que traen `type: 'waypoint'`. El nuevo flow (ver
+//    `useGroupedLayout`) emite `type: 'avoidNodes'` por default.
+//  - `smart` (legacy): wrapper sobre @tisoap/react-flow-smart-edge (A*
+//    cliente). Se mantiene registrado porque algunos edges persistidos
+//    del caché Redis pueden seguir trayendo `type: 'smart'`; el renderer
+//    no crashea y el user puede re-generar el diagrama para migrar.
+//  - Resto: XYFlow nativo (smoothstep, step, straight, bezier).
+const edgeTypes = {
+  avoidNodes: AvoidNodesEdge,
+  smart: SmartStepEdge,
+  waypoint: WaypointEdge,
+} as const;
 
-// --- Actor Node (circle) ---
-function ActorNode({ data, selected }: { data: { label: string; description?: string; editing?: boolean }; selected?: boolean }) {
-  const hs = data.editing ? handleStyleEditing : handleStyle;
-  return (
-    <>
-      <Handle type="target" position={Position.Top} id="top" style={hs} />
-      <Handle type="target" position={Position.Left} id="left" style={hs} />
-      <div
-        className={`rounded-full bg-zinc-900 border border-zinc-500 flex flex-col items-center justify-center text-center dark:bg-zinc-800 transition-shadow ${
-          selected ? 'ring-2 ring-indigo-500 shadow-lg shadow-indigo-500/20' : ''
-        }`}
-        style={{ width: 100, height: 100 }}
-      >
-        <span className="text-[10px] font-semibold text-white leading-tight max-w-[72px]">{data.label}</span>
-        {data.description && (
-          <span className="text-[8px] text-zinc-400 leading-tight mt-0.5 max-w-[64px]">{data.description}</span>
-        )}
-      </div>
-      <Handle type="source" position={Position.Bottom} id="bottom" style={hs} />
-      <Handle type="source" position={Position.Right} id="right" style={hs} />
-    </>
-  );
-}
-
-// --- Database Node (cylinder) ---
-function DatabaseNode({ data, selected }: { data: { label: string; description?: string; editing?: boolean }; selected?: boolean }) {
-  const hs = data.editing ? handleStyleEditing : handleStyle;
-  return (
-    <>
-      <Handle type="target" position={Position.Top} id="top" style={hs} />
-      <Handle type="target" position={Position.Left} id="left" style={hs} />
-      <div className={`flex flex-col items-center transition-shadow ${selected ? 'drop-shadow-[0_0_8px_rgba(99,102,241,0.3)]' : ''}`} style={{ width: 130 }}>
-        <div
-          className="bg-zinc-900 border border-zinc-500 dark:bg-zinc-800"
-          style={{ width: 130, height: 20, borderRadius: '50%', position: 'relative', zIndex: 2 }}
-        />
-        <div
-          className="bg-zinc-900 border-x border-b border-zinc-500 flex flex-col items-center justify-center text-center px-3 pb-2 dark:bg-zinc-800"
-          style={{ width: 130, marginTop: -10, paddingTop: 14, borderBottomLeftRadius: '50% 18px', borderBottomRightRadius: '50% 18px' }}
-        >
-          <span className="text-[11px] font-semibold text-white leading-tight">{data.label}</span>
-          {data.description && (
-            <span className="text-[9px] text-zinc-400 leading-tight mt-0.5">{data.description}</span>
-          )}
-        </div>
-      </div>
-      <Handle type="source" position={Position.Bottom} id="bottom" style={hs} />
-      <Handle type="source" position={Position.Right} id="right" style={hs} />
-    </>
-  );
-}
-
-// --- State Node (filled circle for end states) ---
-function StateNode({ data, selected }: { data: { label: string; description?: string; editing?: boolean }; selected?: boolean }) {
-  const hs = data.editing ? handleStyleEditing : handleStyle;
-  return (
-    <>
-      <Handle type="target" position={Position.Top} id="top" style={hs} />
-      <Handle type="target" position={Position.Left} id="left" style={hs} />
-      <div
-        className={`rounded-full bg-white border-2 border-zinc-300 flex flex-col items-center justify-center text-center dark:bg-zinc-200 transition-shadow ${
-          selected ? 'ring-2 ring-indigo-500 shadow-lg shadow-indigo-500/20' : ''
-        }`}
-        style={{ width: 90, height: 90 }}
-      >
-        <span className="text-[10px] font-bold text-zinc-900 leading-tight max-w-[64px]">{data.label}</span>
-      </div>
-      <Handle type="source" position={Position.Bottom} id="bottom" style={hs} />
-      <Handle type="source" position={Position.Right} id="right" style={hs} />
-    </>
-  );
-}
-
-// --- Node type mappings ---
-
-const nodeTypeToShape: Record<DiagramNodeType, string> = {
-  service: 'serviceNode',
-  database: 'databaseNode',
-  queue: 'serviceNode',
-  gateway: 'serviceNode',
-  external: 'serviceNode',
-  client: 'stateNode',
-  process: 'serviceNode',
-  decision: 'decisionNode',
-  actor: 'actorNode',
-};
-
-const shapeToNodeType: Record<string, DiagramNodeType> = {
-  serviceNode: 'service',
-  databaseNode: 'database',
-  decisionNode: 'decision',
-  actorNode: 'actor',
-  stateNode: 'client',
-};
-
-const nodeDimensions: Record<string, { width: number; height: number }> = {
-  serviceNode: { width: 160, height: 56 },
-  decisionNode: { width: 120, height: 120 },
-  actorNode: { width: 100, height: 100 },
-  databaseNode: { width: 130, height: 70 },
-  stateNode: { width: 90, height: 90 },
-};
-
-const nodeTypes = {
-  serviceNode: ServiceNode,
-  decisionNode: DecisionNode,
-  actorNode: ActorNode,
-  databaseNode: DatabaseNode,
-  stateNode: StateNode,
-};
-
-const nodeTypeLabels: Record<string, string> = {
-  serviceNode: 'Servicio',
-  decisionNode: 'Decisión',
-  actorNode: 'Actor',
-  databaseNode: 'Base de datos',
-  stateNode: 'Estado',
-};
-
-// --- Dagre layout ---
-
-function getLayoutedElements(
-  nodes: Node[],
-  edges: Edge[],
-  direction: 'TB' | 'LR' = 'TB'
-): { nodes: Node[]; edges: Edge[] } {
-  const g = new dagre.graphlib.Graph();
-  g.setDefaultEdgeLabel(() => ({}));
-  g.setGraph({ rankdir: direction, nodesep: 80, ranksep: 100, edgesep: 30 });
-
-  nodes.forEach((node) => {
-    const dims = nodeDimensions[node.type ?? 'serviceNode'] ?? nodeDimensions.serviceNode;
-    g.setNode(node.id, { width: dims.width, height: dims.height });
-  });
-  edges.forEach((edge) => {
-    g.setEdge(edge.source, edge.target);
-  });
-
-  dagre.layout(g);
-
-  const layoutedNodes = nodes.map((node) => {
-    const pos = g.node(node.id);
-    const dims = nodeDimensions[node.type ?? 'serviceNode'] ?? nodeDimensions.serviceNode;
-    return {
-      ...node,
-      position: { x: pos.x - dims.width / 2, y: pos.y - dims.height / 2 },
-    };
-  });
-
-  return { nodes: layoutedNodes, edges };
-}
-
-// --- Edge styles ---
-function makeEdgeStyle(animated?: boolean) {
-  return {
-    type: 'smoothstep' as const,
-    markerEnd: { type: MarkerType.ArrowClosed, width: 14, height: 14, color: 'rgba(161,161,170,0.7)' },
-    style: { strokeWidth: 1.5, stroke: 'rgba(161,161,170,0.5)' },
-    labelStyle: { fontSize: 10, fill: 'rgba(161,161,170,0.9)', fontWeight: 600 },
-    labelBgStyle: { fill: 'rgba(24,24,27,0.9)', fillOpacity: 1, rx: 4, ry: 4 },
-    labelBgPadding: [6, 4] as [number, number],
-    animated,
-  };
-}
-
-// --- Diagram Viewer ---
+// ────────────────────────────────────────────────────────────────────────────
+// DiagramViewer
+// ────────────────────────────────────────────────────────────────────────────
 
 interface DiagramViewerProps {
   diagram: EpicDiagram;
   editable?: boolean;
   onDiagramChange?: (diagram: EpicDiagram) => void;
   fullHeight?: boolean;
+  /**
+   * Si se pasa, activa auto-save durante edición: los cambios se persisten
+   * al cache Redis con debounce 500ms. Sin epicId el editor sigue funcional
+   * pero solo guarda al pulsar "Guardar" explícito.
+   */
+  epicId?: string;
+  /**
+   * Set de nodeIds a iluminar (paso activo del sidepanel). Cuando es
+   * no-vacío, toma precedencia sobre el hover-de-nodo individual: los nodos
+   * fuera del set se atenúan y los edges cuyos ambos endpoints están en el
+   * set se resaltan. Cuando es vacío o undefined, el highlight cae al
+   * comportamiento existente de hover-nodo.
+   */
+  highlightedNodeIds?: Set<string>;
+  /**
+   * Lista de nodeIds sobre los que hacer zoom/pan del viewport. Deliberadamente
+   * SEPARADO de `highlightedNodeIds` porque el highlight responde a hover+click
+   * (debe ser barato, sin mover la cámara) mientras que este focus responde
+   * SOLO al click (debe mover la cámara, pero solo cuando el user "ancla" un
+   * paso). Pasar `null` o array vacío → fitView a todos los nodos (reset).
+   * Pasar IDs → fitView limitado a ese subset con padding amplio.
+   */
+  focusNodeIds?: string[] | null;
+  /**
+   * Callback invocado cuando el user clickea un nodo del canvas que pertenece
+   * a un step del flujo (`diagram.steps[].nodeIds`). El parent (DiagramFullPage)
+   * lo usa para setear `clickedStepId` — lo que abre el bottom panel, aplica
+   * highlight y hace zoom. Sin este callback, click en nodo fuera de edición
+   * es no-op (preserva comportamiento legacy).
+   */
+  onStepFromNode?: (stepId: string) => void;
 }
 
-export function DiagramViewer({ diagram, editable = false, onDiagramChange, fullHeight = false }: DiagramViewerProps) {
+export function DiagramViewer({
+  diagram,
+  editable = false,
+  onDiagramChange,
+  fullHeight = false,
+  epicId,
+  highlightedNodeIds: externalHighlightedNodeIds,
+  focusNodeIds,
+  onStepFromNode,
+}: DiagramViewerProps) {
   const [isEditing, setIsEditing] = useState(false);
-  const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null);
-  const [editingNodeLabel, setEditingNodeLabel] = useState('');
-  const [editingNodeDesc, setEditingNodeDesc] = useState('');
-  const [showAddNode, setShowAddNode] = useState(false);
-  const [newNodeLabel, setNewNodeLabel] = useState('');
-  const [newNodeType, setNewNodeType] = useState<string>('serviceNode');
-  const [editingEdgeId, setEditingEdgeId] = useState<string | null>(null);
-  const [editingEdgeLabel, setEditingEdgeLabel] = useState('');
-  const nodeIdCounter = useRef(0);
+  /*
+    `editModeMounted` desacopla presencia en el DOM de la animación. Cuando
+    `isEditing` pasa de true → false, el paneles (EditToolbar, PropertyPanel,
+    ValidationPanel) permanecen montados durante `EDIT_ANIM_MS` para que la
+    animación-out se reproduzca; tras ese delay, `editModeMounted` pasa a
+    false y los paneles se desmontan. Mismo patrón que `DiagramThemePanel`.
 
-  const { layoutedNodes, layoutedEdges } = useMemo(() => {
-    const rfNodes: Node[] = diagram.nodes.map((n) => ({
-      id: n.id,
-      type: nodeTypeToShape[n.type] ?? 'serviceNode',
-      position: { x: 0, y: 0 },
-      data: { label: n.label, description: n.description, nodeType: n.type, editing: isEditing },
-      draggable: isEditing,
-    }));
+    Guardia contra race-condition en toggle rápido: si el user hace
+    edit → cancel → edit dentro de los 180 ms, el timer del ciclo anterior
+    podría desmontar los paneles cuando `isEditing` ya es `true` de nuevo.
+    Leemos el estado destino vía ref en el callback del timer para que la
+    cleanup del useEffect no elimine los paneles del nuevo ciclo.
+  */
+  const [editModeMounted, setEditModeMounted] = useState(false);
+  const isEditingRef = useRef(isEditing);
+  isEditingRef.current = isEditing;
+  const EDIT_ANIM_MS = 180;
+  useEffect(() => {
+    if (isEditing) {
+      setEditModeMounted(true);
+      return;
+    }
+    if (!editModeMounted) return;
+    const timer = window.setTimeout(() => {
+      // Re-check destino: si el user reabrió edit dentro del anim window,
+      // el ref trae el valor actual y abortamos el dismount.
+      if (!isEditingRef.current) setEditModeMounted(false);
+    }, EDIT_ANIM_MS);
+    return () => window.clearTimeout(timer);
+  }, [isEditing, editModeMounted]);
 
-    const rfEdges: Edge[] = diagram.edges.map((e) => ({
-      id: e.id,
-      source: e.source,
-      target: e.target,
-      sourceHandle: e.sourceHandle,
-      targetHandle: e.targetHandle,
-      label: e.label,
-      ...makeEdgeStyle(e.animated),
-      deletable: isEditing,
-    }));
+  // Dos flags distintas, intencionalmente separadas:
+  //   - `hadManualLayoutOnLoadRef`: el diagrama entró con `hasManualLayout=true`
+  //     (posiciones manuales previas). Se lee una vez al montar.
+  //   - `modifiedThisSessionRef`: el user DROP/DRAG algo en esta sesión de
+  //     edición. Solo se enciende con drags reales o nodes añadidos.
+  //
+  // Separarlas evita el bug de "cristalización" (QA H6): si el user solo abre
+  // edit y cierra sin cambios, no queremos sobrescribir `manualPositions` con
+  // lo que Dagre acabó de calcular — preservamos las positions originales.
+  const hadManualLayoutOnLoadRef = useRef<boolean>(Boolean(diagram.hasManualLayout));
+  // Convertido de ref a state (fix Arch H9 + QA H4): como `useMemo` observa
+  // dependencies reactive, un ref no disparaba recompute del
+  // `liveDiagramForAutoSave`. Con state, el autosave solo cristaliza
+  // `manualPositions` cuando el user REALMENTE modificó algo esta sesión.
+  const [hasModifiedThisSession, setHasModifiedThisSession] = useState(false);
 
-    const { nodes: ln, edges: le } = getLayoutedElements(rfNodes, rfEdges, 'TB');
-    return { layoutedNodes: ln, layoutedEdges: le };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [diagram]);
+  // Snapshot de `{nodes, edges}` al entrar a edit. `handleReset` restaura
+  // desde aquí — inmune a cambios externos del prop `diagram` durante la
+  // sesión de edición (QA H2).
+  const editSnapshotRef = useRef<{ nodes: Node[]; edges: Edge[] } | null>(null);
 
+  // Refs de nodes/edges actualizados en cada render. Usados en
+  // `toggleEditing` para evitar capturar esos arrays en el closure del
+  // useCallback (fix QA H5 / Arch M3): si los capturara, el callback se
+  // recrearía en cada render del canvas, invalidando referencias memorizadas
+  // en el botón "Editar diagrama".
+  const nodesRef = useRef<Node[]>([]);
+  const edgesRef = useRef<Edge[]>([]);
+
+  // Tema configurable (fondo + color de nodos) persistido en localStorage.
+  // Se propaga a los nodes via CSS variables en el contenedor, evitando
+  // re-renders individuales cuando cambia el color.
+  const { theme, setBackground, reset: resetTheme } = useDiagramTheme();
+
+  // Tema org-wide (colores por grupo) persistido en el backend + RBAC.
+  // Se aplica vía CSS variables `--diagram-group-${group}-bg` en el
+  // contenedor; los custom nodes las consumen sin re-renders.
+  const orgTheme = useOrgDiagramTheme();
+
+  // Vars CSS para colores-por-grupo. Memoizado sobre `orgTheme.colors`
+  // (identity estable mientras no cambien los colores) para evitar
+  // recomputar el record en cada render del viewer, lo que invalidaría
+  // el `style` del contenedor y forzaría un reflow innecesario.
+  const groupThemeVars = useMemo<Record<string, string>>(() => {
+    const vars: Record<string, string> = {};
+    for (const [group, color] of Object.entries(orgTheme.colors)) {
+      vars[`--diagram-group-${group}-bg`] = color;
+    }
+    // CSS vars de colores de texto — los 6 nodos custom las consumen vía
+    // `text-[color:var(--diagram-title-color,#ffffff)]` sin necesidad de
+    // propagar por props. Cambiar un color re-pinta todos los nodos sin
+    // disparar un React re-render.
+    vars['--diagram-title-color'] = orgTheme.textColors.title;
+    vars['--diagram-description-color'] = orgTheme.textColors.description;
+    return vars;
+  }, [orgTheme.colors, orgTheme.textColors]);
+
+  // Color automático de los puntos del fondo: contrasta con el color del
+  // canvas para que los puntos sean visibles sobre cualquier fondo elegido.
+  const dotsColor = isLightColor(theme.background)
+    ? 'rgba(39, 39, 42, 0.35)'
+    : 'rgba(212, 212, 216, 0.25)';
+
+  // Container ref para el ResizeObserver que mide nodos reales
+  const containerRef = useRef<HTMLDivElement | null>(null);
+  // Instancia de ReactFlow para llamar fitView controlado
+  const rfInstanceRef = useRef<ReactFlowInstance | null>(null);
+  // Último diagram.id al que ajustamos viewport — evita jumps durante edit
+  const lastFittedIdRef = useRef<string | null>(null);
+
+  // Mediciones reales de tamaños — si el CSS expandió un nodo más allá del
+  // default en `nodeDimensions`, el hook devuelve un map para forzar re-layout.
+  const measured = useMeasuredDimensions(containerRef.current, isEditing);
+
+  // Pipeline de layout con ELK.js: async, devuelve loading/error además de
+  // nodes/edges/clusters. Durante el primer compute (~100-500ms para 20 nodos
+  // con thoroughness=30), `loading=true` dispara un overlay.
+  const {
+    nodes: layoutedNodes,
+    edges: layoutedEdges,
+    clusters,
+    loading: layoutLoading,
+    error: layoutError,
+  } = useGroupedLayout(diagram, {
+    measuredDimensions: measured,
+    editing: isEditing,
+  });
+
+  // ReactFlow controla nodes/edges en estado local para soportar drag manual
   const [nodes, setNodes, onNodesChange] = useNodesState(layoutedNodes);
   const [edges, setEdges, onEdgesChange] = useEdgesState(layoutedEdges);
 
-  // Sync when diagram changes externally
-  useMemo(() => {
+  /*
+   * Hover highlight — cuando el cursor está sobre un nodo, las aristas
+   * conectadas a él (source o target) se iluminan (stroke indigo + width
+   * +1px) y las no-conectadas se atenúan a opacity 0.2. Da contexto
+   * visual inmediato: "¿qué tiene que ver este nodo con los demás?".
+   *
+   * Se actualiza vía `onNodeMouseEnter`/`onNodeMouseLeave` del React Flow
+   * (props nativos — no toca los custom nodes). El useMemo de
+   * `enrichedEdges` incluye este state en su dep array para recomputar
+   * los estilos en cada cambio.
+   */
+  const [hoveredNodeId, setHoveredNodeId] = useState<string | null>(null);
+  // Mantener refs sincronizados a cada render — así callbacks estables
+  // (toggleEditing, handleSave) pueden leer el estado actual sin capturar
+  // el array en su closure (evita recreación del callback por frame).
+  nodesRef.current = nodes;
+  edgesRef.current = edges;
+
+  /*
+   * Router de obstacle-avoidance de libavoid-js corriendo en Web Worker.
+   * El hook arranca el worker en el primer render (lazy: la carga del WASM
+   * ~500 KB es async; mientras se compila, `AvoidNodesEdge` cae a
+   * smooth-step fallback en cada edge). En `updateRoutingOnNodesChange`
+   * ReactFlow nos da los `NodeChange[]` del drag → los propagamos al
+   * worker para re-route incremental. `resetRouting` fuerza un re-compute
+   * completo (usado cuando cambia topología: add/remove edge).
+   *
+   * Tuning — validado leyendo el source de `avoid-nodes-edge/dist/index.js`
+   * + comportamiento de draw.io (floating connections, no fixed points):
+   *
+   *   - `edgeToNodeSpacing: 20` → internamente `shapeBufferDistance` del
+   *     libavoid Router. Gap entre edge ruteado y borde de nodo vecino.
+   *   - `edgeToEdgeSpacing: 25` → internamente `idealNudgingDistance`.
+   *     Separación entre edges paralelos. Valor alto (25) da aire
+   *     suficiente para 3+ edges entre los mismos nodos.
+   *   - `edgeRounding: 8` — radio de las curvas en los bends ortogonales.
+   *   - `autoBestSideConnection: TRUE` — libavoid decide el mejor lado
+   *     de entrada/salida según la geometría (como draw.io floating
+   *     connections). El usuario arrastra "del nodo al nodo" y el router
+   *     optimiza el path automáticamente. La dirección de la flecha
+   *     (source → target) SIGUE respetando el gesto porque la asignamos
+   *     manualmente desde `connectionState.fromNode/toNode` en
+   *     `onConnectEnd`. Solo el LADO por donde entra/sale es auto.
+   *
+   *     Por qué no `false`: con `false`, libavoid respeta el
+   *     sourceHandle/targetHandle literal del edge. Con mis handles
+   *     bidireccionales superpuestos (mismo spot en cada lado), el
+   *     handle activado depende del z-index del DOM — no de la
+   *     "intención" del usuario. Si el z-order activa el handle top
+   *     pero el usuario quería ir abajo, libavoid fuerza un path
+   *     absurdo que rodea todo para salir por arriba. `true` evita esto
+   *     dejando que el router decida el lado más corto.
+   *   - `shouldSplitEdgesNearHandle: true` → libavoid distribuye
+   *     múltiples edges paralelos a lo largo del borde del nodo en
+   *     lugar de convergerlos en un solo punto.
+   */
+  const { updateRoutingOnNodesChange, resetRouting } = useAvoidNodesRouterFromWorker(
+    nodes,
+    edges,
+    {
+      edgeToNodeSpacing: 20,
+      edgeToEdgeSpacing: 25,
+      edgeRounding: 8,
+      autoBestSideConnection: true,
+      shouldSplitEdgesNearHandle: true,
+    },
+  );
+
+  // State machine central del modo edición: selección, tool activo, y
+  // operaciones atómicas (add/update/delete node|edge). El hook NO
+  // mantiene copia separada de nodes/edges — opera directamente sobre los
+  // setters de React Flow. Single source of truth.
+  const editor = useDiagramEditor({
+    nodes,
+    setNodes,
+    edges,
+    setEdges,
+    onManualLayout: () => {
+      setHasModifiedThisSession(true);
+    },
+  });
+
+  // Undo/redo: useDiagramHistory acepta setters "directos" (array → array,
+  // no updater). React Flow `useNodesState` devuelve setters con signature
+  // `(updater) => void`, así que wrapeamos cada uno en un callback que
+  // convierte array a updater.
+  const setNodesDirect = useCallback((next: Node[]) => setNodes(() => next), [setNodes]);
+  const setEdgesDirect = useCallback((next: Edge[]) => setEdges(() => next), [setEdges]);
+
+  const history = useDiagramHistory({
+    nodes,
+    edges,
+    setNodes: setNodesDirect,
+    setEdges: setEdgesDirect,
+  });
+
+  // Keyboard shortcuts: callbacks wrapeados en useCallback con dependencias
+  // estables (fix QA H1). Sin esto, los callbacks inline se recrean en cada
+  // render del viewer y el useEffect del hook remonta el listener global,
+  // creando ventanas donde teclas no se detectan durante edición intensa.
+  const kbOnDelete = useCallback(() => {
+    const count = editor.selection.nodeIds.size + (editor.selection.edgeId ? 1 : 0);
+    if (count === 0) return;
+    history.push();
+    editor.deleteSelection();
+    // Toast con acción "Deshacer" — patrón Gmail/Figma. El user puede
+    // cancelar la eliminación sin memorizar Cmd+Z.
+    toast.success(count === 1 ? 'Elemento eliminado' : `${count} elementos eliminados`, {
+      action: { label: 'Deshacer', onClick: () => history.undo() },
+    });
+  }, [history, editor]);
+  const kbOnDuplicate = useCallback(() => {
+    if (editor.selection.nodeIds.size === 0) return;
+    history.push();
+    editor.duplicateSelection();
+    toast.success('Nodo duplicado', {
+      action: { label: 'Deshacer', onClick: () => history.undo() },
+    });
+  }, [history, editor]);
+  const kbOnEscape = useCallback(() => {
+    editor.clearSelection();
+    editor.setActiveTool(null);
+  }, [editor]);
+  const kbOnNudge = useCallback(
+    (dx: number, dy: number) => {
+      history.push();
+      editor.nudgeSelection(dx, dy);
+    },
+    [history, editor],
+  );
+  useDiagramKeyboard({
+    enabled: isEditing,
+    onDelete: kbOnDelete,
+    onUndo: history.undo,
+    onRedo: history.redo,
+    onDuplicate: kbOnDuplicate,
+    onSelectAll: editor.selectAll,
+    onEscape: kbOnEscape,
+    onNudge: kbOnNudge,
+  });
+
+  // Drag-drop de la palette al canvas. El hook expone los handlers que se
+  // pegan al `<div>` que envuelve al `<ReactFlow>` — al soltar, proyecta
+  // coords del cursor (pantalla) a coords del flow via `screenToFlowPosition`
+  // y llama `addNodeAt` del editor con el tipo arrastrado.
+  const { onDragOver, onDrop: onDropTool } = useDropNode({
+    onDrop: (type, position) => {
+      history.push();
+      editor.addNodeAt(position, type);
+    },
+    rfInstance: rfInstanceRef.current,
+  });
+
+  // Menú contextual (right-click). El hook encapsula el state del menu
+  // (posición pantalla + target). Los callbacks del render despachan al
+  // editor + history según el tipo de target.
+  const contextMenu = useContextMenu();
+
+  /**
+   * Construye el `EpicDiagram` canónico para auto-save desde los nodes/edges
+   * del state de React Flow. Memoized sobre content de nodes/edges — el
+   * hook `useDiagramAutoSave` comparará identity para disparar debounce.
+   *
+   * Nota: esto puede disparar saves "no significativos" al entrar en edit
+   * (cuando onNodesChange sincroniza editing=true). Es aceptable — el
+   * server escribe al mismo cache y el debounce 500ms absorbe ráfagas.
+   */
+  const liveDiagramForAutoSave = useMemo<EpicDiagram | null>(() => {
+    if (!isEditing) return null;
+    if (!epicId) return null;
+    // Fix QA H4 + Arch H9: NO cristalizar el layout Dagre como "manual" si
+    // el user no modificó nada esta sesión y el diagrama no tenía layout
+    // manual previo. Sin este guard, abrir y cerrar el editor sin tocar
+    // nada congela las posiciones de Dagre al cache.
+    const shouldPersistLayout = hasModifiedThisSession || hadManualLayoutOnLoadRef.current;
+
+    // Ya NO filtramos ReferenceNodes ni jump-edges — son primitivas del
+    // modelo. Ver shared `DiagramNodeType` con `'reference'` y backend
+    // `VALID_NODE_TYPES_PERSIST`. Se persisten con sus posiciones, labels
+    // editables, y el user puede arrastrarlos/renombrarlos/borrarlos.
+    const liveNodes: DiagramNode[] = nodes.map((n) => {
+      const data = n.data as { nodeType?: DiagramNodeType; label: string; description?: string; group?: DiagramNode['group'] };
+      return {
+        id: n.id,
+        type: data.nodeType ?? shapeToNodeType[n.type ?? 'serviceNode'] ?? 'service',
+        label: data.label,
+        description: data.description,
+        group: data.group,
+      };
+    });
+    const liveEdges: DiagramEdge[] = edges.map((e) => ({
+      id: e.id,
+      source: e.source,
+      target: e.target,
+      label: typeof e.label === 'string' ? e.label : undefined,
+      animated: e.animated,
+    }));
+
+    // Tres ramas para `manualPositions`:
+    //   1. Si modificó esta sesión → capturar positions actuales.
+    //   2. Si había layout manual previo pero no modificó → preservar
+    //      las positions originales del prop (no sobrescribir con Dagre).
+    //   3. Sin ninguna condición → NO persistir positions ni hasManualLayout.
+    let nextManualPositions: Record<string, { x: number; y: number }> | undefined;
+    if (hasModifiedThisSession) {
+      // Incluimos los ReferenceNode — sus posiciones también se persisten
+      // para que al recargar aparezcan donde el user los dejó.
+      nextManualPositions = Object.fromEntries(
+        nodes
+          .filter((n) => Number.isFinite(n.position.x) && Number.isFinite(n.position.y))
+          .map((n) => [n.id, { x: n.position.x, y: n.position.y }]),
+      );
+    } else if (hadManualLayoutOnLoadRef.current) {
+      nextManualPositions = diagram.manualPositions;
+    }
+
+    return {
+      ...diagram,
+      nodes: liveNodes,
+      edges: liveEdges,
+      ...(shouldPersistLayout
+        ? { hasManualLayout: true, manualPositions: nextManualPositions }
+        : {}),
+      generatedAt: new Date().toISOString(),
+      generatedBy: 'manual',
+    };
+  }, [nodes, edges, diagram, isEditing, epicId, hasModifiedThisSession]);
+
+  const autoSave = useDiagramAutoSave({
+    epicId: epicId ?? '',
+    type: diagram.type,
+    diagram: liveDiagramForAutoSave,
+    enabled: isEditing && !!epicId,
+  });
+
+  // Sincronizar cuando el layout externo cambia (diagram nuevo o medidas
+  // nuevas). **Guard crítico**: durante edición activa, NO sobrescribimos
+  // los nodes/edges — perderíamos drags y adds en vuelo (Arch H1). Si el
+  // diagram cambia durante edit (refresh del cache en otro tab), lo
+  // ignoramos hasta que el user salga del modo edición.
+  useEffect(() => {
+    if (isEditing) return;
     setNodes(layoutedNodes);
     setEdges(layoutedEdges);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [layoutedNodes, layoutedEdges]);
+  }, [layoutedNodes, layoutedEdges, setNodes, setEdges, isEditing]);
 
-  // Toggle editing mode
-  const toggleEditing = useCallback(() => {
-    if (isEditing) {
-      // Exiting edit mode — discard unsaved UI state
-      setSelectedNodeId(null);
-      setShowAddNode(false);
-      setEditingEdgeId(null);
+  // fitView controlado: solo dispara cuando cambia el `diagram.id` (recibimos
+  // un diagrama diferente), no en cada render ni durante edición.
+  useEffect(() => {
+    if (lastFittedIdRef.current === diagram.id) return;
+    if (!rfInstanceRef.current) return;
+    rfInstanceRef.current.fitView({ padding: 0.15 });
+    lastFittedIdRef.current = diagram.id;
+  }, [diagram.id, layoutedNodes]);
+
+  // Zoom/pan al grupo de nodos del paso clickeado. Se dispara SOLO cuando
+  // cambia `focusNodeIds` (driven por click-del-step, no por hover).
+  // `maxZoom: 1.2` evita sobre-zoom en pasos de 1-2 nodos (el viewport no
+  // gigantiza los nodos chicos); `padding: 0.25` da aire alrededor.
+  // Al recibir null/empty (step deselected), hacemos un fitView a todos los
+  // nodos para restaurar la vista panorámica del diagrama.
+  //
+  // Usamos `join(',')` en la dep para estabilidad referencial: arrays nuevos
+  // con los mismos IDs no disparan el efecto (evita re-zoom innecesario
+  // cuando el parent recrea el array en cada render sin cambio real).
+  const focusKey = (focusNodeIds ?? []).join(',');
+  useEffect(() => {
+    const instance = rfInstanceRef.current;
+    if (!instance) return;
+    if (focusNodeIds && focusNodeIds.length > 0) {
+      instance.fitView({
+        nodes: focusNodeIds.map((id) => ({ id })),
+        padding: 0.25,
+        maxZoom: 1.2,
+        duration: 500,
+      });
+    } else {
+      instance.fitView({ padding: 0.15, duration: 400 });
     }
-    setIsEditing((v) => !v);
-    // Update node draggable + editing data
-    setNodes((nds) =>
-      nds.map((n) => ({
-        ...n,
-        draggable: !isEditing,
-        data: { ...n.data, editing: !isEditing },
-      }))
-    );
-  }, [isEditing, setNodes]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [focusKey]);
 
-  // Save edits back to parent
+  // ─────────── Edit mode handlers ───────────
+
+  const toggleEditing = useCallback(() => {
+    setIsEditing((v) => {
+      const next = !v;
+      // Usamos `next` (no `!isEditing` del closure) para evitar stale
+      // closure bug: en el segundo toggle el closure todavía vería el
+      // valor pre-flip y los nodes quedarían en estado contradictorio.
+      if (next) {
+        // Entrando a edit: capturamos snapshot del estado actual desde refs
+        // (no del closure — evita recreación del callback en cada render).
+        editSnapshotRef.current = { nodes: nodesRef.current, edges: edgesRef.current };
+        setHasModifiedThisSession(false);
+        // Limpiar history de sesión previa (fix QA H7): si el user entró-
+        // salió-entró rápido, evitar que Cmd+Z devuelva a estados descartados
+        // con "Cancelar" de la sesión anterior.
+        history.clear();
+      } else {
+        // Saliendo de edit: limpiamos snapshot y estado efímero.
+        editSnapshotRef.current = null;
+        editor.clearSelection();
+        editor.setActiveTool(null);
+        history.clear();
+      }
+      setNodes((nds) =>
+        nds.map((n) => ({
+          ...n,
+          draggable: next,
+          data: { ...n.data, editing: next },
+        })),
+      );
+      return next;
+    });
+  }, [setNodes, editor, history]);
+
   const handleSave = useCallback(() => {
-    const updatedNodes: DiagramNode[] = nodes.map((n) => ({
-      id: n.id,
-      type: (n.data as { nodeType?: DiagramNodeType }).nodeType ?? shapeToNodeType[n.type ?? 'serviceNode'] ?? 'service',
-      label: (n.data as { label: string }).label,
-      description: (n.data as { description?: string }).description,
-    }));
+    // ReferenceNodes (jump connectors) son primitivas del modelo — se
+    // persisten con los demás nodes. Ver shared `DiagramNodeType` ('reference').
+    const updatedNodes: DiagramNode[] = nodes.map((n) => {
+      const data = n.data as { nodeType?: DiagramNodeType; label: string; description?: string; group?: DiagramNode['group'] };
+      return {
+        id: n.id,
+        type: data.nodeType ?? shapeToNodeType[n.type ?? 'serviceNode'] ?? 'service',
+        label: data.label,
+        description: data.description,
+        group: data.group,
+      };
+    });
+    // Al guardar, NO persistimos sourceHandle/targetHandle — los recalcula
+    // el viewer al volver a cargar. Esto evita que un drag manual fije
+    // handles ilógicos en la BD.
     const updatedEdges: DiagramEdge[] = edges.map((e) => ({
       id: e.id,
       source: e.source,
       target: e.target,
-      sourceHandle: e.sourceHandle ?? undefined,
-      targetHandle: e.targetHandle ?? undefined,
       label: typeof e.label === 'string' ? e.label : undefined,
       animated: e.animated,
     }));
+
+    // Decisión de `manualPositions`:
+    //   1. Si el user modificó algo en ESTA sesión (drag o add) → capturamos
+    //      las posiciones actuales de todos los nodes.
+    //   2. Si el diagrama ya tenía `hasManualLayout=true` al cargar pero el
+    //      user NO tocó nada → preservamos las posiciones originales que
+    //      vinieron en el prop (no sobrescribimos con lo que Dagre acabó
+    //      de calcular; evita la "cristalización" del layout).
+    //   3. Sin hasManualLayout previo + sin cambios esta sesión → no
+    //      persistimos manualPositions (el diagrama sigue usando Dagre).
+    let nextHasManualLayout = false;
+    let nextManualPositions: Record<string, { x: number; y: number }> | undefined;
+
+    if (hasModifiedThisSession) {
+      nextHasManualLayout = true;
+      // Incluimos los ReferenceNode para que sus posiciones se persistan.
+      nextManualPositions = Object.fromEntries(
+        nodes
+          .filter((n) => Number.isFinite(n.position.x) && Number.isFinite(n.position.y))
+          .map((n) => [n.id, { x: n.position.x, y: n.position.y }]),
+      );
+    } else if (hadManualLayoutOnLoadRef.current) {
+      nextHasManualLayout = true;
+      nextManualPositions = diagram.manualPositions;
+    }
+
     const updatedDiagram: EpicDiagram = {
       ...diagram,
       nodes: updatedNodes,
       edges: updatedEdges,
       generatedAt: new Date().toISOString(),
       generatedBy: 'manual',
+      ...(nextHasManualLayout
+        ? { hasManualLayout: true, manualPositions: nextManualPositions }
+        : {}),
     };
     onDiagramChange?.(updatedDiagram);
     setIsEditing(false);
-    setSelectedNodeId(null);
-    setShowAddNode(false);
-    setEditingEdgeId(null);
+    editSnapshotRef.current = null;
+    setHasModifiedThisSession(false);
+    editor.clearSelection();
+    editor.setActiveTool(null);
     setNodes((nds) => nds.map((n) => ({ ...n, draggable: false, data: { ...n.data, editing: false } })));
-  }, [nodes, edges, diagram, onDiagramChange, setNodes]);
+  }, [nodes, edges, diagram, onDiagramChange, setNodes, editor]);
 
-  // Reset to original layout
+  /**
+   * Descarta las posiciones manuales del diagrama (server-side) y recarga el
+   * contenido para que el layout engine (ELK) vuelva a calcular posiciones.
+   *
+   * Solo tiene sentido cuando `diagram.hasManualLayout=true` — si el diagrama
+   * ya usa layout automático, el botón no se muestra (ver render). La acción
+   * es irreversible respecto a las posiciones manuales; el contenido
+   * semántico (nodos/edges/labels) se preserva.
+   */
+  const handleRecalculateLayout = useCallback(async () => {
+    if (!epicId) return;
+    if (!onDiagramChange) return;
+    const confirmed = window.confirm(
+      '¿Recalcular el layout automáticamente? Las posiciones manuales actuales se descartarán.',
+    );
+    if (!confirmed) return;
+    const reset = await resetDiagramLayout(epicId, diagram.type);
+    if (reset) {
+      onDiagramChange(reset);
+      toast.success('Layout recalculado');
+    } else {
+      toast.error('No se pudo recalcular el layout');
+    }
+  }, [epicId, diagram.type, onDiagramChange]);
+
   const handleReset = useCallback(() => {
-    setNodes(layoutedNodes);
-    setEdges(layoutedEdges);
-    setSelectedNodeId(null);
-    setShowAddNode(false);
-    setEditingEdgeId(null);
-  }, [layoutedNodes, layoutedEdges, setNodes, setEdges]);
+    // Restaurar desde snapshot de inicio de sesión, NO desde `layoutedNodes`.
+    // `layoutedNodes` puede haber cambiado si el prop `diagram` recibió un
+    // update externo durante la edición — restaurarlo daría al user algo
+    // distinto al estado de partida.
+    const snapshot = editSnapshotRef.current;
+    if (snapshot) {
+      setNodes(snapshot.nodes);
+      setEdges(snapshot.edges);
+    } else {
+      setNodes(layoutedNodes);
+      setEdges(layoutedEdges);
+    }
+    editor.clearSelection();
+    editor.setActiveTool(null);
+    setHasModifiedThisSession(false);
+    rfInstanceRef.current?.fitView({ padding: 0.15 });
+  }, [layoutedNodes, layoutedEdges, setNodes, setEdges, editor]);
 
-  // Handle new connections
+  /*
+   * ═══════════════════════════════════════════════════════════════════
+   * DEBUG LOGS — TEMPORAL
+   * ═══════════════════════════════════════════════════════════════════
+   * Cuatro handlers de conexión de React Flow instrumentados para
+   * diagnosticar por qué el gesto de conectar un nodo a otro no está
+   * creando edges. Orden del pipeline:
+   *   1. onConnectStart — drag inicia desde un handle
+   *   2. isValidConnection — React Flow pregunta si este pair es válido
+   *      (se dispara MUCHAS veces, cada vez que el mouse se mueve sobre
+   *      un handle candidato)
+   *   3. onConnect — drag suelta sobre un handle y la conexión es válida
+   *   4. onConnectEnd — drag termina (siempre, haya conexión o no)
+   * Si un gesto NO llega a onConnect, los logs de Start/ValidConnection/
+   * End muestran dónde React Flow abortó.
+   * ═══════════════════════════════════════════════════════════════════
+   */
+  const onConnectStart = useCallback<
+    NonNullable<React.ComponentProps<typeof ReactFlow>['onConnectStart']>
+  >((_event, params) => {
+    console.log('[DIAGRAM-CONNECT] 1. onConnectStart', {
+      nodeId: params.nodeId,
+      handleId: params.handleId,
+      handleType: params.handleType,
+      isEditing,
+      connectionMode: 'Loose',
+    });
+  }, [isEditing]);
+
+  const isValidConnection = useCallback<
+    NonNullable<React.ComponentProps<typeof ReactFlow>['isValidConnection']>
+  >((connection) => {
+    console.log('[DIAGRAM-CONNECT] 2. isValidConnection?', {
+      source: connection.source,
+      sourceHandle: connection.sourceHandle,
+      target: connection.target,
+      targetHandle: connection.targetHandle,
+    });
+    return true;
+  }, []);
+
+  /*
+   * `onConnect` queda como no-op. React Flow v12 lo dispara cuando la
+   * conexión es "válida" según sus reglas internas, pero el `Connection`
+   * object viene normalizado (source/target alineados con el `type`
+   * fijo de cada handle) — no refleja el gesto REAL del usuario cuando
+   * arrastra de target a source. La creación del edge se hace en
+   * `onConnectEnd` donde `connectionState.fromNode/toNode` respetan la
+   * dirección del drag.
+   */
   const onConnect = useCallback(
-    (connection: Connection) => {
-      if (!isEditing) return;
-      const newEdge: Edge = {
-        id: `edge-new-${Date.now()}`,
-        source: connection.source!,
-        target: connection.target!,
-        sourceHandle: connection.sourceHandle,
-        targetHandle: connection.targetHandle,
-        ...makeEdgeStyle(false),
-        deletable: true,
-      };
-      setEdges((eds) => addEdge(newEdge, eds));
+    (_connection: Connection) => {
+      console.log('[DIAGRAM-CONNECT] 3. onConnect — deferring edge creation to onConnectEnd');
     },
-    [isEditing, setEdges]
+    []
   );
 
-  // Node click — select for editing
+  const onConnectEnd = useCallback<
+    NonNullable<React.ComponentProps<typeof ReactFlow>['onConnectEnd']>
+  >((event, connectionState) => {
+    console.log('[DIAGRAM-CONNECT] 4. onConnectEnd', {
+      isValid: connectionState?.isValid,
+      toNode: connectionState?.toNode?.id,
+      toHandle: connectionState?.toHandle?.id,
+      fromNode: connectionState?.fromNode?.id,
+      fromHandle: connectionState?.fromHandle?.id,
+      eventTargetTag: (event.target as HTMLElement | null)?.tagName,
+    });
+
+    if (!isEditing) return;
+    // El gesto no aterrizó en un handle válido (soltó en el aire).
+    if (!connectionState?.isValid) return;
+    if (!connectionState.fromNode || !connectionState.toNode) return;
+
+    // History push ACÁ (no en onConnect) porque onConnectEnd dispara
+    // siempre (válido o no) — queremos capturar el pre-estado solamente
+    // cuando sabemos que vamos a crear el edge. Evita polluir undo stack
+    // con snapshots de gestos cancelados.
+    history.push();
+
+    // Dirección semántica REAL: `fromNode` = donde inició el drag,
+    // `toNode` = donde se soltó. Esto respeta la intención visual del
+    // usuario independiente del `type` de cada handle.
+    //
+    // `canonicalSourceHandle`/`canonicalTargetHandle` aseguran que el
+    // edge persiste con IDs que existen con el `type` correcto para
+    // renderizar, sin importar qué handle type activó el gesto (p. ej.
+    // user arrastra desde `top` que es target → lo remapeamos a
+    // `top-source` que existe superpuesto en la misma posición).
+    const newEdge: Edge = {
+      id: `edge-new-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+      source: connectionState.fromNode.id,
+      target: connectionState.toNode.id,
+      sourceHandle: canonicalSourceHandle(connectionState.fromHandle?.id),
+      targetHandle: canonicalTargetHandle(connectionState.toHandle?.id),
+      type: 'avoidNodes',
+      ...makeEdgeStyle(false),
+      deletable: true,
+    };
+    console.log('[DIAGRAM-CONNECT] 4b. Creating edge from gesture', newEdge);
+
+    // Concatenación manual — NO usamos el helper `addEdge` de React Flow
+    // porque deduplica por (source, target, sourceHandle, targetHandle).
+    // Queremos permitir edges paralelos entre los mismos nodos: libavoid
+    // los nudge automáticamente con offset visible (`edgeToEdgeSpacing`).
+    setEdges((eds) => {
+      const next = [...eds, newEdge];
+      console.log(
+        '[DIAGRAM-CONNECT] 4c. setEdges — antes:',
+        eds.length,
+        'después:',
+        next.length,
+        'diff:',
+        next.length - eds.length,
+      );
+      return next;
+    });
+
+    /*
+     * CRÍTICO: llamar `resetRouting()` explícitamente después del
+     * `setEdges`. El `handleEdgesChange` (que normalmente dispara reset en
+     * changes de tipo 'add') sólo se activa con manipulaciones que hace
+     * React Flow mismo sobre `edges` (p. ej. backspace para delete). Al
+     * mutar el array con `setEdges` directo desde acá, `onEdgesChange`
+     * NO se dispara → libavoid no entera del nuevo edge → los edges
+     * paralelos no se recalculan con el nuevo miembro en el batch, y el
+     * último edge se renderiza con path "forzado" (diagonal feo).
+     *
+     * `requestAnimationFrame` deja que React commitee el setEdges antes
+     * de que resetRouting lea el estado via refs internos del hook.
+     */
+    requestAnimationFrame(() => resetRouting());
+  }, [isEditing, setEdges, history, resetRouting]);
+
+  // Mapa nodeId → stepId para abrir el step correspondiente al clickear un
+  // nodo del canvas. Orden ascendente por `step.order` — si un nodo pertenece
+  // a múltiples steps (caso raro), gana el PRIMERO del flujo (más intuitivo
+  // que el último). `join(',')` NO se usa aquí; el useMemo depende de
+  // `diagram.steps` que es estable salvo regeneración.
+  const nodeToStep = useMemo<Map<string, string>>(() => {
+    const m = new Map<string, string>();
+    if (!diagram.steps) return m;
+    const sorted = [...diagram.steps].sort((a, b) => a.order - b.order);
+    for (const step of sorted) {
+      for (const nodeId of step.nodeIds) {
+        if (!m.has(nodeId)) m.set(nodeId, step.id);
+      }
+    }
+    return m;
+  }, [diagram.steps]);
+
   const onNodeClick = useCallback(
     (_: React.MouseEvent, node: Node) => {
-      if (!isEditing) return;
-      setSelectedNodeId(node.id);
-      setEditingNodeLabel((node.data as { label: string }).label);
-      setEditingNodeDesc((node.data as { description?: string }).description ?? '');
-      setEditingEdgeId(null);
+      // Modo edición: selección para editar propiedades del nodo.
+      if (isEditing) {
+        editor.selectNode(node.id);
+        return;
+      }
+      // Modo view: si el nodo pertenece a un step, abrirlo en el bottom panel.
+      // El padre decide qué hacer (setClickedStepId → pipeline highlight+zoom).
+      if (onStepFromNode) {
+        const stepId = nodeToStep.get(node.id);
+        if (stepId) onStepFromNode(stepId);
+      }
     },
-    [isEditing]
+    [isEditing, editor, onStepFromNode, nodeToStep]
   );
 
-  // Edge click — select for label editing
   const onEdgeClick = useCallback(
     (_: React.MouseEvent, edge: Edge) => {
       if (!isEditing) return;
-      setEditingEdgeId(edge.id);
-      setEditingEdgeLabel(typeof edge.label === 'string' ? edge.label : '');
-      setSelectedNodeId(null);
+      editor.selectEdge(edge.id);
     },
-    [isEditing]
+    [isEditing, editor]
   );
 
-  // Apply node label changes
-  const applyNodeEdit = useCallback(() => {
-    if (!selectedNodeId) return;
-    setNodes((nds) =>
-      nds.map((n) =>
-        n.id === selectedNodeId
-          ? { ...n, data: { ...n.data, label: editingNodeLabel, description: editingNodeDesc || undefined } }
-          : n
-      )
-    );
-    setSelectedNodeId(null);
-  }, [selectedNodeId, editingNodeLabel, editingNodeDesc, setNodes]);
+  /**
+   * Enriquece los edges custom con el callback `onLabelDoubleClick` en
+   * `data`. Los 3 edge types custom (`avoidNodes`, `waypoint`, `smart`) lo
+   * leen para habilitar el double-click sobre el pill HTML del label — el
+   * handler simplemente selecciona la edge (el user la edita luego en el
+   * PropertyPanel o inline editor).
+   *
+   * `avoidNodes` es el default actual; `waypoint`/`smart` se mantienen
+   * por compatibilidad con edges persistidos en cache Redis viejo. Si
+   * olvidáramos uno, double-click al label quedaría sin handler silencioso.
+   *
+   * Solo inyectamos el callback cuando estamos en modo edición — evita
+   * que el handler aparezca como prop fantasma en el modo view.
+   */
+  /**
+   * Dos fuentes de highlight en este viewer, mutuamente excluyentes:
+   *
+   *   1. Sidepanel step (externo, via `externalHighlightedNodeIds`): cuando
+   *      un paso del flujo está activo (hover o click). El SET completo de
+   *      nodos del paso se ilumina; los demás se atenúan. Edges entre dos
+   *      nodos del set se resaltan; los demás se atenúan.
+   *
+   *   2. Hover de nodo individual (interno, `hoveredNodeId`): comportamiento
+   *      clásico. Solo se resaltan los edges que TOCAN el nodo (source o
+   *      target coincide); nodos se mantienen con su opacidad normal.
+   *
+   * Precedencia: el set externo gana cuando es no-vacío. Así evitamos
+   * flicker si el cursor del user está sobre un nodo mientras ya hay un
+   * paso seleccionado — la selección del sidepanel domina visualmente.
+   */
+  const hasStepHighlight = Boolean(
+    externalHighlightedNodeIds && externalHighlightedNodeIds.size > 0,
+  );
 
-  // Apply edge label changes
-  const applyEdgeEdit = useCallback(() => {
-    if (!editingEdgeId) return;
-    setEdges((eds) =>
-      eds.map((e) =>
-        e.id === editingEdgeId ? { ...e, label: editingEdgeLabel || undefined } : e
-      )
-    );
-    setEditingEdgeId(null);
-  }, [editingEdgeId, editingEdgeLabel, setEdges]);
+  const enrichedEdges = useMemo<Edge[]>(
+    () => {
+      const hoverActive = hoveredNodeId !== null;
+      return edges.map((e): Edge => {
+        const existingData = (e.data as Record<string, unknown>) ?? {};
+        const extraData: Record<string, unknown> = {};
 
-  // Delete selected node
-  const deleteSelectedNode = useCallback(() => {
-    if (!selectedNodeId) return;
-    setNodes((nds) => nds.filter((n) => n.id !== selectedNodeId));
-    setEdges((eds) => eds.filter((e) => e.source !== selectedNodeId && e.target !== selectedNodeId));
-    setSelectedNodeId(null);
-  }, [selectedNodeId, setNodes, setEdges]);
+        // En edit mode, inyectar el callback de double-click del label.
+        if (
+          isEditing &&
+          (e.type === 'avoidNodes' || e.type === 'waypoint' || e.type === 'smart')
+        ) {
+          extraData.onLabelDoubleClick = (edgeId: string) => editor.selectEdge(edgeId);
+        }
 
-  // Delete selected edge
-  const deleteSelectedEdge = useCallback(() => {
-    if (!editingEdgeId) return;
-    setEdges((eds) => eds.filter((e) => e.id !== editingEdgeId));
-    setEditingEdgeId(null);
-  }, [editingEdgeId, setEdges]);
+        // Hover highlight: el `AvoidNodesEdge` lee `data.strokeColor` /
+        // `data.strokeWidth` (NO `edge.style`), así que los overrides
+        // deben ir en `data`. Source verificado en
+        // `node_modules/avoid-nodes-edge/dist/index.js`:
+        //    let M = i?.strokeColor ?? "#94a3b8";
+        //    let L = i?.strokeWidth ?? Fe;
+        if (hasStepHighlight && externalHighlightedNodeIds) {
+          // Step highlight: solo se resaltan edges cuyos DOS endpoints están
+          // en el set. Todo lo demás se atenúa fuertemente para dar foco.
+          const bothInSet =
+            externalHighlightedNodeIds.has(e.source) &&
+            externalHighlightedNodeIds.has(e.target);
+          if (bothInSet) {
+            extraData.strokeColor = 'rgb(129,140,248)'; // indigo-400
+            extraData.strokeWidth = 2.5;
+          } else {
+            extraData.strokeColor = 'rgba(212,212,216,0.12)';
+            extraData.strokeWidth = 1;
+          }
+        } else if (hoverActive) {
+          const isConnected = e.source === hoveredNodeId || e.target === hoveredNodeId;
+          if (isConnected) {
+            extraData.strokeColor = 'rgb(129,140,248)'; // indigo-400 brillante
+            extraData.strokeWidth = 2.5;
+          } else {
+            extraData.strokeColor = 'rgba(212,212,216,0.15)';
+            extraData.strokeWidth = 1;
+          }
+        }
 
-  // Add new node
-  const handleAddNode = useCallback(() => {
-    if (!newNodeLabel.trim()) return;
-    nodeIdCounter.current += 1;
-    const id = `node-new-${Date.now()}-${nodeIdCounter.current}`;
-    const nodeType = shapeToNodeType[newNodeType] ?? 'service';
-    const dims = nodeDimensions[newNodeType] ?? nodeDimensions.serviceNode;
-    const newNode: Node = {
-      id,
-      type: newNodeType,
-      position: { x: 200 + Math.random() * 100, y: 200 + Math.random() * 100 },
-      data: { label: newNodeLabel.trim(), nodeType, editing: true },
-      draggable: true,
-    };
-    setNodes((nds) => [...nds, newNode]);
-    setNewNodeLabel('');
-    setShowAddNode(false);
-  }, [newNodeLabel, newNodeType, setNodes]);
+        return {
+          ...e,
+          data: { ...existingData, ...extraData },
+        };
+      });
+    },
+    // `hoveredNodeId` + set externo disparan recompute de los estilos.
+    [edges, isEditing, editor.selectEdge, hoveredNodeId, hasStepHighlight, externalHighlightedNodeIds],
+  );
 
-  // Handle node changes with custom filtering
+  /**
+   * Inyecta `onLabelChange` en los reference nodes cuando está en modo
+   * edit. El callback actualiza el node Y activa `hasModifiedThisSession`
+   * en el mismo tick, garantizando que el auto-save captura el label
+   * nuevo (fix QA-HIGH: race condition entre `setNodes` del nodo y el
+   * debounce del auto-save).
+   *
+   * Patrón paralelo al de `enrichedEdges.onLabelDoubleClick`.
+   */
+  const handleReferenceLabelChange = useCallback(
+    (nodeId: string, newLabel: string) => {
+      setNodes((current) =>
+        current.map((n) =>
+          n.id === nodeId
+            ? { ...n, data: { ...(n.data ?? {}), label: newLabel } }
+            : n,
+        ),
+      );
+      setHasModifiedThisSession(true);
+    },
+    [setNodes],
+  );
+
+  const enrichedNodes = useMemo(
+    () => {
+      // Edición: inyectar callback onLabelChange en reference nodes.
+      // Step highlight: atenuar nodos que NO pertenecen al set activo del
+      // sidepanel. Aplicamos opacidad al `style` — ReactFlow la propaga al
+      // wrapper div que envuelve los custom nodes, así el dimming es uniforme
+      // sin tener que modificar cada NodeComponent individualmente.
+      const baseNodes = isEditing
+        ? nodes.map((n) =>
+            n.type === 'reference'
+              ? {
+                  ...n,
+                  data: {
+                    ...((n.data as Record<string, unknown>) ?? {}),
+                    onLabelChange: handleReferenceLabelChange,
+                  },
+                }
+              : n,
+          )
+        : nodes;
+
+      if (!hasStepHighlight || !externalHighlightedNodeIds) return baseNodes;
+
+      return baseNodes.map((n) => {
+        const isHighlighted = externalHighlightedNodeIds.has(n.id);
+        return {
+          ...n,
+          style: {
+            ...(n.style ?? {}),
+            opacity: isHighlighted ? 1 : 0.25,
+            transition: 'opacity 180ms ease-in-out',
+          },
+        };
+      });
+    },
+    [nodes, isEditing, handleReferenceLabelChange, hasStepHighlight, externalHighlightedNodeIds],
+  );
+
+  /**
+   * Click en área vacía del canvas. Dos comportamientos según `activeTool`:
+   *   - Tool activo → deposita un node de ese tipo en la posición del click
+   *     (convertida de coords de pantalla a coords del grafo via
+   *     `screenToFlowPosition`). El tool se desactiva tras colocar.
+   *   - Sin tool → limpia selección (comportamiento previo).
+   */
+  const onPaneClick = useCallback(
+    (event: React.MouseEvent | React.TouchEvent) => {
+      if (!isEditing) return;
+      if (!editor.activeTool) {
+        editor.clearSelection();
+        return;
+      }
+      const instance = rfInstanceRef.current;
+      if (!instance) return;
+      const clientX = 'clientX' in event ? event.clientX : event.touches[0]?.clientX ?? 0;
+      const clientY = 'clientY' in event ? event.clientY : event.touches[0]?.clientY ?? 0;
+      const position = instance.screenToFlowPosition({ x: clientX, y: clientY });
+      editor.addNodeAt(position);
+    },
+    [isEditing, editor]
+  );
+
+  /**
+   * Primer drag manual del user enciende la flag `manualLayoutFlagRef`. El
+   * hook del editor también la enciende al añadir un nuevo node. En
+   * `handleSave` capturamos las posiciones actuales para persistirlas.
+   */
+  const onNodeDragStart = useCallback(() => {
+    setHasModifiedThisSession(true);
+  }, []);
+
+  /**
+   * Al soltar un nodo arrastrado, resolvemos colisiones: si el user lo
+   * dejó encima de otro, empujamos ambos mínimamente hasta que no se
+   * solapen. Algoritmo naive O(n²) importado de `resolve-collisions.ts`,
+   * adaptado del ejemplo oficial de React Flow (xyflow blog post).
+   *
+   * Solo se dispara en modo edición — en view mode el user no puede
+   * arrastrar nodos, así que el handler nunca debería ejecutarse fuera
+   * de edit.
+   */
+  const onNodeDragStop = useCallback(() => {
+    if (!isEditing) return;
+    setNodes((current) => {
+      // Snap al grid primero — el nodo que acabo de arrastrar cae en la
+      // celda más cercana, manteniendo el layout alineado.
+      const snapped = snapToGrid(current, DRAG_SNAP_GRID_SIZE);
+      // Luego resolveCollisions por si el snap causó solape.
+      const result = resolveCollisions(snapped, {
+        maxIterations: 50,
+        overlapThreshold: 0.5,
+        margin: 50,
+      });
+      if (result.nodesMoved > 0) {
+        console.debug(
+          `[DIAGRAM-DEBUG][DiagramViewer] onNodeDragStop: snap + ` +
+            `${result.nodesMoved} nodo(s) empujados tras drag (` +
+            `${result.iterations} iteraciones).`,
+        );
+      }
+      return result.nodes;
+    });
+  }, [isEditing, setNodes]);
+
   const handleNodesChange = useCallback(
     (changes: NodeChange[]) => {
-      if (!isEditing) {
-        // In view mode, only allow viewport changes (no position/remove)
-        const filtered = changes.filter((c) => c.type !== 'position' && c.type !== 'remove');
-        onNodesChange(filtered);
-      } else {
-        onNodesChange(changes);
-      }
+      const effectiveChanges = !isEditing
+        ? changes.filter((c) => c.type !== 'position' && c.type !== 'remove')
+        : changes;
+      onNodesChange(effectiveChanges);
+      // libavoid-js: re-route incremental. El worker batches los drag
+      // events (debounce interno) — enviamos cada change sin preocuparnos
+      // de over-posting. En modo view-only `effectiveChanges` no trae
+      // position/remove, así que el worker no hace trabajo extra.
+      updateRoutingOnNodesChange(effectiveChanges);
     },
-    [isEditing, onNodesChange]
+    [isEditing, onNodesChange, updateRoutingOnNodesChange]
   );
 
   const handleEdgesChange = useCallback(
     (changes: EdgeChange[]) => {
-      if (!isEditing) {
-        const filtered = changes.filter((c) => c.type !== 'remove');
-        onEdgesChange(filtered);
-      } else {
-        onEdgesChange(changes);
-      }
+      const effectiveChanges = !isEditing
+        ? changes.filter((c) => c.type !== 'remove')
+        : changes;
+      onEdgesChange(effectiveChanges);
+      // Cambios de topología (add/remove edges) requieren full re-route:
+      // libavoid incremental sólo maneja nodos, no nuevas conexiones.
+      // `requestAnimationFrame` deja que React aplique `setEdges` antes
+      // del reset — así `resetRouting` lee el estado post-mutación vía
+      // zustand/store interno del hook.
+      const needsReset = effectiveChanges.some(
+        (c) => c.type === 'add' || c.type === 'remove',
+      );
+      if (needsReset) requestAnimationFrame(() => resetRouting());
     },
-    [isEditing, onEdgesChange]
+    [isEditing, onEdgesChange, resetRouting]
   );
 
-  const selectedNode = selectedNodeId ? nodes.find((n) => n.id === selectedNodeId) : null;
+  // ─────────── Render ───────────
 
   return (
-    <div className={`relative ${fullHeight ? 'h-full' : ''}`}>
-      <div className={`${fullHeight ? 'h-full' : 'h-[600px]'} rounded-xl border bg-zinc-950 dark:bg-zinc-950 ${isEditing ? 'border-indigo-500/50' : 'border-zinc-800'}`}>
+    <div ref={containerRef} className={`relative ${fullHeight ? 'h-full' : ''}`}>
+      {/*
+        Card styling (rounded + border) solo cuando NO es fullHeight — en la
+        vista dedicada fullscreen el diagrama debe ir edge-to-edge sin radio
+        ni borde que compitan visualmente con el canvas. El highlight de
+        edición también es irrelevante en fullHeight (no hay encuadre).
+
+        El `backgroundColor` viene del tema configurable (user-settable via
+        el panel). La CSS variable `--diagram-node-bg` se propaga a los
+        custom nodes para que consuman el color de nodos elegido sin
+        re-renders por nodo.
+      */}
+      <div
+        className={`relative overflow-hidden ${
+          fullHeight
+            ? // Bordes redondeados tipo Lovable en fullHeight: el board "flota"
+              // dentro del padding externo del padre (DiagramFullPage) con un
+              // borde sutil y corners rounded-2xl. El overflow-hidden clipa
+              // el grid y los edges dentro de los corners.
+              `h-full rounded-2xl border border-border/40 shadow-sm`
+            : `h-[600px] rounded-xl border ${isEditing ? 'border-primary/50' : 'border-zinc-800'}`
+        }`}
+        style={{
+          backgroundColor: theme.background,
+          // `groupThemeVars` expone `--diagram-group-${group}-bg` para
+          // cada uno de los 7 layers arquitectónicos. Los custom nodes los
+          // consumen con fallback: `var(--diagram-group-frontend-bg,
+          // var(--diagram-node-bg, #27272a))` — así el tema org-wide
+          // tiene prioridad y el tema per-user es el fallback.
+          ...groupThemeVars,
+        } as React.CSSProperties}
+        onDragOver={isEditing ? onDragOver : undefined}
+        onDrop={isEditing ? onDropTool : undefined}
+      >
+        {/* Overlay mientras ELK computa el layout inicial. Típicamente
+            <500ms para 20 nodos con thoroughness=30. Ocupa toda el área
+            sin bloquear los hooks de React Flow detrás. */}
+        {layoutLoading && (
+          <div className="absolute inset-0 z-20 flex items-center justify-center bg-background/70 backdrop-blur-sm text-xs text-muted-foreground">
+            Calculando layout…
+          </div>
+        )}
+        {layoutError && !layoutLoading && (
+          <div className="absolute top-3 left-1/2 -translate-x-1/2 z-20 flex items-center gap-2 rounded-md bg-amber-500/10 border border-amber-500/30 px-3 py-1.5 text-[11px] text-amber-600 dark:text-amber-400">
+            Layout en modo fallback (ELK falló): {layoutError}
+          </div>
+        )}
+        <DiagramThemePanel
+          theme={theme}
+          onBackgroundChange={setBackground}
+          onReset={resetTheme}
+          orgColors={orgTheme.colors}
+          orgCanEdit={orgTheme.canEdit}
+          onOrgColorChange={(group, color) =>
+            orgTheme.save({ ...orgTheme.colors, [group]: color })
+          }
+          onOrgReset={orgTheme.reset}
+          textColors={orgTheme.textColors}
+          onTextColorChange={(key, color) =>
+            orgTheme.saveTextColors({ ...orgTheme.textColors, [key]: color })
+          }
+        />
         <ReactFlow
-          nodes={nodes}
-          edges={edges}
+          nodes={enrichedNodes}
+          edges={enrichedEdges}
+          onInit={(instance) => { rfInstanceRef.current = instance; }}
           onNodesChange={handleNodesChange}
           onEdgesChange={handleEdgesChange}
           onConnect={isEditing ? onConnect : undefined}
+          onConnectStart={isEditing ? onConnectStart : undefined}
+          onConnectEnd={isEditing ? onConnectEnd : undefined}
+          isValidConnection={isEditing ? isValidConnection : undefined}
           onNodeClick={onNodeClick}
           onEdgeClick={onEdgeClick}
-          onPaneClick={() => { setSelectedNodeId(null); setEditingEdgeId(null); }}
+          onPaneClick={onPaneClick}
+          onNodeDragStart={onNodeDragStart}
+          onNodeDragStop={onNodeDragStop}
+          /*
+            Hover highlight — setea el `hoveredNodeId` que dispara el
+            recálculo de estilos en `enrichedEdges`. React Flow dispara
+            estos eventos en cada mouse-enter/leave del bounding box del
+            nodo, así que cubren tanto el header box como la descripción.
+          */
+          onNodeMouseEnter={(_, node) => setHoveredNodeId(node.id)}
+          onNodeMouseLeave={() => setHoveredNodeId(null)}
+          /*
+            Right-click handlers: abren el menú contextual en la posición
+            del cursor, con target contextualizado (node/edge/pane). El menú
+            se monta fuera del <ReactFlow> para usar `position: fixed` y que
+            no sea cortado por el overflow del canvas.
+          */
+          onNodeContextMenu={(e, node) => {
+            if (!isEditing) return;
+            e.preventDefault();
+            contextMenu.open({ x: e.clientX, y: e.clientY }, { kind: 'node', nodeId: node.id });
+          }}
+          onEdgeContextMenu={(e, edge) => {
+            if (!isEditing) return;
+            e.preventDefault();
+            contextMenu.open({ x: e.clientX, y: e.clientY }, { kind: 'edge', edgeId: edge.id });
+          }}
+          onPaneContextMenu={(e) => {
+            if (!isEditing) return;
+            const mouseEvent = e as unknown as MouseEvent;
+            mouseEvent.preventDefault?.();
+            const instance = rfInstanceRef.current;
+            if (!instance) return;
+            const flowPos = instance.screenToFlowPosition({
+              x: mouseEvent.clientX,
+              y: mouseEvent.clientY,
+            });
+            contextMenu.open(
+              { x: mouseEvent.clientX, y: mouseEvent.clientY },
+              { kind: 'pane', position: flowPos },
+            );
+          }}
           nodeTypes={nodeTypes}
+          edgeTypes={edgeTypes}
+          /*
+           * ConnectionMode.Loose — permite arrastrar conexiones en
+           * cualquier combinación de handles (source→source, target→target,
+           * target→source), no solo source→target. Con esto el `source`
+           * del edge creado es el nodo donde el usuario inició el gesto y
+           * el `target` es donde lo soltó, respetando la dirección
+           * semántica del dibujo manual. Sin Loose, React Flow invertía
+           * source/target para respetar el `type` fijo de cada handle, y
+           * la flecha quedaba apuntando al revés de lo que el user dibujó.
+           *
+           * El Strict default sigue siendo lo correcto para diagramas
+           * rigidamente hierárquicos (flowcharts top-down), pero con
+           * libavoid + autoBestSideConnection el routing es geométrico,
+           * no topológico — los handles son solo anchors del visual, no
+           * constraints de flow.
+           */
+          connectionMode={ConnectionMode.Loose}
+          /*
+           * Snap to grid al arrastrar nodos. Combina con `SNAP_GRID_SIZE`
+           * del `useGroupedLayout` (post-layout snap) y con el `gap` del
+           * `<Background>` dots para un comportamiento consistente tipo
+           * draw.io: nodos cargan en grid, snap al moverlos, grid visible.
+           * Los 3 valores deben coincidir (40px) — la fuente de verdad
+           * vive en `DRAG_SNAP_GRID_SIZE` arriba y `SNAP_GRID_SIZE` en
+           * `useGroupedLayout.ts`.
+           */
+          snapToGrid
+          snapGrid={[DRAG_SNAP_GRID_SIZE, DRAG_SNAP_GRID_SIZE]}
           fitView
           fitViewOptions={{ padding: 0.15 }}
           minZoom={0.2}
           maxZoom={2.5}
           proOptions={{ hideAttribution: true }}
+          /*
+            Navegación estilo Figma/Excalidraw:
+              - `panOnScroll`: scroll con trackpad (two-finger) mueve el canvas
+                en vez de zoomear.
+              - `zoomOnScroll=false`: desactiva el default "rueda = zoom".
+              - Zoom sigue disponible vía pinch del trackpad (zoomOnPinch es
+                true por default) y `Cmd/Ctrl + scroll` (React Flow lo mapea
+                automáticamente cuando panOnScroll está activo).
+              - Click-and-drag sigue funcionando para pan porque `panOnDrag`
+                es true por default — tenemos ambos métodos de navegación.
+          */
+          panOnScroll
+          zoomOnScroll={false}
           nodesDraggable={isEditing}
           nodesConnectable={isEditing}
           elementsSelectable={isEditing}
           className="[&_.react-flow__edge-text]:!fill-zinc-400"
-          defaultEdgeOptions={isEditing ? { type: 'smoothstep' } : undefined}
+          defaultEdgeOptions={isEditing ? { type: 'avoidNodes', ...makeEdgeStyle(false) } : makeEdgeStyle(false)}
         >
-          <Background gap={24} size={1} color="rgba(63,63,70,0.3)" />
+          {/*
+            Swim lanes por grupo arquitectónico — DESHABILITADAS.
+            El `ClusterBackground` sigue importado y disponible; solo no se
+            monta. `clusters` sigue computándose en `useGroupedLayout` porque
+            lo consumen otras rutas (p. ej. stats en dev logs). Si en el
+            futuro querés reactivar las bandas, descomentá la línea de abajo.
+          */}
+          {/* <ClusterBackground clusters={clusters} /> */}
+          {/*
+            Background con `variant="dots"`: patrón tipo Figma/Excalidraw.
+            `gap={DRAG_SNAP_GRID_SIZE}` (40px) hace que CADA punto del
+            background coincida con un punto de snap del grid — al
+            arrastrar un nodo, "salta" exactamente entre dots visibles.
+            Da feedback visual inmediato de la grilla, look draw.io.
+            `dotsColor` se calcula por luminancia del fondo para
+            contrastar automáticamente en cualquier tema elegido.
+          */}
+          <Background gap={DRAG_SNAP_GRID_SIZE} size={1.5} color={dotsColor} />
+          {/* Controles de zoom/fit — posición default (bottom-left) mientras
+              diagnosticamos un crash. Si el crash se resuelve al revertir
+              esta línea, sabemos que `position` de xyflow v12 tenía un
+              problema de runtime a pesar de aceptarlo el type check. */}
           <Controls
             showInteractive={false}
             className="!bg-zinc-900 !border-zinc-700 !shadow-lg !rounded-lg [&>button]:!bg-zinc-900 [&>button]:!border-zinc-700 [&>button]:!text-zinc-300 [&>button:hover]:!bg-zinc-800"
           />
-          <MiniMap
-            nodeStrokeWidth={2}
-            nodeColor="#3f3f46"
-            className="!bg-zinc-900 !border-zinc-700 !shadow-lg !rounded-lg"
-            maskColor="rgba(0,0,0,0.3)"
-          />
 
-          {/* Editing toolbar */}
+          {/* Toolbar lateral izquierda (palette de tipos de node).
+              Solo visible en edit; comparte el espacio con el panel de Colores
+              arriba (ese va en top-left con z alto desde DiagramViewer).
+
+              Usamos `editModeMounted` en vez de `isEditing` para que el
+              panel permanezca montado durante el out-animation de 180ms. */}
+          {editable && editModeMounted && (
+            <Panel
+              position="top-left"
+              className="!mt-14 !ml-2"
+              data-state={isEditing ? 'open' : 'closed'}
+            >
+              <div
+                data-state={isEditing ? 'open' : 'closed'}
+                className="duration-[180ms] data-[state=open]:animate-in data-[state=open]:fade-in data-[state=open]:slide-in-from-left-4 data-[state=closed]:animate-out data-[state=closed]:fade-out data-[state=closed]:slide-out-to-left-4"
+              >
+                <EditToolbar
+                  activeTool={editor.activeTool}
+                  onToolSelect={editor.setActiveTool}
+                />
+              </div>
+            </Panel>
+          )}
+
+          {/* Panel derecho: propiedades de la selección. Solo se monta con
+              selección activa — progressive disclosure. Animado con slide
+              desde la derecha al entrar/salir del modo edición. */}
+          {editable && editModeMounted && (editor.selectedNode || editor.selectedEdge) && (
+            <Panel
+              position="top-right"
+              className="!mt-14 !mr-2"
+              data-state={isEditing ? 'open' : 'closed'}
+            >
+              <div
+                data-state={isEditing ? 'open' : 'closed'}
+                className="duration-[180ms] data-[state=open]:animate-in data-[state=open]:fade-in data-[state=open]:slide-in-from-right-4 data-[state=closed]:animate-out data-[state=closed]:fade-out data-[state=closed]:slide-out-to-right-4"
+              >
+                <PropertyPanel
+                  selectedNode={editor.selectedNode}
+                  selectedEdge={editor.selectedEdge}
+                  onUpdateNode={editor.updateNode}
+                  onUpdateEdge={editor.updateEdge}
+                  onDeleteNode={editor.deleteNode}
+                  onDeleteEdge={editor.deleteEdge}
+                  onClose={editor.clearSelection}
+                />
+              </div>
+            </Panel>
+          )}
+
+          {/* Action bar top-right: Guardar / Cancelar / Editar diagrama.
+              La palette (izquierda) y property panel (derecha) no colisionan
+              con esta barra porque viven debajo (mt-14).
+
+              Tooltips vienen del wrapper `@/components/ui/tooltip` (Radix)
+              para mantener consistencia con el resto del software
+              (FolderTree, sidebar, etc.). */}
           {editable && (
-            <Panel position="top-right" className="flex gap-1.5">
-              {isEditing ? (
-                <>
-                  <Button
-                    size="sm"
-                    variant="outline"
-                    onClick={() => setShowAddNode((v) => !v)}
-                    className="h-7 gap-1.5 text-xs bg-zinc-900 border-zinc-700 text-zinc-300 hover:bg-zinc-800 hover:text-white"
-                  >
-                    <Plus className="h-3 w-3" />
-                    Nodo
-                  </Button>
-                  <Button
-                    size="sm"
-                    variant="outline"
-                    onClick={handleReset}
-                    className="h-7 gap-1.5 text-xs bg-zinc-900 border-zinc-700 text-zinc-300 hover:bg-zinc-800 hover:text-white"
-                  >
-                    <RotateCcw className="h-3 w-3" />
-                  </Button>
-                  <Button
-                    size="sm"
-                    onClick={handleSave}
-                    className="h-7 gap-1.5 text-xs bg-indigo-600 hover:bg-indigo-700 text-white"
-                  >
-                    <Save className="h-3 w-3" />
-                    Guardar
-                  </Button>
-                  <Button
-                    size="sm"
-                    variant="outline"
-                    onClick={toggleEditing}
-                    className="h-7 text-xs bg-zinc-900 border-zinc-700 text-zinc-300 hover:bg-zinc-800 hover:text-white"
-                  >
-                    Cancelar
-                  </Button>
-                </>
-              ) : (
-                <Button
-                  size="sm"
-                  variant="outline"
-                  onClick={toggleEditing}
-                  className="h-7 gap-1.5 text-xs bg-zinc-900 border-zinc-700 text-zinc-300 hover:bg-zinc-800 hover:text-white"
-                >
-                  <MousePointer2 className="h-3 w-3" />
-                  Editar diagrama
-                </Button>
-              )}
+            <Panel position="top-right" className="flex items-center gap-1.5">
+              <TooltipProvider delayDuration={300}>
+                {isEditing && epicId && (
+                  <SaveIndicator
+                    status={autoSave.status}
+                    lastSavedAt={autoSave.lastSavedAt}
+                    error={autoSave.error}
+                    onRetry={autoSave.retry}
+                  />
+                )}
+                {isEditing ? (
+                  <>
+                    <Tooltip>
+                      <TooltipTrigger asChild>
+                        <Button
+                          size="sm"
+                          variant="outline"
+                          onClick={handleReset}
+                          className="h-7 gap-1.5 text-xs bg-zinc-900 border-zinc-700 text-zinc-300 hover:bg-zinc-800 hover:text-white"
+                        >
+                          <RotateCcw className="h-3 w-3" />
+                        </Button>
+                      </TooltipTrigger>
+                      <TooltipContent side="bottom">Descartar cambios</TooltipContent>
+                    </Tooltip>
+                    <Tooltip>
+                      <TooltipTrigger asChild>
+                        <Button
+                          size="sm"
+                          onClick={handleSave}
+                          className="h-7 gap-1.5 text-xs bg-primary hover:bg-primary/90 text-primary-foreground"
+                        >
+                          <Save className="h-3 w-3" />
+                          Guardar
+                        </Button>
+                      </TooltipTrigger>
+                      <TooltipContent side="bottom">Guardar cambios (Cmd+S)</TooltipContent>
+                    </Tooltip>
+                    <Tooltip>
+                      <TooltipTrigger asChild>
+                        <Button
+                          size="sm"
+                          variant="outline"
+                          onClick={toggleEditing}
+                          className="h-7 text-xs bg-zinc-900 border-zinc-700 text-zinc-300 hover:bg-zinc-800 hover:text-white"
+                        >
+                          Cancelar
+                        </Button>
+                      </TooltipTrigger>
+                      <TooltipContent side="bottom">Salir sin guardar (Esc)</TooltipContent>
+                    </Tooltip>
+                  </>
+                ) : (
+                  <>
+                    {diagram.hasManualLayout && epicId && onDiagramChange && (
+                      <Tooltip>
+                        <TooltipTrigger asChild>
+                          <Button
+                            size="sm"
+                            variant="outline"
+                            onClick={handleRecalculateLayout}
+                            className="h-7 gap-1.5 text-xs bg-zinc-900 border-zinc-700 text-zinc-300 hover:bg-zinc-800 hover:text-white"
+                          >
+                            <Shuffle className="h-3 w-3" />
+                            Recalcular layout
+                          </Button>
+                        </TooltipTrigger>
+                        <TooltipContent side="bottom">
+                          Descarta las posiciones manuales y aplica el layout automático actual
+                        </TooltipContent>
+                      </Tooltip>
+                    )}
+                    <Tooltip>
+                      <TooltipTrigger asChild>
+                        <Button
+                          size="sm"
+                          variant="outline"
+                          onClick={toggleEditing}
+                          className="h-7 gap-1.5 text-xs bg-zinc-900 border-zinc-700 text-zinc-300 hover:bg-zinc-800 hover:text-white"
+                        >
+                          <MousePointer2 className="h-3 w-3" />
+                          Editar diagrama
+                        </Button>
+                      </TooltipTrigger>
+                      <TooltipContent side="bottom">
+                        Habilita la paleta, las selecciones y el guardado del diagrama
+                      </TooltipContent>
+                    </Tooltip>
+                  </>
+                )}
+              </TooltipProvider>
             </Panel>
           )}
 
-          {/* Add node panel */}
-          {isEditing && showAddNode && (
-            <Panel position="top-left" className="!mt-2 !ml-2">
-              <div className="bg-zinc-900 border border-zinc-700 rounded-lg p-3 space-y-2 w-56 shadow-xl">
-                <p className="text-[11px] font-semibold text-zinc-400 uppercase tracking-wider">Agregar nodo</p>
-                <Input
-                  value={newNodeLabel}
-                  onChange={(e) => setNewNodeLabel(e.target.value)}
-                  placeholder="Nombre del nodo"
-                  className="h-7 text-xs bg-zinc-800 border-zinc-700 text-white placeholder:text-zinc-500"
-                  onKeyDown={(e) => e.key === 'Enter' && handleAddNode()}
-                />
-                <Select value={newNodeType} onValueChange={setNewNodeType}>
-                  <SelectTrigger className="h-7 text-xs bg-zinc-800 border-zinc-700 text-white">
-                    <SelectValue />
-                  </SelectTrigger>
-                  <SelectContent>
-                    {Object.entries(nodeTypeLabels).map(([key, label]) => (
-                      <SelectItem key={key} value={key}>{label}</SelectItem>
-                    ))}
-                  </SelectContent>
-                </Select>
-                <Button size="sm" onClick={handleAddNode} disabled={!newNodeLabel.trim()} className="w-full h-7 text-xs gap-1.5">
-                  <Plus className="h-3 w-3" />
-                  Agregar
-                </Button>
-              </div>
-            </Panel>
-          )}
+          {/* Leyenda flotante de colores por grupo — bottom-left. Siempre
+              visible (view + edit) para discoverability inmediata: el user ve
+              un cluster de color y entiende qué layer es sin abrir el panel
+              de configuración.
 
-          {/* Node edit panel */}
-          {isEditing && selectedNode && (
-            <Panel position="bottom-left" className="!mb-2 !ml-2">
-              <div className="bg-zinc-900 border border-zinc-700 rounded-lg p-3 space-y-2 w-56 shadow-xl">
-                <div className="flex items-center justify-between">
-                  <p className="text-[11px] font-semibold text-zinc-400 uppercase tracking-wider flex items-center gap-1.5">
-                    <Type className="h-3 w-3" />
-                    Editar nodo
-                  </p>
-                  <Button
-                    size="sm"
-                    variant="ghost"
-                    onClick={deleteSelectedNode}
-                    className="h-6 w-6 p-0 text-red-400 hover:text-red-300 hover:bg-red-950/30"
-                  >
-                    <Trash2 className="h-3 w-3" />
-                  </Button>
-                </div>
-                <Input
-                  value={editingNodeLabel}
-                  onChange={(e) => setEditingNodeLabel(e.target.value)}
-                  placeholder="Nombre"
-                  className="h-7 text-xs bg-zinc-800 border-zinc-700 text-white placeholder:text-zinc-500"
-                  onKeyDown={(e) => e.key === 'Enter' && applyNodeEdit()}
-                />
-                <Input
-                  value={editingNodeDesc}
-                  onChange={(e) => setEditingNodeDesc(e.target.value)}
-                  placeholder="Descripción (opcional)"
-                  className="h-7 text-xs bg-zinc-800 border-zinc-700 text-white placeholder:text-zinc-500"
-                  onKeyDown={(e) => e.key === 'Enter' && applyNodeEdit()}
-                />
-                <Button size="sm" onClick={applyNodeEdit} className="w-full h-7 text-xs">
-                  Aplicar
-                </Button>
-              </div>
-            </Panel>
-          )}
+              Recibe `orgTheme.colors` por prop (lifted state) — DiagramViewer
+              es la única instance de useOrgDiagramTheme, así ambos consumidores
+              (DiagramThemePanel + ColorLegend) ven los mismos colores
+              reactivos. Si la leyenda llamara el hook por su cuenta, crearía
+              un `useState` independiente y quedaría desincronizada. */}
+          <Panel position="bottom-left" className="!mb-2 !ml-2">
+            <ColorLegend colors={orgTheme.colors} />
+          </Panel>
 
-          {/* Edge edit panel */}
-          {isEditing && editingEdgeId && (
-            <Panel position="bottom-left" className="!mb-2 !ml-2">
-              <div className="bg-zinc-900 border border-zinc-700 rounded-lg p-3 space-y-2 w-56 shadow-xl">
-                <div className="flex items-center justify-between">
-                  <p className="text-[11px] font-semibold text-zinc-400 uppercase tracking-wider">Editar conexión</p>
-                  <Button
-                    size="sm"
-                    variant="ghost"
-                    onClick={deleteSelectedEdge}
-                    className="h-6 w-6 p-0 text-red-400 hover:text-red-300 hover:bg-red-950/30"
-                  >
-                    <Trash2 className="h-3 w-3" />
-                  </Button>
-                </div>
-                <Input
-                  value={editingEdgeLabel}
-                  onChange={(e) => setEditingEdgeLabel(e.target.value)}
-                  placeholder="Etiqueta (ej: SI, NO)"
-                  className="h-7 text-xs bg-zinc-800 border-zinc-700 text-white placeholder:text-zinc-500"
-                  onKeyDown={(e) => e.key === 'Enter' && applyEdgeEdit()}
-                />
-                <Button size="sm" onClick={applyEdgeEdit} className="w-full h-7 text-xs">
-                  Aplicar
-                </Button>
-              </div>
-            </Panel>
-          )}
-
-          {/* Editing mode indicator */}
-          {isEditing && (
-            <Panel position="bottom-right" className="!mb-2 !mr-2">
-              <div className="bg-indigo-600/90 text-white text-[10px] font-medium px-2.5 py-1 rounded-md flex items-center gap-1.5">
-                <div className="h-1.5 w-1.5 rounded-full bg-white animate-pulse" />
-                Modo edición — arrastra nodos, conecta handles, click para editar
+          {/* Panel de validación en bottom-right. Colapsado por default muestra
+              un pill compacto con score + dot color-coded; expandido muestra
+              métricas + warnings (decisions sin ramas, nodes huérfanos, labels
+              largos, duplicados). Solo en edit — el modo view no muestra
+              feedback de calidad. Fade-in/out sin slide (es pequeño). */}
+          {editModeMounted && (
+            <Panel
+              position="bottom-right"
+              className="!mb-2 !mr-2"
+              data-state={isEditing ? 'open' : 'closed'}
+            >
+              <div
+                data-state={isEditing ? 'open' : 'closed'}
+                className="duration-[180ms] data-[state=open]:animate-in data-[state=open]:fade-in data-[state=closed]:animate-out data-[state=closed]:fade-out"
+              >
+                <ValidationPanel nodes={nodes} edges={edges} defaultOpen={false} />
               </div>
             </Panel>
           )}
         </ReactFlow>
+
+        {/*
+          Menú contextual fuera del <ReactFlow> para usar position:fixed
+          y no ser cortado por el overflow del canvas. Los callbacks hacen
+          push al history antes de cada mutación para soportar undo.
+        */}
+        <DiagramContextMenu
+          screenPosition={contextMenu.screenPosition}
+          target={contextMenu.target}
+          onEdit={(t) => {
+            if (t.kind === 'node') editor.selectNode(t.nodeId);
+            else if (t.kind === 'edge') editor.selectEdge(t.edgeId);
+          }}
+          onDuplicate={(t) => {
+            if (t.kind !== 'node') return;
+            history.push();
+            editor.selectNode(t.nodeId);
+            editor.duplicateSelection();
+          }}
+          onDelete={(t) => {
+            history.push();
+            if (t.kind === 'node') {
+              editor.deleteNode(t.nodeId);
+              toast.success('Nodo eliminado', {
+                action: { label: 'Deshacer', onClick: () => history.undo() },
+              });
+            } else if (t.kind === 'edge') {
+              editor.deleteEdge(t.edgeId);
+              toast.success('Conexión eliminada', {
+                action: { label: 'Deshacer', onClick: () => history.undo() },
+              });
+            }
+          }}
+          onAddNodeHere={(pos) => {
+            history.push();
+            editor.addNodeAt(pos, 'service');
+          }}
+          onClose={contextMenu.close}
+        />
       </div>
     </div>
   );

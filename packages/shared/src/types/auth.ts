@@ -68,6 +68,7 @@ export enum Permission {
   // Admin
   MANAGE_USERS = 'manage:users',
   MANAGE_INTEGRATIONS = 'manage:integrations',
+  MANAGE_DIAGRAM_THEME = 'manage:diagram-theme',
 
   // View
   VIEW_ALL = 'view:all',
@@ -94,6 +95,7 @@ export const PERMISSION_LABELS: Record<Permission, string> = {
   [Permission.MANAGE_DEPENDENCIES]: 'Gestionar Dependencias',
   [Permission.MANAGE_USERS]: 'Gestionar Usuarios',
   [Permission.MANAGE_INTEGRATIONS]: 'Gestionar Integraciones',
+  [Permission.MANAGE_DIAGRAM_THEME]: 'Gestionar tema de diagramas',
   [Permission.VIEW_ALL]: 'Ver Todo',
 };
 
@@ -125,7 +127,7 @@ export const PERMISSION_CATEGORIES: PermissionCategory[] = [
   },
   {
     label: 'Gestión',
-    permissions: [Permission.MANAGE_DOCUMENTS, Permission.MANAGE_DEPENDENCIES, Permission.MANAGE_USERS, Permission.MANAGE_INTEGRATIONS],
+    permissions: [Permission.MANAGE_DOCUMENTS, Permission.MANAGE_DEPENDENCIES, Permission.MANAGE_USERS, Permission.MANAGE_INTEGRATIONS, Permission.MANAGE_DIAGRAM_THEME],
   },
   {
     label: 'Acceso',
@@ -141,7 +143,7 @@ export const DEFAULT_ROLE_PERMISSIONS: Record<UserRole, Permission[]> = {
     Permission.CREATE_DIAGRAM, Permission.EDIT_DIAGRAM,
     Permission.CREATE_QA_MATRIX, Permission.EDIT_QA_MATRIX,
     Permission.MANAGE_DOCUMENTS, Permission.MANAGE_DEPENDENCIES,
-    Permission.MANAGE_USERS, Permission.MANAGE_INTEGRATIONS,
+    Permission.MANAGE_USERS, Permission.MANAGE_INTEGRATIONS, Permission.MANAGE_DIAGRAM_THEME,
     Permission.VIEW_ALL,
   ],
   [UserRole.ProductOwner]: [
@@ -179,7 +181,7 @@ export const ROLE_PERMISSIONS: Record<UserRole, Permission[]> = {
     Permission.CREATE_DIAGRAM, Permission.EDIT_DIAGRAM,
     Permission.CREATE_QA_MATRIX, Permission.EDIT_QA_MATRIX,
     Permission.MANAGE_DOCUMENTS, Permission.MANAGE_DEPENDENCIES,
-    Permission.MANAGE_USERS, Permission.MANAGE_INTEGRATIONS,
+    Permission.MANAGE_USERS, Permission.MANAGE_INTEGRATIONS, Permission.MANAGE_DIAGRAM_THEME,
     Permission.VIEW_ALL,
   ],
   [UserRole.ProductOwner]: [

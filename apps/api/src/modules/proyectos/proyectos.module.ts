@@ -17,6 +17,9 @@ import { ProposalCacheService } from './epics/generation/proposal-cache.service'
 import { StoryGenerationController } from './stories/generation/story-generation.controller';
 import { StoryGenerationService } from './stories/generation/story-generation.service';
 import { StoryProposalCacheService } from './stories/generation/story-proposal-cache.service';
+import { DiagramGenerationController } from './diagrams/generation/diagram-generation.controller';
+import { DiagramGenerationService } from './diagrams/generation/diagram-generation.service';
+import { DiagramCacheService } from './diagrams/generation/diagram-cache.service';
 
 @Module({
   imports: [AgentToolsModule, CodeRepositoriesModule],
@@ -24,6 +27,7 @@ import { StoryProposalCacheService } from './stories/generation/story-proposal-c
     PodsController,
     EpicGenerationController, // Must register before InitiativesController (same prefix, more specific route)
     StoryGenerationController, // Must register before StoriesController (prefix /proyectos/story-generation vs /proyectos/historias)
+    DiagramGenerationController, // Must register before EpicsController (prefix /proyectos/diagrams-generation vs /proyectos/epicas)
     InitiativesController,
     EpicsController,
     StoriesController,
@@ -35,6 +39,8 @@ import { StoryProposalCacheService } from './stories/generation/story-proposal-c
     EpicsService,
     EpicGenerationService,
     ProposalCacheService,
+    DiagramGenerationService,
+    DiagramCacheService,
     StoriesService,
     StoryGenerationService,
     StoryProposalCacheService,

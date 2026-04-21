@@ -1,17 +1,17 @@
 'use client';
 
-import type { EpicGenerationPhase } from '@cenzontle/shared';
+import type { AgentPhase } from '@/hooks/useAgentThinkingState';
 
 interface PhaseProgressBarProps {
-  currentPhase: EpicGenerationPhase;
+  currentPhase: AgentPhase;
 }
 
-type ActivePhase = 'researching' | 'analyzing' | 'proposing';
+type ActivePhase = 'researching' | 'analyzing' | 'terminal';
 
 const PHASES: { key: ActivePhase; label: string }[] = [
   { key: 'researching', label: 'Investigando' },
   { key: 'analyzing', label: 'Analizando' },
-  { key: 'proposing', label: 'Proponiendo' },
+  { key: 'terminal', label: 'Generando' },
 ];
 
 const PHASE_ORDER: Record<string, number> = {
@@ -19,7 +19,13 @@ const PHASE_ORDER: Record<string, number> = {
   researching: 0,
   analyzing: 1,
   proposing: 2,
+  composing: 2,
   done: 3,
+};
+
+const TERMINAL_LABELS: Record<string, string> = {
+  proposing: 'Proponiendo',
+  composing: 'Componiendo',
 };
 
 export function PhaseProgressBar({ currentPhase }: PhaseProgressBarProps) {
@@ -47,12 +53,13 @@ export function PhaseProgressBar({ currentPhase }: PhaseProgressBarProps) {
         {PHASES.map((phase, idx) => {
           const isActive = idx === currentIdx;
           const isDone = idx < currentIdx || currentPhase === 'done';
+          const label = phase.key === 'terminal' ? (TERMINAL_LABELS[currentPhase] ?? phase.label) : phase.label;
           return (
             <span
               key={phase.key}
               className={`text-[9px] ${isActive ? 'text-foreground font-medium' : isDone ? 'text-muted-foreground' : 'text-muted-foreground/40'}`}
             >
-              {phase.label}
+              {label}
             </span>
           );
         })}

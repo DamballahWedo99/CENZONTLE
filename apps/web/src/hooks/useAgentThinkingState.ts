@@ -1,5 +1,13 @@
 import { useMemo } from 'react';
+import type { EpicGenerationPhase, DiagramGenerationPhase } from '@cenzontle/shared';
 import type { EpicGenerationEventWithMeta } from '@/lib/epic-agent';
+import type { DiagramGenerationEventWithMeta } from '@/lib/diagram-agent';
+
+/** Unión de eventos de agentes SSE soportados por este hook de progreso. */
+export type AgentThinkingEvent = EpicGenerationEventWithMeta | DiagramGenerationEventWithMeta;
+
+/** Fase agregada del agente — derivada de los tipos del shared package. */
+export type AgentPhase = EpicGenerationPhase | DiagramGenerationPhase;
 
 // -- Display block types --
 
@@ -31,7 +39,7 @@ export interface ThinkingState {
   isRunning: boolean;
   runStartedAt: number | null;
   totalDurationMs: number | null;
-  currentPhase: 'idle' | 'researching' | 'analyzing' | 'proposing' | 'done';
+  currentPhase: AgentPhase;
   phaseLabel: string;
   blocks: ThinkingDisplayBlock[];
   toolCount: number;
@@ -44,7 +52,7 @@ export interface ThinkingState {
 // Re-use the canonical TOOL_LABELS from the component module
 import { TOOL_LABELS } from '@/components/proyectos/overview/agent-thinking/constants';
 
-function getTimestamp(event: EpicGenerationEventWithMeta): number {
+function getTimestamp(event: AgentThinkingEvent): number {
   if (event.timestamp) return new Date(event.timestamp).getTime();
   if (event._receivedAt) return new Date(event._receivedAt).getTime();
   return Date.now();
@@ -67,7 +75,7 @@ function buildArgsPreview(args?: Record<string, unknown>): string {
  * Tool calls are keyed by block index (not tool name) to support repeated calls
  * to the same tool (e.g., two explore_code calls in one run).
  */
-function processEvents(events: EpicGenerationEventWithMeta[]): ThinkingState {
+function processEvents(events: AgentThinkingEvent[]): ThinkingState {
   const blocks: ThinkingDisplayBlock[] = [];
   let isRunning = false;
   let runStartedAt: number | null = null;
@@ -100,6 +108,16 @@ function processEvents(events: EpicGenerationEventWithMeta[]): ThinkingState {
       case 'phase_change':
         currentPhase = event.phase;
         phaseLabel = event.label;
+        // Finalizar el thinking block anterior en cambios de fase, para que el
+        // auto-checklist del draft_diagram aparezca como un bloque visual
+        // separado del razonamiento previo del LLM. Sin esto, los deltas
+        // siguientes se acumulan al mismo bloque aunque semánticamente son
+        // otra cosa.
+        if (thinkingIdx >= 0) {
+          blocks[thinkingIdx] = { ...blocks[thinkingIdx] as ThinkingBlockData, isActive: false };
+          thinkingIdx = -1;
+          thinkingText = '';
+        }
         break;
 
       case 'thinking': {
@@ -211,6 +229,10 @@ function processEvents(events: EpicGenerationEventWithMeta[]): ThinkingState {
       }
 
       case 'proposal_ready':
+      case 'diagram_ready':
+      case 'document_ready':
+        // Terminal payload events — no thinking block / no tool call to render.
+        // The owning component handles the side-effect (state dispatch, toast).
         break;
 
       case 'error':
@@ -252,6 +274,6 @@ function processEvents(events: EpicGenerationEventWithMeta[]): ThinkingState {
 
 // -- Hook --
 
-export function useAgentThinkingState(events: EpicGenerationEventWithMeta[]): ThinkingState {
+export function useAgentThinkingState(events: AgentThinkingEvent[]): ThinkingState {
   return useMemo(() => processEvents(events), [events]);
 }

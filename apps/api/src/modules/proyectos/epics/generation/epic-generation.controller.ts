@@ -20,15 +20,8 @@ import { EpicGenerationService } from './epic-generation.service';
 import { ProposalCacheService } from './proposal-cache.service';
 import { GenerateEpicsQueryDto } from './dto/generate-epics.dto';
 import { scrubSecrets } from '../../../../common/utils/scrub-secrets.util';
+import { sanitizeForLog } from '../../../../common/utils/sanitize-llm-input.util';
 import type { Request, Response } from 'express';
-
-/**
- * Sanitiza una cadena para uso en logs: redacta patrones tipo PAT/token, elimina
- * caracteres de control (CR/LF) para prevenir CWE-117 (log injection), y trunca.
- */
-function sanitizeForLog(s: string, maxLen = 200): string {
-  return scrubSecrets(s).replace(/[\r\n\x00-\x1f]+/g, ' ').slice(0, maxLen);
-}
 
 @ApiTags('Épicas — Generación IA')
 @Controller('proyectos/epic-generation')
@@ -175,8 +168,9 @@ export class EpicGenerationController {
     await this.assertUserCanAccessInitiative(user, initiativeId);
 
     const webSearchEnabled = query.webSearch === true;
-    // CWE-117: sanitizar el prompt del usuario antes de log.
-    const promptForLog = query.prompt ? sanitizeForLog(query.prompt) : '';
+    // CWE-117 (log injection) + CWE-532 (secrets in logs): doble defensa —
+    // scrubSecrets redacta PATs/tokens, sanitizeForLog strip control chars + trunca.
+    const promptForLog = query.prompt ? sanitizeForLog(scrubSecrets(query.prompt)) : '';
     this.logger.log(`[generate] initiative=${initiativeId} prompt="${promptForLog}" count=${query.count ?? 5} webSearch=${webSearchEnabled}`);
 
     res.setHeader('Content-Type', 'text/event-stream');
