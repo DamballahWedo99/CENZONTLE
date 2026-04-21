@@ -187,6 +187,11 @@ export function GraphView({ showForceControls = false, onNavigateToNode }: { sho
   // (en el primer mount del main D3 useEffect). Evita infinite loops y
   // re-syncs innecesarios en cada re-render de nodos/links.
   const didHydrateRef = useRef(false);
+  // Flag para skipear la primera ejecucion del "update forces" useEffect.
+  // La sim inicial ya se crea con los valores correctos en el main D3
+  // useEffect — no necesitamos re-aplicarlos, y hacerlo con state=DEFAULT
+  // (el state aun no commiteado) los sobrescribiria con defaults.
+  const skipFirstForceUpdateRef = useRef(true);
   const { state, selectNode, filteredTree } = useDefiniciones();
   const [hoveredNode, setHoveredNode] = useState<string | null>(null);
   const [focusedNodeId, setFocusedNodeId] = useState<string | null>(null);
@@ -561,17 +566,37 @@ export function GraphView({ showForceControls = false, onNavigateToNode }: { sho
     }
   }, [dimensions]);
 
-  // Update forces imperatively
+  // Update forces imperatively — reacciona a cambios de sliders del user.
+  //
+  // CRITICAL: usamos `forcesRef.current` (no `forces` state) para leer los
+  // valores. Razon: el state `forces` puede estar stale durante re-renders
+  // intermedios (React no commit hasta el proximo render, pero useEffects
+  // pueden dispararse en el mismo cycle si sus deps cambian por refs
+  // nuevas de otros hooks). forcesRef.current es sync manual actualizado
+  // en el main D3 useEffect y via la linea `forcesRef.current = forces`
+  // del componente. Siempre refleja el valor mas reciente.
+  //
+  // Tambien skipeamos el primer run al mount porque la sim ya se crea con
+  // los valores correctos en el main D3 useEffect.
   useEffect(() => {
     const sim = simulationRef.current;
+    const current = forcesRef.current;
     // eslint-disable-next-line no-console
-    console.log('[GraphView] update forces useEffect fired. forces=', forces, 'simExists=', !!sim);
+    console.log('[GraphView] update forces useEffect fired. state forces=', forces, 'ref=', current, 'simExists=', !!sim, 'skipFirst=', skipFirstForceUpdateRef.current);
+    if (skipFirstForceUpdateRef.current) {
+      skipFirstForceUpdateRef.current = false;
+      // eslint-disable-next-line no-console
+      console.log('[GraphView] update forces: SKIPPED primer run');
+      return;
+    }
     if (!sim) return;
-    sim.force('center', d3.forceCenter(dimensionsRef.current.width / 2, dimensionsRef.current.height / 2).strength(forces.centerStrength));
-    sim.force('charge', d3.forceManyBody().strength(forces.repelStrength).distanceMax(350));
+    // eslint-disable-next-line no-console
+    console.log('[GraphView] update forces: APPLYING ref values to sim');
+    sim.force('center', d3.forceCenter(dimensionsRef.current.width / 2, dimensionsRef.current.height / 2).strength(current.centerStrength));
+    sim.force('charge', d3.forceManyBody().strength(current.repelStrength).distanceMax(350));
     (sim.force('link') as d3.ForceLink<GraphNode, GraphLink>)
-      ?.strength(forces.linkStrength)
-      .distance(forces.linkDistance);
+      ?.strength(current.linkStrength)
+      .distance(current.linkDistance);
     sim.alpha(0.5).restart();
   }, [forces]);
 
