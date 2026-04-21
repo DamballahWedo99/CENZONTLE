@@ -14,12 +14,16 @@ import { CodeRepositoriesModule } from '../code-repositories/code-repositories.m
 import { EpicGenerationController } from './epics/generation/epic-generation.controller';
 import { EpicGenerationService } from './epics/generation/epic-generation.service';
 import { ProposalCacheService } from './epics/generation/proposal-cache.service';
+import { DiagramGenerationController } from './diagrams/generation/diagram-generation.controller';
+import { DiagramGenerationService } from './diagrams/generation/diagram-generation.service';
+import { DiagramCacheService } from './diagrams/generation/diagram-cache.service';
 
 @Module({
   imports: [AgentToolsModule, CodeRepositoriesModule],
   controllers: [
     PodsController,
     EpicGenerationController, // Must register before InitiativesController (same prefix, more specific route)
+    DiagramGenerationController,
     InitiativesController,
     EpicsController,
     StoriesController,
@@ -31,6 +35,8 @@ import { ProposalCacheService } from './epics/generation/proposal-cache.service'
     EpicsService,
     EpicGenerationService,
     ProposalCacheService,
+    DiagramGenerationService,
+    DiagramCacheService,
     StoriesService,
     ChangelogService,
   ],

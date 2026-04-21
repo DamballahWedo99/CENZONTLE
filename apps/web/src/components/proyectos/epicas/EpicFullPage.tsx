@@ -42,6 +42,7 @@ import { EpicDependencies } from './EpicDependencies';
 import { IntegrationSettingsDialog } from '../settings/IntegrationSettingsDialog';
 import { EpicStoryList } from './EpicStoryList';
 import { generateStories } from '@/lib/story-agent';
+import { useDiagramCacheHydration } from '@/hooks/useDiagramCacheHydration';
 import {
   Calendar,
   Pencil,
@@ -324,6 +325,13 @@ function EpicFullPageInner({ epicId }: { epicId: string }) {
     if (!rawEpic) return false;
     return rawEpic.diagrams.some((d) => d.type === 'business');
   }, [rawEpic]);
+
+  // Hidrata el estado desde Redis (cache con TTL 5 días) si el diagrama no
+  // está ya en memoria. La lógica vive en un hook reutilizable porque la
+  // vista dedicada (`DiagramFullPage`) también la necesita — sin él, abrir
+  // el diagrama en una tab nueva mostraría "No hay diagrama" aunque esté
+  // cacheado. Ver `useDiagramCacheHydration` para detalles.
+  useDiagramCacheHydration(rawEpic?.id, 'business');
 
   const hasStories = useMemo(() => {
     if (!epic) return false;

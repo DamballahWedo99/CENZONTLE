@@ -1,6 +1,7 @@
 'use client';
 
-import React, { useState, useCallback } from 'react';
+import React, { useState, useCallback, useEffect, useRef } from 'react';
+import { useSearchParams } from 'next/navigation';
 import { Search, Network, List, BookMarked, SlidersHorizontal, History, Shield, RefreshCw, Loader2, AlertCircle, ChevronDown, Check } from 'lucide-react';
 import { useDefiniciones } from '@/context/DefinicionesContext';
 import { useAuthContext } from '@/context/AuthContext';
@@ -53,6 +54,21 @@ export function DefinicionesExplorer() {
   }, [state.tree, selectNode, expandFolder]);
   const [viewMode, setViewMode] = useState<ViewMode>('tree');
   const [showForceControls, setShowForceControls] = useState(false);
+
+  // Deep-link desde otros módulos (ej: sidepanel de pasos del diagrama):
+  // abrir `/proyectos/definiciones?path=epics/{id}-{slug}/diagrams/{type}.md`
+  // debe pre-seleccionar ese archivo y expandir sus ancestros. Se dispara
+  // una sola vez por mount una vez que el tree tiene contenido — si el user
+  // navega a otro nodo manualmente, no queremos re-forzar al del query.
+  const searchParams = useSearchParams();
+  const queryPath = searchParams?.get('path') ?? null;
+  const hasNavigatedFromQueryRef = useRef(false);
+  useEffect(() => {
+    if (hasNavigatedFromQueryRef.current) return;
+    if (!queryPath || state.tree.length === 0) return;
+    navigateToNode(queryPath);
+    hasNavigatedFromQueryRef.current = true;
+  }, [queryPath, state.tree, navigateToNode]);
 
   return (
     <div className="flex flex-col h-full">
