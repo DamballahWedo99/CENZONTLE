@@ -1112,19 +1112,30 @@ Tu mision: para CADA una de las ${poResult.outlines.length} historias (con su PO
 ${fullStoriesBlock}
 </stories_with_po_and_tl>
 
-Proceso obligatorio:
-1. Explora el codigo (code_grep, code_read) para entender frameworks de testing existentes (Jest/Vitest/JUnit/pytest) y patrones de mocks ya usados.
-2. Para CADA historia, redacta testingStrategy con estas 6 subsecciones markdown:
+⚠️ CONTRATO DURO — LEER ANTES DE PROCEDER:
+- \`strategies.length\` DEBE ser exactamente ${poResult.outlines.length} (una entry por historia, indexada por outlineIndex 0..${poResult.outlines.length - 1}).
+- NUNCA emitas \`strategies:[]\` ni array incompleto. Emitir un array vacio es una FALLA del agente — siempre hay algo que estrategizar basado en las acceptance criteria.
+- Si no hay repos de codigo conectados, o si \`code_grep\` no encuentra frameworks de testing: NO es excusa para devolver vacio. Infiere el framework del stack de la epica/iniciativa:
+    * Backend TypeScript/Node → Jest + supertest (o Vitest si detectas config).
+    * Frontend React/Next → Vitest + Testing Library + Playwright para e2e.
+    * Python → pytest + pytest-mock.
+    * Java → JUnit 5 + Mockito.
+    * Si realmente no puedes inferir → Jest por default y declaralo en la subseccion Herramientas.
+- \`discoveredDependencies\` PUEDE ser array vacio si la epica es autocontenida. Es el unico array donde vacio esta permitido.
+
+Proceso:
+1. Explora el codigo MAX 2 tool calls (code_grep con outputMode='files_with_matches' para detectar framework, code_read solo si necesitas confirmar patron de mock). NO sobreexplores — si los primeros tool calls no ayudan, pasa directo a redactar basandote en las acceptance criteria.
+2. Para CADA una de las ${poResult.outlines.length} historias, redacta testingStrategy con estas 6 subsecciones markdown:
    (1) Alcance de pruebas unitarias
    (2) Escenarios felices (3-5)
    (3) Edge cases y errores (5-10)
    (4) Mocks y stubs
    (5) Criterios de cobertura (>= 90% tipico)
    (6) Herramientas
-3. Identifica dependencias REALES descubiertas al trazar los tests (APIs externas que mockear, servicios con contratos, datos semilla, equipos que proveen). Registra cada una con su mdContent detallado — se persistiran como .md individuales en el vault.
-4. Llama submit_qa_strategies UNA sola vez.
+3. Identifica dependencias REALES descubiertas al trazar los tests (APIs externas que mockear, servicios con contratos, datos semilla, equipos que proveen). Registra cada una con mdContent markdown — se persistiran como .md individuales en el vault.
+4. Llama submit_qa_strategies UNA sola vez con \`strategies\` de longitud ${poResult.outlines.length}.
 
-NO cambies PO ni technical. Si una historia es inviable de testear, dejalo claro en testingStrategy con recomendaciones.`;
+NO cambies PO ni technical. Si una historia es dificil de testear, dilo en su testingStrategy con recomendaciones — pero igual EMITE su entry.`;
 
     const output = await this.runAgentLoop({
       role: 'qa',
@@ -1833,6 +1844,12 @@ Idioma: espanol. Codigo en ingles si el repo lo usa asi.`;
 
 TU MISION: para cada historia, redactar testingStrategy enfocada en PRUEBAS UNITARIAS e integracion a nivel de historia. Identificar dependencias transversales descubiertas.
 
+⚠️ CONTRATO NO NEGOCIABLE:
+- El array \`strategies\` de \`submit_qa_strategies\` DEBE tener una entry por cada historia que reciba (outlineIndex 0..N-1).
+- Emitir \`strategies:[]\` o un array incompleto es una FALLA del agente — siempre hay testing que proponer basado en acceptance criteria, incluso sin repos de codigo conectados.
+- Si no puedes detectar framework via code_grep, infiere del stack: backend Node/TS → Jest+supertest, frontend React → Vitest+Testing Library, Python → pytest, Java → JUnit+Mockito. Default: Jest.
+- Solo \`discoveredDependencies\` PUEDE ser vacio (si la epica es autocontenida).
+
 ⚠️ PRESUPUESTO DURO: 16384 tokens TOTAL para todas las strategies + dependencies. Distribucion aproximada:
   - Si son 3-5 historias: ~2500 tokens por testingStrategy.
   - Si son 6-8 historias: ~1500 tokens por testingStrategy.
@@ -1881,18 +1898,20 @@ Tipos:
 
 ## Proceso
 
-1. Explora codigo MAX 3-4 tool calls (code_grep test/spec). No sobre-explores.
+1. Explora codigo MAX 2 tool calls (code_grep test/spec con outputMode='files_with_matches'). Si no encuentras framework al segundo call, NO sigas explorando — infiere del stack y procede a redactar.
 2. Para CADA historia, redacta testingStrategy CONCISA.
 3. Identifica dependencias REALES (no genericas).
-4. Llama \`submit_qa_strategies\` UNA sola vez.
+4. Llama \`submit_qa_strategies\` UNA sola vez con strategies.length = N (siempre, sin excepcion).
 
-## Anti-patrones
+## Anti-patrones (fallas criticas)
 
-- testingStrategy con prosa larga (cada bullet > 30 palabras es excesivo).
-- Headings ## dentro de testingStrategy (usa **bold** label).
-- Inventar numeros sin base del codigo.
-- Dependencias genericas ("depende de la DB") sin contexto especifico.
-- Invadir trabajo del TL (arquitectura) o del PO (criterios).
+- ❌ Emitir \`strategies:[]\` o array incompleto porque no hay repos conectados. Usa el fallback de frameworks inferidos.
+- ❌ Sobreexplorar con 5+ tool calls acumulando 20K+ tokens de contexto vacio.
+- ❌ testingStrategy con prosa larga (cada bullet > 15 palabras es excesivo).
+- ❌ Headings ## dentro de testingStrategy (usa **bold** label).
+- ❌ Inventar numeros sin base (pero SI esta OK usar 90% cobertura por default y decirlo).
+- ❌ Dependencias genericas ("depende de la DB") sin contexto especifico.
+- ❌ Invadir trabajo del TL (arquitectura) o del PO (criterios).
 
 Idioma: espanol. Nombres de frameworks/archivos en ingles.`;
   }
