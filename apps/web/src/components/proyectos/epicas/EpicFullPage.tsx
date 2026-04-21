@@ -625,23 +625,30 @@ function EpicFullPageInner({ epicId }: { epicId: string }) {
     if (acceptingAllStories || acceptingStoryId) return;
     setAcceptingAllStories(true);
     const snapshot = [...storyProposals];
-    let successCount = 0;
-    let failureCount = 0;
+    const startMs = Date.now();
+    // eslint-disable-next-line no-console
+    console.log(`[StoryAccept:batch] ▶ aceptando ${snapshot.length} historias en paralelo`);
     try {
-      for (const proposal of snapshot) {
-        try {
-          await handleAcceptStoryProposal(proposal);
-          successCount++;
-        } catch (err: any) {
-          failureCount++;
-          if (err?.status === 401 || err?.status === 403 || err?.status === 503) {
-            toast.error('Autenticacion o backend caido — abortando aceptacion masiva');
-            break;
-          }
-        }
-      }
+      // Paralelizamos las aceptaciones — cada historia tiene su propio folder
+      // en el vault (iniciativas/.../historias/<slug>-<id6>/) entonces no hay
+      // colision de SHA entre writes. Promise.allSettled permite que unas
+      // fallen sin abortar las demas.
+      const results = await Promise.allSettled(
+        snapshot.map((proposal) => handleAcceptStoryProposal(proposal)),
+      );
+      const successCount = results.filter((r) => r.status === 'fulfilled').length;
+      const failureCount = results.filter((r) => r.status === 'rejected').length;
+      const durMs = Date.now() - startMs;
+      // eslint-disable-next-line no-console
+      console.log(
+        `[StoryAccept:batch] ✓ done: ${successCount} OK, ${failureCount} fallidas (${durMs}ms total, avg ${Math.round(durMs / snapshot.length)}ms/historia)`,
+      );
       if (failureCount > 0) {
         toast.warning(`${successCount} historias creadas, ${failureCount} fallaron. Las fallidas siguen en staging.`);
+      } else if (successCount > 1) {
+        // Toast consolidado para batch exitoso (los individuales ya dispararon sus propios toast)
+        // No duplicamos mensaje si solo fue 1 historia — handleAcceptStoryProposal ya lo hizo.
+        toast.success(`${successCount} historias creadas en ${(durMs / 1000).toFixed(1)}s`);
       }
     } finally {
       setAcceptingAllStories(false);

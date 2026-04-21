@@ -401,41 +401,59 @@ export class StoriesService {
   }
 
   private async writeFileSet(fileSet: Map<string, StoryFileEntry>): Promise<string[]> {
-    const writtenPaths: string[] = [];
-    try {
-      // index.md primero para que el folder exista con entry-point.
-      const orderedEntries = this.orderFileSetForWrite(fileSet);
-      for (const [path, entry] of orderedEntries) {
+    const batchStart = Date.now();
+    const entries = Array.from(fileSet.entries());
+
+    // Escribimos TODOS los archivos en PARALELO. Cada uno tiene un path unico
+    // dentro del folder de la historia (index.md, definicion-negocio.md,
+    // documentos/<slug>.md, dependencias/<slug>.md, etc.) — no hay colision de
+    // SHA entre writes concurrentes. GitHub Contents API con archivos NUEVOS
+    // no requiere SHA del parent, solo el SHA del archivo (que no existe).
+    //
+    // Promise.allSettled permite que unas fallen sin abortar el batch —
+    // luego del fan-out hacemos rollback atomico de los que SI se escribieron
+    // si hay cualquier falla.
+    const results = await Promise.allSettled(
+      entries.map(async ([path, entry]) => {
         const writeStart = Date.now();
         await this.vault.writeNote(path, entry.content, entry.commitMsg);
+        const dur = Date.now() - writeStart;
         this.logger.log(
-          `[StoryVault:write] ${writtenPaths.length + 1}/${fileSet.size} ✓ ${path} (${Date.now() - writeStart}ms, msg="${entry.commitMsg.slice(0, 60)}")`,
+          `[StoryVault:write] ✓ ${path} (${dur}ms, msg="${entry.commitMsg.slice(0, 60)}")`,
         );
-        writtenPaths.push(path);
+        return path;
+      }),
+    );
+
+    const writtenPaths: string[] = [];
+    const failures: Array<{ path: string; error: string }> = [];
+    for (let i = 0; i < results.length; i++) {
+      const r = results[i];
+      if (r.status === 'fulfilled') {
+        writtenPaths.push(r.value);
+      } else {
+        failures.push({
+          path: entries[i][0],
+          error: r.reason?.message ?? String(r.reason),
+        });
       }
-      return writtenPaths;
-    } catch (err: any) {
+    }
+
+    const totalDur = Date.now() - batchStart;
+    this.logger.log(
+      `[StoryVault:write] batch done in ${totalDur}ms — ${writtenPaths.length}/${entries.length} OK, ${failures.length} failed`,
+    );
+
+    if (failures.length > 0) {
       this.logger.error(
-        `[StoryVault:write] ✗ failed at ${writtenPaths.length + 1}/${fileSet.size}: ${err?.message}. Rolling back ${writtenPaths.length} files.`,
+        `[StoryVault:write] ✗ ${failures.length} writes failed. Rolling back ${writtenPaths.length} successful files. Failures: ${failures.map((f) => `${f.path}: ${f.error}`).join('; ')}`,
       );
       await this.rollbackFileSet(writtenPaths, 'inline');
-      throw err;
+      // Lanzamos el primer error como representativo (todos los errores estan en los logs).
+      throw new Error(`writeFileSet: ${failures.length} write(s) failed: ${failures[0].error}`);
     }
-  }
 
-  /**
-   * Ordena entries para que index.md se escriba primero. GitHub no crea
-   * el folder hasta que hay al menos un archivo dentro, asi que empezar por
-   * index tiene la ventaja de que el folder aparece en listings inmediatamente.
-   */
-  private orderFileSetForWrite(fileSet: Map<string, StoryFileEntry>): Array<[string, StoryFileEntry]> {
-    const entries = Array.from(fileSet.entries());
-    entries.sort((a, b) => {
-      const ai = a[0].endsWith('/index.md') ? 0 : 1;
-      const bi = b[0].endsWith('/index.md') ? 0 : 1;
-      return ai - bi;
-    });
-    return entries;
+    return writtenPaths;
   }
 
   private async rollbackFileSet(paths: string[], storyIdHint: string): Promise<void> {
