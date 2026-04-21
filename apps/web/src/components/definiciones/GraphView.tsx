@@ -157,6 +157,10 @@ export function GraphView({ showForceControls = false, onNavigateToNode }: { sho
   const simulationRef = useRef<d3.Simulation<GraphNode, GraphLink> | null>(null);
   const dimensionsRef = useRef({ width: 800, height: 600 });
   const forcesRef = useRef<ForceSettings>(DEFAULT_FORCES);
+  // Flag para sincronizar el state de forces con localStorage una sola vez
+  // (en el primer mount del main D3 useEffect). Evita infinite loops y
+  // re-syncs innecesarios en cada re-render de nodos/links.
+  const didHydrateRef = useRef(false);
   const { state, selectNode, filteredTree } = useDefiniciones();
   const [hoveredNode, setHoveredNode] = useState<string | null>(null);
   const [focusedNodeId, setFocusedNodeId] = useState<string | null>(null);
@@ -172,23 +176,11 @@ export function GraphView({ showForceControls = false, onNavigateToNode }: { sho
   // por 1.5 seg antes de volver al icono de Save.
   const [justSaved, setJustSaved] = useState(false);
 
-  // Hydration: leer localStorage AL MONTAR en el cliente y aplicar si difiere
-  // de defaults. Esto dispara setForces -> re-render -> el "update forces"
-  // useEffect aplica los valores a la simulacion D3 existente.
-  useEffect(() => {
-    const stored = loadForcesFromStorage();
-    // Solo setear si es distinto a defaults (evita re-render innecesario).
-    if (
-      stored.centerStrength !== DEFAULT_FORCES.centerStrength ||
-      stored.repelStrength !== DEFAULT_FORCES.repelStrength ||
-      stored.linkStrength !== DEFAULT_FORCES.linkStrength ||
-      stored.linkDistance !== DEFAULT_FORCES.linkDistance ||
-      stored.nodeSize !== DEFAULT_FORCES.nodeSize
-    ) {
-      setForces(stored);
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  // NOTA: la hidratacion de forces desde localStorage se hace SINCRONAMENTE
+  // dentro del main D3 useEffect mas abajo. Ver el comentario "CRITICAL"
+  // alla para contexto. Removemos el hydration useEffect separado porque
+  // causaba un double-apply (una vez en el main useEffect con defaults,
+  // otra via setForces + update effect) y el flash visual de reorganizacion.
 
   dimensionsRef.current = dimensions;
   forcesRef.current = forces;
@@ -253,12 +245,41 @@ export function GraphView({ showForceControls = false, onNavigateToNode }: { sho
     if (!svgRef.current) return;
     const svg = d3.select(svgRef.current);
     const { width, height } = dimensionsRef.current;
-    // IMPORTANTE: usar `forcesRef.current` (que ya contiene los valores
-    // cargados de localStorage al mount) en vez de DEFAULT_FORCES. Sin esto,
-    // la simulacion inicial siempre usaba los defaults del codigo y solo
-    // se aplicaba la config custom cuando el user tocaba un slider — al
-    // refresh, los nodos arrancaban mal posicionados.
-    const currentForces = forcesRef.current;
+
+    // CRITICAL: leer localStorage SINCRONAMENTE aqui en vez de depender del
+    // state `forces` o `forcesRef`. Razon:
+    //
+    // Este useEffect corre al mount, pero el hydration useEffect que hidrata
+    // el state desde localStorage corre DESPUES (ambos al mount, pero el
+    // main D3 esta antes en el orden de declaracion — o al menos corre en
+    // el primer commit con state inicial = DEFAULT_FORCES).
+    //
+    // Leyendo localStorage aqui directamente garantizamos que la simulacion
+    // inicial use los valores persistidos SIN depender del orden de
+    // useEffects. Tambien sincronizamos el state para que los sliders del
+    // panel de Fuerzas muestren los valores correctos (sin esto el sim
+    // tendria valores correctos pero los sliders mostrarian defaults).
+    // En el primer mount, leemos del storage para hidratar; despues usamos
+    // forcesRef.current (que esta sincronizado con el state `forces`).
+    const currentForces = didHydrateRef.current
+      ? forcesRef.current
+      : loadForcesFromStorage();
+
+    // Sync el state una sola vez tras hydration — para que los sliders del
+    // panel muestren los valores cargados. No re-triggers el effect porque
+    // deps son [nodes, links].
+    if (!didHydrateRef.current) {
+      didHydrateRef.current = true;
+      const needsSync =
+        currentForces.centerStrength !== forcesRef.current.centerStrength ||
+        currentForces.repelStrength !== forcesRef.current.repelStrength ||
+        currentForces.linkStrength !== forcesRef.current.linkStrength ||
+        currentForces.linkDistance !== forcesRef.current.linkDistance ||
+        currentForces.nodeSize !== forcesRef.current.nodeSize;
+      if (needsSync) {
+        setForces(currentForces);
+      }
+    }
 
     simulationRef.current?.stop();
     svg.selectAll('*').remove();
