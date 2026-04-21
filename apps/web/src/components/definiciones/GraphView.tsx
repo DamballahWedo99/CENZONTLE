@@ -192,6 +192,12 @@ export function GraphView({ showForceControls = false, onNavigateToNode }: { sho
   // useEffect — no necesitamos re-aplicarlos, y hacerlo con state=DEFAULT
   // (el state aun no commiteado) los sobrescribiria con defaults.
   const skipFirstForceUpdateRef = useRef(true);
+  // Refs para detectar si nodes/links cambiaron semanticamente (por IDs),
+  // no solo por referencia. El main D3 useEffect se dispara cada vez que
+  // filteredTree del context cambia de ref (aun sin cambios semanticos) —
+  // con este check evitamos destruir y recrear la sim innecesariamente.
+  const prevNodeIdsRef = useRef<string>('');
+  const prevLinkIdsRef = useRef<string>('');
   const { state, selectNode, filteredTree } = useDefiniciones();
   const [hoveredNode, setHoveredNode] = useState<string | null>(null);
   const [focusedNodeId, setFocusedNodeId] = useState<string | null>(null);
@@ -292,6 +298,33 @@ export function GraphView({ showForceControls = false, onNavigateToNode }: { sho
     // tendria valores correctos pero los sliders mostrarian defaults).
     // eslint-disable-next-line no-console
     console.log('[GraphView] main D3 useEffect fired. didHydrateRef=', didHydrateRef.current, 'nodes=', nodes.length, 'links=', links.length);
+
+    // Early return si nodes/links no cambiaron semanticamente (solo ref).
+    // filteredTree del context retorna nuevas refs entre renders aun sin
+    // cambios reales, lo cual disparaba este effect y destruia+recreaba
+    // la sim constantemente — interrumpiendo la convergencia de d3-force
+    // con cada re-render del componente, causando que los nodos no se
+    // organizaran segun la config guardada.
+    const newNodeIds = nodes.map((n) => n.id).sort().join('|');
+    const newLinkIds = links
+      .map((l) => {
+        const s = typeof l.source === 'object' ? (l.source as GraphNode).id : l.source;
+        const t = typeof l.target === 'object' ? (l.target as GraphNode).id : l.target;
+        return `${s}->${t}`;
+      })
+      .sort()
+      .join('|');
+    if (
+      simulationRef.current &&
+      prevNodeIdsRef.current === newNodeIds &&
+      prevLinkIdsRef.current === newLinkIds
+    ) {
+      // eslint-disable-next-line no-console
+      console.log('[GraphView] main D3: nodes/links unchanged by ID — skipping recreation');
+      return;
+    }
+    prevNodeIdsRef.current = newNodeIds;
+    prevLinkIdsRef.current = newLinkIds;
 
     // En el primer mount, leemos del storage para hidratar; despues usamos
     // forcesRef.current (que esta sincronizado con el state `forces`).
