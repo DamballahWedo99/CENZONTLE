@@ -384,8 +384,23 @@ export function GraphView({ showForceControls = false, onNavigateToNode }: { sho
 
     svg.call(zoom as unknown as (selection: typeof svg) => void);
 
-    // Deep copy nodes/links for D3 mutation
-    const simNodes: GraphNode[] = nodes.map(n => ({ ...n }));
+    // Deep copy nodes/links for D3 mutation. CRITICAL: explicitamente
+    // limpiar fx/fy de los nodos. Si quedaron seteados de una sesion
+    // anterior (por drag del user con "Obsidian pinning"), los nodos
+    // estarian FIJADOS y no se reorganizarian con las nuevas fuerzas —
+    // sintoma exacto del bug que el user reporto (ver Issue #94 d3-force).
+    const simNodes: GraphNode[] = nodes.map(n => {
+      const copy = { ...n };
+      // Borrar posiciones fijas si existen — forzar fresh layout con los
+      // nuevos force parameters.
+      delete (copy as Partial<d3.SimulationNodeDatum>).fx;
+      delete (copy as Partial<d3.SimulationNodeDatum>).fy;
+      delete (copy as Partial<d3.SimulationNodeDatum>).x;
+      delete (copy as Partial<d3.SimulationNodeDatum>).y;
+      delete (copy as Partial<d3.SimulationNodeDatum>).vx;
+      delete (copy as Partial<d3.SimulationNodeDatum>).vy;
+      return copy;
+    });
     const simLinks: GraphLink[] = links.map(l => ({ ...l, source: l.source as string, target: l.target as string }));
 
     // Force simulation
@@ -397,6 +412,22 @@ export function GraphView({ showForceControls = false, onNavigateToNode }: { sho
       .alphaDecay(0.02);
 
     simulationRef.current = simulation;
+
+    // Force re-initialize cada fuerza con los nodos frescos + alpha=1
+    // restart. Segun Issue #94 de d3-force, cuando los parametros difieren
+    // sustancialmente de los defaults o de la sim anterior, el simple
+    // alpha(0.5) no es suficiente — los nodos quedan con layout de la sim
+    // anterior. Con alpha(1) forzamos una convergencia COMPLETA desde
+    // positions random (que las tienen tras el delete de x/y arriba).
+    simulation.alpha(1).restart();
+
+    // eslint-disable-next-line no-console
+    console.log('[GraphView] sim created. forces applied:', {
+      center: (simulation.force('center') as d3.ForceCenter<GraphNode>)?.strength?.(),
+      charge: (simulation.force('charge') as d3.ForceManyBody<GraphNode>)?.strength?.(),
+      link_strength: (simulation.force('link') as d3.ForceLink<GraphNode, GraphLink>)?.strength?.(),
+      link_distance: (simulation.force('link') as d3.ForceLink<GraphNode, GraphLink>)?.distance?.(),
+    });
 
     // Draw links
     const link = g.append('g')
