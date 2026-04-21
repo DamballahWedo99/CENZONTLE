@@ -161,15 +161,46 @@ export class VaultService {
   }
 
   /**
+   * Mutex queue para serializar TODAS las operaciones de escritura al vault.
+   *
+   * Por que: GitHub Contents API no soporta N writes concurrentes al mismo
+   * branch. Cada write commitea, invalidando el SHA del tree, y el siguiente
+   * write en flight recibe 409. Con burst de 24+ writes (6 historias x 4
+   * archivos), el retry no puede ganar — hay livelock: cada retry encuentra
+   * que otro write acaba de invalidar el SHA de nuevo.
+   *
+   * Solucion: los callers siguen usando Promise.all si quieren, pero cada
+   * writeNote/deleteNote espera su turno en esta queue. GitHub commita en
+   * serie internamente de todos modos — no perdemos throughput real.
+   *
+   * Timing esperado: 24 writes x ~300ms = ~7 seg total, pero 0 errors.
+   */
+  private githubWriteQueue: Promise<unknown> = Promise.resolve();
+
+  private enqueueGithubWrite<T>(operation: () => Promise<T>): Promise<T> {
+    const next = this.githubWriteQueue.then(operation, operation);
+    // Swallow errors en la cadena del queue para que un write fallido no
+    // bloquee los siguientes. El caller recibe el error via el Promise returned.
+    this.githubWriteQueue = next.catch(() => undefined);
+    return next;
+  }
+
+  /**
    * Create or update a note in the vault. Commits the change to GitHub.
    *
-   * Retry con backoff exponencial ante 409 Conflict: bajo concurrencia alta
-   * (multiples writes paralelos al mismo branch), el SHA del tree cambia entre
-   * read y write y GitHub retorna 409. La estrategia canonica es re-leer el
-   * SHA actualizado y reintentar. 3 retries con 200/400/800ms suelen bastar
-   * para absorber burst de 50+ commits simultaneos al mismo branch.
+   * Serializado via mutex queue (ver githubWriteQueue arriba). Los callers
+   * pueden lanzar N writeNote en Promise.all, pero internamente se procesan
+   * uno a la vez — GitHub los queue igual server-side, solo que aqui
+   * evitamos los 409s que el paralelismo cliente-side producia.
+   *
+   * Retry con backoff (max 3, 200/400/800ms) se mantiene para resiliencia
+   * ante writes concurrentes desde OTROS procesos/clones de la app.
    */
   async writeNote(path: string, content: string, commitMessage: string): Promise<VaultNote> {
+    return this.enqueueGithubWrite(() => this.writeNoteImpl(path, content, commitMessage));
+  }
+
+  private async writeNoteImpl(path: string, content: string, commitMessage: string): Promise<VaultNote> {
     this.logger.log(`[writeNote] path=${path} contentLen=${content.length} msg="${commitMessage}"`);
     const MAX_RETRIES = 3;
 
@@ -235,9 +266,13 @@ export class VaultService {
 
   /**
    * Delete a note from the vault. Fails silently if the note doesn't exist.
-   * Retry con backoff ante 409 (mismo patron que writeNote).
+   * Serializado via mutex queue (ver writeNote) + retry con backoff ante 409.
    */
   async deleteNote(path: string, commitMessage: string): Promise<void> {
+    return this.enqueueGithubWrite(() => this.deleteNoteImpl(path, commitMessage));
+  }
+
+  private async deleteNoteImpl(path: string, commitMessage: string): Promise<void> {
     const MAX_RETRIES = 3;
 
     for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
