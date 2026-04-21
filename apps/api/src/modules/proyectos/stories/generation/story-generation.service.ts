@@ -875,12 +875,15 @@ NO disenes tecnicamente ni propongas tests — eso es trabajo del Tech Lead y de
 
     const terminalTool: Anthropic.Messages.Tool = {
       name: 'submit_technical_designs',
-      description: 'Envia las secciones tecnicas disenadas, indexadas por outlineIndex (0-based en el orden que recibiste los outlines del PO).',
+      description: `Envia las secciones tecnicas disenadas, indexadas por outlineIndex (0..${poResult.outlines.length - 1}). El array designs DEBE contener exactamente ${poResult.outlines.length} entries.`,
       input_schema: {
         type: 'object' as const,
         properties: {
           designs: {
             type: 'array',
+            minItems: poResult.outlines.length,
+            maxItems: poResult.outlines.length,
+            description: `EXACTAMENTE ${poResult.outlines.length} entries, una por cada outline del PO. NUNCA array vacio.`,
             items: {
               type: 'object',
               properties: {
@@ -1030,12 +1033,18 @@ NO cambies titles, descriptions, acceptanceCriteria — esos estan congelados. S
 
     const terminalTool: Anthropic.Messages.Tool = {
       name: 'submit_qa_strategies',
-      description: 'Envia las estrategias de testing por historia (indexed por outlineIndex) + dependencias descubiertas transversales.',
+      description: `Envia las estrategias de testing por historia (indexed por outlineIndex 0..${poResult.outlines.length - 1}) + dependencias transversales. El array strategies DEBE contener exactamente ${poResult.outlines.length} entries (una por historia).`,
       input_schema: {
         type: 'object' as const,
         properties: {
           strategies: {
             type: 'array',
+            // Schema-level enforcement: el modelo VE minItems/maxItems en el JSON
+            // Schema y el SDK de Anthropic lo usa para guiar el tool_use. Si el
+            // modelo intenta llamar con menos items, tiene que reconsiderar.
+            minItems: poResult.outlines.length,
+            maxItems: poResult.outlines.length,
+            description: `EXACTAMENTE ${poResult.outlines.length} entries, una por cada historia (outlineIndex 0..${poResult.outlines.length - 1}). NUNCA array vacio.`,
             items: {
               type: 'object',
               properties: {
@@ -1378,17 +1387,26 @@ NO cambies PO ni technical. Si una historia es dificil de testear, dilo en su te
         if (toolBlock.name === terminalToolName) {
           const terminalInput = toolBlock.input as Record<string, unknown>;
           const preview = this.summarizeTerminalInput(terminalToolName, terminalInput);
+          // Capturamos el TEXTO que el modelo escribio antes del tool_use — es
+          // critico para diagnosticar cuando el modelo "desiste" (emite arrays
+          // vacios aun con el contrato estricto). El texto contiene su razonamiento
+          // y nos dice SI el modelo mal-interpreto el prompt o hubo otra causa.
+          const assistantText = assistantContent
+            .filter((b: any) => b.type === 'text' && b.text)
+            .map((b: any) => b.text)
+            .join('\n')
+            .slice(0, 800);
           // Si el modelo se quedo sin tokens MIENTRAS escribia el JSON del terminal
           // tool, el SDK de Anthropic devuelve un objeto parcial/vacio. Detectarlo
           // explicitamente evita propagar shells vacios silenciosamente.
           const truncated = response.stop_reason === 'max_tokens';
           if (truncated) {
             this.logger.warn(
-              `[StoryGen:${role.toUpperCase()}] ⚠ terminal tool '${terminalToolName}' called at iter ${iteration} BUT stop_reason=max_tokens — JSON likely truncated. Preview: ${preview}`,
+              `[StoryGen:${role.toUpperCase()}] ⚠ terminal tool '${terminalToolName}' called at iter ${iteration} BUT stop_reason=max_tokens — JSON likely truncated. Preview: ${preview}. Modelo escribio: "${scrubSecrets(assistantText).slice(0, 400)}"`,
             );
           } else {
             this.logger.log(
-              `[StoryGen:${role.toUpperCase()}] ✓ terminal tool '${terminalToolName}' called at iter ${iteration} — ${preview}`,
+              `[StoryGen:${role.toUpperCase()}] ✓ terminal tool '${terminalToolName}' called at iter ${iteration} — ${preview}${assistantText ? ` | text_preview="${scrubSecrets(assistantText).slice(0, 300)}"` : ''}`,
             );
           }
           return terminalInput;

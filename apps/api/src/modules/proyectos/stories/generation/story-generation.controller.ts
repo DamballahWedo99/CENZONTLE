@@ -183,7 +183,7 @@ export class StoryGenerationController {
     const subject = this.generation.generate(
       epicId,
       query.prompt,
-      query.count ?? 5,
+      query.count, // undefined si no se envio — el agente PO decide el numero de historias
       abortController.signal,
       webSearchEnabled,
     );
