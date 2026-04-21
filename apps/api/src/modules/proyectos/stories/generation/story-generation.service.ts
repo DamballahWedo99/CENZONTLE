@@ -1177,19 +1177,20 @@ ${fullStoriesBlock}
     * Si realmente no puedes inferir → Jest por default y declaralo en la subseccion Herramientas.
 - \`discoveredDependencies\` PUEDE ser array vacio si la epica es autocontenida. Es el unico array donde vacio esta permitido.
 
-Proceso:
-1. Explora el codigo MAX 2 tool calls (code_grep con outputMode='files_with_matches' para detectar framework, code_read solo si necesitas confirmar patron de mock). NO sobreexplores — si los primeros tool calls no ayudan, pasa directo a redactar basandote en las acceptance criteria.
-2. Para CADA una de las ${poResult.outlines.length} historias, redacta testingStrategy con estas 6 subsecciones markdown:
-   (1) Alcance de pruebas unitarias
-   (2) Escenarios felices (3-5)
-   (3) Edge cases y errores (5-10)
-   (4) Mocks y stubs
-   (5) Criterios de cobertura (>= 90% tipico)
-   (6) Herramientas
-3. Identifica dependencias REALES descubiertas al trazar los tests (APIs externas que mockear, servicios con contratos, datos semilla, equipos que proveen). Registra cada una con mdContent markdown — se persistiran como .md individuales en el vault.
-4. Llama submit_qa_strategies UNA sola vez con \`strategies\` de longitud ${poResult.outlines.length}.
+⚠️ PRESUPUESTO: 16384 tokens TOTAL para las ${poResult.outlines.length} strategies + deps. Cada strategy debe ser ~${Math.max(800, Math.floor(14000 / poResult.outlines.length))} tokens max. Si una historia necesita mas detalle, comprimelo en bullets cortos — NUNCA emitas array vacio o incompleto.
 
-NO cambies PO ni technical. Si una historia es dificil de testear, dilo en su testingStrategy con recomendaciones — pero igual EMITE su entry.`;
+Proceso:
+1. Explora el codigo MAX 2 tool calls (code_grep con outputMode='files_with_matches' para detectar framework, code_read solo si necesitas confirmar patron de mock). NO sobreexplores — si los primeros tool calls no ayudan, procede directo a redactar basandote en las acceptance criteria.
+2. Para CADA una de las ${poResult.outlines.length} historias, redacta testingStrategy CORTA con 4 subsecciones \`**bold**\` (NO headings ##):
+   - **Happy paths** (2-3 casos, 1 linea cada uno)
+   - **Edge cases** (3-5 escenarios con codigo de error)
+   - **Mocks** (deps mockeadas con happy/fail)
+   - **Herramientas** (framework + cobertura >=90%)
+   Cada bullet max 10 palabras. NO incluyas "Alcance" ni "Cobertura" como secciones separadas.
+3. Identifica dependencias REALES (APIs externas, servicios con contratos, datos semilla, equipos). mdContent max ~100 palabras cada una.
+4. Llama submit_qa_strategies UNA sola vez con \`strategies\` de longitud EXACTA ${poResult.outlines.length}.
+
+NO cambies PO ni technical. Si una historia es dificil de testear, dilo en su testingStrategy — pero SIEMPRE emite su entry (strategies:[] es FALLA).`;
 
     const expectedStrategyCount = poResult.outlines.length;
     const output = await this.runAgentLoop({
@@ -1950,44 +1951,40 @@ TU MISION: para cada historia, redactar testingStrategy enfocada en PRUEBAS UNIT
 - Si no puedes detectar framework via code_grep, infiere del stack: backend Node/TS → Jest+supertest, frontend React → Vitest+Testing Library, Python → pytest, Java → JUnit+Mockito. Default: Jest.
 - Solo \`discoveredDependencies\` PUEDE ser vacio (si la epica es autocontenida).
 
-⚠️ PRESUPUESTO DURO: 16384 tokens TOTAL para todas las strategies + dependencies. Distribucion aproximada:
-  - Si son 3-5 historias: ~2500 tokens por testingStrategy.
-  - Si son 6-8 historias: ~1500 tokens por testingStrategy.
-  - Si son 9+ historias: ~1000 tokens por testingStrategy.
-SE CONCISO — listas en vez de prosa, sin headings markdown decorativos. Cada bullet max 15 palabras. Si excedes el presupuesto, el JSON se trunca y pierdes TODO el trabajo.
+⚠️ PRESUPUESTO CRITICO: 16384 tokens TOTAL. Divide entre TODAS las historias:
+  - 3 historias  → ~3000 tokens cada strategy
+  - 5 historias  → ~1800 tokens cada strategy
+  - 8 historias  → ~1100 tokens cada strategy
+  - 10+ historias → ~800 tokens cada strategy
+Si sospechas que no cabe, HAZ MAS CORTA cada strategy — NO emitas vacio.
 
-## Que compones por historia (en qa.testingStrategy)
+## Formato obligatorio (4 subsecciones, NO 6 — sin Alcance, sin Cobertura separadas)
 
-Markdown CORTO con estas 6 subsecciones (usa **bold** como label, no headings ##):
+Markdown plano con \`**bold**\` como label. NO headings ##. Max 10 palabras por bullet:
 
-1. **Alcance**: clases/funciones a cubrir (lista 1 linea).
-2. **Happy paths**: 3-5 casos breves (1 linea cada uno: "input X → output Y").
-3. **Edge cases**: 5-8 escenarios (1 linea cada uno).
-4. **Mocks**: dependencias mockeadas + comportamiento happy/fail (lista compacta).
-5. **Cobertura**: porcentaje minimo + justificacion en 1 linea.
-6. **Herramientas**: framework segun el stack detectado (1 linea).
+1. **Happy paths** (2-3 casos): "input → output esperado"
+2. **Edge cases** (3-5): "condicion → comportamiento + codigo error"
+3. **Mocks** (compacto): dep1 (happy/fail), dep2 (happy/fail)
+4. **Herramientas**: framework + cobertura >=90%
 
-EJEMPLO CONCISO de testingStrategy:
+EJEMPLO MINIMO (600 tokens aprox):
 \`\`\`
-**Alcance**: AnalysisController, AnalysisService, LLMClient, ValidationUtil.
 **Happy paths**:
-- POST /analyze con epica valida → 200 + outline JSON.
-- LLMClient con response valido → outline parseado.
-- ValidationUtil con storyPoints 5 → ok.
+- POST /analyze + epica valida → 200 + outline JSON.
+- LLM response OK → outline parseado correcto.
 **Edge cases**:
-- Body sin titulo → 400 + ERR.VALIDATION.MISSING_FIELD.
-- LLM timeout → 504 + retry una vez.
+- Body sin titulo → 400 + ERR.VALIDATION.
+- LLM timeout → 504, retry una vez.
 - storyPoints fuera Fibonacci → 422.
-- Response LLM no parseable → 502 + log.
-- Input > 20k chars → 413.
-**Mocks**: LLMClient (happy: outline JSON; fail: throw timeout). DB (happy: epic existe; fail: not found).
-**Cobertura**: >=90% lineas (excluir DTOs).
-**Herramientas**: Jest + ts-jest + supertest (detectado en repo).
+**Mocks**: LLMClient (outline JSON / timeout). DB (exists / 404).
+**Herramientas**: Jest + supertest. >=90% cobertura.
 \`\`\`
+
+NO incluyas "**Alcance**" (redundante con TL), NO "**Cobertura**" separada (va en Herramientas).
 
 ## Dependencias descubiertas (mdContent)
 
-Cada una max ~150 palabras de mdContent. Solo info accionable: que es, impacto, estrategia mock, owner. NO repitas info entre deps.
+Cada una max ~100 palabras de mdContent. Info accionable: naturaleza, impacto, mock, owner. Sin repetir.
 
 Tipos:
 - **api**: API externa.
