@@ -183,19 +183,15 @@ export function GraphView({ showForceControls = false, onNavigateToNode }: { sho
   const simulationRef = useRef<d3.Simulation<GraphNode, GraphLink> | null>(null);
   const dimensionsRef = useRef({ width: 800, height: 600 });
   const forcesRef = useRef<ForceSettings>(DEFAULT_FORCES);
-  // Flag para sincronizar el state de forces con localStorage una sola vez
-  // (en el primer mount del main D3 useEffect). Evita infinite loops y
-  // re-syncs innecesarios en cada re-render de nodos/links.
-  const didHydrateRef = useRef(false);
-  // Flag para skipear la primera ejecucion del "update forces" useEffect.
-  // La sim inicial ya se crea con los valores correctos en el main D3
-  // useEffect — no necesitamos re-aplicarlos, y hacerlo con state=DEFAULT
-  // (el state aun no commiteado) los sobrescribiria con defaults.
-  const skipFirstForceUpdateRef = useRef(true);
+  // Flag que marca si ya hidratamos `forces` desde localStorage. El main D3
+  // useEffect NO crea la simulacion hasta que isHydrated sea true. Esto
+  // garantiza que la sim se cree UNA SOLA VEZ con los valores correctos,
+  // en lugar de crearse con defaults + reactualizarse con stored (lo cual
+  // causaba que los nodos arrancaran con layout de defaults y no alcanzaran
+  // a reorganizarse visualmente).
+  const [isHydrated, setIsHydrated] = useState(false);
   // Refs para detectar si nodes/links cambiaron semanticamente (por IDs),
-  // no solo por referencia. El main D3 useEffect se dispara cada vez que
-  // filteredTree del context cambia de ref (aun sin cambios semanticos) —
-  // con este check evitamos destruir y recrear la sim innecesariamente.
+  // no solo por referencia.
   const prevNodeIdsRef = useRef<string>('');
   const prevLinkIdsRef = useRef<string>('');
   const { state, selectNode, filteredTree } = useDefiniciones();
@@ -213,11 +209,22 @@ export function GraphView({ showForceControls = false, onNavigateToNode }: { sho
   // por 1.5 seg antes de volver al icono de Save.
   const [justSaved, setJustSaved] = useState(false);
 
-  // NOTA: la hidratacion de forces desde localStorage se hace SINCRONAMENTE
-  // dentro del main D3 useEffect mas abajo. Ver el comentario "CRITICAL"
-  // alla para contexto. Removemos el hydration useEffect separado porque
-  // causaba un double-apply (una vez en el main useEffect con defaults,
-  // otra via setForces + update effect) y el flash visual de reorganizacion.
+  // Hydration: lee localStorage al mount en el cliente y actualiza `forces` +
+  // marca isHydrated=true. Solo despues de esto el main D3 useEffect creara
+  // la simulacion (ver check `if (!isHydrated) return` al inicio del main
+  // useEffect). Esto garantiza que la sim se cree UNA sola vez con los
+  // valores correctos, sin defaults intermedios que perturben la
+  // convergencia visual.
+  useEffect(() => {
+    const stored = loadForcesFromStorage();
+    // eslint-disable-next-line no-console
+    console.log('[GraphView] hydration useEffect: loaded from storage:', stored);
+    // Sync ref tambien para que el main D3 tenga acceso sincrono.
+    forcesRef.current = stored;
+    setForces(stored);
+    setIsHydrated(true);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   dimensionsRef.current = dimensions;
   forcesRef.current = forces;
@@ -297,14 +304,19 @@ export function GraphView({ showForceControls = false, onNavigateToNode }: { sho
     // panel de Fuerzas muestren los valores correctos (sin esto el sim
     // tendria valores correctos pero los sliders mostrarian defaults).
     // eslint-disable-next-line no-console
-    console.log('[GraphView] main D3 useEffect fired. didHydrateRef=', didHydrateRef.current, 'nodes=', nodes.length, 'links=', links.length);
+    console.log('[GraphView] main D3 useEffect fired. isHydrated=', isHydrated, 'nodes=', nodes.length, 'links=', links.length);
+
+    // BLOQUEO: no crear la sim hasta que isHydrated=true. El hydration
+    // useEffect arriba lee localStorage y actualiza forces + isHydrated.
+    // Mientras tanto, NO hacemos nada — esto garantiza que la primera
+    // creacion de la sim sea con los valores correctos.
+    if (!isHydrated) {
+      // eslint-disable-next-line no-console
+      console.log('[GraphView] main D3: WAITING for hydration — skipping sim creation');
+      return;
+    }
 
     // Early return si nodes/links no cambiaron semanticamente (solo ref).
-    // filteredTree del context retorna nuevas refs entre renders aun sin
-    // cambios reales, lo cual disparaba este effect y destruia+recreaba
-    // la sim constantemente — interrumpiendo la convergencia de d3-force
-    // con cada re-render del componente, causando que los nodos no se
-    // organizaran segun la config guardada.
     const newNodeIds = nodes.map((n) => n.id).sort().join('|');
     const newLinkIds = links
       .map((l) => {
@@ -326,45 +338,11 @@ export function GraphView({ showForceControls = false, onNavigateToNode }: { sho
     prevNodeIdsRef.current = newNodeIds;
     prevLinkIdsRef.current = newLinkIds;
 
-    // En el primer mount, leemos del storage para hidratar; despues usamos
-    // forcesRef.current (que esta sincronizado con el state `forces`).
-    const currentForces = didHydrateRef.current
-      ? forcesRef.current
-      : loadForcesFromStorage();
+    // Post-hydration: forces ya tiene los valores correctos (stored o default).
+    const currentForces = forces;
 
     // eslint-disable-next-line no-console
-    console.log('[GraphView] main D3 useEffect: using currentForces=', currentForces, 'forcesRef.current=', forcesRef.current, 'state forces=', forces);
-
-    // Sync el state una sola vez tras hydration — para que los sliders del
-    // panel muestren los valores cargados.
-    //
-    // CRITICAL: actualizar forcesRef.current SINCRONAMENTE aqui. Razon:
-    // este useEffect puede re-dispararse (porque filteredTree del context
-    // genera nuevas refs de nodes/links entre renders, aun sin cambios
-    // semanticos). En el re-run, didHydrateRef es true -> usa
-    // forcesRef.current. Sin el sync manual, forcesRef aun tendria
-    // DEFAULT porque setForces es async y no commit hasta el siguiente
-    // render. Con el sync manual, el re-run crea la sim con stored.
-    if (!didHydrateRef.current) {
-      didHydrateRef.current = true;
-      const needsSync =
-        currentForces.centerStrength !== forcesRef.current.centerStrength ||
-        currentForces.repelStrength !== forcesRef.current.repelStrength ||
-        currentForces.linkStrength !== forcesRef.current.linkStrength ||
-        currentForces.linkDistance !== forcesRef.current.linkDistance ||
-        currentForces.nodeSize !== forcesRef.current.nodeSize;
-      // eslint-disable-next-line no-console
-      console.log('[GraphView] hydration: needsSync=', needsSync);
-      if (needsSync) {
-        // Sync manual del ref ANTES del setForces — el re-run del effect
-        // (que ocurre entre setForces call y commit) encontrara el valor
-        // correcto en el ref.
-        forcesRef.current = currentForces;
-        // eslint-disable-next-line no-console
-        console.log('[GraphView] calling setForces with:', currentForces, '+ ref synced');
-        setForces(currentForces);
-      }
-    }
+    console.log('[GraphView] main D3 useEffect: using currentForces=', currentForces);
 
     simulationRef.current?.stop();
     svg.selectAll('*').remove();
@@ -583,7 +561,8 @@ export function GraphView({ showForceControls = false, onNavigateToNode }: { sho
       clearTimeout(zoomTimer);
       svg.on('.zoom', null);
     };
-  }, [nodes, links]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [nodes, links, isHydrated]);
 
 
   // Handle resize without recreating the simulation
@@ -600,38 +579,21 @@ export function GraphView({ showForceControls = false, onNavigateToNode }: { sho
   }, [dimensions]);
 
   // Update forces imperatively — reacciona a cambios de sliders del user.
-  //
-  // CRITICAL: usamos `forcesRef.current` (no `forces` state) para leer los
-  // valores. Razon: el state `forces` puede estar stale durante re-renders
-  // intermedios (React no commit hasta el proximo render, pero useEffects
-  // pueden dispararse en el mismo cycle si sus deps cambian por refs
-  // nuevas de otros hooks). forcesRef.current es sync manual actualizado
-  // en el main D3 useEffect y via la linea `forcesRef.current = forces`
-  // del componente. Siempre refleja el valor mas reciente.
-  //
-  // Tambien skipeamos el primer run al mount porque la sim ya se crea con
-  // los valores correctos en el main D3 useEffect.
+  // No dispara sobrescrituras al mount porque espera a isHydrated=true y
+  // a simulationRef.current (la sim se crea con valores correctos).
   useEffect(() => {
+    if (!isHydrated) return;
     const sim = simulationRef.current;
-    const current = forcesRef.current;
-    // eslint-disable-next-line no-console
-    console.log('[GraphView] update forces useEffect fired. state forces=', forces, 'ref=', current, 'simExists=', !!sim, 'skipFirst=', skipFirstForceUpdateRef.current);
-    if (skipFirstForceUpdateRef.current) {
-      skipFirstForceUpdateRef.current = false;
-      // eslint-disable-next-line no-console
-      console.log('[GraphView] update forces: SKIPPED primer run');
-      return;
-    }
     if (!sim) return;
     // eslint-disable-next-line no-console
-    console.log('[GraphView] update forces: APPLYING ref values to sim');
-    sim.force('center', d3.forceCenter(dimensionsRef.current.width / 2, dimensionsRef.current.height / 2).strength(current.centerStrength));
-    sim.force('charge', d3.forceManyBody().strength(current.repelStrength).distanceMax(350));
+    console.log('[GraphView] update forces useEffect fired. forces=', forces);
+    sim.force('center', d3.forceCenter(dimensionsRef.current.width / 2, dimensionsRef.current.height / 2).strength(forces.centerStrength));
+    sim.force('charge', d3.forceManyBody().strength(forces.repelStrength).distanceMax(350));
     (sim.force('link') as d3.ForceLink<GraphNode, GraphLink>)
-      ?.strength(current.linkStrength)
-      .distance(current.linkDistance);
+      ?.strength(forces.linkStrength)
+      .distance(forces.linkDistance);
     sim.alpha(0.5).restart();
-  }, [forces]);
+  }, [forces, isHydrated]);
 
   const updateForce = useCallback(<K extends keyof ForceSettings>(key: K, value: ForceSettings[K]) => {
     setForces(prev => ({ ...prev, [key]: value }));
