@@ -231,7 +231,12 @@ export function GraphView({ showForceControls = false, onNavigateToNode }: { sho
     if (!svgRef.current) return;
     const svg = d3.select(svgRef.current);
     const { width, height } = dimensionsRef.current;
-    const currentForces = DEFAULT_FORCES;
+    // IMPORTANTE: usar `forcesRef.current` (que ya contiene los valores
+    // cargados de localStorage al mount) en vez de DEFAULT_FORCES. Sin esto,
+    // la simulacion inicial siempre usaba los defaults del codigo y solo
+    // se aplicaba la config custom cuando el user tocaba un slider — al
+    // refresh, los nodos arrancaban mal posicionados.
+    const currentForces = forcesRef.current;
 
     simulationRef.current?.stop();
     svg.selectAll('*').remove();
