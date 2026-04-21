@@ -43,17 +43,18 @@ const VALID_STORY_POINTS = [1, 2, 3, 5, 8, 13] as const;
 
 // Presupuestos por agente — tuned para equilibrio entre profundidad y costo.
 //
-// max_tokens: con beta header 'output-128k-2025-02-19' (config en constructor),
-// Sonnet 4 soporta hasta 64K output. Para evitar stop_reason='max_tokens' que
-// TRUNCA el JSON del tool_use, damos margen generoso a TL/QA donde el
-// output escala con el count de historias (5 historias × 6 subsecciones).
-// PO es mas ligero (outlines + background + criteria) y 8192 le sobra.
+// max_tokens: Sonnet 4 soporta hasta 64000 tokens output nativamente. Damos
+// margen generoso a TL y QA porque cuando el PO propone N historias, cada
+// uno tiene que redactar N × (subsecciones × prosa). Si el QA sigue
+// truncando con 32K, el issue no es el cap — es que el modelo esta
+// entrando en loop de iteracion sin producir el terminal tool.
+// PO es mas ligero (metadata + criteria) y 12K le sobra.
 const PO_MAX_ITERATIONS = 8;
 const TL_MAX_ITERATIONS = 8;
 const QA_MAX_ITERATIONS = 6;
-const PO_MAX_TOKENS = 8192;
-const TL_MAX_TOKENS = 16384;
-const QA_MAX_TOKENS = 16384;
+const PO_MAX_TOKENS = 12288;
+const TL_MAX_TOKENS = 32768;
+const QA_MAX_TOKENS = 32768;
 
 // Caps defensivos alineados con DTO (apps/api/.../stories/dto/story-content.dto.ts).
 const MAX_FIELD_LEN = 20_000;
@@ -158,15 +159,11 @@ export class StoryGenerationService {
     if (!apiKey) {
       this.logger.warn('ANTHROPIC_API_KEY not configured — story generation will fail at runtime');
     }
-    // Beta header 'output-128k-2025-02-19' desbloquea max_tokens hasta 64K en
-    // Sonnet 4 (default stable es 8192). Necesario para el agente QA que con
-    // 5 historias × 6 subsecciones + dependencies excede 8192 facil y trunca
-    // el JSON del tool_use silenciosamente. Sin impacto negativo si el agente
-    // genera menos — el presupuesto es un ceiling, no un target.
-    this.client = new Anthropic({
-      apiKey: apiKey || undefined,
-      defaultHeaders: { 'anthropic-beta': 'output-128k-2025-02-19' },
-    });
+    // Sonnet 4 (claude-sonnet-4-20250514) soporta max_tokens hasta 64000 tokens
+    // NATIVAMENTE, sin beta header. El header 'output-128k-2025-02-19' era de
+    // Sonnet 3.7 y no aplica aqui — lo removimos por higiene.
+    // Para output > 64K se requiere Opus 4.6/4.7 (128K nativo) o Batches API.
+    this.client = new Anthropic({ apiKey: apiKey || undefined });
 
     // PO lee contexto de negocio (docs de iniciativa + vault de definiciones).
     this.poToolset = [initDocsTool, vaultGlob, vaultGrep, vaultRead];
@@ -953,12 +950,22 @@ NO cambies titles, descriptions, acceptanceCriteria — esos estan congelados. S
       designs.set(idx, this.normalizeTechnical(raw.technical));
     }
 
-    // FAIL FAST: si el agente NO produjo ningun design (tipico cuando el modelo
-    // se quedo sin tokens escribiendo el JSON del terminal tool), abortar con
-    // error claro en vez de propagar shells vacios al usuario.
+    // FAIL FAST: si el agente NO produjo ningun design, abortar con diagnostico
+    // enriquecido (igual que el QA, ver comentario alla).
     if (designs.size === 0) {
+      const rawPreview = rawDesigns.length > 0
+        ? JSON.stringify(rawDesigns[0]).slice(0, 400)
+        : '(empty array)';
+      const indicesSeen = rawDesigns
+        .map((r: any) => r?.outlineIndex)
+        .filter((i: any) => typeof i === 'number')
+        .join(',');
+      const diagnosis =
+        rawDesigns.length === 0
+          ? 'Array rawDesigns vacio — o truncamiento o el agente emitio designs:[]'
+          : `rawDesigns tiene ${rawDesigns.length} items pero ninguno matched outlineIndex valido [0..${poResult.outlines.length - 1}]. Indices recibidos: [${indicesSeen}]`;
       this.logger.error(
-        `[StoryGen:TL] ✗ no designs produced (received ${rawDesigns.length} raw, 0 valid). Likely max_tokens truncation.`,
+        `[StoryGen:TL] ✗ no designs produced. rawDesigns.length=${rawDesigns.length} outlineCount=${poResult.outlines.length}. ${diagnosis}. Raw[0] preview: ${rawPreview}`,
       );
       subject.next({
         data: {
@@ -1128,15 +1135,30 @@ NO cambies PO ni technical. Si una historia es inviable de testear, dejalo claro
       strategies.set(idx, this.normalizeQA(raw.qa));
     }
 
-    // FAIL FAST: si el agente NO produjo ninguna strategy, abortar.
+    // FAIL FAST: si el agente NO produjo ninguna strategy, abortar con diagnostico
+    // enriquecido para distinguir entre:
+    //  (a) truncamiento max_tokens (rawStrategies.length=0 porque el JSON se corto)
+    //  (b) array vacio emitido intencionalmente (agente devolvio strategies:[])
+    //  (c) items con outlineIndex invalido (desfase PO <-> QA)
     if (strategies.size === 0) {
+      const rawPreview = rawStrategies.length > 0
+        ? JSON.stringify(rawStrategies[0]).slice(0, 400)
+        : '(empty array)';
+      const indicesSeen = rawStrategies
+        .map((r: any) => r?.outlineIndex)
+        .filter((i: any) => typeof i === 'number')
+        .join(',');
+      const diagnosis =
+        rawStrategies.length === 0
+          ? 'Array rawStrategies vacio — o truncamiento o el agente emitio strategies:[]'
+          : `rawStrategies tiene ${rawStrategies.length} items pero ninguno matched outlineIndex valido [0..${poResult.outlines.length - 1}]. Indices recibidos: [${indicesSeen}]`;
       this.logger.error(
-        `[StoryGen:QA] ✗ no strategies produced (received ${rawStrategies.length} raw, 0 valid). Likely max_tokens truncation.`,
+        `[StoryGen:QA] ✗ no strategies produced. rawStrategies.length=${rawStrategies.length} rawDeps.length=${rawDeps.length} outlineCount=${poResult.outlines.length}. ${diagnosis}. Raw[0] preview: ${rawPreview}`,
       );
       subject.next({
         data: {
           type: 'error',
-          message: 'El agente QA no pudo generar las estrategias de testing (respuesta truncada). Reintenta con menos historias.',
+          message: `El agente QA no genero estrategias (rawStrategies=${rawStrategies.length}, outlines=${poResult.outlines.length}). Revisa los logs del API para diagnostico.`,
           timestamp: new Date().toISOString(),
         },
       });
