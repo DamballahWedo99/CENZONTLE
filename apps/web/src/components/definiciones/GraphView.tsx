@@ -46,30 +46,56 @@ const DEFAULT_FORCES: ForceSettings = {
 const FORCES_STORAGE_KEY = 'definiciones:graph-forces:v1';
 
 function loadForcesFromStorage(): ForceSettings {
-  if (typeof window === 'undefined') return DEFAULT_FORCES;
+  if (typeof window === 'undefined') {
+    // eslint-disable-next-line no-console
+    console.log('[GraphView] loadForcesFromStorage: SSR, returning DEFAULT_FORCES');
+    return DEFAULT_FORCES;
+  }
   try {
     const raw = window.localStorage.getItem(FORCES_STORAGE_KEY);
-    if (!raw) return DEFAULT_FORCES;
+    // eslint-disable-next-line no-console
+    console.log('[GraphView] loadForcesFromStorage: raw from localStorage:', raw);
+    if (!raw) {
+      // eslint-disable-next-line no-console
+      console.log('[GraphView] loadForcesFromStorage: no data, returning DEFAULT_FORCES');
+      return DEFAULT_FORCES;
+    }
     const parsed = JSON.parse(raw) as Partial<ForceSettings>;
-    // Merge con defaults para tolerar keys faltantes en versiones viejas.
-    return {
+    const result = {
       centerStrength: typeof parsed.centerStrength === 'number' ? parsed.centerStrength : DEFAULT_FORCES.centerStrength,
       repelStrength: typeof parsed.repelStrength === 'number' ? parsed.repelStrength : DEFAULT_FORCES.repelStrength,
       linkStrength: typeof parsed.linkStrength === 'number' ? parsed.linkStrength : DEFAULT_FORCES.linkStrength,
       linkDistance: typeof parsed.linkDistance === 'number' ? parsed.linkDistance : DEFAULT_FORCES.linkDistance,
       nodeSize: typeof parsed.nodeSize === 'number' ? parsed.nodeSize : DEFAULT_FORCES.nodeSize,
     };
-  } catch {
+    // eslint-disable-next-line no-console
+    console.log('[GraphView] loadForcesFromStorage: parsed result:', result);
+    return result;
+  } catch (err) {
+    // eslint-disable-next-line no-console
+    console.error('[GraphView] loadForcesFromStorage: error parsing:', err);
     return DEFAULT_FORCES;
   }
 }
 
 function saveForcesToStorage(forces: ForceSettings): void {
-  if (typeof window === 'undefined') return;
+  if (typeof window === 'undefined') {
+    // eslint-disable-next-line no-console
+    console.log('[GraphView] saveForcesToStorage: SSR, skipping');
+    return;
+  }
   try {
-    window.localStorage.setItem(FORCES_STORAGE_KEY, JSON.stringify(forces));
-  } catch {
-    // Storage puede estar lleno / en modo privado — silenciamos.
+    const serialized = JSON.stringify(forces);
+    window.localStorage.setItem(FORCES_STORAGE_KEY, serialized);
+    // eslint-disable-next-line no-console
+    console.log('[GraphView] saveForcesToStorage: saved:', forces);
+    // Verificacion inmediata — leer de vuelta para confirmar que se persistio
+    const readBack = window.localStorage.getItem(FORCES_STORAGE_KEY);
+    // eslint-disable-next-line no-console
+    console.log('[GraphView] saveForcesToStorage: readback:', readBack);
+  } catch (err) {
+    // eslint-disable-next-line no-console
+    console.error('[GraphView] saveForcesToStorage: error:', err);
   }
 }
 
@@ -259,11 +285,17 @@ export function GraphView({ showForceControls = false, onNavigateToNode }: { sho
     // useEffects. Tambien sincronizamos el state para que los sliders del
     // panel de Fuerzas muestren los valores correctos (sin esto el sim
     // tendria valores correctos pero los sliders mostrarian defaults).
+    // eslint-disable-next-line no-console
+    console.log('[GraphView] main D3 useEffect fired. didHydrateRef=', didHydrateRef.current, 'nodes=', nodes.length, 'links=', links.length);
+
     // En el primer mount, leemos del storage para hidratar; despues usamos
     // forcesRef.current (que esta sincronizado con el state `forces`).
     const currentForces = didHydrateRef.current
       ? forcesRef.current
       : loadForcesFromStorage();
+
+    // eslint-disable-next-line no-console
+    console.log('[GraphView] main D3 useEffect: using currentForces=', currentForces, 'forcesRef.current=', forcesRef.current, 'state forces=', forces);
 
     // Sync el state una sola vez tras hydration — para que los sliders del
     // panel muestren los valores cargados. No re-triggers el effect porque
@@ -276,7 +308,11 @@ export function GraphView({ showForceControls = false, onNavigateToNode }: { sho
         currentForces.linkStrength !== forcesRef.current.linkStrength ||
         currentForces.linkDistance !== forcesRef.current.linkDistance ||
         currentForces.nodeSize !== forcesRef.current.nodeSize;
+      // eslint-disable-next-line no-console
+      console.log('[GraphView] hydration: needsSync=', needsSync);
       if (needsSync) {
+        // eslint-disable-next-line no-console
+        console.log('[GraphView] calling setForces with:', currentForces);
         setForces(currentForces);
       }
     }
@@ -517,6 +553,8 @@ export function GraphView({ showForceControls = false, onNavigateToNode }: { sho
   // Update forces imperatively
   useEffect(() => {
     const sim = simulationRef.current;
+    // eslint-disable-next-line no-console
+    console.log('[GraphView] update forces useEffect fired. forces=', forces, 'simExists=', !!sim);
     if (!sim) return;
     sim.force('center', d3.forceCenter(dimensionsRef.current.width / 2, dimensionsRef.current.height / 2).strength(forces.centerStrength));
     sim.force('charge', d3.forceManyBody().strength(forces.repelStrength).distanceMax(350));
@@ -536,6 +574,8 @@ export function GraphView({ showForceControls = false, onNavigateToNode }: { sho
    * DEFAULT_FORCES del codigo.
    */
   const saveAsDefault = useCallback(() => {
+    // eslint-disable-next-line no-console
+    console.log('[GraphView] saveAsDefault CLICKED. current forces=', forces);
     saveForcesToStorage(forces);
     setJustSaved(true);
     toast.success('Configuración guardada como predeterminada');
