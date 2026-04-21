@@ -1,11 +1,14 @@
 'use client';
 
-import { useState } from 'react';
+import { useCallback, useRef, useState } from 'react';
 import Link from 'next/link';
+import { toast } from 'sonner';
 import { Epic, EpicDiagram } from '@cenzontle/shared';
 import { Button } from '@/components/ui/button';
+import { ConfirmDialog } from '@/components/ui/confirm-dialog';
 import { DiagramViewer } from './DiagramViewer';
-import { generateDiagram } from '@/lib/diagram-agent';
+import { streamDiagramGeneration, type DiagramGenerationEventWithMeta } from '@/lib/diagram-agent';
+import { AgentThinkingDisplay } from '@/components/proyectos/overview/agent-thinking';
 import {
   Sparkles,
   GitBranch,
@@ -37,20 +40,115 @@ export function EpicDiagrams({
   onTlReject,
 }: EpicDiagramsProps) {
   const [isGenerating, setIsGenerating] = useState(false);
+  const [events, setEvents] = useState<DiagramGenerationEventWithMeta[]>([]);
   const [showRejectForm, setShowRejectForm] = useState(false);
   const [rejectComment, setRejectComment] = useState('');
+  // Confirmación antes de regenerar: regenerar con IA sobrescribe el diagrama
+  // existente (incluyendo ediciones manuales y posiciones personalizadas).
+  // Solo se pide confirmación si ya hay un diagrama — la primera generación
+  // no tiene qué perder.
+  const [confirmRegenerateOpen, setConfirmRegenerateOpen] = useState(false);
+
+  // Buffer para el metadata del documento de integración emitido por el
+  // evento `document_ready`. El backend lo emite ANTES de `diagram_ready`,
+  // así que cuando llega aún no existe un diagrama en el state local al
+  // que anclar los campos. Guardamos el payload aquí y lo aplicamos dentro
+  // del handler del `diagram_ready` (o, si el diagrama ya existía en `diagrams`,
+  // al instante via `onDiagramEdited`).
+  //
+  // `useRef` en vez de `useState` porque el valor vive durante el iterador
+  // async y no queremos re-renderizar el componente entre eventos — sólo
+  // consumirlo en el siguiente tick lógico.
+  const pendingDocRef = useRef<{
+    diagramType: EpicDiagram['type'];
+    path: string;
+    generatedAt: string;
+  } | null>(null);
 
   const businessDiagram = diagrams.find((d) => d.type === 'business');
+  const showThinking = isGenerating || events.length > 0;
 
-  const handleGenerate = async () => {
+  const handleGenerate = useCallback(async () => {
     setIsGenerating(true);
+    setEvents([]);
+    pendingDocRef.current = null;
+
+    const collected: DiagramGenerationEventWithMeta[] = [];
+    let emittedDiagram: EpicDiagram | null = null;
+    let lastError: string | null = null;
+
     try {
-      const diagram = await generateDiagram(epic, 'business');
-      onDiagramGenerated(diagram);
-    } finally {
-      setIsGenerating(false);
+      for await (const event of streamDiagramGeneration(epic, 'business')) {
+        collected.push(event);
+        setEvents([...collected]);
+        if (event.type === 'diagram_ready') {
+          // Si `document_ready` llegó primero (caso normal), aplicamos sus
+          // campos al diagrama antes de propagarlo al padre — así el state
+          // global queda consistente en un único dispatch. El backend
+          // típicamente ya setea estos campos antes de `saveDiagram`, pero
+          // nos aseguramos de no perderlos si hubo desincronía (p.ej. cache
+          // servido sin los campos nuevos).
+          const pending = pendingDocRef.current;
+          if (pending && pending.diagramType === event.diagram.type) {
+            emittedDiagram = {
+              ...event.diagram,
+              integrationFlowDocPath: event.diagram.integrationFlowDocPath ?? pending.path,
+              integrationFlowGeneratedAt:
+                event.diagram.integrationFlowGeneratedAt ?? pending.generatedAt,
+            };
+            pendingDocRef.current = null;
+          } else {
+            emittedDiagram = event.diagram;
+          }
+        } else if (event.type === 'document_ready') {
+          // Toast informativo — el path puede ser largo; recortar a 60 chars
+          // para no reventar el toast component (sonner respeta layout pero
+          // los paths del vault pueden superar los 100 chars).
+          const truncatedPath =
+            event.path.length > 60 ? `${event.path.slice(0, 57)}...` : event.path;
+          toast.success('Documento de flujo de integración guardado en el vault', {
+            description: truncatedPath,
+          });
+
+          // Buscar el diagrama correspondiente en el state actual (props).
+          // Si existe (regeneración sobre un diagrama previo), lo actualizamos
+          // inmediatamente vía `onDiagramEdited` para que el context refleje
+          // los nuevos campos incluso si el `diagram_ready` tarda.
+          //
+          // Si no existe (primera generación o el diagrama aún no está en
+          // props), guardamos en el ref y lo aplicaremos cuando llegue
+          // `diagram_ready`.
+          const existing = diagrams.find((d) => d.type === event.diagramType);
+          if (existing) {
+            onDiagramEdited({
+              ...existing,
+              integrationFlowDocPath: event.path,
+              integrationFlowGeneratedAt: event.generatedAt,
+            });
+          } else {
+            pendingDocRef.current = {
+              diagramType: event.diagramType,
+              path: event.path,
+              generatedAt: event.generatedAt,
+            };
+          }
+        } else if (event.type === 'error') {
+          lastError = event.message;
+        }
+      }
+    } catch (err) {
+      lastError = err instanceof Error ? err.message : 'Error desconocido al generar el diagrama.';
     }
-  };
+
+    if (emittedDiagram) {
+      onDiagramGenerated(emittedDiagram);
+    } else {
+      const description = lastError ?? 'El agente finalizó sin emitir un diagrama.';
+      toast.error('No fue posible generar el diagrama', { description });
+    }
+    pendingDocRef.current = null;
+    setIsGenerating(false);
+  }, [epic, diagrams, onDiagramGenerated, onDiagramEdited]);
 
   const handleReject = () => {
     if (!rejectComment.trim()) return;
@@ -59,6 +157,11 @@ export function EpicDiagrams({
     setShowRejectForm(false);
   };
 
+  const handleConfirmRegenerate = useCallback(() => {
+    setConfirmRegenerateOpen(false);
+    handleGenerate();
+  }, [handleGenerate]);
+
   function formatShortDate(dateStr: string): string {
     return new Date(dateStr).toLocaleDateString('es-MX', { day: 'numeric', month: 'short' });
   }
@@ -66,44 +169,46 @@ export function EpicDiagrams({
   // No diagram yet — show generation prompt
   if (!businessDiagram) {
     return (
-      <div className="rounded-xl border-2 border-dashed py-12 flex flex-col items-center gap-4 text-center">
-        <div className="h-12 w-12 rounded-full bg-muted flex items-center justify-center">
-          <Sparkles className="h-6 w-6 text-muted-foreground" />
-        </div>
-        <div>
-          <p className="text-sm font-medium">Genera el diagrama de negocio con IA</p>
-          <p className="text-xs text-muted-foreground mt-1 max-w-md">
-            El agente analizará la definición de esta épica para generar el diagrama de flujo de negocio automáticamente.
-          </p>
-        </div>
-        <Button
-          variant="outline"
-          size="sm"
-          onClick={handleGenerate}
-          disabled={isGenerating}
-          className="gap-2 mt-2"
-        >
-          {isGenerating ? (
-            <Loader2 className="h-3.5 w-3.5 animate-spin" />
-          ) : (
-            <GitBranch className="h-3.5 w-3.5" />
-          )}
-          Generar Diagrama de Negocio
-        </Button>
-        {isGenerating && (
-          <div className="flex items-center gap-3 rounded-lg bg-muted/50 px-4 py-3 text-sm mt-2">
-            <Loader2 className="h-4 w-4 animate-spin text-muted-foreground" />
-            <span className="text-muted-foreground">
-              El agente está analizando la épica para generar el diagrama de negocio...
-            </span>
-          </div>
+      <div className="space-y-4">
+        {showThinking && (
+          <AgentThinkingDisplay events={events} isStreaming={isGenerating} />
         )}
+        <div className="rounded-xl border-2 border-dashed py-12 flex flex-col items-center gap-4 text-center">
+          <div className="h-12 w-12 rounded-full bg-muted flex items-center justify-center">
+            <Sparkles className="h-6 w-6 text-muted-foreground" />
+          </div>
+          <div>
+            <p className="text-sm font-medium">Genera el diagrama de negocio con IA</p>
+            <p className="text-xs text-muted-foreground mt-1 max-w-md">
+              El agente analizará la definición de esta épica, leerá código y documentación reales, y generará el diagrama de flujo de negocio automáticamente.
+            </p>
+          </div>
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={handleGenerate}
+            disabled={isGenerating}
+            className="gap-2 mt-2"
+          >
+            {isGenerating ? (
+              <Loader2 className="h-3.5 w-3.5 animate-spin" />
+            ) : (
+              <GitBranch className="h-3.5 w-3.5" />
+            )}
+            Generar Diagrama de Negocio
+          </Button>
+        </div>
       </div>
     );
   }
 
   return (
     <div className="space-y-4">
+      {/* Agent thinking — shown above the diagram while streaming and persisted after */}
+      {showThinking && (
+        <AgentThinkingDisplay events={events} isStreaming={isGenerating} />
+      )}
+
       {/* Header with regenerate */}
       <div className="flex items-center justify-between">
         <span className="flex items-center gap-1.5 text-sm font-medium">
@@ -114,7 +219,7 @@ export function EpicDiagrams({
           <Button
             variant="ghost"
             size="sm"
-            onClick={handleGenerate}
+            onClick={() => setConfirmRegenerateOpen(true)}
             disabled={isGenerating}
             className="gap-1.5 text-xs h-7 text-muted-foreground"
           >
@@ -127,7 +232,18 @@ export function EpicDiagrams({
             className="gap-1.5 text-xs h-7 text-muted-foreground"
             asChild
           >
-            <Link href={`/proyectos/epicas/${epic.id}/diagrama`}>
+            {/*
+              `target="_blank"` abre la vista dedicada del diagrama en una
+              nueva pestaña para que el usuario pueda seguir viendo la épica
+              en la original. `rel="noopener noreferrer"` es convención
+              defensiva: previene reverse tabnabbing (que el destino acceda
+              a window.opener) y no filtra el Referer del origen.
+            */}
+            <Link
+              href={`/proyectos/epicas/${epic.id}/diagrama`}
+              target="_blank"
+              rel="noopener noreferrer"
+            >
               <Maximize2 className="h-3 w-3" />
               Página completa
             </Link>
@@ -135,10 +251,12 @@ export function EpicDiagrams({
         </div>
       </div>
 
-      {/* Editable Diagram */}
+      {/* Editable Diagram — pasamos epicId para que el viewer active
+          auto-save al cache Redis con debounce 500ms durante edición. */}
       <DiagramViewer
         diagram={businessDiagram}
         editable
+        epicId={epic.id}
         onDiagramChange={onDiagramEdited}
       />
 
@@ -150,16 +268,6 @@ export function EpicDiagrams({
           Generado por {businessDiagram.generatedBy === 'ai' ? 'IA' : 'usuario'} · {new Date(businessDiagram.generatedAt).toLocaleDateString('es-MX', { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' })}
         </span>
       </div>
-
-      {/* Generating overlay */}
-      {isGenerating && (
-        <div className="flex items-center gap-3 rounded-lg bg-muted/50 px-4 py-3 text-sm">
-          <Loader2 className="h-4 w-4 animate-spin text-muted-foreground" />
-          <span className="text-muted-foreground">
-            Regenerando diagrama de negocio...
-          </span>
-        </div>
-      )}
 
       {/* TL Approval Section */}
       <div className="rounded-xl border p-5">
@@ -269,6 +377,20 @@ export function EpicDiagrams({
           </div>
         )}
       </div>
+
+      {/* Confirmación antes de regenerar. Pedimos confirmación SIEMPRE que
+          haya un diagrama existente (puede tener ediciones manuales que se
+          perderían). Si regenerar no tiene nada que perder, no se muestra
+          porque el render de este header completo depende de `businessDiagram`. */}
+      <ConfirmDialog
+        open={confirmRegenerateOpen}
+        onOpenChange={setConfirmRegenerateOpen}
+        title="Regenerar diagrama con IA"
+        description="Se reemplazará el diagrama actual. Las ediciones manuales, posiciones personalizadas y el tema de colores aplicado a los nodos se perderán. ¿Continuar?"
+        confirmText="Regenerar"
+        cancelText="Conservar"
+        onConfirm={handleConfirmRegenerate}
+      />
     </div>
   );
 }

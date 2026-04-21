@@ -17,6 +17,7 @@ export const TOOL_ICONS: Record<string, LucideIcon> = {
   read_initiative_documents: FileText,
   loading_context: Brain,
   submit_proposals: Send,
+  submit_diagram: Send,
   // Code exploration tools (real source code via ripgrep sobre repos clonados)
   code_glob: FolderSearch,
   code_grep: TextSearch,
@@ -32,6 +33,7 @@ export const TOOL_LABELS: Record<string, string> = {
   read_initiative_documents: 'Lectura de documentos',
   loading_context: 'Carga de contexto',
   submit_proposals: 'Propuestas generadas',
+  submit_diagram: 'Diagrama generado',
   code_glob: 'Búsqueda por patrón',
   code_grep: 'Búsqueda en código',
   code_read: 'Lectura de archivo',
@@ -44,6 +46,7 @@ export const TOOL_COLORS: Record<string, string> = {
   web_search: 'border-l-green-500',
   read_initiative_documents: 'border-l-purple-500',
   submit_proposals: 'border-l-primary',
+  submit_diagram: 'border-l-primary',
   loading_context: 'border-l-muted-foreground',
   code_glob: 'border-l-cyan-500',
   code_grep: 'border-l-emerald-500',
@@ -58,5 +61,6 @@ export const PHASE_LABELS: Record<string, string> = {
   researching: 'Investigando',
   analyzing: 'Analizando',
   proposing: 'Proponiendo',
+  composing: 'Componiendo',
   done: 'Completado',
 };

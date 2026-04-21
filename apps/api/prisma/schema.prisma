@@ -267,3 +267,21 @@ model ChangelogEntry {
   @@index([timestamp])
   @@map("changelog_entries")
 }
+
+/// Singleton: configuración de colores de diagrama por grupo para toda la
+/// organización. Sólo Alta Gerencia puede modificarlo. `groupColors` es un
+/// objeto JSON con llaves `start | end | frontend | backend | data | infra |
+/// external | decision | alt` → hex string (#rrggbb).
+///
+/// `textColors` es nullable por backward compat — filas antiguas sin este
+/// campo se resuelven en el service con DEFAULT_DIAGRAM_TEXT_COLORS. Shape:
+/// `{ title: string; description: string }` donde ambos son hex #rrggbb.
+model DiagramThemeSettings {
+  id          String   @id @default("singleton")
+  groupColors Json
+  textColors  Json?
+  updatedAt   DateTime @updatedAt
+  updatedBy   String?
+
+  @@map("diagram_theme_settings")
+}

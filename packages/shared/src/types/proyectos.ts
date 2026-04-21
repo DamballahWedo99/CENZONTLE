@@ -57,14 +57,196 @@ export enum ChangelogEntityType {
 
 // === DIAGRAM TYPES ===
 
-export type DiagramNodeType = 'service' | 'database' | 'queue' | 'gateway' | 'external' | 'client' | 'process' | 'decision' | 'actor';
+export type DiagramNodeType =
+  | 'service'
+  | 'database'
+  | 'queue'
+  | 'gateway'
+  | 'external'
+  | 'client'
+  | 'process'
+  | 'decision'
+  | 'actor'
+  // `reference` es un "jump connector" — par de círculos con la misma letra
+  // (A/B/C…) que parten un edge largo en dos segmentos cortos. Se crea en
+  // el frontend post-layout (ver `insertJumpConnectors` en useGroupedLayout)
+  // y se persiste como nodo real para que el user pueda moverlo/renombrarlo.
+  // El LLM del backend NO debe generar este tipo — solo aparece como
+  // resultado del pipeline de rendering, nunca como salida del agente.
+  | 'reference';
+
+/**
+ * Agrupamiento visual del nodo — el viewer lo usa para clustering (swim lanes).
+ * Si falta, el backend lo auto-asigna por heurística basada en DiagramNodeType.
+ *
+ * Son 7 layers arquitectónicos. `decision` y `external` son TIPOS de nodo,
+ * no layers: un rombo de decisión hereda la capa donde vive su lógica
+ * (normalmente backend); un integrador externo es un layer aparte aunque el
+ * tipo del nodo también se llame `external`.
+ */
+export type DiagramNodeGroup =
+  | 'start'
+  | 'end'
+  | 'frontend'
+  | 'backend'
+  | 'data'
+  | 'infra'
+  | 'external';
+
+/**
+ * Lista canónica de los grupos actuales. Usado para validación en backend
+ * (`VALID_GROUPS`), filtrado defensivo en el theme service y como single
+ * source of truth que el `DiagramNodeGroup` union debería espejar.
+ */
+export const DIAGRAM_NODE_GROUPS: readonly DiagramNodeGroup[] = [
+  'start',
+  'end',
+  'frontend',
+  'backend',
+  'data',
+  'infra',
+  'external',
+];
+
+/**
+ * Máximo de caracteres en un edge label — el viewer trunca con `…` si excede.
+ * El backend validator (`diagram-generation.service.ts`) y el frontend
+ * `ValidationPanel` usan este mismo valor para enforcement consistente.
+ */
+export const DIAGRAM_EDGE_LABEL_MAX_CHARS = 12;
+
+/**
+ * Labels de edge prohibidos por demasiado genéricos. C4 model y el análisis
+ * de best practices 2026 (icepanel top-mistakes) coinciden: un label como
+ * "uses" es equivalente a no tener label — el lector sigue sin saber si es
+ * un call, un read, un publish, etc.
+ *
+ * Mantener corto y conservador — solo tokens inequívocamente no informativos.
+ * Labels legítimos cortos ("SI", "NO", "GET", "JWT") NO están aquí porque
+ * sí comunican algo específico (rama, verbo HTTP, mecanismo de autenticación).
+ *
+ * La lista es `ReadonlySet<string>` para lookup O(1) en hot path. El
+ * validator en backend y el ValidationPanel en frontend ambos normalizan
+ * el input con `.toLowerCase().trim()` antes de consultar.
+ */
+export const TRIVIAL_DIAGRAM_EDGE_LABELS: ReadonlySet<string> = new Set([
+  'uses',
+  'usa',
+  'utiliza',
+  'use',
+  '-',
+  '.',
+  '->',
+  '→',
+  'x',
+  'arrow',
+  'edge',
+  'link',
+  'flow',
+]);
+
+/**
+ * Grupos legacy (`decision`, `alt`) del schema anterior a la reducción 9→7.
+ * Aún pueden vivir en:
+ *   - Diagramas cacheados en Redis (TTL 5 días) emitidos antes del cambio.
+ *   - Filas de `diagram_theme_settings.groupColors` (JSONB tolera keys extra).
+ *
+ * Los normalizamos al leer (`migrateLegacyGroup`) y al escribir
+ * (`migrateLegacyDiagramGroups`) para garantizar que la UI nunca reciba un
+ * valor fuera del union actual.
+ *
+ * `decision`/`alt` → `backend` porque los rombos y caminos alternativos
+ * típicamente viven en la capa de lógica de servidor.
+ */
+export const LEGACY_DIAGRAM_GROUP_MAP: Record<string, DiagramNodeGroup> = {
+  decision: 'backend',
+  alt: 'backend',
+};
+
+/**
+ * Mapea un valor legacy de `group` al valor canónico actual. Si el input
+ * ya es un grupo válido, lo retorna sin cambios. Si es desconocido, retorna
+ * `undefined` — el caller decide el fallback (típicamente `'backend'`).
+ */
+export function migrateLegacyGroup(group: string | undefined | null): DiagramNodeGroup | undefined {
+  if (!group) return undefined;
+  if ((DIAGRAM_NODE_GROUPS as readonly string[]).includes(group)) {
+    return group as DiagramNodeGroup;
+  }
+  return LEGACY_DIAGRAM_GROUP_MAP[group];
+}
+
+/**
+ * Aplica `migrateLegacyGroup` a cada nodo de un diagrama — helper para el
+ * cache service en el backend. Retorna un diagrama nuevo (no muta el input)
+ * con `node.group` normalizado al union actual. Nodos con grupo desconocido
+ * conservan el valor original para no enmascarar bugs upstream.
+ */
+export function migrateLegacyDiagramGroups<T extends EpicDiagram>(diagram: T): T {
+  const nodes = diagram.nodes.map((n) => {
+    const migrated = migrateLegacyGroup(n.group);
+    return migrated && migrated !== n.group ? { ...n, group: migrated } : n;
+  });
+  return { ...diagram, nodes };
+}
+
+/**
+ * Filtra un objeto `groupColors` (puede venir de DB con keys legacy) al
+ * shape actual — solo conserva las 7 claves válidas. Usado en
+ * `diagram-theme-settings.service.toPublic()` para evitar que claves
+ * `decision`/`alt` escapen al frontend con un tipo más ancho del declarado.
+ */
+export function filterDiagramGroupColors(raw: Record<string, unknown>): Partial<DiagramGroupColors> {
+  const out: Partial<DiagramGroupColors> = {};
+  for (const key of DIAGRAM_NODE_GROUPS) {
+    const value = raw[key];
+    if (typeof value === 'string') out[key] = value;
+  }
+  return out;
+}
+
+/**
+ * Configuración de colores por grupo semántico de nodos. Hex strings.
+ * Cada organización (single-org actualmente) tiene un único set.
+ */
+export type DiagramGroupColors = Record<DiagramNodeGroup, string>;
+
+export const DEFAULT_DIAGRAM_GROUP_COLORS: DiagramGroupColors = {
+  start: '#6366f1',    // indigo (nodo inicial)
+  end: '#10b981',      // emerald (terminal)
+  frontend: '#38bdf8', // sky (UI, web, móvil)
+  backend: '#a855f7',  // violet (microservicios)
+  data: '#f59e0b',     // amber (DBs, colas)
+  infra: '#94a3b8',    // slate (gateways, CDNs)
+  external: '#f43f5e', // rose (terceros)
+};
+
+/**
+ * Colores de texto dentro de cada nodo (título grande y descripción pequeña).
+ * Son GLOBALES al diagrama — no por grupo — para evitar un panel de config
+ * abrumador (14 controles). Los defaults son un white+zinc-200 que trabaja
+ * bien contra los 7 fondos por grupo.
+ */
+export type DiagramTextColors = {
+  /** Color hex del TÍTULO dentro de cada nodo (ej: "Frontend App"). */
+  title: string;
+  /** Color hex de la DESCRIPCIÓN (texto pequeño debajo del título). */
+  description: string;
+};
+
+export const DEFAULT_DIAGRAM_TEXT_COLORS: DiagramTextColors = {
+  title: '#ffffff',
+  // zinc-200 — mucho más contraste que el zinc-400 hardcodeado previo.
+  // Los diagramas nuevos salen legibles sin intervención del usuario.
+  description: '#e4e4e7',
+};
 
 export interface DiagramNode {
   id: string;
   type: DiagramNodeType;
   label: string;
   description?: string;
-  group?: string; // visual grouping (e.g. "backend", "frontend", "external")
+  group?: DiagramNodeGroup;
 }
 
 export interface DiagramEdge {
@@ -77,14 +259,96 @@ export interface DiagramEdge {
   targetHandle?: string;
 }
 
+export type DiagramGenerationType = 'technical' | 'business';
+
+/**
+ * Paso del flujo de integración — agrupa nodos lógicamente y provee narrativa
+ * para el sidepanel del viewer. El paso activo (hover o click) ilumina los
+ * `nodeIds` declarados y sus edges interconectoras; el resto del diagrama
+ * se atenúa visualmente.
+ *
+ * El agente genera los pasos junto con el documento de flujo de integración
+ * que se escribe al vault (ver `integrationFlowDocPath` en `EpicDiagram`).
+ * Diagramas legacy no tienen `steps` — el sidepanel muestra un CTA de
+ * backfill en ese caso.
+ */
+export interface DiagramStep {
+  id: string;
+  /** Orden en el flujo (1..N). Determina la numeración visual en el sidepanel. */
+  order: number;
+  /** Título corto — e.g. "Validación de credenciales". */
+  title: string;
+  /** Descripción detallada del paso (2-4 frases). */
+  description: string;
+  /** IDs de nodos que este paso engloba. Debe tener al menos 1. */
+  nodeIds: string[];
+  /**
+   * IDs de edges explícitamente asociados al paso. Si undefined, el viewer
+   * deriva los edges cuya source + target pertenecen ambos a `nodeIds`.
+   */
+  edgeIds?: string[];
+  /**
+   * Anchor opcional al documento de flujo de integración (e.g. "#paso-1").
+   * Si está presente, el sidepanel linkea "Ver detalles" al doc scrolleado.
+   */
+  docAnchor?: string;
+  /**
+   * Sinopsis de 1-2 frases del paso, optimizada para lectura rápida en el
+   * bottom panel del viewer. Se diferencia de `description` en que es
+   * deliberadamente condensada (≤220 chars) — el lector debe captar el
+   * "qué hace" del paso en un vistazo. Opcional para backward compat con
+   * diagramas generados antes de esta feature.
+   */
+  summary?: string;
+  /**
+   * 3-6 bullet points que enumeran los puntos CLAVE del paso (inputs,
+   * decisiones, efectos principales). Se renderizan como lista visual en
+   * el bottom panel. Cada bullet es una frase corta e independiente
+   * (≤120 chars). Opcional para backward compat.
+   */
+  bulletpoints?: string[];
+}
+
 export interface EpicDiagram {
   id: string;
   name: string;
-  type: 'technical' | 'business';
+  type: DiagramGenerationType;
   nodes: DiagramNode[];
   edges: DiagramEdge[];
   generatedAt: string;
   generatedBy: 'ai' | 'manual';
+  /**
+   * Marca si el diagrama tiene posiciones de nodos ajustadas manualmente.
+   * Cuando `true`, el viewer NO re-corre Dagre (respeta los drags del user).
+   * Cuando `false` o ausente, el auto-layout se aplica como siempre.
+   * Se enciende la primera vez que el user arrastra un nodo en modo edición.
+   */
+  hasManualLayout?: boolean;
+  /**
+   * Posiciones manuales `{ nodeId → {x, y} }` persistidas junto al diagrama.
+   * Solo se poblan cuando `hasManualLayout === true`. El viewer las aplica
+   * tras el layout Dagre (si sigue activo) o las usa como posición directa.
+   */
+  manualPositions?: Record<string, { x: number; y: number }>;
+  /**
+   * Pasos del flujo de integración generados por el agente. Opcional —
+   * diagramas legacy (generados antes de esta feature) no lo tienen; el
+   * sidepanel muestra un CTA "Generar documento de flujo" en ese caso.
+   */
+  steps?: DiagramStep[];
+  /**
+   * Path en vault al documento de flujo de integración. Formato canónico:
+   * `epics/{epicId}-{slug}/diagrams/{type}.md`. Undefined si el diagrama
+   * es legacy o si la escritura al vault falló (el diagrama se persiste
+   * igual; la ausencia del doc es degradación graciosa).
+   */
+  integrationFlowDocPath?: string;
+  /**
+   * ISO timestamp de cuando se generó el documento de integración. Puede
+   * diferir de `generatedAt` si el doc se generó vía backfill sobre un
+   * diagrama preexistente.
+   */
+  integrationFlowGeneratedAt?: string;
 }
 
 // === QA MATRIX TYPES ===
@@ -381,6 +645,33 @@ export interface CachedGenerationSession {
   completedAt?: string;
   ttlSeconds: number;
 }
+
+/** Fases del agente de generacion de diagramas. */
+export type DiagramGenerationPhase = 'idle' | 'researching' | 'analyzing' | 'composing' | 'done';
+
+/** Base fields present on every diagram SSE event. */
+interface DiagramGenerationEventBase {
+  timestamp?: string;
+}
+
+/** Eventos SSE emitidos durante la generacion de diagramas. */
+export type DiagramGenerationEvent =
+  | (DiagramGenerationEventBase & { type: 'run_started' })
+  | (DiagramGenerationEventBase & { type: 'run_finished'; totalDurationMs: number })
+  | (DiagramGenerationEventBase & { type: 'phase_change'; phase: DiagramGenerationPhase; label: string })
+  | (DiagramGenerationEventBase & { type: 'thinking'; delta: string })
+  | (DiagramGenerationEventBase & { type: 'step_start'; step: string; label?: string; tool?: string; toolArgs?: Record<string, unknown> })
+  | (DiagramGenerationEventBase & { type: 'step_done'; step: string; tool?: string; summary?: string; durationMs?: number; resultPreview?: string })
+  | (DiagramGenerationEventBase & { type: 'diagram_ready'; diagram: EpicDiagram })
+  | (DiagramGenerationEventBase & {
+      type: 'document_ready';
+      path: string;
+      epicId: string;
+      diagramType: DiagramGenerationType;
+      generatedAt: string;
+    })
+  | (DiagramGenerationEventBase & { type: 'done' })
+  | (DiagramGenerationEventBase & { type: 'error'; message: string });
 
 // --- Story section types ---
 

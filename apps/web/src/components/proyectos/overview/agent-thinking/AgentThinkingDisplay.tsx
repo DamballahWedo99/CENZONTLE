@@ -4,14 +4,13 @@ import { useState, useEffect } from 'react';
 import { Button } from '@/components/ui/button';
 import { X } from 'lucide-react';
 import { Collapsible, CollapsibleTrigger, CollapsibleContent } from '@/components/ui/collapsible';
-import { useAgentThinkingState } from '@/hooks/useAgentThinkingState';
+import { useAgentThinkingState, type AgentThinkingEvent } from '@/hooks/useAgentThinkingState';
 import { ThinkingHeader } from './ThinkingHeader';
 import { ThinkingContent } from './ThinkingContent';
 import { PhaseProgressBar } from './PhaseProgressBar';
-import type { EpicGenerationEvent } from '@cenzontle/shared';
 
 interface AgentThinkingDisplayProps {
-  events: EpicGenerationEvent[];
+  events: AgentThinkingEvent[];
   isStreaming: boolean;
   onCancel?: () => void;
 }

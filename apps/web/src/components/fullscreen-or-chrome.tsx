@@ -7,8 +7,15 @@ import { DashboardHeader } from '@/components/dashboard-header';
 /**
  * Routes matching these patterns render fullscreen (no sidebar, no header).
  * Everything else gets the normal dashboard chrome.
+ *
+ * `/diagrama` cubre `/proyectos/epicas/[id]/diagrama`, que se abre en una
+ * tab nueva desde el tab de diagrama de la épica. Como el destino es una
+ * vista de presentación del canvas React Flow completo, no queremos chrome
+ * alrededor: ni sidebar, ni header, ni breadcrumb. El usuario cierra la
+ * tab para "volver" — es la convención para vistas abiertas con
+ * `target="_blank"`.
  */
-const FULLSCREEN_PATTERNS = ['/terminal'];
+const FULLSCREEN_PATTERNS = ['/terminal', '/diagrama'];
 
 function isFullscreen(pathname: string | null): boolean {
   if (!pathname) return false;

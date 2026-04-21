@@ -2,13 +2,14 @@
   "name": "cenzontle",
   "private": true,
   "scripts": {
-    "dev": "turbo dev",
+    "dev": "pnpm --filter @cenzontle/shared build && turbo dev --filter=@cenzontle/web --filter=@cenzontle/api",
+    "dev:unsafe": "turbo dev",
     "build": "turbo build",
     "lint": "turbo lint",
     "test": "turbo test",
     "type-check": "turbo type-check",
-    "dev:web": "turbo dev --filter=@cenzontle/web",
-    "dev:api": "turbo dev --filter=@cenzontle/api",
+    "dev:web": "pnpm --filter @cenzontle/shared build && turbo dev --filter=@cenzontle/web",
+    "dev:api": "pnpm --filter @cenzontle/shared build && turbo dev --filter=@cenzontle/api",
     "clean": "turbo clean"
   },
   "devDependencies": {

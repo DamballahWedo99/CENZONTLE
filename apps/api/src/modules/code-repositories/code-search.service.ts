@@ -249,7 +249,12 @@ export class CodeSearchService implements OnModuleInit {
     if (opts.subDir) {
       this.assertNotForbidden(opts.subDir);
     }
+    // Resolve symlinks on the repo root (CWE-59 mitigation). macOS canonicalizes
+    // /tmp → /private/tmp, so comparing `real.startsWith(path.resolve(...))` fails
+    // and every file would be discarded as "escapes repo". We compute both forms
+    // and accept either prefix.
     const absRepo = path.resolve(repoPath);
+    const realRepo = await fs.realpath(absRepo).catch(() => absRepo);
     const targetDir = opts.subDir ? this.resolveSafePath(repoPath, opts.subDir) : absRepo;
     const maxResults = Math.min(opts.maxResults ?? 100, 500);
 
@@ -291,10 +296,17 @@ export class CodeSearchService implements OnModuleInit {
         try {
           const abs = path.join(targetDir, f);
           const real = await fs.realpath(abs);
-          if (real !== absRepo && !real.startsWith(absRepo + path.sep)) {
+          // Accept containment against either the resolved (realRepo) OR the
+          // original (absRepo) repo root. macOS /tmp → /private/tmp means the
+          // resolved file path will share a prefix with realRepo but not with
+          // absRepo; on other OSes both forms are equal.
+          const containedInReal = real === realRepo || real.startsWith(realRepo + path.sep);
+          const containedInAbs = real === absRepo || real.startsWith(absRepo + path.sep);
+          if (!containedInReal && !containedInAbs) {
             return null; // escapa del repo
           }
-          if (this.isForbiddenPath(path.relative(absRepo, real))) {
+          const rootForRelative = containedInReal ? realRepo : absRepo;
+          if (this.isForbiddenPath(path.relative(rootForRelative, real))) {
             return null; // symlink a ubicación prohibida
           }
           return f;
@@ -336,7 +348,10 @@ export class CodeSearchService implements OnModuleInit {
     if (opts.path) {
       this.assertNotForbidden(opts.path);
     }
+    // See glob() for rationale — resolve symlinks on the repo root so the
+    // containment check works on macOS (/tmp → /private/tmp).
     const absRepo = path.resolve(repoPath);
+    const realRepo = await fs.realpath(absRepo).catch(() => absRepo);
     const targetDir = opts.path ? this.resolveSafePath(repoPath, opts.path) : absRepo;
     const mode = opts.outputMode ?? 'files_with_matches';
     const headLimit = opts.headLimit ?? 250;
@@ -393,9 +408,16 @@ export class CodeSearchService implements OnModuleInit {
       try {
         const abs = path.resolve(targetDir, filePath);
         const real = await fs.realpath(abs);
-        const ok =
-          (real === absRepo || real.startsWith(absRepo + path.sep)) &&
-          !this.isForbiddenPath(path.relative(absRepo, real));
+        // Accept containment against either realRepo or absRepo (macOS /tmp
+        // quirk). Compute relative path against the matching root.
+        const containedInReal = real === realRepo || real.startsWith(realRepo + path.sep);
+        const containedInAbs = real === absRepo || real.startsWith(absRepo + path.sep);
+        if (!containedInReal && !containedInAbs) {
+          realpathCache.set(filePath, false);
+          return false;
+        }
+        const rootForRelative = containedInReal ? realRepo : absRepo;
+        const ok = !this.isForbiddenPath(path.relative(rootForRelative, real));
         realpathCache.set(filePath, ok);
         return ok;
       } catch {
@@ -762,6 +784,9 @@ export class CodeSearchService implements OnModuleInit {
    */
   private async assertNotForbiddenRealPath(absPath: string, repoPath: string): Promise<string> {
     const absRepo = path.resolve(repoPath);
+    // Resolve symlinks on the repo root too, for the same macOS /tmp reason
+    // explained in glob(). Fallback to absRepo if realpath fails.
+    const realRepo = await fs.realpath(absRepo).catch(() => absRepo);
     let realPath: string;
     try {
       realPath = await fs.realpath(absPath);
@@ -778,17 +803,20 @@ export class CodeSearchService implements OnModuleInit {
     }
 
     // Containment check: si el realPath salió del repo via symlink, bloquear.
-    // Comparación idéntica a resolveSafePath pero sobre el target real.
-    if (realPath !== absRepo && !realPath.startsWith(absRepo + path.sep)) {
+    // Acepta contención contra realRepo o absRepo (macOS /tmp quirk).
+    const containedInReal = realPath === realRepo || realPath.startsWith(realRepo + path.sep);
+    const containedInAbs = realPath === absRepo || realPath.startsWith(absRepo + path.sep);
+    if (!containedInReal && !containedInAbs) {
       throw new BadRequestException(
         `Path escapes repository root via symlink: ${path.relative(absRepo, absPath)}`,
       );
     }
 
-    // Blocklist check sobre el target real. El path relativo va contra repoPath
-    // (no contra absPath) para que los segmentos prohibidos se evalúen con el
-    // nombre real, no con el alias del symlink.
-    const relativeReal = path.relative(absRepo, realPath);
+    // Blocklist check sobre el target real. El path relativo va contra la
+    // root que contiene realmente el archivo (realRepo si el filesystem lo
+    // canonicalizó, absRepo si no).
+    const rootForRelative = containedInReal ? realRepo : absRepo;
+    const relativeReal = path.relative(rootForRelative, realPath);
     if (this.isForbiddenPath(relativeReal)) {
       throw new BadRequestException(
         `Access denied: symlink target "${relativeReal}" is a sensitive location.`,
