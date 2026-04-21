@@ -58,6 +58,17 @@ export interface OrphanCleanupReport {
   orphanPaths: string[];
 }
 
+export interface LegacyRootCleanupReport {
+  checkedRoots: string[];
+  filesDeleted: Record<string, number>;
+  errors: Array<{ root: string; error: string }>;
+  stuckEntities: {
+    initiatives: number;
+    epics: number;
+    stories: number;
+  };
+}
+
 // ─────────────────────────────────────────────────────────────────────
 //   VaultMigrationService
 // ─────────────────────────────────────────────────────────────────────
@@ -822,6 +833,97 @@ export class VaultMigrationService {
       foldersDeleted,
       errors,
       orphanPaths,
+    };
+  }
+
+  // ─────────────────────────────────────────────────────────────────────
+  //   Cleanup de roots legacy (epics/, stories/, initiatives/)
+  // ─────────────────────────────────────────────────────────────────────
+
+  /**
+   * Borra las carpetas legacy en la raiz del vault:
+   *   - `epics/`
+   *   - `stories/`
+   *   - `initiatives/` (en ingles — distinto de `iniciativas/` que es nueva)
+   *
+   * Estos folders quedan huerfanos despues de `migrateAll()` porque el delete
+   * legacy en `migrateEpic`/`migrateStory` es best-effort — si fallo por 409
+   * (pre-mutex queue) los archivos quedan huerfanos aunque PG ya apunte al
+   * nuevo path.
+   *
+   * SAFETY CHECK: antes de borrar, verifica que NINGUNA entidad en PG apunte
+   * todavia a esos roots legacy. Si alguna lo hace, la migracion no esta
+   * completa — se aborta con ConflictException y reporta cuantas entidades
+   * quedan atoradas.
+   *
+   * Idempotente: si el root ya no existe (404), retorna 0 archivos borrados.
+   */
+  async cleanupLegacyRoots(): Promise<LegacyRootCleanupReport> {
+    this.logger.log('[VaultLegacyCleanup] ===== INICIO cleanup de roots legacy =====');
+
+    // Safety check: ¿alguna entidad PG apunta todavia a los roots legacy?
+    const [stuckInits, stuckEpics, stuckStories] = await Promise.all([
+      this.prisma.initiative.count({
+        where: { vaultPath: { startsWith: 'initiatives/' } },
+      }),
+      this.prisma.epic.count({
+        where: { vaultPath: { startsWith: 'epics/' } },
+      }),
+      this.prisma.story.count({
+        where: { vaultPath: { startsWith: 'stories/' } },
+      }),
+    ]);
+
+    const stuckEntities = {
+      initiatives: stuckInits,
+      epics: stuckEpics,
+      stories: stuckStories,
+    };
+
+    if (stuckInits > 0 || stuckEpics > 0 || stuckStories > 0) {
+      this.logger.warn(
+        `[VaultLegacyCleanup] ABORT — hay entidades con vaultPath legacy: ` +
+        `initiatives=${stuckInits} epics=${stuckEpics} stories=${stuckStories}. ` +
+        `Corre POST /admin/vault/migration/run primero.`,
+      );
+      throw new ConflictException(
+        `No se puede limpiar roots legacy: hay entidades en PG con vaultPath legacy ` +
+        `(initiatives=${stuckInits}, epics=${stuckEpics}, stories=${stuckStories}). ` +
+        `Ejecuta POST /admin/vault/migration/run primero para migrarlas.`,
+      );
+    }
+
+    // Todos los legacy roots fueron migrados. Borrar los folders fisicos.
+    const legacyRoots = ['epics', 'stories', 'initiatives'];
+    const filesDeleted: Record<string, number> = {};
+    const errors: Array<{ root: string; error: string }> = [];
+
+    for (const root of legacyRoots) {
+      try {
+        const count = await this.vaultFolder.deleteFolder(
+          root,
+          `cleanup(vault): remove legacy root ${root}/ (post-migration)`,
+        );
+        filesDeleted[root] = count;
+        this.logger.log(`[VaultLegacyCleanup] ✓ ${root}/ — ${count} archivo(s) borrado(s)`);
+      } catch (err: any) {
+        const message = err instanceof Error ? err.message : String(err);
+        errors.push({ root, error: message });
+        this.logger.warn(`[VaultLegacyCleanup] ✗ ${root}/: ${message}`);
+      }
+    }
+
+    this.logger.log(
+      `[VaultLegacyCleanup] ===== FIN: deleted epics=${filesDeleted.epics ?? 0}, ` +
+      `stories=${filesDeleted.stories ?? 0}, initiatives=${filesDeleted.initiatives ?? 0}, ` +
+      `errors=${errors.length} =====`,
+    );
+
+    return {
+      checkedRoots: legacyRoots,
+      filesDeleted,
+      errors,
+      stuckEntities,
     };
   }
 }

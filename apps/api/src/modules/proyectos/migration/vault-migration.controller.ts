@@ -4,7 +4,7 @@ import { Permission } from '@cenzontle/shared';
 import type { AuthenticatedUser } from '@cenzontle/shared';
 import { CurrentUser, Permissions } from '../../auth/decorators';
 import { sanitizeForLog } from '../../../common/utils/sanitize-llm-input.util';
-import { VaultMigrationService, MigrationReport, OrphanCleanupReport } from './vault-migration.service';
+import { VaultMigrationService, MigrationReport, OrphanCleanupReport, LegacyRootCleanupReport } from './vault-migration.service';
 
 /**
  * Endpoint de administración para ejecutar la migración big-bang del vault
@@ -61,5 +61,28 @@ export class VaultMigrationController {
       `[VaultCleanup] ejecutada por user=${sanitizeForLog(user.sub)} email=${sanitizeForLog(user.email ?? 'unknown')}`,
     );
     return this.migration.cleanupOrphanStories();
+  }
+
+  /**
+   * Borra los folders legacy en la raiz del vault (epics/, stories/,
+   * initiatives/) que quedaron post-migracion. Safety check: aborta con 409
+   * si alguna entidad en PG todavia apunta a vaultPath legacy.
+   */
+  @Post('cleanup-legacy-roots')
+  @Permissions(Permission.MANAGE_USERS)
+  @ApiOperation({
+    summary: 'Borrar carpetas legacy de la raiz del vault (epics/, stories/, initiatives/)',
+    description:
+      'Limpia los folders huerfanos en la raiz del vault que quedaron despues de la migracion ' +
+      'big-bang. Estos roots ya no deberian existir porque la data se migro a iniciativas/, ' +
+      'pero el delete es best-effort y a veces fallaba por 409. Safety check: responde 409 ' +
+      'Conflict si alguna entidad PG apunta todavia a los legacy roots — en ese caso corre ' +
+      'POST /admin/vault/migration/run primero.',
+  })
+  async cleanupLegacyRoots(@CurrentUser() user: AuthenticatedUser): Promise<LegacyRootCleanupReport> {
+    this.logger.log(
+      `[VaultLegacyCleanup] ejecutada por user=${sanitizeForLog(user.sub)} email=${sanitizeForLog(user.email ?? 'unknown')}`,
+    );
+    return this.migration.cleanupLegacyRoots();
   }
 }
