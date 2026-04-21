@@ -41,8 +41,10 @@ import {
   Pencil,
   Trash2,
   Download,
+  Eye,
   X,
 } from 'lucide-react';
+import { DocumentPreview, type PreviewDoc } from '@/components/documents/DocumentPreview';
 
 // --- Type maps ---
 
@@ -124,6 +126,7 @@ export function EpicDocuments({
 
   // Export loading
   const [exportingDocId, setExportingDocId] = useState<string | null>(null);
+  const [previewDoc, setPreviewDoc] = useState<PreviewDoc | null>(null);
 
   // --- File Upload ---
 
@@ -471,6 +474,26 @@ export function EpicDocuments({
                     </DropdownMenuContent>
                   </DropdownMenu>
 
+                  {/* Preview (solo PDFs e imagenes con URL real; excluye
+                    * documentos manuales cuya url es '#'). */}
+                  {(doc.type === 'pdf' || doc.type === 'image') && doc.url && doc.url !== '#' && (
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      className="h-7 w-7 p-0"
+                      onClick={() =>
+                        setPreviewDoc({
+                          name: doc.name,
+                          url: doc.url,
+                          type: doc.type as 'pdf' | 'image',
+                        })
+                      }
+                      aria-label={`Previsualizar ${doc.name}`}
+                    >
+                      <Eye className="h-3 w-3" />
+                    </Button>
+                  )}
+
                   {/* Delete */}
                   <Button
                     variant="ghost"
@@ -610,6 +633,9 @@ export function EpicDocuments({
         }}
         destructive
       />
+
+      {/* --- Document Preview (PDF / Imagen) --- */}
+      <DocumentPreview doc={previewDoc} onClose={() => setPreviewDoc(null)} />
     </div>
   );
 }
