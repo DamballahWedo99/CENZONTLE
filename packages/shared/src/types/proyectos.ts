@@ -382,6 +382,51 @@ export interface CachedGenerationSession {
   ttlSeconds: number;
 }
 
+// --- Story generation (AI agent) types ---
+
+/** Fases de los 3 agentes especializados durante la generacion de historias. */
+export type StoryGenerationPhase =
+  | 'idle'
+  | 'researching'      // Investigacion inicial (documentos + vault + codigo)
+  | 'drafting_po'      // Agente PO redactando antecedentes/objetivo/criterios
+  | 'drafting_technical' // Agente Tech Lead detallando arquitectura/flujo/validaciones
+  | 'drafting_qa'      // Agente QA generando estrategia de testing + casos unitarios
+  | 'proposing'        // Consolidando y emitiendo propuestas
+  | 'done';
+
+/**
+ * Rol del agente activo durante un step. Permite a la UI rotular que "sombrero"
+ * esta usando el agente en cada momento (PO / Tech Lead / QA).
+ */
+export type StoryAgentRole = 'po' | 'technical' | 'qa' | 'orchestrator';
+
+interface StoryGenerationEventBase {
+  timestamp?: string;
+}
+
+/** Eventos SSE emitidos durante la generacion de historias. */
+export type StoryGenerationEvent =
+  | (StoryGenerationEventBase & { type: 'run_started' })
+  | (StoryGenerationEventBase & { type: 'run_finished'; totalDurationMs: number })
+  | (StoryGenerationEventBase & { type: 'phase_change'; phase: StoryGenerationPhase; label: string; role?: StoryAgentRole })
+  | (StoryGenerationEventBase & { type: 'thinking'; delta: string; role?: StoryAgentRole })
+  | (StoryGenerationEventBase & { type: 'step_start'; step: string; label?: string; tool?: string; toolArgs?: Record<string, unknown>; role?: StoryAgentRole })
+  | (StoryGenerationEventBase & { type: 'step_done'; step: string; tool?: string; summary?: string; durationMs?: number; resultPreview?: string; role?: StoryAgentRole })
+  | (StoryGenerationEventBase & { type: 'proposal_ready'; story: ProposedStory })
+  | (StoryGenerationEventBase & { type: 'done' })
+  | (StoryGenerationEventBase & { type: 'error'; message: string });
+
+/** Cached story generation session stored in Redis, keyed por epicId. */
+export interface CachedStoryGenerationSession {
+  epicId: string;
+  status: 'streaming' | 'staging';
+  proposals: ProposedStory[];
+  events: StoryGenerationEvent[];
+  createdAt: string;
+  completedAt?: string;
+  ttlSeconds: number;
+}
+
 // --- Story section types ---
 
 export interface StoryPOFields {
@@ -424,6 +469,69 @@ export interface UserStory {
   createdAt: string;
   updatedAt: string;
 }
+
+/**
+ * Output del Agente PO (Product Owner). Contiene los meta-datos de la historia
+ * y la seccion de negocio. Se pasa literalmente al Agente Tech Lead como input.
+ */
+export interface StoryOutline {
+  title: string;
+  description: string;
+  storyPoints: number; // fibonacci
+  podId: string;
+  labels: string[];
+  po: StoryPOFields;
+}
+
+/**
+ * Documento de la iniciativa/epica padre que el agente PO identifico como
+ * relevante para la historia. Se persiste como .md individual en
+ * `stories/<folder>/documentos-epica/<slug>.md`.
+ */
+export interface RelatedDocument {
+  docId: string;          // id del documento en initiative.documents
+  docName: string;        // nombre original del archivo
+  bucketUrl: string;      // ruta del bucket (ej: /api/documents/file/initiatives/xxx/...)
+  relevanceSummary: string; // 1-2 parrafos del agente explicando por que aplica
+}
+
+/** Severidad de una dependencia descubierta (align con Priority enum). */
+export type DependencySeverity = 'critical' | 'high' | 'medium' | 'low';
+
+/**
+ * Clasificacion de una dependencia descubierta por el agente QA.
+ * Diferente de `DependencyType` (usado en EpicDependency) — aquel tiene
+ * semantica de direccion entre epicas; este solo categoriza el origen.
+ */
+export type DiscoveredDependencyType = 'api' | 'service' | 'data' | 'team' | 'other';
+
+/**
+ * Dependencia descubierta por el agente QA al trazar la estrategia de testing.
+ * Se persiste como .md individual en `stories/<folder>/dependencias/<slug>.md`.
+ */
+export interface DiscoveredDependency {
+  id: string;               // clientId local (ai-dep-<uuid>)
+  title: string;            // titulo corto
+  description: string;      // resumen ejecutivo 1-2 lineas
+  severity: DependencySeverity;
+  type: DiscoveredDependencyType;
+  mdContent: string;        // markdown extenso con detalles, refs, mitigacion
+}
+
+/**
+ * Historia propuesta por los 3 agentes IA (PO + Tech Lead + QA),
+ * antes de ser aceptada y persistida. Omite campos generados por el servidor.
+ */
+export type ProposedStory = Omit<
+  UserStory,
+  'id' | 'createdAt' | 'updatedAt' | 'tracker'
+> & {
+  clientId: string; // ID local para tracking en staging
+  /** Documentos de la iniciativa detectados como relevantes por el agente PO. */
+  relatedDocuments?: RelatedDocument[];
+  /** Dependencias descubiertas por el agente QA durante el trazo de testing. */
+  discoveredDependencies?: DiscoveredDependency[];
+};
 
 export interface Pod {
   id: string;

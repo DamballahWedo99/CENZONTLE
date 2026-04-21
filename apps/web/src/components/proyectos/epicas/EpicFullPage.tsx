@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useMemo, useEffect } from 'react';
+import { useState, useMemo, useEffect, useRef, useCallback } from 'react';
 import { useRouter, useSearchParams } from 'next/navigation';
 import Link from 'next/link';
 import { useProyectos } from '@/context/ProyectosContext';
@@ -41,7 +41,18 @@ import { EpicDocuments } from './EpicDocuments';
 import { EpicDependencies } from './EpicDependencies';
 import { IntegrationSettingsDialog } from '../settings/IntegrationSettingsDialog';
 import { EpicStoryList } from './EpicStoryList';
-import { generateStories } from '@/lib/story-agent';
+import { StoryAgentPromptBar } from './StoryAgentPromptBar';
+import { StoryProposalList } from './StoryProposalList';
+import { streamStoryProposals } from '@/lib/story-agent';
+import {
+  getCachedStorySession,
+  removeCachedStoryProposal,
+  invalidateStoryCache,
+} from '@/lib/api/story-generation';
+import type {
+  ProposedStory,
+  StoryGenerationEvent,
+} from '@cenzontle/shared';
 import {
   Calendar,
   Pencil,
@@ -56,8 +67,6 @@ import {
   CheckCircle2,
   Circle,
   Lock,
-  Sparkles,
-  Loader2,
   ShieldCheck,
   XCircle,
   MessageSquare,
@@ -297,7 +306,11 @@ function EpicFullPageInner({ epicId }: { epicId: string }) {
   const [editBusinessFields, setEditBusinessFields] = useState<Record<BusinessFieldKey, string>>({} as Record<BusinessFieldKey, string>);
   const [editPodIds, setEditPodIds] = useState<string[]>([]);
   const [editInitiativeId, setEditInitiativeId] = useState('');
-  const [isGeneratingStories, setIsGeneratingStories] = useState(false);
+  const [storyAgentMode, setStoryAgentMode] = useState<'idle' | 'prompting' | 'streaming' | 'staging'>('idle');
+  const [storyProposals, setStoryProposals] = useState<ProposedStory[]>([]);
+  const [storyAgentEvents, setStoryAgentEvents] = useState<StoryGenerationEvent[]>([]);
+  const [acceptingStoryId, setAcceptingStoryId] = useState<string | null>(null);
+  const storyAbortRef = useRef<AbortController | null>(null);
   const [rejectComment, setRejectComment] = useState('');
   const [showRejectForm, setShowRejectForm] = useState(false);
   const [activeTab, setActiveTab] = useState(() => searchParams.get('tab') ?? 'definicion');
@@ -457,6 +470,218 @@ function EpicFullPageInner({ epicId }: { epicId: string }) {
     return () => setBreadcrumb(null);
   }, [epic, setBreadcrumb]);
 
+  // ── AI Story Generation (agente 3-roles: PO + Tech Lead + QA) ──
+  // IMPORTANTE: estos hooks deben ejecutarse SIEMPRE (antes del early return
+  // `if (!epic)` para no romper el orden de hooks entre renders). Los handlers
+  // tienen sus propios guards `if (!rawEpic) return;` para comportamiento seguro.
+
+  const [acceptingAllStories, setAcceptingAllStories] = useState(false);
+
+  const handleOpenStoryPrompt = useCallback(() => {
+    setStoryAgentMode('prompting');
+    setStoryProposals([]);
+    setStoryAgentEvents([]);
+  }, []);
+
+  const handleCancelStoryAgent = useCallback(() => {
+    storyAbortRef.current?.abort();
+    storyAbortRef.current = null;
+    setStoryAgentMode('idle');
+  }, []);
+
+  const handleStartStoryStreaming = useCallback(async (prompt: string, webSearch: boolean) => {
+    if (!rawEpic) return;
+    setStoryAgentMode('streaming');
+    setStoryProposals([]);
+    setStoryAgentEvents([]);
+
+    const abort = new AbortController();
+    storyAbortRef.current = abort;
+
+    try {
+      const generator = streamStoryProposals(rawEpic.id, {
+        prompt: prompt.trim() || undefined,
+        webSearch,
+        signal: abort.signal,
+      });
+
+      for await (const event of generator) {
+        if (abort.signal.aborted) break;
+        setStoryAgentEvents((prev) => [...prev, event]);
+
+        if (event.type === 'proposal_ready') {
+          setStoryProposals((prev) => [...prev, event.story]);
+        }
+
+        if (event.type === 'error') {
+          toast.error(event.message || 'Error del agente de historias');
+          setStoryAgentMode('idle');
+          return;
+        }
+
+        if (event.type === 'run_finished' || event.type === 'done') {
+          setStoryAgentMode((prev) => (prev === 'streaming' ? 'staging' : prev));
+        }
+      }
+      setStoryAgentMode((prev) => (prev === 'streaming' ? 'staging' : prev));
+    } catch (err: any) {
+      if (err?.name !== 'AbortError') {
+        toast.error(err?.message || 'Error generando historias');
+      }
+      setStoryAgentMode('idle');
+    } finally {
+      storyAbortRef.current = null;
+    }
+  }, [rawEpic]);
+
+  const handleAcceptStoryProposal = useCallback(async (proposal: ProposedStory) => {
+    if (!rawEpic) return;
+    setAcceptingStoryId(proposal.clientId);
+    // eslint-disable-next-line no-console
+    console.log(
+      `[StoryAccept] ▶ "${proposal.title}" SP=${proposal.storyPoints} pod=${proposal.podId} docs=${proposal.relatedDocuments?.length ?? 0} deps=${proposal.discoveredDependencies?.length ?? 0}`,
+    );
+    try {
+      const whatHowWhenStr = [
+        proposal.po.whatHowWhen.what,
+        proposal.po.whatHowWhen.how,
+        proposal.po.whatHowWhen.when,
+      ].filter(Boolean).join(' / ');
+
+      const created = await apiCreateStory({
+        title: proposal.title,
+        epicId: proposal.epicId,
+        podId: proposal.podId,
+        status: proposal.status as string,
+        storyPoints: proposal.storyPoints,
+        sprintId: proposal.sprintId ?? undefined,
+        labels: proposal.labels,
+        po: {
+          background: proposal.po.background,
+          objective: proposal.po.objective,
+          userStory: proposal.po.userStory,
+          whatHowWhen: whatHowWhenStr,
+          acceptanceCriteria: proposal.po.acceptanceCriteria.join('\n'),
+          additionalNotes: proposal.po.additionalNotes,
+        },
+        technical: proposal.technical,
+        qa: {
+          testingStrategy: proposal.qa.testingStrategy,
+          linkedQAMatrixId: proposal.qa.linkedQAMatrixId ?? undefined,
+        },
+        relatedDocuments: proposal.relatedDocuments,
+        discoveredDependencies: proposal.discoveredDependencies,
+      });
+
+      const nowIso = new Date().toISOString();
+      dispatch({
+        type: 'CREATE_STORY',
+        payload: {
+          ...proposal,
+          id: created.id,
+          createdAt: nowIso,
+          updatedAt: nowIso,
+        },
+      });
+
+      await removeCachedStoryProposal(rawEpic.id, proposal.clientId).catch(() => {});
+      setStoryProposals((prev) => {
+        const next = prev.filter((p) => p.clientId !== proposal.clientId);
+        if (next.length === 0) setStoryAgentMode('idle');
+        return next;
+      });
+      // El vaultPath del backend apunta a `stories/<folder>/index.md`. Mostramos
+      // el folder (sin el /index.md) al usuario para que identifique donde quedo.
+      const folderPath = created.vaultPath
+        ? created.vaultPath.replace(/\/index\.md$/, '/')
+        : null;
+      // eslint-disable-next-line no-console
+      console.log(
+        `[StoryAccept] ✓ "${proposal.title}" created id=${created.id} folder=${folderPath ?? '(no vault)'}`,
+      );
+      if (folderPath) {
+        toast.success(`Historia "${proposal.title}" creada en ${folderPath}`);
+      } else {
+        toast.success(`Historia "${proposal.title}" creada`);
+      }
+    } catch (err: any) {
+      // eslint-disable-next-line no-console
+      console.error(`[StoryAccept] ✗ "${proposal.title}" failed: ${err?.message}`);
+      toast.error(err?.message || 'Error al crear la historia');
+    } finally {
+      setAcceptingStoryId(null);
+    }
+  }, [rawEpic, dispatch]);
+
+  const handleAcceptAllStories = useCallback(async () => {
+    if (acceptingAllStories || acceptingStoryId) return;
+    setAcceptingAllStories(true);
+    const snapshot = [...storyProposals];
+    let successCount = 0;
+    let failureCount = 0;
+    try {
+      for (const proposal of snapshot) {
+        try {
+          await handleAcceptStoryProposal(proposal);
+          successCount++;
+        } catch (err: any) {
+          failureCount++;
+          if (err?.status === 401 || err?.status === 403 || err?.status === 503) {
+            toast.error('Autenticacion o backend caido — abortando aceptacion masiva');
+            break;
+          }
+        }
+      }
+      if (failureCount > 0) {
+        toast.warning(`${successCount} historias creadas, ${failureCount} fallaron. Las fallidas siguen en staging.`);
+      }
+    } finally {
+      setAcceptingAllStories(false);
+    }
+  }, [storyProposals, handleAcceptStoryProposal, acceptingAllStories, acceptingStoryId]);
+
+  const handleDiscardStoryProposal = useCallback(async (clientId: string) => {
+    if (!rawEpic) return;
+    await removeCachedStoryProposal(rawEpic.id, clientId).catch(() => {});
+    setStoryProposals((prev) => {
+      const next = prev.filter((p) => p.clientId !== clientId);
+      if (next.length === 0) setStoryAgentMode('idle');
+      return next;
+    });
+  }, [rawEpic]);
+
+  const handleDiscardAllStories = useCallback(async () => {
+    if (!rawEpic) return;
+    await invalidateStoryCache(rawEpic.id).catch(() => {});
+    setStoryProposals([]);
+    setStoryAgentEvents([]);
+    setStoryAgentMode('idle');
+  }, [rawEpic]);
+
+  const handleRefineStoryPrompt = useCallback(() => {
+    setStoryAgentMode('prompting');
+  }, []);
+
+  // Recuperar sesion cacheada al montar / cambiar de epica.
+  // Si hay propuestas en cache (ej: recarga tras generar), las mostramos en staging.
+  useEffect(() => {
+    if (!rawEpic) return;
+    let cancelled = false;
+    (async () => {
+      try {
+        const cached = await getCachedStorySession(rawEpic.id);
+        if (cancelled || !cached?.session) return;
+        const session = cached.session;
+        if (session.status === 'staging' && session.proposals.length > 0) {
+          setStoryProposals(session.proposals);
+          setStoryAgentEvents(session.events);
+          setStoryAgentMode('staging');
+        }
+      } catch { /* ignore recovery errors */ }
+    })();
+    return () => { cancelled = true; };
+  }, [rawEpic?.id]);
+
   if (!epic) {
     return (
       <div className="flex flex-col items-center justify-center py-20 text-muted-foreground">
@@ -536,17 +761,6 @@ function EpicFullPageInner({ epicId }: { epicId: string }) {
 
   const updateBusinessField = (key: BusinessFieldKey, value: string) => {
     setEditBusinessFields((prev) => ({ ...prev, [key]: value }));
-  };
-
-  const handleGenerateStories = async () => {
-    if (!rawEpic) return;
-    setIsGeneratingStories(true);
-    try {
-      const stories = await generateStories(rawEpic, rawEpic.podIds);
-      dispatch({ type: 'BULK_CREATE_STORIES', payload: { epicId: rawEpic.id, stories } });
-    } finally {
-      setIsGeneratingStories(false);
-    }
   };
 
   const handleApprove = () => {
@@ -890,34 +1104,30 @@ function EpicFullPageInner({ epicId }: { epicId: string }) {
 
               {/* ── Historias ── */}
               <TabsContent value="historias" className="mt-8 space-y-6">
-                {/* AI Generate button — only when no stories exist */}
-                {epic.stories.length === 0 && (
-                  <div className="flex items-center justify-between">
-                    <div />
-                    <Button
-                      variant="outline"
-                      size="sm"
-                      onClick={handleGenerateStories}
-                      disabled={isGeneratingStories}
-                      className="gap-2"
-                    >
-                      {isGeneratingStories ? (
-                        <Loader2 className="h-3.5 w-3.5 animate-spin" />
-                      ) : (
-                        <Sparkles className="h-3.5 w-3.5" />
-                      )}
-                      Generar con IA
-                    </Button>
-                  </div>
+                {/* Prompt bar / thinking display.
+                    Persiste mientras el agente este en cualquier modo distinto
+                    de idle. En staging queda collapsable para revisar reasoning. */}
+                {storyAgentMode !== 'idle' && (
+                  <StoryAgentPromptBar
+                    mode={storyAgentMode}
+                    events={storyAgentEvents}
+                    onSubmit={handleStartStoryStreaming}
+                    onCancel={handleCancelStoryAgent}
+                  />
                 )}
 
-                {isGeneratingStories && (
-                  <div className="flex items-center gap-3 rounded-lg bg-muted/50 px-4 py-3 text-sm">
-                    <Loader2 className="h-4 w-4 animate-spin text-muted-foreground" />
-                    <span className="text-muted-foreground">
-                      El agente está analizando la épica y los repositorios para generar historias...
-                    </span>
-                  </div>
+                {/* Lista de propuestas en staging */}
+                {storyAgentMode === 'staging' && storyProposals.length > 0 && (
+                  <StoryProposalList
+                    proposals={storyProposals}
+                    pods={state.pods}
+                    acceptingId={acceptingStoryId}
+                    onAccept={handleAcceptStoryProposal}
+                    onAcceptAll={handleAcceptAllStories}
+                    onDiscard={handleDiscardStoryProposal}
+                    onDiscardAll={handleDiscardAllStories}
+                    onRefinePrompt={handleRefineStoryPrompt}
+                  />
                 )}
 
                 {/* Story list with create/edit/delete */}
@@ -926,6 +1136,7 @@ function EpicFullPageInner({ epicId }: { epicId: string }) {
                   epicId={rawEpic!.id}
                   pods={state.pods}
                   qaMatrix={rawEpic!.qaMatrix}
+                  onGenerateWithAI={storyAgentMode === 'idle' ? handleOpenStoryPrompt : undefined}
                   onCreateStory={async (story) => {
                     try {
                       const po: any = story.po ?? {};

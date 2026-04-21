@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useCallback, useRef, useEffect } from 'react';
+import { useState, useCallback, useRef, useEffect, useMemo } from 'react';
 import { useRouter } from 'next/navigation';
 import {
   UserStory,
@@ -13,6 +13,7 @@ import {
 } from '@cenzontle/shared';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
+import { TypeToConfirmDialog } from '@/components/ui/type-to-confirm-dialog';
 import {
   Select,
   SelectContent,
@@ -34,7 +35,7 @@ import {
   Code2,
   TestTube2,
   Link2,
-
+  Sparkles,
 } from 'lucide-react';
 
 // --- Labels ---
@@ -188,6 +189,12 @@ interface EpicStoryListProps {
   onCreateStory: (story: UserStory) => void;
   onUpdateStory: (id: string, changes: Partial<UserStory>) => void;
   onDeleteStory: (id: string) => void;
+  /**
+   * Si se provee, renderiza un boton "Crear con IA" inmediatamente a la izquierda
+   * del boton "Agregar historia" en el header. Se oculta cuando esta undefined
+   * (p.ej. cuando el agente ya esta en modo streaming/staging desde el padre).
+   */
+  onGenerateWithAI?: () => void;
 }
 
 export function EpicStoryList({
@@ -198,6 +205,7 @@ export function EpicStoryList({
   onCreateStory,
   onUpdateStory,
   onDeleteStory,
+  onGenerateWithAI,
 }: EpicStoryListProps) {
   const router = useRouter();
   const [isCreating, setIsCreating] = useState(false);
@@ -209,6 +217,13 @@ export function EpicStoryList({
   const [viewTab, setViewTab] = useState<string>('po');
   const [newLabel, setNewLabel] = useState('');
   const [deleteConfirmId, setDeleteConfirmId] = useState<string | null>(null);
+  // Deriva la story completa para usarla en el modal type-to-confirm (necesita
+  // expectedValue=title). Si la story se elimina del array, deleteConfirmId
+  // tambien se limpia desde el handler.
+  const storyToDelete = useMemo(
+    () => (deleteConfirmId ? stories.find((s) => s.id === deleteConfirmId) ?? null : null),
+    [deleteConfirmId, stories],
+  );
 
   // tracker is assigned externally (e.g. via Linear/Jira integration), not at creation time
 
@@ -840,16 +855,30 @@ export function EpicStoryList({
           {stories.length} {stories.length === 1 ? 'historia' : 'historias'} ·{' '}
           {stories.reduce((sum, s) => sum + s.storyPoints, 0)} SP
         </p>
-        <Button
-          size="sm"
-          variant="outline"
-          onClick={startCreating}
-          disabled={isCreating}
-          className="gap-1.5 text-xs"
-        >
-          <Plus className="h-3.5 w-3.5" />
-          Agregar historia
-        </Button>
+        <div className="flex items-center gap-2">
+          {onGenerateWithAI && (
+            <Button
+              size="sm"
+              variant="outline"
+              onClick={onGenerateWithAI}
+              disabled={isCreating}
+              className="gap-1.5 text-xs"
+            >
+              <Sparkles className="h-3.5 w-3.5" />
+              Crear con IA
+            </Button>
+          )}
+          <Button
+            size="sm"
+            variant="outline"
+            onClick={startCreating}
+            disabled={isCreating}
+            className="gap-1.5 text-xs"
+          >
+            <Plus className="h-3.5 w-3.5" />
+            Agregar historia
+          </Button>
+        </div>
       </div>
 
       {/* Story list — hidden during creation to focus on the form */}
@@ -901,49 +930,18 @@ export function EpicStoryList({
                       <Pencil className="h-3.5 w-3.5" />
                     )}
                   </Button>
-                  {deleteConfirmId === story.id ? (
-                    <div
-                      className="flex items-center gap-0.5"
-                      onClick={(e) => e.stopPropagation()}
-                    >
-                      <Button
-                        size="sm"
-                        variant="ghost"
-                        onClick={() => {
-                          onDeleteStory(story.id);
-                          setDeleteConfirmId(null);
-                          if (editingStoryId === story.id) setEditingStoryId(null);
-                          if (expandedStoryId === story.id) setExpandedStoryId(null);
-                        }}
-                        className="h-7 w-7 p-0 text-red-500 hover:text-red-600 hover:bg-red-500/10"
-                        title="Confirmar eliminación"
-                      >
-                        <Check className="h-3.5 w-3.5" />
-                      </Button>
-                      <Button
-                        size="sm"
-                        variant="ghost"
-                        onClick={() => setDeleteConfirmId(null)}
-                        className="h-7 w-7 p-0 text-muted-foreground hover:text-foreground"
-                        title="Cancelar"
-                      >
-                        <X className="h-3.5 w-3.5" />
-                      </Button>
-                    </div>
-                  ) : (
-                    <Button
-                      size="sm"
-                      variant="ghost"
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        setDeleteConfirmId(story.id);
-                      }}
-                      className="h-7 w-7 p-0 text-muted-foreground hover:text-red-500"
-                      title="Eliminar historia"
-                    >
-                      <Trash2 className="h-3.5 w-3.5" />
-                    </Button>
-                  )}
+                  <Button
+                    size="sm"
+                    variant="ghost"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      setDeleteConfirmId(story.id);
+                    }}
+                    className="h-7 w-7 p-0 text-muted-foreground hover:text-red-500"
+                    title="Eliminar historia"
+                  >
+                    <Trash2 className="h-3.5 w-3.5" />
+                  </Button>
                 </div>
                 <ChevronRight className="h-4 w-4 text-muted-foreground" />
               </div>
@@ -1097,6 +1095,28 @@ export function EpicStoryList({
             </div>
           </div>
         </div>
+      )}
+
+      {/* ── Modal type-to-confirm para borrar historia ── */}
+      {storyToDelete && (
+        <TypeToConfirmDialog
+          open={!!deleteConfirmId}
+          onOpenChange={(open) => {
+            if (!open) setDeleteConfirmId(null);
+          }}
+          title="Eliminar historia"
+          resourceLabel="historia"
+          expectedValue={storyToDelete.title}
+          description="Esto eliminará la historia junto con su carpeta del vault (definicion-negocio.md, definicion-tecnica.md, testing-strategy.md, documentos-epica/, dependencias/). La acción es permanente y no se puede deshacer."
+          confirmText="Eliminar historia"
+          onConfirm={async () => {
+            const id = storyToDelete.id;
+            onDeleteStory(id);
+            setDeleteConfirmId(null);
+            if (editingStoryId === id) setEditingStoryId(null);
+            if (expandedStoryId === id) setExpandedStoryId(null);
+          }}
+        />
       )}
     </div>
   );

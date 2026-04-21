@@ -11,6 +11,7 @@ export class GenerateEpicsQueryDto {
 
   @ApiPropertyOptional({ description: 'Número máximo de épicas a generar (3-8)', default: 5 })
   @IsOptional()
+  @Transform(({ value }) => (typeof value === 'string' ? parseInt(value, 10) : value))
   @IsInt()
   @Min(1)
   @Max(8)

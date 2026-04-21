@@ -45,6 +45,22 @@ export interface StoryWithContentResponse extends StoryResponse {
   };
 }
 
+export interface RelatedDocumentInput {
+  docId: string;
+  docName: string;
+  bucketUrl: string;
+  relevanceSummary: string;
+}
+
+export interface DiscoveredDependencyInput {
+  id: string;
+  title: string;
+  description: string;
+  severity: 'critical' | 'high' | 'medium' | 'low';
+  type: 'api' | 'service' | 'data' | 'team' | 'other';
+  mdContent: string;
+}
+
 export interface CreateStoryInput {
   title: string;
   epicId: string;
@@ -56,6 +72,8 @@ export interface CreateStoryInput {
   po?: StoryPoFields;
   technical?: StoryTechnicalFields;
   qa?: StoryQaFields;
+  relatedDocuments?: RelatedDocumentInput[];
+  discoveredDependencies?: DiscoveredDependencyInput[];
 }
 
 export function getStories(params?: { epicId?: string; podId?: string; status?: string }) {
