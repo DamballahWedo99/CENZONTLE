@@ -43,23 +43,18 @@ const VALID_STORY_POINTS = [1, 2, 3, 5, 8, 13] as const;
 
 // Presupuestos por agente — tuned para equilibrio entre profundidad y costo.
 //
-// max_tokens: Sonnet 4 soporta hasta 64000 tokens output nativamente PERO el
-// SDK de Anthropic rechaza requests sync (`messages.create`) con un cap
-// efectivo ~21000 tokens, porque para max_tokens mayores la latencia puede
-// exceder el timeout HTTP de 10 min — el SDK exige `messages.stream()` para
-// salir de ese umbral.
-//
-// Como no hemos migrado aun a streaming, limitamos los 3 agentes a 16384
-// tokens (por debajo del threshold con margen). Si el QA trunca con 16K
-// para 5+ historias, dos opciones:
-//  (a) migrar TL/QA a streaming — unlock 64K sin timeout
-//  (b) procesar QA en batches de 3 historias
+// max_tokens: con messages.stream() (implementado en runAgentLoop), el SDK
+// ya no aplica el cap predictivo de ~21000 del sync API. Sonnet 4 soporta
+// hasta 64000 tokens output nativos. Damos margen generoso a TL y QA para
+// que con N=10+ historias el modelo no emita arrays vacios por temor a
+// quedarse sin presupuesto — el prompt ya es conciso, los tokens son el
+// techo, no el target.
 const PO_MAX_ITERATIONS = 8;
 const TL_MAX_ITERATIONS = 8;
 const QA_MAX_ITERATIONS = 6;
-const PO_MAX_TOKENS = 12288;
-const TL_MAX_TOKENS = 16384;
-const QA_MAX_TOKENS = 16384;
+const PO_MAX_TOKENS = 16384;
+const TL_MAX_TOKENS = 32768;
+const QA_MAX_TOKENS = 32768;
 
 // Caps defensivos alineados con DTO (apps/api/.../stories/dto/story-content.dto.ts).
 const MAX_FIELD_LEN = 20_000;
@@ -1177,7 +1172,7 @@ ${fullStoriesBlock}
     * Si realmente no puedes inferir → Jest por default y declaralo en la subseccion Herramientas.
 - \`discoveredDependencies\` PUEDE ser array vacio si la epica es autocontenida. Es el unico array donde vacio esta permitido.
 
-⚠️ PRESUPUESTO: 16384 tokens TOTAL para las ${poResult.outlines.length} strategies + deps. Cada strategy debe ser ~${Math.max(800, Math.floor(14000 / poResult.outlines.length))} tokens max. Si una historia necesita mas detalle, comprimelo en bullets cortos — NUNCA emitas array vacio o incompleto.
+⚠️ PRESUPUESTO: 32768 tokens TOTAL (streaming mode, sin limite predictivo). Para las ${poResult.outlines.length} strategies + deps tienes ~${Math.floor(30000 / poResult.outlines.length)} tokens por strategy — MAS QUE SUFICIENTE. Se conciso igual (listas > prosa) pero SIN miedo de quedarte corto. NUNCA emitas array vacio o incompleto.
 
 Proceso:
 1. Explora el codigo MAX 2 tool calls (code_grep con outputMode='files_with_matches' para detectar framework, code_read solo si necesitas confirmar patron de mock). NO sobreexplores — si los primeros tool calls no ayudan, procede directo a redactar basandote en las acceptance criteria.
@@ -1340,7 +1335,18 @@ NO cambies PO ni technical. Si una historia es dificil de testear, dilo en su te
       }
 
       const callStart = Date.now();
-      const response = await this.client.messages.create(
+      // Usamos messages.stream() en lugar de messages.create() porque:
+      //  - El SDK de Anthropic rechaza messages.create con max_tokens > ~21000
+      //    (limite predictivo del 10-min HTTP timeout). messages.stream() NO
+      //    aplica ese limite — la conexion SSE evita el timeout.
+      //  - Stream desbloquea max_tokens hasta 64000 nativo de Sonnet 4 sin
+      //    cambiar nada mas. El modelo deja de defensivamente emitir arrays
+      //    vacios por miedo a quedarse sin tokens.
+      //  - .finalMessage() espera a que el stream complete y retorna un
+      //    Message con la misma shape que messages.create() — drop-in.
+      //    El SDK reassembla automaticamente los input_json_delta chunks en
+      //    el tool_use.input como Record<string, unknown>.
+      const stream = this.client.messages.stream(
         {
           model: MODEL,
           max_tokens: maxTokens,
@@ -1355,6 +1361,7 @@ NO cambies PO ni technical. Si una historia es dificil de testear, dilo en su te
         },
         signal ? { signal } : undefined,
       );
+      const response = await stream.finalMessage();
 
       // CRITICO: log de usage con tokens. `cache_read_input_tokens > 0` en iter 0
       // de los agentes TL y QA confirma que el prompt cache funciona.
@@ -1951,12 +1958,7 @@ TU MISION: para cada historia, redactar testingStrategy enfocada en PRUEBAS UNIT
 - Si no puedes detectar framework via code_grep, infiere del stack: backend Node/TS → Jest+supertest, frontend React → Vitest+Testing Library, Python → pytest, Java → JUnit+Mockito. Default: Jest.
 - Solo \`discoveredDependencies\` PUEDE ser vacio (si la epica es autocontenida).
 
-⚠️ PRESUPUESTO CRITICO: 16384 tokens TOTAL. Divide entre TODAS las historias:
-  - 3 historias  → ~3000 tokens cada strategy
-  - 5 historias  → ~1800 tokens cada strategy
-  - 8 historias  → ~1100 tokens cada strategy
-  - 10+ historias → ~800 tokens cada strategy
-Si sospechas que no cabe, HAZ MAS CORTA cada strategy — NO emitas vacio.
+⚠️ PRESUPUESTO (streaming mode): 32768 tokens TOTAL. Con cualquier N razonable (3-15 historias) cabe holgado — ~2000-5000 tokens por strategy es viable. Mantente conciso por claridad, no por presupuesto. NUNCA emitas array vacio o incompleto.
 
 ## Formato obligatorio (4 subsecciones, NO 6 — sin Alcance, sin Cobertura separadas)
 
