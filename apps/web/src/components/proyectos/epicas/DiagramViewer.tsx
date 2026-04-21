@@ -713,44 +713,19 @@ export function DiagramViewer({
     rfInstanceRef.current?.fitView({ padding: 0.15 });
   }, [layoutedNodes, layoutedEdges, setNodes, setEdges, editor]);
 
-  /*
-   * ═══════════════════════════════════════════════════════════════════
-   * DEBUG LOGS — TEMPORAL
-   * ═══════════════════════════════════════════════════════════════════
-   * Cuatro handlers de conexión de React Flow instrumentados para
-   * diagnosticar por qué el gesto de conectar un nodo a otro no está
-   * creando edges. Orden del pipeline:
-   *   1. onConnectStart — drag inicia desde un handle
-   *   2. isValidConnection — React Flow pregunta si este pair es válido
-   *      (se dispara MUCHAS veces, cada vez que el mouse se mueve sobre
-   *      un handle candidato)
-   *   3. onConnect — drag suelta sobre un handle y la conexión es válida
-   *   4. onConnectEnd — drag termina (siempre, haya conexión o no)
-   * Si un gesto NO llega a onConnect, los logs de Start/ValidConnection/
-   * End muestran dónde React Flow abortó.
-   * ═══════════════════════════════════════════════════════════════════
-   */
   const onConnectStart = useCallback<
     NonNullable<React.ComponentProps<typeof ReactFlow>['onConnectStart']>
-  >((_event, params) => {
-    console.log('[DIAGRAM-CONNECT] 1. onConnectStart', {
-      nodeId: params.nodeId,
-      handleId: params.handleId,
-      handleType: params.handleType,
-      isEditing,
-      connectionMode: 'Loose',
-    });
-  }, [isEditing]);
+  >(() => {
+    // no-op: la creacion del edge ocurre en onConnectEnd donde
+    // `connectionState.fromNode/toNode` respetan la direccion del drag.
+  }, []);
 
   const isValidConnection = useCallback<
     NonNullable<React.ComponentProps<typeof ReactFlow>['isValidConnection']>
-  >((connection) => {
-    console.log('[DIAGRAM-CONNECT] 2. isValidConnection?', {
-      source: connection.source,
-      sourceHandle: connection.sourceHandle,
-      target: connection.target,
-      targetHandle: connection.targetHandle,
-    });
+  >(() => {
+    // Siempre true — React Flow v12 dispara esto muchas veces durante el
+    // drag; la validacion real (editing mode, nodos validos) se hace en
+    // onConnectEnd antes de persistir.
     return true;
   }, []);
 
@@ -763,25 +738,13 @@ export function DiagramViewer({
    * `onConnectEnd` donde `connectionState.fromNode/toNode` respetan la
    * dirección del drag.
    */
-  const onConnect = useCallback(
-    (_connection: Connection) => {
-      console.log('[DIAGRAM-CONNECT] 3. onConnect — deferring edge creation to onConnectEnd');
-    },
-    []
-  );
+  const onConnect = useCallback((_connection: Connection) => {
+    // no-op — ver comentario arriba.
+  }, []);
 
   const onConnectEnd = useCallback<
     NonNullable<React.ComponentProps<typeof ReactFlow>['onConnectEnd']>
-  >((event, connectionState) => {
-    console.log('[DIAGRAM-CONNECT] 4. onConnectEnd', {
-      isValid: connectionState?.isValid,
-      toNode: connectionState?.toNode?.id,
-      toHandle: connectionState?.toHandle?.id,
-      fromNode: connectionState?.fromNode?.id,
-      fromHandle: connectionState?.fromHandle?.id,
-      eventTargetTag: (event.target as HTMLElement | null)?.tagName,
-    });
-
+  >((_event, connectionState) => {
     if (!isEditing) return;
     // El gesto no aterrizó en un handle válido (soltó en el aire).
     if (!connectionState?.isValid) return;
@@ -812,24 +775,11 @@ export function DiagramViewer({
       ...makeEdgeStyle(false),
       deletable: true,
     };
-    console.log('[DIAGRAM-CONNECT] 4b. Creating edge from gesture', newEdge);
-
     // Concatenación manual — NO usamos el helper `addEdge` de React Flow
     // porque deduplica por (source, target, sourceHandle, targetHandle).
     // Queremos permitir edges paralelos entre los mismos nodos: libavoid
     // los nudge automáticamente con offset visible (`edgeToEdgeSpacing`).
-    setEdges((eds) => {
-      const next = [...eds, newEdge];
-      console.log(
-        '[DIAGRAM-CONNECT] 4c. setEdges — antes:',
-        eds.length,
-        'después:',
-        next.length,
-        'diff:',
-        next.length - eds.length,
-      );
-      return next;
-    });
+    setEdges((eds) => [...eds, newEdge]);
 
     /*
      * CRÍTICO: llamar `resetRouting()` explícitamente después del

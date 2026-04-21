@@ -28,6 +28,13 @@ interface EpicDiagramsProps {
   tlApproval: Epic['tlApproval'];
   onTlApprove: () => void;
   onTlReject: (comment: string) => void;
+  /**
+   * Callback opcional invocado cuando el backend emite `document_ready`.
+   * El padre (EpicFullPage) lo usa para refrescar la lista de documentos
+   * de la épica, ya que el backend habrá registrado el .md del vault en
+   * `epic.documents[]` antes de emitir el evento.
+   */
+  onDocumentReady?: () => void;
 }
 
 export function EpicDiagrams({
@@ -38,6 +45,7 @@ export function EpicDiagrams({
   tlApproval,
   onTlApprove,
   onTlReject,
+  onDocumentReady,
 }: EpicDiagramsProps) {
   const [isGenerating, setIsGenerating] = useState(false);
   const [events, setEvents] = useState<DiagramGenerationEventWithMeta[]>([]);
@@ -132,6 +140,9 @@ export function EpicDiagrams({
               generatedAt: event.generatedAt,
             };
           }
+          // Notificar al padre para que refresque epic.documents[] — el
+          // backend ya habrá registrado el .md del vault como EpicDocument.
+          onDocumentReady?.();
         } else if (event.type === 'error') {
           lastError = event.message;
         }

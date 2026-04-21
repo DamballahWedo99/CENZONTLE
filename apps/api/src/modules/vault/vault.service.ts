@@ -161,86 +161,164 @@ export class VaultService {
   }
 
   /**
+   * Mutex queue para serializar TODAS las operaciones de escritura al vault.
+   *
+   * Por que: GitHub Contents API no soporta N writes concurrentes al mismo
+   * branch. Cada write commitea, invalidando el SHA del tree, y el siguiente
+   * write en flight recibe 409. Con burst de 24+ writes (6 historias x 4
+   * archivos), el retry no puede ganar — hay livelock: cada retry encuentra
+   * que otro write acaba de invalidar el SHA de nuevo.
+   *
+   * Solucion: los callers siguen usando Promise.all si quieren, pero cada
+   * writeNote/deleteNote espera su turno en esta queue. GitHub commita en
+   * serie internamente de todos modos — no perdemos throughput real.
+   *
+   * Timing esperado: 24 writes x ~300ms = ~7 seg total, pero 0 errors.
+   */
+  private githubWriteQueue: Promise<unknown> = Promise.resolve();
+
+  private enqueueGithubWrite<T>(operation: () => Promise<T>): Promise<T> {
+    const next = this.githubWriteQueue.then(operation, operation);
+    // Swallow errors en la cadena del queue para que un write fallido no
+    // bloquee los siguientes. El caller recibe el error via el Promise returned.
+    this.githubWriteQueue = next.catch(() => undefined);
+    return next;
+  }
+
+  /**
    * Create or update a note in the vault. Commits the change to GitHub.
+   *
+   * Serializado via mutex queue (ver githubWriteQueue arriba). Los callers
+   * pueden lanzar N writeNote en Promise.all, pero internamente se procesan
+   * uno a la vez — GitHub los queue igual server-side, solo que aqui
+   * evitamos los 409s que el paralelismo cliente-side producia.
+   *
+   * Retry con backoff (max 3, 200/400/800ms) se mantiene para resiliencia
+   * ante writes concurrentes desde OTROS procesos/clones de la app.
    */
   async writeNote(path: string, content: string, commitMessage: string): Promise<VaultNote> {
+    return this.enqueueGithubWrite(() => this.writeNoteImpl(path, content, commitMessage));
+  }
+
+  private async writeNoteImpl(path: string, content: string, commitMessage: string): Promise<VaultNote> {
     this.logger.log(`[writeNote] path=${path} contentLen=${content.length} msg="${commitMessage}"`);
-    try {
-      const ctx = await this.getContext();
-      // Check if file exists to get its SHA
-      const existing = await this.readNote(path);
-      this.logger.log(`[writeNote] existing=${existing ? `sha=${existing.sha.slice(0, 8)}` : 'NEW'}`);
+    const MAX_RETRIES = 3;
 
-      const res = await ctx.octokit.repos.createOrUpdateFileContents({
-        owner: ctx.owner,
-        repo: ctx.repo,
-        path,
-        message: commitMessage,
-        content: Buffer.from(content, 'utf-8').toString('base64'),
-        branch: ctx.branch,
-        ...(existing ? { sha: existing.sha } : {}),
-      });
+    for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
+      try {
+        const ctx = await this.getContext();
+        // IMPORTANTE: invalidar cache antes de re-leer en retries para forzar
+        // fetch fresco del SHA (el cache puede tener el SHA viejo pre-conflict).
+        if (attempt > 0) this.cache.delete(path);
+        const existing = await this.readNote(path);
+        if (attempt === 0) {
+          this.logger.log(`[writeNote] existing=${existing ? `sha=${existing.sha.slice(0, 8)}` : 'NEW'}`);
+        }
 
-      const newSha = res.data.content?.sha ?? '';
-      this.logger.log(`[writeNote] OK newSha=${newSha.slice(0, 8)}`);
-      const note: VaultNote = { path, content, sha: newSha, updatedAt: new Date().toISOString() };
+        const res = await ctx.octokit.repos.createOrUpdateFileContents({
+          owner: ctx.owner,
+          repo: ctx.repo,
+          path,
+          message: commitMessage,
+          content: Buffer.from(content, 'utf-8').toString('base64'),
+          branch: ctx.branch,
+          ...(existing ? { sha: existing.sha } : {}),
+        });
 
-      this.cache.set(path, { note, expiresAt: Date.now() + this.cacheTtlMs });
+        const newSha = res.data.content?.sha ?? '';
+        this.logger.log(
+          `[writeNote] OK newSha=${newSha.slice(0, 8)}${attempt > 0 ? ` (after ${attempt} retry)` : ''}`,
+        );
+        const note: VaultNote = { path, content, sha: newSha, updatedAt: new Date().toISOString() };
 
-      // Fire-and-forget: invalidar el clone local para que las tools vault_*
-      // vean el nuevo contenido en la siguiente búsqueda. Sin esto, el agente
-      // que consulta un epic recién editado vería contenido stale hasta el
-      // próximo ensureFresh (5 min). Con esto, <500ms de lag típico.
-      this.vaultClone.scheduleClone(ctx.configId);
+        this.cache.set(path, { note, expiresAt: Date.now() + this.cacheTtlMs });
+        this.vaultClone.scheduleClone(ctx.configId);
 
-      return note;
-    } catch (err: any) {
-      this.logger.error(`[writeNote] FAILED path=${path} status=${err?.status} message=${err?.message}`);
-      // Safelist explícito de campos a logear — nunca `JSON.stringify(err)` porque
-      // los Octokit RequestError objects pueden contener `err.request.headers.authorization`
-      // con el token Bearer. Solo logueamos campos que sabemos que son públicos.
-      if (err?.response?.data) {
-        const scrubbed = {
-          message: err.response.data?.message,
-          documentation_url: err.response.data?.documentation_url,
-          status: err?.status,
-        };
-        this.logger.error(`[writeNote] GitHub response: ${JSON.stringify(scrubbed)}`);
+        return note;
+      } catch (err: any) {
+        // 409 Conflict: SHA expirado por commit concurrente. Retry con backoff.
+        const isRetriable409 = err?.status === 409 && attempt < MAX_RETRIES;
+        if (isRetriable409) {
+          const backoffMs = 200 * Math.pow(2, attempt); // 200, 400, 800
+          this.logger.warn(
+            `[writeNote] 409 conflict on ${path}, retry ${attempt + 1}/${MAX_RETRIES} in ${backoffMs}ms`,
+          );
+          await new Promise((resolve) => setTimeout(resolve, backoffMs));
+          continue;
+        }
+
+        this.logger.error(`[writeNote] FAILED path=${path} status=${err?.status} message=${err?.message}`);
+        if (err?.response?.data) {
+          const scrubbed = {
+            message: err.response.data?.message,
+            documentation_url: err.response.data?.documentation_url,
+            status: err?.status,
+          };
+          this.logger.error(`[writeNote] GitHub response: ${JSON.stringify(scrubbed)}`);
+        }
+        throw new InternalServerErrorException(`Error escribiendo ${path} al vault`);
       }
-      throw new InternalServerErrorException(`Error escribiendo ${path} al vault`);
     }
+
+    // Inalcanzable (el loop retorna o throws) pero TypeScript lo exige.
+    throw new InternalServerErrorException(`Error escribiendo ${path} al vault (retries exhausted)`);
   }
 
   /**
    * Delete a note from the vault. Fails silently if the note doesn't exist.
+   * Serializado via mutex queue (ver writeNote) + retry con backoff ante 409.
    */
   async deleteNote(path: string, commitMessage: string): Promise<void> {
-    try {
-      const ctx = await this.getContext();
-      const existing = await this.readNote(path);
-      if (!existing) {
-        this.logger.warn(`Attempted to delete non-existent note: ${path}`);
+    return this.enqueueGithubWrite(() => this.deleteNoteImpl(path, commitMessage));
+  }
+
+  private async deleteNoteImpl(path: string, commitMessage: string): Promise<void> {
+    const MAX_RETRIES = 3;
+
+    for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
+      try {
+        const ctx = await this.getContext();
+        if (attempt > 0) this.cache.delete(path);
+        const existing = await this.readNote(path);
+        if (!existing) {
+          this.logger.warn(`Attempted to delete non-existent note: ${path}`);
+          return;
+        }
+
+        await ctx.octokit.repos.deleteFile({
+          owner: ctx.owner,
+          repo: ctx.repo,
+          path,
+          message: commitMessage,
+          sha: existing.sha,
+          branch: ctx.branch,
+        });
+
+        if (attempt > 0) {
+          this.logger.log(`[deleteNote] OK ${path} (after ${attempt} retry)`);
+        }
+        this.cache.delete(path);
+        this.vaultClone.scheduleClone(ctx.configId);
         return;
+      } catch (err: any) {
+        if (err.status === 404) return;
+
+        const isRetriable409 = err?.status === 409 && attempt < MAX_RETRIES;
+        if (isRetriable409) {
+          const backoffMs = 200 * Math.pow(2, attempt);
+          this.logger.warn(
+            `[deleteNote] 409 conflict on ${path}, retry ${attempt + 1}/${MAX_RETRIES} in ${backoffMs}ms`,
+          );
+          await new Promise((resolve) => setTimeout(resolve, backoffMs));
+          continue;
+        }
+
+        this.logger.error(`Error deleting note ${path}`, err);
+        throw new InternalServerErrorException(`Error eliminando ${path} del vault`);
       }
-
-      await ctx.octokit.repos.deleteFile({
-        owner: ctx.owner,
-        repo: ctx.repo,
-        path,
-        message: commitMessage,
-        sha: existing.sha,
-        branch: ctx.branch,
-      });
-
-      this.cache.delete(path);
-
-      // Fire-and-forget: invalidar clone local. Ver writeNote para el razonamiento.
-      this.vaultClone.scheduleClone(ctx.configId);
-    } catch (err: any) {
-      if (err.status === 404) return;
-      this.logger.error(`Error deleting note ${path}`, err);
-      throw new InternalServerErrorException(`Error eliminando ${path} del vault`);
     }
+
+    throw new InternalServerErrorException(`Error eliminando ${path} del vault (retries exhausted)`);
   }
 
   /**

@@ -8,6 +8,7 @@ import {
 } from 'lucide-react';
 import { DefinicionNode } from '@/types/definiciones';
 import { useDefiniciones, type SortOption } from '@/context/DefinicionesContext';
+import { formatDisplayName } from '@/lib/definiciones-display';
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -253,7 +254,7 @@ function TreeNode({ node, depth, inlineInput, setInlineInput, onRequestDelete }:
             onCancel={() => { setRenameValue(node.name); setIsRenaming(false); }}
           />
         ) : (
-          <span className="flex-1 truncate">{node.name}</span>
+          <span className="flex-1 truncate">{formatDisplayName(node.name, isFolder)}</span>
         )}
 
         {(getEffectiveAccessForNode(node.id).level === 'editor' || getEffectiveAccessForNode(node.id).level === 'owner') && (
@@ -499,8 +500,8 @@ export function FolderTree() {
             </DialogTitle>
             <DialogDescription>
               {deleteTarget?.isFolder
-                ? <>¿Eliminar la carpeta <strong>&quot;{deleteTarget?.name}&quot;</strong> y todo su contenido? Esta acción no se puede deshacer.</>
-                : <>¿Eliminar <strong>&quot;{deleteTarget?.name}&quot;</strong>? Esta acción no se puede deshacer.</>
+                ? <>¿Eliminar la carpeta <strong>&quot;{deleteTarget ? formatDisplayName(deleteTarget.name, deleteTarget.isFolder) : ''}&quot;</strong> y todo su contenido? Esta acción no se puede deshacer.</>
+                : <>¿Eliminar <strong>&quot;{deleteTarget ? formatDisplayName(deleteTarget.name, deleteTarget.isFolder) : ''}&quot;</strong>? Esta acción no se puede deshacer.</>
               }
             </DialogDescription>
           </DialogHeader>

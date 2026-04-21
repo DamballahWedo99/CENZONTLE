@@ -28,6 +28,19 @@ const MODEL = 'claude-sonnet-4-20250514';
 // limita el costo de tokens enviados a Anthropic. ~60 MB ≈ ~15 PDFs típicos.
 const MAX_ATTACHMENT_BYTES_TOTAL = 60 * 1024 * 1024;
 
+// Topes por campo narrativo (alineados al DTO de epicas en apps/api/src/modules/proyectos/epics/dto).
+// Defense in depth: aunque el DTO ya limitaria una request con campos gigantes al aceptar,
+// capamos en emitProposals para evitar que:
+//   1. Redis aloje payloads de megabytes.
+//   2. Commits gigantes al vault GitHub.
+//   3. UI renderice textos patologicos.
+const MAX_FIELD_LEN = 20_000;
+const MAX_TITLE_LEN = 300;
+
+function cap(s: string, n = MAX_FIELD_LEN): string {
+  return s.length > n ? s.slice(0, n) : s;
+}
+
 @Injectable()
 export class EpicGenerationService {
   private readonly logger = new Logger(EpicGenerationService.name);
@@ -216,13 +229,18 @@ export class EpicGenerationService {
         });
       }
 
-      const response = await this.client.messages.create({
-        model: MODEL,
-        max_tokens: 4096,
-        system: [{ type: 'text', text: systemPrompt, cache_control: { type: 'ephemeral' } }],
-        tools: claudeTools,
-        messages,
-      });
+      const response = await this.client.messages.create(
+        {
+          model: MODEL,
+          max_tokens: 4096,
+          system: [{ type: 'text', text: systemPrompt, cache_control: { type: 'ephemeral' } }],
+          tools: claudeTools,
+          messages,
+        },
+        // Propagar el AbortSignal al SDK evita consumir la respuesta completa de
+        // Anthropic cuando el cliente SSE ya se desconecto (cost + memory leak).
+        signal ? { signal } : undefined,
+      );
 
       // Collect text and tool-use blocks
       const assistantContent = response.content;
@@ -430,10 +448,13 @@ export class EpicGenerationService {
             },
           });
 
+          // Defense in depth: scrubear el resultado ANTES de reinyectarlo al LLM.
+          // Si un tool retorno contenido con patron de PAT/token, scrubSecrets aqui
+          // evita que el modelo lo aprenda y lo regurgite en thinking o proposals.
           toolResults.push({
             type: 'tool_result',
             tool_use_id: toolBlock.id,
-            content: result,
+            content: scrubSecrets(result),
           });
         } catch (err: any) {
           timer.clear();
@@ -504,26 +525,26 @@ export class EpicGenerationService {
 
       const proposed: ProposedEpic = {
         clientId: `ai-${randomUUID()}`,
-        title: String(raw.title ?? `Epica ${i + 1}`),
-        description: String(raw.description ?? ''),
+        title: cap(String(raw.title ?? `Epica ${i + 1}`), MAX_TITLE_LEN),
+        description: cap(String(raw.description ?? '')),
         status: 'draft' as EpicStatus,
         priority: this.validatePriority(raw.priority),
         initiativeId: initiative.id,
         podIds: validPodIds,
-        startDate: raw.startDate ? String(raw.startDate) : epicStart.toISOString().slice(0, 10),
-        targetDate: raw.targetDate ? String(raw.targetDate) : epicEnd.toISOString().slice(0, 10),
-        qualitativeBenefits: String(raw.qualitativeBenefits ?? ''),
-        quantitativeBenefits: String(raw.quantitativeBenefits ?? ''),
-        benefitsMeasurement: String(raw.benefitsMeasurement ?? ''),
-        scopeDescription: String(raw.scopeDescription ?? ''),
-        acceptanceCriteria: String(raw.acceptanceCriteria ?? ''),
-        technologicalImprovements: String(raw.technologicalImprovements ?? ''),
-        businessPriority: String(raw.businessPriority ?? ''),
-        teamsInvolved: String(raw.teamsInvolved ?? ''),
-        impactedChannels: String(raw.impactedChannels ?? ''),
-        impactedFlows: String(raw.impactedFlows ?? ''),
-        impactSabreLevel: String(raw.impactSabreLevel ?? ''),
-        thirdPartyDependencies: String(raw.thirdPartyDependencies ?? ''),
+        startDate: raw.startDate ? String(raw.startDate).slice(0, 10) : epicStart.toISOString().slice(0, 10),
+        targetDate: raw.targetDate ? String(raw.targetDate).slice(0, 10) : epicEnd.toISOString().slice(0, 10),
+        qualitativeBenefits: cap(String(raw.qualitativeBenefits ?? '')),
+        quantitativeBenefits: cap(String(raw.quantitativeBenefits ?? '')),
+        benefitsMeasurement: cap(String(raw.benefitsMeasurement ?? '')),
+        scopeDescription: cap(String(raw.scopeDescription ?? '')),
+        acceptanceCriteria: cap(String(raw.acceptanceCriteria ?? '')),
+        technologicalImprovements: cap(String(raw.technologicalImprovements ?? '')),
+        businessPriority: cap(String(raw.businessPriority ?? '')),
+        teamsInvolved: cap(String(raw.teamsInvolved ?? '')),
+        impactedChannels: cap(String(raw.impactedChannels ?? '')),
+        impactedFlows: cap(String(raw.impactedFlows ?? '')),
+        impactSabreLevel: cap(String(raw.impactSabreLevel ?? '')),
+        thirdPartyDependencies: cap(String(raw.thirdPartyDependencies ?? '')),
       };
 
       subject.next({ data: { type: 'proposal_ready', epic: proposed, timestamp: new Date().toISOString() } });

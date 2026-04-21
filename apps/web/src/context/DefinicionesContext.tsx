@@ -145,6 +145,28 @@ function findNodeById(nodes: DefinicionNode[], id: string): DefinicionNode | nul
   return null;
 }
 
+/**
+ * Devuelve los ids de todos los folders ancestors de un nodo dado.
+ * Ejemplo: para un doc en `root/carpeta-A/carpeta-B/doc.md`, retorna
+ * [rootId, carpetaAId, carpetaBId] — todos los folders que hay que expandir
+ * para que el nodo sea visible en el tree.
+ *
+ * Si el nodo no existe, retorna []. Si el nodo es root (sin padre), retorna [].
+ */
+function findAncestorIds(nodes: DefinicionNode[], targetId: string): string[] {
+  const walk = (list: DefinicionNode[], trail: string[]): string[] | null => {
+    for (const node of list) {
+      if (node.id === targetId) return trail;
+      if (node.type === 'folder' && node.children) {
+        const found = walk(node.children, [...trail, node.id]);
+        if (found) return found;
+      }
+    }
+    return null;
+  };
+  return walk(nodes, []) ?? [];
+}
+
 function updateNodeInTree(nodes: DefinicionNode[], id: string, updater: (node: DefinicionNode) => DefinicionNode): DefinicionNode[] {
   return nodes.map(node => {
     if (node.id === id) return updater(node);
@@ -227,6 +249,40 @@ function filterTree(nodes: DefinicionNode[], query: string): DefinicionNode[] {
   }, []);
 }
 
+/**
+ * Recolecta IDs de TODOS los folders que o bien matchean la busqueda
+ * directamente o bien contienen un descendiente que matchea. Se usa para
+ * auto-expandir el tree del EXPLORADOR cuando el user tipea una busqueda —
+ * asi se ven los resultados anidados sin tener que abrir manualmente.
+ */
+function collectFolderIdsWithMatches(nodes: DefinicionNode[], query: string): Set<string> {
+  const out = new Set<string>();
+  if (!query.trim()) return out;
+  const lower = query.toLowerCase();
+
+  const walk = (list: DefinicionNode[]): boolean => {
+    let anyMatch = false;
+    for (const node of list) {
+      const nameMatch = node.name.toLowerCase().includes(lower);
+      const tagMatch = node.tags?.some(t => t.toLowerCase().includes(lower)) ?? false;
+      const contentMatch = node.content?.toLowerCase().includes(lower) ?? false;
+      const selfMatch = nameMatch || tagMatch || contentMatch;
+      let descendantMatch = false;
+      if (node.type === 'folder' && node.children) {
+        descendantMatch = walk(node.children);
+      }
+      if (node.type === 'folder' && (selfMatch || descendantMatch)) {
+        out.add(node.id);
+      }
+      if (selfMatch || descendantMatch) anyMatch = true;
+    }
+    return anyMatch;
+  };
+
+  walk(nodes);
+  return out;
+}
+
 // === Vault mapping ===
 
 /**
@@ -241,13 +297,18 @@ const UUID_PREFIX_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f
  * Convierte un filename del vault en un nombre legible para la UI:
  * 1. Remueve extensión `.md`
  * 2. Strip UUID prefix si existe
- * 3. Reemplaza guiones por espacios y capitaliza primera letra (un-slugify)
+ * 3. Reemplaza guiones por espacios (preservando guiones entre dígitos) y
+ *    capitaliza primera letra (un-slugify)
+ *
+ * El lookbehind/lookahead `(?<!\d)-(?!\d)` preserva guiones que estan entre
+ * dos digitos — esto es critico para archivos user-uploaded con timestamps
+ * tipo `2026-04-21` o versiones tipo `v1-2-3`. Sin este guard, fechas como
+ * `2026-04-21` se transforman a `2026 04 21` y pierden su semantica.
  */
 function humanizeFilename(filename: string): string {
   const withoutExt = filename.replace(/\.md$/i, '');
   const withoutUuid = withoutExt.replace(UUID_PREFIX_RE, '');
-  // Un-slugify: guiones a espacios + capitalizar
-  const humanized = withoutUuid.replace(/-/g, ' ').trim();
+  const humanized = withoutUuid.replace(/(?<!\d)-(?!\d)/g, ' ').trim();
   if (!humanized) return withoutUuid || withoutExt;
   return humanized.charAt(0).toUpperCase() + humanized.slice(1);
 }
@@ -570,8 +631,29 @@ function reducer(state: DefinicionesState, action: DefinicionesAction): Definici
         })),
       };
 
-    case 'SELECT_NODE':
-      return { ...state, selectedId: action.id, isEditing: false };
+    case 'SELECT_NODE': {
+      // Al seleccionar un nodo (desde cualquier fuente — click en tree,
+      // click en content area card, link de graph/changelog), auto-expandimos
+      // solo sus ANCESTORS para que el nodo sea visible en el tree.
+      //
+      // IMPORTANTE: NO expandimos el folder seleccionado mismo — si lo
+      // hicieramos, el flujo `toggleFolder(id) + selectNode(id)` del click
+      // en tree se anularia (toggle colapsa, select re-expande). El user
+      // puede hacer click en el chevron / carpeta misma para controlar la
+      // expansion del nodo; este reducer solo revela la ruta hasta el.
+      if (action.id === null) {
+        return { ...state, selectedId: null, isEditing: false };
+      }
+      const ancestors = findAncestorIds(state.tree, action.id);
+      const nextExpanded = new Set(state.expandedFolders);
+      for (const ancestorId of ancestors) nextExpanded.add(ancestorId);
+      return {
+        ...state,
+        selectedId: action.id,
+        isEditing: false,
+        expandedFolders: nextExpanded,
+      };
+    }
 
     case 'TOGGLE_FOLDER': {
       const next = new Set(state.expandedFolders);
@@ -586,8 +668,24 @@ function reducer(state: DefinicionesState, action: DefinicionesAction): Definici
       return { ...state, expandedFolders: next };
     }
 
-    case 'SET_SEARCH':
-      return { ...state, searchQuery: action.query };
+    case 'SET_SEARCH': {
+      // Cuando el user escribe una busqueda, auto-expandir todos los folders
+      // que contienen matches (directos o descendientes). Asi el tree del
+      // EXPLORADOR revela los resultados anidados sin que el user tenga que
+      // expandir manualmente. Cuando se limpia la busqueda, dejamos los
+      // folders expandidos como estaban — no colapsamos para no sorprender
+      // al user que quiza ya navego a uno de esos nodos.
+      if (!action.query.trim()) {
+        return { ...state, searchQuery: action.query };
+      }
+      const matchFolders = collectFolderIdsWithMatches(state.tree, action.query);
+      if (matchFolders.size === 0) {
+        return { ...state, searchQuery: action.query };
+      }
+      const nextExpanded = new Set(state.expandedFolders);
+      matchFolders.forEach(id => nextExpanded.add(id));
+      return { ...state, searchQuery: action.query, expandedFolders: nextExpanded };
+    }
 
     case 'TOGGLE_EDITING':
       return { ...state, isEditing: !state.isEditing };
@@ -1133,15 +1231,6 @@ export function DefinicionesProvider({ children }: { children: ReactNode }) {
     }
   }, [state.selectedId, state.tree]);
 
-  const selectedNode = useMemo(() => {
-    if (!state.selectedId) return null;
-    const node = findNodeById(state.tree, state.selectedId);
-    if (!node || !currentUser) return node;
-    const access = getEffectiveAccess(currentUser.id, currentUser.role, node.id, state.tree, state.accessConfig, state.roleDefaults);
-    if (access.level === 'none') return null;
-    return node;
-  }, [state.tree, state.selectedId, currentUser, state.accessConfig, state.roleDefaults]);
-
   const unfilteredTree = useMemo(
     () => sortTree(filterTree(state.tree, state.searchQuery), state.sortBy),
     [state.tree, state.searchQuery, state.sortBy],
@@ -1154,6 +1243,25 @@ export function DefinicionesProvider({ children }: { children: ReactNode }) {
     },
     [unfilteredTree, currentUser, state.tree, state.accessConfig, state.roleDefaults],
   );
+
+  const selectedNode = useMemo(() => {
+    if (!state.selectedId) return null;
+    // Si hay busqueda activa, preferir el nodo de filteredTree porque sus
+    // `children` ya estan filtrados a los que matchean. Asi el panel derecho
+    // del DocumentViewer muestra solo los resultados relevantes en vez del
+    // contenido completo del folder. Fallback al tree crudo si no esta en
+    // filteredTree (ej: seleccionado antes de la busqueda o fuera del
+    // scope del filter por access).
+    if (state.searchQuery.trim()) {
+      const filteredNode = findNodeById(filteredTree, state.selectedId);
+      if (filteredNode) return filteredNode;
+    }
+    const node = findNodeById(state.tree, state.selectedId);
+    if (!node || !currentUser) return node;
+    const access = getEffectiveAccess(currentUser.id, currentUser.role, node.id, state.tree, state.accessConfig, state.roleDefaults);
+    if (access.level === 'none') return null;
+    return node;
+  }, [state.tree, filteredTree, state.selectedId, state.searchQuery, currentUser, state.accessConfig, state.roleDefaults]);
 
   const getEffectiveAccessForNode = useCallback(
     (nodeId: string): EffectiveAccess => {

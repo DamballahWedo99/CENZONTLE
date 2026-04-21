@@ -21,6 +21,7 @@ import {
 } from 'lucide-react';
 import { useDefiniciones } from '@/context/DefinicionesContext';
 import { DefinicionNode } from '@/types/definiciones';
+import { formatDisplayName } from '@/lib/definiciones-display';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip';
@@ -708,7 +709,7 @@ export function DocumentViewer() {
             <div className="p-1.5 rounded-md bg-primary/10">
               <Folder className="h-4 w-4 text-primary/70" />
             </div>
-            <h2 className="text-lg font-semibold">{selectedNode.name}</h2>
+            <h2 className="text-lg font-semibold">{formatDisplayName(selectedNode.name, selectedNode.type === 'folder')}</h2>
           </div>
           <p className="text-sm text-muted-foreground ml-10">
             {folders.length > 0 && `${folders.length} ${folders.length === 1 ? 'carpeta' : 'carpetas'}`}
@@ -731,7 +732,7 @@ export function DocumentViewer() {
                     ? <Folder className="h-4 w-4 text-primary/50 group-hover:text-primary/70 transition-colors" />
                     : <FileText className="h-4 w-4 text-primary/50 group-hover:text-primary/70 transition-colors" />
                   }
-                  <span className="font-medium text-sm truncate">{child.name}</span>
+                  <span className="font-medium text-sm truncate">{formatDisplayName(child.name, child.type === 'folder')}</span>
                 </div>
                 {child.type === 'document' && child.content !== undefined && (
                   <p className="text-xs text-muted-foreground line-clamp-3 leading-relaxed">
@@ -815,7 +816,7 @@ export function DocumentViewer() {
       <div className="px-6 py-3 border-b border-border/50 shrink-0 space-y-2 bg-muted/30">
         <div className="flex items-center justify-between">
           <div className="flex items-center gap-2 min-w-0">
-            <h2 className="text-base font-semibold truncate">{selectedNode.name}</h2>
+            <h2 className="text-base font-semibold truncate">{formatDisplayName(selectedNode.name, false)}</h2>
             {state.isEditing ? (
               <>
                 <button

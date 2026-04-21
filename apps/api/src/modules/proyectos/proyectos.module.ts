@@ -14,16 +14,23 @@ import { CodeRepositoriesModule } from '../code-repositories/code-repositories.m
 import { EpicGenerationController } from './epics/generation/epic-generation.controller';
 import { EpicGenerationService } from './epics/generation/epic-generation.service';
 import { ProposalCacheService } from './epics/generation/proposal-cache.service';
+import { StoryGenerationController } from './stories/generation/story-generation.controller';
+import { StoryGenerationService } from './stories/generation/story-generation.service';
+import { StoryProposalCacheService } from './stories/generation/story-proposal-cache.service';
 import { DiagramGenerationController } from './diagrams/generation/diagram-generation.controller';
 import { DiagramGenerationService } from './diagrams/generation/diagram-generation.service';
 import { DiagramCacheService } from './diagrams/generation/diagram-cache.service';
+import { VaultMigrationController } from './migration/vault-migration.controller';
+import { VaultMigrationService } from './migration/vault-migration.service';
 
 @Module({
   imports: [AgentToolsModule, CodeRepositoriesModule],
   controllers: [
     PodsController,
     EpicGenerationController, // Must register before InitiativesController (same prefix, more specific route)
-    DiagramGenerationController,
+    StoryGenerationController, // Must register before StoriesController (prefix /proyectos/story-generation vs /proyectos/historias)
+    DiagramGenerationController, // Must register before EpicsController (prefix /proyectos/diagrams-generation vs /proyectos/epicas)
+    VaultMigrationController, // Admin endpoint: POST /admin/vault/migration/run
     InitiativesController,
     EpicsController,
     StoriesController,
@@ -38,6 +45,9 @@ import { DiagramCacheService } from './diagrams/generation/diagram-cache.service
     DiagramGenerationService,
     DiagramCacheService,
     StoriesService,
+    StoryGenerationService,
+    StoryProposalCacheService,
+    VaultMigrationService,
     ChangelogService,
   ],
   exports: [PodsService, InitiativesService, EpicsService, StoriesService, ChangelogService],

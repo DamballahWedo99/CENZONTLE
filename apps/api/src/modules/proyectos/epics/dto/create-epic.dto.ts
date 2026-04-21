@@ -1,4 +1,5 @@
-import { IsString, IsNotEmpty, IsEnum, IsOptional, IsDateString, IsArray, IsUUID, IsObject, MaxLength } from 'class-validator';
+import { IsString, IsNotEmpty, IsEnum, IsOptional, IsDateString, IsArray, IsUUID, IsObject, MaxLength, Matches, ValidateNested } from 'class-validator';
+import { Type } from 'class-transformer';
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
 import { EpicStatus, Priority } from '@prisma/client';
 
@@ -7,6 +8,29 @@ import { EpicStatus, Priority } from '@prisma/client';
 const MAX_TITLE = 200;
 const MAX_DESCRIPTION = 5_000;
 const MAX_NARRATIVE = 20_000;
+
+/**
+ * Sub-DTO de un diagrama asociado a una epica.
+ *
+ * **Seguridad crítica**: el `id` se usa en `epicDiagramPath` para construir
+ * el path del archivo en el vault. Sin validación de charset, un `id` con
+ * `/`, `..`, o whitespace permitiría path traversal y overwrite de archivos
+ * hermanos (`index.md`, `definicion.md`). Restringimos a charset UUID-safe
+ * `[a-fA-F0-9-]` aunque el resto del objeto se acepta como `Record<string, any>`
+ * porque el shape completo vive en el JSONB de PG sin schema estricto.
+ */
+export class EpicDiagramItemDto {
+  @ApiProperty({ example: '04c4c744-edcc-4ede-80c1-455fbd2a59af' })
+  @IsString()
+  @Matches(/^[a-fA-F0-9-]+$/, { message: 'diagram.id debe contener solo [a-fA-F0-9-]' })
+  id!: string;
+
+  // El resto de campos (`type`, `nodes`, `edges`, `title`, etc.) se aceptan
+  // sin validar campo-por-campo. Si el ValidationPipe global NO tiene
+  // `forbidNonWhitelisted: true`, los campos extra sobreviven al pipe y
+  // se persisten como JSONB. class-validator solo valida `id`, que es el
+  // unico campo con impacto security (va a `epicDiagramPath`).
+}
 
 export class CreateEpicDto {
   @ApiProperty({ example: 'Rediseño de Checkout Web' })
@@ -65,7 +89,12 @@ export class CreateEpicDto {
 
   // JSONB fields
   @ApiPropertyOptional() @IsOptional() @IsArray() documents?: any[];
-  @ApiPropertyOptional() @IsOptional() @IsArray() diagrams?: any[];
+  @ApiPropertyOptional({ type: [EpicDiagramItemDto] })
+  @IsOptional()
+  @IsArray()
+  @ValidateNested({ each: true })
+  @Type(() => EpicDiagramItemDto)
+  diagrams?: EpicDiagramItemDto[];
   @ApiPropertyOptional() @IsOptional() @IsArray() dependencies?: any[];
   @ApiPropertyOptional() @IsOptional() @IsObject() tracker?: Record<string, any>;
 }

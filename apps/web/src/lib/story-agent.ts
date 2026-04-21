@@ -1,13 +1,18 @@
 /**
- * Mock AI Story Generation Agent
+ * Story Generation — SSE Client + Mock Fallback
  *
- * In production this would call an LLM API with context from the epic definition,
- * the business diagram, and the existing microservices repositories to generate
- * structured user stories. For now we simulate the agent by parsing the epic fields
- * and generating realistic stories.
+ * Contains:
+ *  - `streamStoryProposals(epicId, opts)` → conecta al backend SSE del agente
+ *    que orquesta los 3 roles (PO + Tech Lead + QA) y emite eventos en tiempo real.
+ *  - `generateStories(epic, podIds)` → generador mock basado en templates
+ *    (fallback / demo). Se mantiene para no romper callers existentes.
  */
 
 import { Epic, UserStory, StoryStatus } from '@cenzontle/shared';
+import type { StoryGenerationEvent } from '@cenzontle/shared';
+
+/** Extension frontend-only con timestamp fallback cuando el backend no lo envia. */
+export type StoryGenerationEventWithMeta = StoryGenerationEvent & { _receivedAt?: string };
 
 interface StoryTemplate {
   keywords: string[];
@@ -319,4 +324,161 @@ export async function generateStories(epic: Epic, podIds: string[]): Promise<Use
   }
 
   return matched;
+}
+
+/* ------------------------------------------------------------------ */
+/*  SSE streaming: real-time agent que orquesta PO + Tech Lead + QA   */
+/* ------------------------------------------------------------------ */
+
+export interface StreamStoryOptions {
+  prompt?: string;
+  count?: number;
+  webSearch?: boolean;
+  signal?: AbortSignal;
+}
+
+/**
+ * Conecta al endpoint SSE del agente de historias. Emite eventos en orden:
+ * run_started → phase_change(researching) → step_*... → phase_change(drafting_po|technical|qa)
+ * → proposal_ready(story) x N → done → run_finished.
+ */
+export async function* streamStoryProposals(
+  epicId: string,
+  opts: StreamStoryOptions = {},
+): AsyncGenerator<StoryGenerationEventWithMeta> {
+  const params = new URLSearchParams();
+  if (opts.prompt) params.set('prompt', opts.prompt);
+  if (opts.count) params.set('count', String(opts.count));
+  if (opts.webSearch) params.set('webSearch', 'true');
+
+  const url = `/api/proxy/proyectos/story-generation/${epicId}?${params}`;
+
+  // eslint-disable-next-line no-console
+  console.log(`[StoryAgent] ═══ CONNECT epic=${epicId} prompt="${opts.prompt ?? ''}" count=${opts.count ?? 'auto'} webSearch=${!!opts.webSearch}`);
+
+  const response = await fetch(url, {
+    headers: { Accept: 'text/event-stream' },
+    signal: opts.signal,
+  });
+
+  if (!response.ok) {
+    const text = await response.text().catch(() => 'Unknown error');
+    // eslint-disable-next-line no-console
+    console.error(`[StoryAgent] ✗ HTTP ${response.status}: ${text}`);
+    yield { type: 'error', message: `Error ${response.status}: ${text}` };
+    return;
+  }
+
+  const reader = response.body?.getReader();
+  if (!reader) {
+    yield { type: 'error', message: 'No response body' };
+    return;
+  }
+
+  const decoder = new TextDecoder();
+  let buffer = '';
+  let eventCount = 0;
+
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+
+      buffer += decoder.decode(value, { stream: true });
+
+      const parts = buffer.split('\n\n');
+      buffer = parts.pop() ?? '';
+
+      for (const part of parts) {
+        const event = parseStoryEvent(part);
+        if (event) {
+          eventCount++;
+          logEvent(event, eventCount);
+          yield event;
+        }
+      }
+    }
+
+    if (buffer.trim()) {
+      const event = parseStoryEvent(buffer);
+      if (event) {
+        eventCount++;
+        logEvent(event, eventCount);
+        yield event;
+      }
+    }
+  } finally {
+    reader.releaseLock();
+    // eslint-disable-next-line no-console
+    console.log(`[StoryAgent] ═══ DISCONNECT totalEvents=${eventCount}`);
+  }
+}
+
+function logEvent(event: StoryGenerationEventWithMeta, n: number): void {
+  // Log compacto con prefijo, numero de evento, tipo y datos relevantes.
+  // Solo info que ayuda a debugging del flujo — no todo el payload completo.
+  const role = (event as any).role ? `[${(event as any).role}]` : '';
+  switch (event.type) {
+    case 'run_started':
+      // eslint-disable-next-line no-console
+      console.log(`[StoryAgent] #${n} ▶ run_started`);
+      break;
+    case 'phase_change':
+      // eslint-disable-next-line no-console
+      console.log(`[StoryAgent] #${n} ── phase ${event.phase} ${role} "${event.label}"`);
+      break;
+    case 'thinking':
+      // eslint-disable-next-line no-console
+      console.log(`[StoryAgent] #${n} 💭 thinking ${role} ${event.delta.slice(0, 80).replace(/\n/g, ' ')}${event.delta.length > 80 ? '…' : ''}`);
+      break;
+    case 'step_start':
+      // eslint-disable-next-line no-console
+      console.log(`[StoryAgent] #${n} ▶ step_start tool=${event.tool ?? event.step} ${role}`);
+      break;
+    case 'step_done':
+      // eslint-disable-next-line no-console
+      console.log(`[StoryAgent] #${n} ✓ step_done tool=${event.tool ?? event.step} ${role} ${event.durationMs ?? '?'}ms — ${event.summary ?? ''}`);
+      break;
+    case 'proposal_ready':
+      // eslint-disable-next-line no-console
+      console.log(`[StoryAgent] #${n} 📦 proposal_ready "${event.story.title}" SP=${event.story.storyPoints} pod=${event.story.podId} docs=${event.story.relatedDocuments?.length ?? 0} deps=${event.story.discoveredDependencies?.length ?? 0}`);
+      break;
+    case 'done':
+      // eslint-disable-next-line no-console
+      console.log(`[StoryAgent] #${n} ✓ done`);
+      break;
+    case 'run_finished':
+      // eslint-disable-next-line no-console
+      console.log(`[StoryAgent] #${n} ═ run_finished total=${event.totalDurationMs}ms`);
+      break;
+    case 'error':
+      // eslint-disable-next-line no-console
+      console.error(`[StoryAgent] #${n} ✗ error: ${event.message}`);
+      break;
+  }
+}
+
+function parseStoryEvent(raw: string): StoryGenerationEventWithMeta | null {
+  const lines = raw.split('\n');
+  const dataLines: string[] = [];
+
+  for (const line of lines) {
+    if (line.startsWith('data:')) {
+      dataLines.push(line.slice(5).trimStart());
+    }
+  }
+
+  if (dataLines.length === 0) return null;
+
+  const data = dataLines.join('\n');
+
+  try {
+    const parsed = JSON.parse(data) as StoryGenerationEventWithMeta;
+    if (!parsed.timestamp) {
+      parsed._receivedAt = new Date().toISOString();
+    }
+    return parsed;
+  } catch {
+    return null;
+  }
 }
