@@ -135,6 +135,18 @@ interface AgentLoopParams {
   signal?: AbortSignal;
   subject: Subject<{ data: StoryGenerationEvent }>;
   runStartTime: number;
+  /**
+   * Validator opcional del input del terminal tool. Si retorna { valid: false },
+   * el loop responde con tool_result is_error:true y continua para que el
+   * modelo reintente. Util para forzar contratos no enforced por JSON Schema
+   * alone (ej. minItems — Anthropic SDK no hace strict validation client-side,
+   * solo pasa el schema como hint al modelo). Si el modelo ignora el hint,
+   * este validator lo detecta y fuerza retry explicito.
+   */
+  validateTerminal?: (input: Record<string, unknown>) => {
+    valid: boolean;
+    errorMessage?: string;
+  };
 }
 
 @Injectable()
@@ -814,6 +826,16 @@ NO disenes tecnicamente ni propongas tests — eso es trabajo del Tech Lead y de
       maxTokens: PO_MAX_TOKENS,
       initialUserContent: userContent,
       terminalToolName: 'submit_po_outline',
+      validateTerminal: (input) => {
+        const stories = (input as { stories?: unknown }).stories;
+        if (!Array.isArray(stories) || stories.length === 0) {
+          return {
+            valid: false,
+            errorMessage: `stories=[] NO es aceptable. Redacta al menos 3 historias basandote en el alcance de la epica. Usa el markdown completo de la epica y las acceptance criteria como guia.`,
+          };
+        }
+        return { valid: true };
+      },
       ctx: common.ctx,
       signal,
       subject,
@@ -946,6 +968,7 @@ Proceso obligatorio:
 
 NO cambies titles, descriptions, acceptanceCriteria — esos estan congelados. Si detectas que un outline es inviable, igual genera design con el mejor aproach y deja notas en architecture.`;
 
+    const expectedDesignCount = poResult.outlines.length;
     const output = await this.runAgentLoop({
       role: 'technical',
       commonContextBlock,
@@ -956,6 +979,28 @@ NO cambies titles, descriptions, acceptanceCriteria — esos estan congelados. S
       maxTokens: TL_MAX_TOKENS,
       initialUserContent: userContent,
       terminalToolName: 'submit_technical_designs',
+      validateTerminal: (input) => {
+        const designs = (input as { designs?: unknown }).designs;
+        if (!Array.isArray(designs)) {
+          return {
+            valid: false,
+            errorMessage: `El campo designs debe ser un array, no ${typeof designs}. Emite exactamente ${expectedDesignCount} entries.`,
+          };
+        }
+        if (designs.length === 0) {
+          return {
+            valid: false,
+            errorMessage: `designs=[] NO es aceptable. Debes emitir EXACTAMENTE ${expectedDesignCount} entries, una por cada outline del PO (outlineIndex 0..${expectedDesignCount - 1}). Aun si un outline es ambiguo, redacta el mejor design posible con notas en architecture.`,
+          };
+        }
+        if (designs.length < expectedDesignCount) {
+          return {
+            valid: false,
+            errorMessage: `Solo emitiste ${designs.length}/${expectedDesignCount} designs. Agrega los ${expectedDesignCount - designs.length} faltantes. Cada outline debe tener su design.`,
+          };
+        }
+        return { valid: true };
+      },
       ctx: common.ctx,
       signal,
       subject,
@@ -1146,6 +1191,7 @@ Proceso:
 
 NO cambies PO ni technical. Si una historia es dificil de testear, dilo en su testingStrategy con recomendaciones — pero igual EMITE su entry.`;
 
+    const expectedStrategyCount = poResult.outlines.length;
     const output = await this.runAgentLoop({
       role: 'qa',
       commonContextBlock,
@@ -1156,6 +1202,28 @@ NO cambies PO ni technical. Si una historia es dificil de testear, dilo en su te
       maxTokens: QA_MAX_TOKENS,
       initialUserContent: userContent,
       terminalToolName: 'submit_qa_strategies',
+      validateTerminal: (input) => {
+        const strategies = (input as { strategies?: unknown }).strategies;
+        if (!Array.isArray(strategies)) {
+          return {
+            valid: false,
+            errorMessage: `El campo strategies debe ser un array, no ${typeof strategies}. Emite exactamente ${expectedStrategyCount} entries.`,
+          };
+        }
+        if (strategies.length === 0) {
+          return {
+            valid: false,
+            errorMessage: `strategies=[] NO es aceptable. Debes emitir EXACTAMENTE ${expectedStrategyCount} entries, una por cada outline (outlineIndex 0..${expectedStrategyCount - 1}). Si no encontraste framework de testing via code_grep, usa el fallback: Jest+supertest para backend Node/TS, Vitest+Testing Library para frontend React, pytest para Python. Aun sin repos conectados, SIEMPRE puedes estrategizar basandote en las acceptance criteria de cada historia.`,
+          };
+        }
+        if (strategies.length < expectedStrategyCount) {
+          return {
+            valid: false,
+            errorMessage: `Solo emitiste ${strategies.length}/${expectedStrategyCount} strategies. Agrega las ${expectedStrategyCount - strategies.length} faltantes. Cada historia debe tener su entry, no saltes ninguna.`,
+          };
+        }
+        return { valid: true };
+      },
       ctx: common.ctx,
       signal,
       subject,
@@ -1241,6 +1309,7 @@ NO cambies PO ni technical. Si una historia es dificil de testear, dilo en su te
       maxTokens,
       initialUserContent,
       terminalToolName,
+      validateTerminal,
       ctx,
       signal,
       subject,
@@ -1383,23 +1452,36 @@ NO cambies PO ni technical. Si una historia es dificil de testear, dilo en su te
       for (const toolBlock of toolUseBlocks) {
         if (signal?.aborted) return null;
 
-        // Terminal tool → retornamos su input como output del agente
+        // Terminal tool → validar contrato ANTES de retornar
         if (toolBlock.name === terminalToolName) {
           const terminalInput = toolBlock.input as Record<string, unknown>;
           const preview = this.summarizeTerminalInput(terminalToolName, terminalInput);
-          // Capturamos el TEXTO que el modelo escribio antes del tool_use — es
-          // critico para diagnosticar cuando el modelo "desiste" (emite arrays
-          // vacios aun con el contrato estricto). El texto contiene su razonamiento
-          // y nos dice SI el modelo mal-interpreto el prompt o hubo otra causa.
           const assistantText = assistantContent
             .filter((b: any) => b.type === 'text' && b.text)
             .map((b: any) => b.text)
             .join('\n')
             .slice(0, 800);
-          // Si el modelo se quedo sin tokens MIENTRAS escribia el JSON del terminal
-          // tool, el SDK de Anthropic devuelve un objeto parcial/vacio. Detectarlo
-          // explicitamente evita propagar shells vacios silenciosamente.
           const truncated = response.stop_reason === 'max_tokens';
+
+          // Ejecutar el validator si esta definido. Si falla, respondemos con
+          // tool_result is_error y continuamos el loop para forzar retry. El
+          // modelo recibe el error en el proximo user turn y reconsidera.
+          if (validateTerminal) {
+            const check = validateTerminal(terminalInput);
+            if (!check.valid) {
+              this.logger.warn(
+                `[StoryGen:${role.toUpperCase()}] ⚠ terminal tool '${terminalToolName}' called at iter ${iteration} but CONTRATO VIOLADO: ${check.errorMessage}. Preview: ${preview}. Forzando retry. text_preview="${scrubSecrets(assistantText).slice(0, 300)}"`,
+              );
+              toolResults.push({
+                type: 'tool_result',
+                tool_use_id: toolBlock.id,
+                is_error: true,
+                content: `ERROR DE CONTRATO: ${check.errorMessage}\n\nNo llames submit_qa_strategies/submit_technical_designs/submit_po_outline otra vez hasta que el array tenga el numero correcto de entries. Regenera el tool_use corrigiendo el problema.`,
+              });
+              continue;
+            }
+          }
+
           if (truncated) {
             this.logger.warn(
               `[StoryGen:${role.toUpperCase()}] ⚠ terminal tool '${terminalToolName}' called at iter ${iteration} BUT stop_reason=max_tokens — JSON likely truncated. Preview: ${preview}. Modelo escribio: "${scrubSecrets(assistantText).slice(0, 400)}"`,
