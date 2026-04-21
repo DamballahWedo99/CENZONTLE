@@ -161,12 +161,34 @@ export function GraphView({ showForceControls = false, onNavigateToNode }: { sho
   const [hoveredNode, setHoveredNode] = useState<string | null>(null);
   const [focusedNodeId, setFocusedNodeId] = useState<string | null>(null);
   const [dimensions, setDimensions] = useState({ width: 800, height: 600 });
-  // Carga lazy desde localStorage al mount — si el user ya guardo su config,
-  // arranca con ella en vez de con los defaults.
-  const [forces, setForces] = useState<ForceSettings>(() => loadForcesFromStorage());
+  // Forces arranca con DEFAULT_FORCES — NO leemos localStorage en el
+  // initializer del useState porque en SSR de Next.js (aun en 'use client')
+  // el initializer corre en el server con window=undefined, retorna
+  // DEFAULT_FORCES, y el cliente hidrata con ese valor sin re-ejecutar.
+  // La carga real viene en un useEffect post-mount (ver hydration effect
+  // abajo) que garantiza acceso a window y dispara el update correcto.
+  const [forces, setForces] = useState<ForceSettings>(DEFAULT_FORCES);
   // Flash de confirmacion cuando el user guarda — el boton muestra el check
   // por 1.5 seg antes de volver al icono de Save.
   const [justSaved, setJustSaved] = useState(false);
+
+  // Hydration: leer localStorage AL MONTAR en el cliente y aplicar si difiere
+  // de defaults. Esto dispara setForces -> re-render -> el "update forces"
+  // useEffect aplica los valores a la simulacion D3 existente.
+  useEffect(() => {
+    const stored = loadForcesFromStorage();
+    // Solo setear si es distinto a defaults (evita re-render innecesario).
+    if (
+      stored.centerStrength !== DEFAULT_FORCES.centerStrength ||
+      stored.repelStrength !== DEFAULT_FORCES.repelStrength ||
+      stored.linkStrength !== DEFAULT_FORCES.linkStrength ||
+      stored.linkDistance !== DEFAULT_FORCES.linkDistance ||
+      stored.nodeSize !== DEFAULT_FORCES.nodeSize
+    ) {
+      setForces(stored);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   dimensionsRef.current = dimensions;
   forcesRef.current = forces;

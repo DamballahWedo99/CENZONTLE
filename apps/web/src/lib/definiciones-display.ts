@@ -96,7 +96,11 @@ export function formatDisplayName(name: string, isFolder = true): string {
   }
 
   // Folders con formato slug: quita shortId de 6 chars + guiones a espacios.
+  // IMPORTANTE: preservar guiones que estan entre digitos (fechas tipo
+  // 2026-04-21, versiones tipo v1-2-3, etc.) via lookbehind/lookahead
+  // negativos. Solo convierte a espacio los guiones entre letras o
+  // entre letra y digito no relacionado.
   let out = baseName.replace(SHORT_ID_SUFFIX, '');
-  out = out.replace(/-/g, ' ');
+  out = out.replace(/(?<!\d)-(?!\d)/g, ' ');
   return out.trim();
 }
