@@ -43,18 +43,23 @@ const VALID_STORY_POINTS = [1, 2, 3, 5, 8, 13] as const;
 
 // Presupuestos por agente — tuned para equilibrio entre profundidad y costo.
 //
-// max_tokens: Sonnet 4 soporta hasta 64000 tokens output nativamente. Damos
-// margen generoso a TL y QA porque cuando el PO propone N historias, cada
-// uno tiene que redactar N × (subsecciones × prosa). Si el QA sigue
-// truncando con 32K, el issue no es el cap — es que el modelo esta
-// entrando en loop de iteracion sin producir el terminal tool.
-// PO es mas ligero (metadata + criteria) y 12K le sobra.
+// max_tokens: Sonnet 4 soporta hasta 64000 tokens output nativamente PERO el
+// SDK de Anthropic rechaza requests sync (`messages.create`) con un cap
+// efectivo ~21000 tokens, porque para max_tokens mayores la latencia puede
+// exceder el timeout HTTP de 10 min — el SDK exige `messages.stream()` para
+// salir de ese umbral.
+//
+// Como no hemos migrado aun a streaming, limitamos los 3 agentes a 16384
+// tokens (por debajo del threshold con margen). Si el QA trunca con 16K
+// para 5+ historias, dos opciones:
+//  (a) migrar TL/QA a streaming — unlock 64K sin timeout
+//  (b) procesar QA en batches de 3 historias
 const PO_MAX_ITERATIONS = 8;
 const TL_MAX_ITERATIONS = 8;
 const QA_MAX_ITERATIONS = 6;
 const PO_MAX_TOKENS = 12288;
-const TL_MAX_TOKENS = 32768;
-const QA_MAX_TOKENS = 32768;
+const TL_MAX_TOKENS = 16384;
+const QA_MAX_TOKENS = 16384;
 
 // Caps defensivos alineados con DTO (apps/api/.../stories/dto/story-content.dto.ts).
 const MAX_FIELD_LEN = 20_000;
@@ -1828,7 +1833,11 @@ Idioma: espanol. Codigo en ingles si el repo lo usa asi.`;
 
 TU MISION: para cada historia, redactar testingStrategy enfocada en PRUEBAS UNITARIAS e integracion a nivel de historia. Identificar dependencias transversales descubiertas.
 
-⚠️ PRESUPUESTO: 16384 tokens TOTAL para N strategies + dependencies (donde N es el numero de historias que el PO propuso — puede ser 3, 8 o 15). ~1500-2500 tokens por testingStrategy. SE CONCISO — listas en vez de prosa, sin headings markdown decorativos. Cada bullet max 20 palabras.
+⚠️ PRESUPUESTO DURO: 16384 tokens TOTAL para todas las strategies + dependencies. Distribucion aproximada:
+  - Si son 3-5 historias: ~2500 tokens por testingStrategy.
+  - Si son 6-8 historias: ~1500 tokens por testingStrategy.
+  - Si son 9+ historias: ~1000 tokens por testingStrategy.
+SE CONCISO — listas en vez de prosa, sin headings markdown decorativos. Cada bullet max 15 palabras. Si excedes el presupuesto, el JSON se trunca y pierdes TODO el trabajo.
 
 ## Que compones por historia (en qa.testingStrategy)
 
