@@ -12,6 +12,7 @@ import { VaultGrepTool } from '../../../factory/agent-tools/vault-grep.tool';
 import { VaultReadTool } from '../../../factory/agent-tools/vault-read.tool';
 import { CodeRepoCloneService } from '../../../code-repositories/code-repo-clone.service';
 import { VaultService } from '../../../vault/vault.service';
+import { epicDiagramPath } from '../../vault-paths';
 import type {
   AgentTool,
   AgentToolContext,
@@ -958,11 +959,7 @@ export class DiagramGenerationService {
           // El frontend detecta la ausencia y ofrece el backfill.
           let currentDiagram = optimizedDiagram;
           if (validation.data.integrationFlowMarkdown) {
-            const docPath = this.buildIntegrationFlowPath(
-              epicContext.id,
-              epicContext.title,
-              type,
-            );
+            const docPath = this.buildIntegrationFlowPath(epicContext, type);
             const docContent = this.buildIntegrationFlowDocument(
               epicContext,
               currentDiagram,
@@ -1438,11 +1435,7 @@ export class DiagramGenerationService {
             },
           });
 
-          const docPath = this.buildIntegrationFlowPath(
-            epicContext.id,
-            epicContext.title,
-            type,
-          );
+          const docPath = this.buildIntegrationFlowPath(epicContext, type);
           const writeTimestamp = new Date().toISOString();
           // Mutación controlada: actualizamos steps + metadatos del doc
           // ANTES de escribir al vault para que el `generatedAt` del
@@ -2434,7 +2427,7 @@ Básate en vault_grep (Vault de definiciones y conocimiento de negocio) y en los
       integrationFlowMarkdown: {
         type: 'string',
         description:
-          'Documento Markdown híper detallado del flujo de integración que se persistirá al vault de la épica (path canónico: epics/{id}-{slug}/diagrams/{type}.md). ' +
+          'Documento Markdown híper detallado del flujo de integración que se persistirá al vault de la épica (path canónico: iniciativas/<ini-slug>-<iniId6>/epics/<epic-slug>-<epicId6>/diagramas/{type}.md). ' +
           'DEBE ser híper detallado (mínimo 1500 chars, típicamente 3-6k) y contener las secciones estándar en este orden: ' +
           '## Resumen ejecutivo (3-5 frases) · ## Contexto y motivación · ## Actores y sistemas (tabla) · ## Flujo paso a paso (una sección por step, con subsecciones: Qué sucede, Entradas, Salidas, Precondiciones, Postcondiciones, Manejo de errores) · ## Consideraciones técnicas (auth, performance, idempotencia, consistencia, observabilidad) · ## Dependencias y prerrequisitos · ## Casos de falla y rollback · ## Riesgos identificados · ## Referencias. ' +
           'NO incluyas frontmatter YAML — el backend lo antepone. Usa datos REALES del código/vault descubiertos durante la investigación, no platitudes genéricas.',
@@ -2741,21 +2734,22 @@ Básate en vault_grep (Vault de definiciones y conocimiento de negocio) y en los
 
   /**
    * Construye el path canónico en el vault para el documento de flujo de
-   * integración de un diagrama. Formato:
-   *   `epics/{epicId}-{slug}/diagrams/{type}.md`
+   * integración de un diagrama. Usa el helper `epicDiagramPath` de
+   * `vault-paths.ts` para mantener consistencia con el resto del dominio
+   * Proyectos (estructura anidada `iniciativas/.../epics/.../diagramas/`).
    *
-   * Elección del path: incluye el epicId para garantizar unicidad incluso si
-   * dos épicas tienen títulos idénticos, y el slug como ayuda de navegación
-   * humana al browsear el vault. `{type}.md` permite coexistir business +
-   * technical como archivos hermanos en la misma carpeta.
+   * Formato resultante:
+   *   iniciativas/<ini-slug>-<iniId6>/epics/<epic-slug>-<epicId6>/diagramas/<type>.md
    */
   private buildIntegrationFlowPath(
-    epicId: string,
-    epicTitle: string,
+    epicContext: EpicContext,
     type: DiagramGenerationType,
   ): string {
-    const slug = this.slugify(epicTitle) || 'sin-titulo';
-    return `epics/${epicId}-${slug}/diagrams/${type}.md`;
+    return epicDiagramPath(
+      { id: epicContext.initiative.id, name: epicContext.initiative.name },
+      { id: epicContext.id, title: epicContext.title },
+      type,
+    );
   }
 
   /**

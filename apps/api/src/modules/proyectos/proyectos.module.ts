@@ -20,6 +20,8 @@ import { StoryProposalCacheService } from './stories/generation/story-proposal-c
 import { DiagramGenerationController } from './diagrams/generation/diagram-generation.controller';
 import { DiagramGenerationService } from './diagrams/generation/diagram-generation.service';
 import { DiagramCacheService } from './diagrams/generation/diagram-cache.service';
+import { VaultMigrationController } from './migration/vault-migration.controller';
+import { VaultMigrationService } from './migration/vault-migration.service';
 
 @Module({
   imports: [AgentToolsModule, CodeRepositoriesModule],
@@ -28,6 +30,7 @@ import { DiagramCacheService } from './diagrams/generation/diagram-cache.service
     EpicGenerationController, // Must register before InitiativesController (same prefix, more specific route)
     StoryGenerationController, // Must register before StoriesController (prefix /proyectos/story-generation vs /proyectos/historias)
     DiagramGenerationController, // Must register before EpicsController (prefix /proyectos/diagrams-generation vs /proyectos/epicas)
+    VaultMigrationController, // Admin endpoint: POST /admin/vault/migration/run
     InitiativesController,
     EpicsController,
     StoriesController,
@@ -44,6 +47,7 @@ import { DiagramCacheService } from './diagrams/generation/diagram-cache.service
     StoriesService,
     StoryGenerationService,
     StoryProposalCacheService,
+    VaultMigrationService,
     ChangelogService,
   ],
   exports: [PodsService, InitiativesService, EpicsService, StoriesService, ChangelogService],

@@ -13,6 +13,12 @@ import { CodeReadTool } from '../../../factory/agent-tools/code-read.tool';
 import { VaultGlobTool } from '../../../factory/agent-tools/vault-glob.tool';
 import { VaultGrepTool } from '../../../factory/agent-tools/vault-grep.tool';
 import { VaultReadTool } from '../../../factory/agent-tools/vault-read.tool';
+import {
+  isNewFormatVaultPath,
+  epicFolderPath,
+  type InitiativeRef,
+  type EpicRef,
+} from '../../vault-paths';
 import { CodeRepoCloneService } from '../../../code-repositories/code-repo-clone.service';
 import type { AgentTool, AgentToolContext, ToolAttachment } from '../../../factory/agent-tools/agent-tool.interface';
 import type {
@@ -64,6 +70,15 @@ function cap(s: string, n = MAX_FIELD_LEN): string {
   return s.length > n ? s.slice(0, n) : s;
 }
 
+// Clasificación de archivos del vault según su subcarpeta dentro del folder de la épica.
+type EpicVaultFileKind = 'diagrama' | 'documento' | 'dependencia' | 'matriz' | 'historia' | 'otro';
+
+interface EpicVaultFile {
+  path: string;
+  sizeBytes?: number;
+  kind: EpicVaultFileKind;
+}
+
 interface CommonContext {
   epic: {
     id: string;
@@ -81,6 +96,8 @@ interface CommonContext {
   podsForAssignment: { id: string; name: string; description: string }[];
   existingStoriesSummary: string;
   enabledRepos: Array<{ name: string; branch: string }>;
+  // Archivos .md del folder de la épica en el vault — para que el agente PO los lea con vault_read.
+  epicVaultFiles: EpicVaultFile[];
   ctx: AgentToolContext;
 }
 
@@ -410,12 +427,19 @@ export class StoryGenerationService {
 
     const enabledRepos = await this.codeRepoClones.getEnabled().catch(() => []);
 
+    // ── Scan del vault: listar todos los .md del folder de la épica ──────
+    const epicVaultFiles = await this.scanEpicVaultFiles(
+      epic.vaultPath,
+      { id: epic.initiative.id, name: epic.initiative.name },
+      { id: epic.id, title: epic.title },
+    );
+
     subject.next({
       data: {
         type: 'step_done',
         step: 'loading_context',
         role: 'orchestrator',
-        summary: `Epica "${epic.title}" (iniciativa "${epic.initiative.name}"), ${epic.stories.length} historias existentes${enabledRepos.length > 0 ? `, ${enabledRepos.length} repo(s) de codigo` : ''}`,
+        summary: `Epica "${epic.title}" (iniciativa "${epic.initiative.name}"), ${epic.stories.length} historias existentes${enabledRepos.length > 0 ? `, ${enabledRepos.length} repo(s) de codigo` : ''}${epicVaultFiles.length > 0 ? `, ${epicVaultFiles.length} archivo(s) en vault` : ''}`,
         timestamp: new Date().toISOString(),
       },
     });
@@ -441,12 +465,109 @@ export class StoryGenerationService {
       podsForAssignment,
       existingStoriesSummary,
       enabledRepos,
+      epicVaultFiles,
       ctx: { initiativeId: epic.initiativeId },
     };
   }
 
+  /**
+   * Lista todos los archivos .md dentro del folder de la épica en el vault.
+   * Clasifica cada archivo según su subcarpeta (diagrama, documento, dependencia, etc.).
+   *
+   * Solo funciona para épicas con formato nuevo (iniciativas/<slug>/epics/<slug>/index.md).
+   * Para paths legacy retorna lista vacía con advertencia.
+   *
+   * Limitado a 30 archivos para evitar contextos excesivos.
+   */
+  private async scanEpicVaultFiles(
+    vaultPath: string | null,
+    ini: InitiativeRef,
+    epic: EpicRef,
+  ): Promise<EpicVaultFile[]> {
+    const MAX_FILES = 30;
+
+    // Si no hay vaultPath en formato nuevo, no hay folder canonico que listar.
+    if (!isNewFormatVaultPath(vaultPath)) {
+      if (vaultPath) {
+        this.logger.warn(`[StoryGen] epic vault scan omitido — vaultPath legacy o nulo: "${vaultPath}"`);
+      }
+      return [];
+    }
+
+    // Construir el path del folder de la épica a partir de ini+epic refs.
+    const folderPath = epicFolderPath(ini, epic);
+
+    try {
+      const tree = await this.vault.listTree(folderPath);
+
+      // Aplanar el árbol anidado a una lista plana de archivos .md.
+      const flatFiles: EpicVaultFile[] = [];
+      const walk = (nodes: typeof tree) => {
+        for (const node of nodes) {
+          if (node.type === 'file' && node.path.endsWith('.md')) {
+            flatFiles.push({
+              path: node.path,
+              sizeBytes: node.size,
+              kind: this.classifyEpicVaultFile(node.path),
+            });
+          }
+          if (node.children && node.children.length > 0) {
+            walk(node.children);
+          }
+        }
+      };
+      walk(tree);
+
+      // Ordenar: diagramas primero (los más valiosos para el PO), luego el resto.
+      flatFiles.sort((a, b) => {
+        const priority: Record<EpicVaultFileKind, number> = {
+          diagrama: 0,
+          matriz: 1,
+          dependencia: 2,
+          documento: 3,
+          historia: 4,
+          otro: 5,
+        };
+        return priority[a.kind] - priority[b.kind];
+      });
+
+      // Limitar a MAX_FILES para evitar contextos excesivos.
+      const limited = flatFiles.slice(0, MAX_FILES);
+
+      // Log de resumen por tipo para observabilidad.
+      const counts = limited.reduce<Record<EpicVaultFileKind, number>>(
+        (acc, f) => { acc[f.kind] = (acc[f.kind] || 0) + 1; return acc; },
+        { diagrama: 0, documento: 0, dependencia: 0, matriz: 0, historia: 0, otro: 0 },
+      );
+      this.logger.log(
+        `[StoryGen] epic vault scan: found ${limited.length} files` +
+        ` (${counts.diagrama} diagramas, ${counts.documento} documentos,` +
+        ` ${counts.dependencia} deps, ${counts.matriz} matrices,` +
+        ` ${counts.historia} historias, ${counts.otro} otros)`,
+      );
+
+      return limited;
+    } catch (err: any) {
+      this.logger.warn(`[StoryGen] epic vault scan falló (vault desconectado o 404): ${err?.message}`);
+      return [];
+    }
+  }
+
+  /**
+   * Clasifica un archivo del vault según la subcarpeta en la que se encuentra
+   * dentro del folder de la épica.
+   */
+  private classifyEpicVaultFile(path: string): EpicVaultFileKind {
+    if (path.includes('/diagramas/')) return 'diagrama';
+    if (path.includes('/dependencias/')) return 'dependencia';
+    if (path.includes('/matrices/')) return 'matriz';
+    if (path.includes('/documentos/')) return 'documento';
+    if (path.includes('/historias/')) return 'historia';
+    return 'otro';
+  }
+
   private buildCommonContextBlock(ctx: CommonContext): string {
-    const { epic, epicMarkdown, podsForAssignment, enabledRepos, existingStoriesSummary } = ctx;
+    const { epic, epicMarkdown, podsForAssignment, enabledRepos, existingStoriesSummary, epicVaultFiles } = ctx;
     const startDate = epic.startDate.toISOString().slice(0, 10);
     const targetDate = epic.targetDate.toISOString().slice(0, 10);
 
@@ -493,6 +614,27 @@ ${existingStoriesSummary}
 </existing_stories>`);
     } else {
       parts.push('<existing_stories>\nNinguna — primera generacion para esta epica.\n</existing_stories>');
+    }
+
+    // Archivos del vault de la épica — el agente PO los lee con vault_read para entender el flujo.
+    // Defensivo: los paths vienen del vault (controlados por slugify), pero el vault tambien
+    // puede contener archivos creados manualmente via GitHub Web UI con caracteres especiales.
+    // Escapamos <,> para evitar que un nombre de archivo malicioso cierre el tag <epic_vault_files>
+    // y emita instrucciones adversariales al modelo (prompt injection via filesystem).
+    const escapeForPrompt = (s: string) => s.replace(/</g, '&lt;').replace(/>/g, '&gt;');
+    if (epicVaultFiles.length > 0) {
+      const fileLines = epicVaultFiles.map((f) => {
+        const size = f.sizeBytes !== undefined ? ` (${(f.sizeBytes / 1024).toFixed(1)} KB)` : '';
+        return `- ${escapeForPrompt(f.path)}${size} — ${f.kind}`;
+      });
+      parts.push(`<epic_vault_files>
+Archivos del vault asociados a esta epica. Usa vault_read con estos paths para leer su contenido.
+${fileLines.join('\n')}
+</epic_vault_files>`);
+    } else {
+      parts.push(`<epic_vault_files>
+Sin archivos en el vault para esta epica (formato legacy o vault vacio). Basate en los documentos de la iniciativa y el markdown de la epica.
+</epic_vault_files>`);
     }
 
     return parts.join('\n\n');
@@ -1539,6 +1681,12 @@ Aparte de los outlines, identifica cuales de los documentos listados en \`<initi
 ## Proceso
 
 ${webStep}
+
+0. **PRIMERO**: consulta la lista \`<epic_vault_files>\` y LEE con \`vault_read\` al menos:
+   - TODOS los archivos de tipo "diagrama" (cruciales para entender el flujo de la epica).
+   - Hasta 2 archivos de tipo "documento" mas relevantes al titulo de la epica.
+   - Si hay archivos de tipo "matriz", leerlos para evitar duplicar scenarios de testing ya cubiertos.
+   (Si \`<epic_vault_files>\` indica que no hay archivos, omite este paso y continua con el paso 1.)
 
 1. Si hay documentos, lista (read_initiative_documents sin documentId) y lee los que parezcan mas relevantes (con documentId).
 2. Busca en el vault (vault_grep/vault_read) si la epica menciona conceptos de negocio con terminologia propia.

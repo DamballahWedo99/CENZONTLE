@@ -2,11 +2,19 @@ import { Injectable, NotFoundException, Logger } from '@nestjs/common';
 import { Prisma } from '@prisma/client';
 import { PrismaService } from '../../prisma/prisma.service';
 import { VaultService } from '../../vault/vault.service';
+import { VaultFolderService } from '../../vault/vault-folder.service';
 import { CreateStoryDto, RelatedDocumentDto, DiscoveredDependencyDto } from './dto/create-story.dto';
 import { UpdateStoryDto } from './dto/update-story.dto';
 import { StoryQueryDto } from './dto/story-query.dto';
 import { StoryPoFieldsDto, StoryTechnicalFieldsDto, StoryQaFieldsDto } from './dto/story-content.dto';
 import { randomUUID } from 'crypto';
+import {
+  storyFolderPath,
+  storyIndexPath,
+  type InitiativeRef,
+  type EpicRef,
+  type StoryRef,
+} from '../vault-paths';
 
 export interface StoryMarkdownData {
   po?: StoryPoFieldsDto;
@@ -42,6 +50,7 @@ export class StoriesService {
   constructor(
     private prisma: PrismaService,
     private vault: VaultService,
+    private vaultFolder: VaultFolderService,
   ) {}
 
   async findAll(query: StoryQueryDto) {
@@ -74,10 +83,21 @@ export class StoriesService {
     this.logger.log(
       `[StoryVault:create] ═══ START title="${dto.title}" epicId=${dto.epicId} podId=${dto.podId} docs=${docsCount} deps=${depsCount}`,
     );
+
+    // Resolver parent chain: necesitamos initiative + epic para construir el
+    // path anidado `iniciativas/.../epics/.../historias/<story>/`.
+    const epic = await this.prisma.epic.findUnique({
+      where: { id: dto.epicId },
+      include: { initiative: { select: { id: true, name: true } } },
+    });
+    if (!epic) throw new NotFoundException('Épica padre no encontrada');
+
     const id = randomUUID();
-    const folderSlug = this.buildFolderSlug(dto.title, id);
-    const folderPath = `stories/${folderSlug}`;
-    const indexPath = `${folderPath}/index.md`;
+    const iniRef: InitiativeRef = { id: epic.initiative.id, name: epic.initiative.name };
+    const epicRef: EpicRef = { id: epic.id, title: epic.title };
+    const storyRef: StoryRef = { id, title: dto.title };
+    const folderPath = storyFolderPath(iniRef, epicRef, storyRef);
+    const indexPath = storyIndexPath(iniRef, epicRef, storyRef);
     this.logger.log(`[StoryVault:create] folder=${folderPath}`);
 
     const fileSet = this.buildStoryFileSet({
@@ -132,7 +152,18 @@ export class StoriesService {
 
   async update(id: string, dto: UpdateStoryDto) {
     this.logger.log(`[StoryVault:update] START id=${id} fields=[${Object.keys(dto).join(',')}]`);
-    const existing = await this.prisma.story.findUnique({ where: { id } });
+    const existing = await this.prisma.story.findUnique({
+      where: { id },
+      include: {
+        epic: {
+          select: {
+            id: true,
+            title: true,
+            initiative: { select: { id: true, name: true } },
+          },
+        },
+      },
+    });
     if (!existing) {
       throw new NotFoundException('Historia no encontrada');
     }
@@ -140,6 +171,44 @@ export class StoriesService {
     const { po, technical, qa, ...structuralData } = dto;
     const isLegacy = existing.vaultPath ? !existing.vaultPath.endsWith('/index.md') : false;
     this.logger.log(`[StoryVault:update] format=${isLegacy ? 'LEGACY' : 'NEW'} vaultPath=${existing.vaultPath}`);
+
+    // ── Rename: si cambio el title Y estamos en formato nuevo, mover el folder
+    // ANTES de hacer cualquier partial write. Asi el partial update escribe
+    // directamente al folder nuevo, evitando escrituras duplicadas.
+    const titleChanged =
+      structuralData.title !== undefined && structuralData.title !== existing.title;
+    let newVaultPath: string | null = null;
+    if (titleChanged && existing.vaultPath && !isLegacy) {
+      const iniRef: InitiativeRef = {
+        id: existing.epic.initiative.id,
+        name: existing.epic.initiative.name,
+      };
+      const epicRef: EpicRef = { id: existing.epic.id, title: existing.epic.title };
+      const oldStoryRef: StoryRef = { id: existing.id, title: existing.title };
+      const newStoryRef: StoryRef = { id: existing.id, title: structuralData.title! };
+      const oldFolder = storyFolderPath(iniRef, epicRef, oldStoryRef);
+      const newFolder = storyFolderPath(iniRef, epicRef, newStoryRef);
+
+      this.logger.log(`[StoryVault:update] Renaming folder: ${oldFolder} → ${newFolder}`);
+      const result = await this.vaultFolder.moveFolder(
+        oldFolder,
+        newFolder,
+        `refactor(story): rename folder [${id}]`,
+        `refactor(story): cleanup old folder [${id}]`,
+      );
+      if (result.copyErrors.length > 0) {
+        this.logger.error(
+          `[StoryVault:update] moveFolder had ${result.copyErrors.length} copy failures.`,
+        );
+        throw new Error(
+          'Rename de historia fallo parcialmente. Los archivos originales quedaron intactos.',
+        );
+      }
+
+      // Actualizar la referencia al vaultPath para el resto del update.
+      newVaultPath = storyIndexPath(iniRef, epicRef, newStoryRef);
+      existing.vaultPath = newVaultPath;
+    }
 
     // Cambios estructurales que afectan el index.md (metadata).
     const indexDirty =
@@ -225,12 +294,16 @@ export class StoriesService {
       }
     }
 
-    // Update PG (campos estructurales).
+    // Update PG (campos estructurales). Si hubo rename, sincronizar vaultPath.
+    const pgData: Prisma.StoryUpdateInput = { ...structuralData };
+    if (newVaultPath) {
+      pgData.vaultPath = newVaultPath;
+    }
     const result = await this.prisma.story.update({
       where: { id },
-      data: { ...structuralData },
+      data: pgData,
     });
-    this.logger.log(`[StoryVault:update] ═══ DONE id=${id}`);
+    this.logger.log(`[StoryVault:update] ═══ DONE id=${id}${newVaultPath ? ` (renamed → ${newVaultPath})` : ''}`);
     return result;
   }
 
@@ -250,7 +323,10 @@ export class StoriesService {
       } else {
         const folderPath = this.dirname(story.vaultPath);
         this.logger.log(`[StoryVault:remove] format=NEW — deleting folder ${folderPath}`);
-        await this.deleteFolder(folderPath, id, story.title);
+        await this.vaultFolder.deleteFolder(
+          folderPath,
+          `feat(story): delete "${story.title}" [${id}]`,
+        );
       }
     }
 

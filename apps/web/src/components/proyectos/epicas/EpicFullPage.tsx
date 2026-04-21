@@ -5,7 +5,7 @@ import { useRouter, useSearchParams } from 'next/navigation';
 import Link from 'next/link';
 import { useProyectos } from '@/context/ProyectosContext';
 import { useBreadcrumb } from '@/context/BreadcrumbContext';
-import { updateEpic as apiUpdateEpic, deleteEpic as apiDeleteEpic } from '@/lib/api/epics';
+import { updateEpic as apiUpdateEpic, deleteEpic as apiDeleteEpic, getEpic as apiGetEpic } from '@/lib/api/epics';
 import { TypeToConfirmDialog } from '@/components/ui/type-to-confirm-dialog';
 import { createStory as apiCreateStory, updateStory as apiUpdateStory, deleteStory as apiDeleteStory } from '@/lib/api/stories';
 import { toast } from 'sonner';
@@ -1107,6 +1107,30 @@ function EpicFullPageInner({ epicId }: { epicId: string }) {
                   onTlReject={(comment) =>
                     dispatch({ type: 'REJECT_EPIC_DIAGRAM_TL', payload: { epicId: rawEpic!.id, tlName: 'Tech Lead', comment } })
                   }
+                  onDocumentReady={() => {
+                    // El backend ya registró el .md del vault en epic.documents[]
+                    // antes de emitir `document_ready`. Refrescamos la épica para
+                    // sincronizar la tab Documentos sin esperar a que el usuario
+                    // navegue fuera y vuelva.
+                    void apiGetEpic(rawEpic!.id).then((fresh) => {
+                      if (fresh.documents?.length) {
+                        fresh.documents.forEach((doc) => {
+                          // Solo añadimos documentos que no existan ya en el state
+                          // local para evitar duplicados.
+                          const alreadyExists = rawEpic!.documents.some((d) => d.id === doc.id);
+                          if (!alreadyExists) {
+                            dispatch({
+                              type: 'ADD_EPIC_DOCUMENT',
+                              payload: { epicId: rawEpic!.id, document: doc },
+                            });
+                          }
+                        });
+                      }
+                    }).catch(() => {
+                      // Fallo silencioso: el usuario puede ir a Documentos y verá
+                      // los cambios al refrescar la página.
+                    });
+                  }}
                 />
               </TabsContent>
 
