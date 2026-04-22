@@ -916,7 +916,10 @@ export class DiagramGenerationService {
         }
 
         if (toolBlock.name === 'submit_diagram') {
-          const validation = this.validateDiagramInput(toolBlock.input as Record<string, unknown>);
+          const validation = this.validateDiagramInput(
+            toolBlock.input as Record<string, unknown>,
+            { requireStepCoverage: true },
+          );
           if (!validation.ok) {
             toolResults.push({
               type: 'tool_result',
@@ -1755,10 +1758,45 @@ export class DiagramGenerationService {
       };
     }
 
+    // Enforcement numérico del rango 3-10 en el backfill — misma política
+    // que Fase 7 de `validateDiagramInput`. Mantiene consistencia end-to-end:
+    // si el path principal del agente rechaza diagramas con <3 o >10 pasos,
+    // el backfill que re-emite steps sobre un diagrama existente debe aplicar
+    // la misma regla.
+    if (steps.length < 3 || steps.length > 10) {
+      return {
+        ok: false,
+        error: `steps debe tener entre 3 y 10 pasos (encontrados: ${steps.length}). ${steps.length < 3 ? 'Infra-descomposición: el flujo probablemente tiene fases intermedias no capturadas — añade steps que cubran preparación, validación, ejecución y finalización.' : 'Sobre-descomposición: agrupa steps que describen sub-fases del mismo paso lógico. El sidepanel del viewer se vuelve inmanejable con >10 pasos.'}`,
+      };
+    }
+
     if (!integrationFlowMarkdown) {
       return {
         ok: false,
         error: 'integrationFlowMarkdown requerido (mínimo 1500 caracteres, típicamente 3000-6000). Incluye las secciones obligatorias: ## Resumen ejecutivo, ## Contexto y motivación, ## Actores y sistemas, ## Flujo paso a paso, ## Consideraciones técnicas, ## Dependencias y prerrequisitos, ## Casos de falla y rollback, ## Riesgos identificados, ## Referencias.',
+      };
+    }
+
+    // Cobertura narrativa bidireccional — misma invariante que Fase 7 de
+    // `validateDiagramInput` pero adaptada al path de backfill: el diagrama
+    // ya existe en `diagram.nodes` y los steps recién sanitizados deben
+    // cubrirlo al 100%. Sin este check, el backfill podría persistir un
+    // documento que referencia solo a una fracción de los nodos, dejando
+    // el resto huérfanos narrativamente en el sidepanel. Excepción: nodos
+    // `reference` (jump connectors del layout) no requieren rol narrativo.
+    const referencedNodeIds = new Set(steps.flatMap((s) => s.nodeIds));
+    const orphanNodes = diagram.nodes.filter(
+      (n) => n.type !== 'reference' && !referencedNodeIds.has(n.id),
+    );
+    if (orphanNodes.length > 0) {
+      const preview = orphanNodes
+        .slice(0, 3)
+        .map((n) => `"${n.label}" (${n.id})`)
+        .join(', ');
+      const more = orphanNodes.length > 3 ? ` (+${orphanNodes.length - 3} más)` : '';
+      return {
+        ok: false,
+        error: `${orphanNodes.length} nodo(s) del diagrama sin cobertura narrativa: ${preview}${more}. Cada nodo del diagrama DEBE aparecer en nodeIds de al menos un step. Añádelos a un step existente cuya narrativa los justifique, o crea un step adicional que los agrupe (sin exceder 10 pasos totales).`,
       };
     }
 
@@ -2291,6 +2329,46 @@ Básate en vault_grep (Vault de definiciones y conocimiento de negocio) y en los
       );
     }
 
+    // 9. Cobertura narrativa (nodo ↔ step). El draft PUEDE omitir steps (el
+    // schema los marca opcionales), así que este check tiene dos modos:
+    //   - Si el draft incluye steps: validamos que cada nodo del grafo
+    //     aparezca en nodeIds de al menos uno. Si falta cobertura, emitimos
+    //     ⚠ con la lista específica — el agente debe añadirlos a algún step
+    //     o eliminarlos del diagrama antes de llamar a submit_diagram.
+    //   - Si el draft omite steps: emitimos ℹ preventivo para que el agente
+    //     planee la distribución antes del submit. El validator estricto en
+    //     `submit_diagram` rechaza nodos huérfanos narrativamente — este
+    //     recordatorio reduce la probabilidad de ese rechazo tardío.
+    // Excepción: nodos `reference` son jump connectors visuales, no narrativos.
+    const draftSteps = draft.steps;
+    if (draftSteps && draftSteps.length > 0) {
+      const coveredNodeIds = new Set<string>();
+      for (const step of draftSteps) {
+        for (const nid of step.nodeIds) {
+          coveredNodeIds.add(nid);
+        }
+      }
+      const uncoveredNodes = draft.nodes.filter(
+        (n) => n.type !== 'reference' && !coveredNodeIds.has(n.id),
+      );
+      if (uncoveredNodes.length > 0) {
+        const preview = uncoveredNodes
+          .slice(0, 3)
+          .map((n) => `"${n.label}"`)
+          .join(', ');
+        const more = uncoveredNodes.length > 3 ? ` (+${uncoveredNodes.length - 3} más)` : '';
+        checklist.push(
+          `⚠ ${uncoveredNodes.length} nodo(s) sin rol narrativo: ${preview}${more}. Cada nodo del diagrama DEBE aparecer en nodeIds de al menos un step. En submit_diagram el validator rechaza diagramas con nodos huérfanos narrativamente — añádelos a un step existente o elimínalos del draft.`,
+        );
+      } else {
+        checklist.push(`✓ Todos los nodos tienen rol narrativo en al menos un step`);
+      }
+    } else {
+      checklist.push(
+        `ℹ Recuerda: en submit_diagram cada nodo DEBE aparecer en nodeIds de al menos un step (el validator rechaza nodos sin rol narrativo). Planea la distribución de nodos entre 3-10 steps antes de emitir el submit — si un nodo no encaja en ningún step, elimínalo del diagrama en vez de forzarlo.`,
+      );
+    }
+
     return checklist;
   }
 
@@ -2302,7 +2380,8 @@ Básate en vault_grep (Vault de definiciones y conocimiento de negocio) y en los
         'Cada nodo DEBE tener `group` (clustering visual). Todos los edge.source y edge.target deben existir en nodes[]. ' +
         'Los nodos de tipo "decision" deben tener ≥2 aristas salientes con labels distintos. ' +
         'NO envíes sourceHandle/targetHandle: los calcula el viewer. ' +
-        'OBLIGATORIO emitir también `steps` (entre 3 y 10 pasos agrupando nodeIds del diagrama) e `integrationFlowMarkdown` (documento canónico de arquitectura de integración que se persistirá al vault de la épica).',
+        'OBLIGATORIO emitir también `steps` (entre 3 y 10 pasos agrupando nodeIds del diagrama) e `integrationFlowMarkdown` (documento canónico de arquitectura de integración que se persistirá al vault de la épica). ' +
+        'REGLA ESTRICTA DE COHERENCIA NARRATIVA: cada nodo del diagrama DEBE aparecer en `nodeIds` de al menos UN step. Nodos sin rol narrativo (no referenciados en ningún step) están PROHIBIDOS — el validator los rechaza. Si no puedes justificar un nodo dentro de algún step, NO lo incluyas en el diagrama. No añadas nodos decorativos ni "por si acaso".',
       input_schema: {
         type: 'object',
         properties: {
@@ -2384,8 +2463,10 @@ Básate en vault_grep (Vault de definiciones y conocimiento de negocio) y en los
     return {
       steps: {
         type: 'array',
+        minItems: 3,
+        maxItems: 10,
         description:
-          'Pasos del flujo de integración. OBLIGATORIO: entre 3 y 10 pasos. Cada paso agrupa un conjunto de nodeIds del diagrama y provee narrativa. El sidepanel del viewer los usa para iluminar nodos + edges al hacer hover/click. NO puede haber pasos con nodeIds vacíos o referenciando IDs que no existan en nodes[].',
+          'Pasos del flujo de integración. OBLIGATORIO: entre 3 y 10 pasos (el schema lo enforza, el validator lo re-valida). Cada paso agrupa un conjunto de nodeIds del diagrama y provee narrativa. El sidepanel del viewer los usa para iluminar nodos + edges al hacer hover/click. NO puede haber pasos con nodeIds vacíos o referenciando IDs que no existan en nodes[]. COBERTURA OBLIGATORIA: todo nodo del diagrama DEBE aparecer en `nodeIds` de al menos un step — nodos sin rol narrativo están prohibidos y el validator los rechaza. Distribuye los nodos entre los pasos de forma que cubran el 100% del diagrama; un mismo nodo puede aparecer en varios steps si participa en varias fases. Ajusta el conteo al flujo real: flujos simples → 3-5 pasos, flujos medianos → 5-7, flujos complejos → 7-10. No fuerces un número intermedio arbitrario.',
         items: {
           type: 'object',
           properties: {
@@ -2437,13 +2518,23 @@ Básate en vault_grep (Vault de definiciones y conocimiento de negocio) y en los
 
   private validateDiagramInput(
     input: Record<string, unknown>,
-    opts: { allowReference?: boolean } = {},
+    opts: { allowReference?: boolean; requireStepCoverage?: boolean } = {},
   ): { ok: true; data: RawDiagram } | { ok: false; error: string } {
     // `allowReference` permite type='reference' en el input. Usado solo
     // desde `saveCached` (el frontend puede enviar jump connectors como
     // nodos reales del diagrama). El path agéntico (LLM tool) pasa con
     // default `false` porque el LLM nunca debería emitir refs.
     const allowReference = opts.allowReference ?? false;
+    // `requireStepCoverage` enforza la invariante de cobertura narrativa
+    // bidireccional: steps obligatorios + cada nodo del diagrama debe
+    // aparecer en al menos un step. Solo se activa desde el caller de
+    // `submit_diagram` (emisión final del agente). Los otros callers NO
+    // deben forzarla:
+    //   - `draft_diagram`: el schema permite omitir steps por diseño
+    //     (el agente los emite en el submit, no en el draft).
+    //   - `saveCached`: edición manual vía PUT del frontend; el usuario
+    //     puede añadir nodos sin actualizar steps en la misma request.
+    const requireStepCoverage = opts.requireStepCoverage ?? false;
     const validTypes = allowReference
       ? VALID_NODE_TYPES_PERSIST
       : VALID_NODE_TYPES;
@@ -2601,6 +2692,58 @@ Básate en vault_grep (Vault de definiciones y conocimiento de negocio) y en los
       nodeIds,
       edgeIdSet,
     );
+
+    // Fase 7: cobertura narrativa bidireccional — SOLO cuando el caller lo
+    // exige (opt `requireStepCoverage`). El path agéntico de `submit_diagram`
+    // la activa para forzar la invariante "cada nodo tiene rol en un step".
+    // `sanitizeStepsAndMarkdown` garantiza la dirección step → nodo (descarta
+    // pasos con nodeIds inexistentes), pero NO la inversa: un diagrama puede
+    // terminar con nodos que no aparecen en ningún step. Esos nodos son
+    // "decorativos": el lector los ve en el grafo sin encontrar explicación
+    // en el sidepanel.
+    //
+    // Nota sobre IDs: en este punto los `node.id` y los `nodeIds` de los
+    // steps están ambos en su forma pre-sufijo. `assembleDiagram` aplica
+    // el sufijo `-${ts}` más tarde. Son comparables directamente aquí.
+    //
+    // Excepción: nodos `reference` (jump connectors insertados por el layout
+    // para cortar edges largos) son puramente visuales, no narrativos.
+    if (requireStepCoverage) {
+      if (!finalSteps || finalSteps.length === 0) {
+        return {
+          ok: false,
+          error: 'steps requerido: debe emitir entre 3 y 10 pasos con id, title, description, summary, bulletpoints y nodeIds no vacíos. Si el LLM emitió steps pero todos fueron descartados por el sanitizador, verifica que los nodeIds referencien IDs existentes en nodes[] (sin inventarlos).',
+        };
+      }
+      // Enforcement numérico del rango 3-10. El schema JSON ya emite
+      // minItems/maxItems al LLM (Claude los respeta con alta fidelidad),
+      // pero se repite aquí como defense-in-depth: el sanitizador descarta
+      // steps inválidos post-factum, así que el output puede caer fuera del
+      // rango aunque el input original estuviera dentro. Ej: el LLM emite
+      // 11 steps y el sanitizador descarta uno inválido → quedan 10 (ok).
+      // Ej: LLM emite 3 steps, 1 tiene nodeIds inexistentes → quedan 2 (mal).
+      if (finalSteps.length < 3 || finalSteps.length > 10) {
+        return {
+          ok: false,
+          error: `steps debe tener entre 3 y 10 pasos (encontrados: ${finalSteps.length}). ${finalSteps.length < 3 ? 'Infra-descomposición: el flujo probablemente tiene fases intermedias no capturadas — añade steps que cubran la preparación, validación, ejecución y finalización.' : 'Sobre-descomposición: agrupa steps que describen sub-fases del mismo paso lógico (ej: "validación de entrada" + "validación de negocio" → un solo step de "validación"). El sidepanel del viewer se vuelve inmanejable con >10 pasos.'}`,
+        };
+      }
+      const referencedNodeIds = new Set(finalSteps.flatMap((s) => s.nodeIds));
+      const orphanNodes = nodes.filter(
+        (n) => n.type !== 'reference' && !referencedNodeIds.has(n.id),
+      );
+      if (orphanNodes.length > 0) {
+        const preview = orphanNodes
+          .slice(0, 3)
+          .map((n) => `"${n.label}" (${n.id})`)
+          .join(', ');
+        const more = orphanNodes.length > 3 ? ` (+${orphanNodes.length - 3} más)` : '';
+        return {
+          ok: false,
+          error: `${orphanNodes.length} nodo(s) sin rol narrativo en ningún step: ${preview}${more}. Cada nodo del diagrama DEBE aparecer en nodeIds de al menos un step. Añádelos a un step existente donde encajen narrativamente, o elimínalos del diagrama si no aportan valor al flujo.`,
+        };
+      }
+    }
 
     return {
       ok: true,
@@ -2890,6 +3033,12 @@ ANTES de emitir el diagrama final sigues un flujo de TRES fases con auto-revisi�
      }
      \`\`\`
      No omitas \`summary\` ni \`bulletpoints\` — son obligatorios y visibles en la UI del usuario final.
+
+     **REGLA DE COHERENCIA NARRATIVA (crítica — el validator la enforza)**: cada nodo del diagrama DEBE aparecer en \`nodeIds\` de al menos UN step. ANTES de emitir \`submit_diagram\`, recorre mentalmente tu lista de nodos y verifica: "¿cada nodo tiene su explicación en algún paso del flujo?". Si un nodo no encaja en ningún step, tienes DOS opciones (nunca una tercera):
+     - **Añadirlo a un step existente** cuya narrativa lo justifique (ej: un log collector entra en el step de "Observabilidad y telemetría").
+     - **Eliminarlo del diagrama** — si no tiene rol narrativo, es decorativo y el validator lo rechazará. Nodos "por si acaso" prohibidos.
+
+     El validator calcula la diferencia \`nodos_del_diagrama - nodos_referenciados_por_steps\`. Si esa diferencia es >0, el submit falla con lista específica de nodos huérfanos. Evítalo desde el diseño: distribuye los nodos entre los steps de forma que cubran el 100% del grafo.
    - \`integrationFlowMarkdown\`: DOCUMENTO HÍPER DETALLADO (mínimo 1500 chars, típicamente 3000-6000) del flujo de integración. ESTE DOCUMENTO SE PERSISTE EN EL VAULT DE LA ÉPICA — es la fuente canónica de arquitectura de integración. Secciones OBLIGATORIAS en este orden:
      1. \`## Resumen ejecutivo\` — 3-5 frases sobre qué se integra, qué desencadena, qué resultado produce
      2. \`## Contexto y motivación\` — por qué existe este flujo, qué restricciones lo moldean
