@@ -1,3 +1,4 @@
+import type { DiscoveredDependency } from '@cenzontle/shared';
 import { apiFetch } from './client';
 
 export interface EpicResponse {
@@ -86,4 +87,26 @@ export function updateEpic(id: string, data: Record<string, any>) {
 
 export function deleteEpic(id: string) {
   return apiFetch<void>(`/proyectos/epicas/${id}`, { method: 'DELETE' });
+}
+
+export function getDiscoveredDependencies(epicId: string) {
+  return apiFetch<DiscoveredDependency[]>(`/proyectos/epicas/${epicId}/discovered-dependencies`);
+}
+
+/**
+ * Item del DAG: historia bloqueada + lista de sus bloqueantes directos.
+ * El backend ya resuelve los títulos de ambas puntas para evitar N+1 lookups.
+ */
+export interface StoryDependencyItem {
+  story: { id: string; title: string };
+  blockedBy: Array<{
+    story: { id: string; title: string };
+    hardness: 'hard' | 'soft' | string;
+    reason: 'api_contract' | 'migration_order' | 'shared_model' | 'sequential_logic' | 'other' | string;
+    description: string;
+  }>;
+}
+
+export function getStoryDependencies(epicId: string) {
+  return apiFetch<StoryDependencyItem[]>(`/proyectos/epicas/${epicId}/story-dependencies`);
 }

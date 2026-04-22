@@ -1,11 +1,15 @@
 'use client';
 
+import { useCallback } from 'react';
 import { Button } from '@/components/ui/button';
 import { Check, Trash2, RefreshCw, Sparkles } from 'lucide-react';
 import { StoryProposalCard } from './StoryProposalCard';
+import { ProposalTtlCountdown } from '../overview/ProposalTtlCountdown';
+import { getStoryCacheTtl } from '@/lib/api/story-generation';
 import type { ProposedStory, Pod } from '@cenzontle/shared';
 
 interface StoryProposalListProps {
+  epicId: string;
   proposals: ProposedStory[];
   pods: Pod[];
   acceptingId: string | null;
@@ -17,6 +21,7 @@ interface StoryProposalListProps {
 }
 
 export function StoryProposalList({
+  epicId,
   proposals,
   pods,
   acceptingId,
@@ -26,6 +31,8 @@ export function StoryProposalList({
   onDiscardAll,
   onRefinePrompt,
 }: StoryProposalListProps) {
+  const fetchTtl = useCallback(() => getStoryCacheTtl(epicId), [epicId]);
+
   if (proposals.length === 0) return null;
 
   const totalPoints = proposals.reduce((sum, p) => sum + p.storyPoints, 0);
@@ -41,6 +48,7 @@ export function StoryProposalList({
           <span className="text-[11px] text-muted-foreground">
             · {totalPoints} SP totales
           </span>
+          <ProposalTtlCountdown fetchTtl={fetchTtl} onExpired={onDiscardAll} />
         </div>
         <div className="flex items-center gap-1.5">
           <Button
@@ -79,6 +87,9 @@ export function StoryProposalList({
             key={p.clientId}
             proposal={p}
             pods={pods}
+            // Pasamos el batch completo para que el card pueda resolver
+            // títulos de las historias en su `blockedBy`.
+            batchProposals={proposals}
             onAccept={onAccept}
             onDiscard={onDiscard}
             accepting={acceptingId === p.clientId}

@@ -3,6 +3,11 @@ import { ConfigService } from '@nestjs/config';
 import Anthropic from '@anthropic-ai/sdk';
 import { Subject } from 'rxjs';
 import { randomUUID } from 'crypto';
+import {
+  parseAndValidateStoryOrderEdges,
+  type StoryOrderEdge,
+} from './story-order-edges';
+import { mergeDiscoveredDependencies as mergeDiscoveredDependenciesPure } from './deps-merger';
 import { PrismaService } from '../../../prisma/prisma.service';
 import { PodsService } from '../../pods/pods.service';
 import { VaultService } from '../../../vault/vault.service';
@@ -109,7 +114,23 @@ interface POResult {
 
 interface TLResult {
   designs: Map<number, StoryTechnicalFields>; // indexed by outline position
+  /**
+   * Dependencias descubiertas por el TL durante el diseño de arquitectura.
+   * Foco: credenciales externas (API keys, merchant codes), servicios de
+   * terceros, integraciones con proveedores. Comparte shape con las que
+   * emite el QA; el merge final deduplica por `(vendor, type)` / título.
+   */
+  technicalDependencies: DiscoveredDependency[];
+  /**
+   * Edges del DAG de orden entre historias del batch. Cada entry indica que
+   * la historia en `fromIndex` está bloqueada por la de `blockedByIndex`.
+   * Ya validado: sin self, sin ciclos, sin duplicados, indices dentro de
+   * rango del batch.
+   */
+  storyOrderEdges: StoryOrderEdge[];
 }
+
+// StoryOrderEdge es importado desde ./story-order-edges (archivo puro testeable).
 
 interface QAResult {
   strategies: Map<number, StoryQAFields>;
@@ -892,7 +913,7 @@ NO disenes tecnicamente ni propongas tests — eso es trabajo del Tech Lead y de
 
     const terminalTool: Anthropic.Messages.Tool = {
       name: 'submit_technical_designs',
-      description: `Envia las secciones tecnicas disenadas, indexadas por outlineIndex (0..${poResult.outlines.length - 1}). El array designs DEBE contener exactamente ${poResult.outlines.length} entries.`,
+      description: `Envia las secciones tecnicas disenadas, indexadas por outlineIndex (0..${poResult.outlines.length - 1}). El array designs DEBE contener exactamente ${poResult.outlines.length} entries. Adicionalmente puede emitir technicalDependencies cuando el diseno requiera integrar con proveedores externos que demanden credenciales (API keys, merchant codes, OAuth client_secret).`,
       input_schema: {
         type: 'object' as const,
         properties: {
@@ -920,8 +941,62 @@ NO disenes tecnicamente ni propongas tests — eso es trabajo del Tech Lead y de
               required: ['outlineIndex', 'technical'],
             },
           },
+          technicalDependencies: {
+            type: 'array',
+            description: 'Dependencias de arquitectura identificadas durante el diseno (foco: credenciales externas, APIs de terceros, merchant codes, servicios bloqueantes para que el backend funcione). Puede ser array vacio si el diseno es autocontenido.',
+            items: {
+              type: 'object',
+              properties: {
+                title: { type: 'string', description: 'Nombre corto de la dep (e.g., "Stripe API Key")' },
+                description: { type: 'string', description: 'Resumen 1-2 lineas del impacto' },
+                severity: { type: 'string', enum: ['critical', 'high', 'medium', 'low'] },
+                type: { type: 'string', enum: ['api', 'service', 'data', 'team', 'other'] },
+                mdContent: { type: 'string', description: 'Markdown extenso: naturaleza, impacto, como obtener la credencial, owner sugerido, links a docs del proveedor' },
+                vendor: { type: 'string', description: 'Proveedor: "Stripe", "Twilio", "SAP Ariba"' },
+                requiresCredential: { type: 'boolean', description: 'True cuando el backend necesita una credencial externa (API key, merchant code) que el sistema no puede generar por si solo' },
+                isBlocking: { type: 'boolean', description: 'True cuando la dep es bloqueante: el backend NO funciona sin ella' },
+              },
+              required: ['title', 'description', 'severity', 'type', 'mdContent'],
+            },
+          },
+          storyOrderDependencies: {
+            type: 'array',
+            description: 'DAG de orden entre historias del MISMO batch. Cuando dos historias no pueden desarrollarse en paralelo (shared model, migration order, api contract, etc.) emite un edge. Puede ser array vacio si todas las historias son paralelizables. IMPORTANTE: los indices apuntan al mismo outline order del array designs.',
+            items: {
+              type: 'object',
+              properties: {
+                fromOutlineIndex: {
+                  type: 'number',
+                  description: '0-based index de la historia bloqueada (la que DEBE esperar).',
+                },
+                blockedByOutlineIndex: {
+                  type: 'number',
+                  description: '0-based index de la historia que bloquea (DEBE completarse primero).',
+                },
+                hardness: {
+                  type: 'string',
+                  enum: ['hard', 'soft'],
+                  description: 'hard = no puede arrancar hasta que la otra termine. soft = puede arrancar con mock pero debe integrar cuando la otra esté.',
+                },
+                reason: {
+                  type: 'string',
+                  enum: ['api_contract', 'migration_order', 'shared_model', 'sequential_logic', 'other'],
+                  description: 'api_contract: B consume endpoint que A crea. migration_order: B requiere schema que A define. shared_model: B importa DTO que A exporta. sequential_logic: B asume que A ya corrió.',
+                },
+                description: {
+                  type: 'string',
+                  description: 'Descripción humana corta de 1-2 lineas: "B consume /api/users que A crea".',
+                },
+              },
+              required: ['fromOutlineIndex', 'blockedByOutlineIndex', 'hardness', 'reason', 'description'],
+            },
+          },
         },
-        required: ['designs'],
+        // `technicalDependencies` y `storyOrderDependencies` son required
+        // (aunque pueden ser []) para forzar al modelo a considerar ambos
+        // campos en cada call. Sin `required`, el modelo tiende a saltárselos
+        // silenciosamente cuando la historia no es obvia.
+        required: ['designs', 'technicalDependencies', 'storyOrderDependencies'],
       },
     };
 
@@ -1053,7 +1128,127 @@ NO cambies titles, descriptions, acceptanceCriteria — esos estan congelados. S
       );
     }
 
-    return { designs };
+    // Parsear deps técnicas (credenciales externas, servicios de terceros)
+    // que el TL emitió. Son opcionales — puede venir undefined o []. El
+    // merge downstream deduplicará contra las que emita el QA.
+    const rawTechDeps = Array.isArray((output as any).technicalDependencies)
+      ? (output as any).technicalDependencies
+      : [];
+    const technicalDependencies: DiscoveredDependency[] = rawTechDeps
+      .slice(0, MAX_DEPS_PER_BATCH)
+      .map((raw: Record<string, unknown>) => this.normalizeDependency(raw))
+      .filter((d: DiscoveredDependency | null): d is DiscoveredDependency => d !== null);
+
+    if (technicalDependencies.length > 0) {
+      this.logger.log(
+        `[StoryGen:TL] ${technicalDependencies.length} technical dependencies emitted (credenciales/APIs externas)`,
+      );
+    }
+
+    // Detector heurístico: si el TL menciona vendors externos en la prose
+    // (architecture/integrationFlow) pero NO emitió dep correspondiente,
+    // loggear WARN. No falla la generación — da visibilidad cuando el
+    // prompt necesita refinamiento. El user ve el WARN en los logs del
+    // backend y puede decidir re-generar o agregar la dep manualmente.
+    this.checkDependencyEmissionHeuristics(designs, technicalDependencies);
+
+    // Parsear DAG de orden entre historias del batch. Validaciones:
+    // self-bloqueo, indices fuera de rango, ciclos, duplicados — todos
+    // se descartan con WARN en lugar de fallar, para que el batch siempre
+    // avance (mejor deps parciales que ninguna).
+    const rawStoryEdges = Array.isArray((output as any).storyOrderDependencies)
+      ? (output as any).storyOrderDependencies
+      : [];
+    const storyOrderEdges = parseAndValidateStoryOrderEdges(
+      rawStoryEdges,
+      poResult.outlines.length,
+      (reason, details) => {
+        this.logger.warn(
+          `[StoryGen:TL] story-order edge rejected (${reason}): from=${details.from} blockedBy=${details.to} outlineCount=${details.outlineCount}`,
+        );
+      },
+    );
+    if (storyOrderEdges.length > 0) {
+      this.logger.log(
+        `[StoryGen:TL] ${storyOrderEdges.length} story-order edges emitted ` +
+          `(${storyOrderEdges.filter((e) => e.hardness === 'hard').length} hard / ` +
+          `${storyOrderEdges.filter((e) => e.hardness === 'soft').length} soft)`,
+      );
+    }
+
+    return { designs, technicalDependencies, storyOrderEdges };
+  }
+
+  // parseAndValidateStoryOrderEdges + wouldIntroduceCycle viven en
+  // `./story-order-edges.ts` como funciones puras testeables.
+
+  /**
+   * Keywords que sugieren una dependencia externa. Se buscan case-insensitive
+   * en `architecture` + `integrationFlow` de cada design.
+   *
+   * Cobertura deliberada: vendors comunes de SaaS + palabras genéricas
+   * (`api key`, `secret`, `merchant`, `oauth`). No pretende ser exhaustivo —
+   * es un safety net contra el caso silencioso donde el TL emitió prose con
+   * vendor pero olvidó agregar la entry en `technicalDependencies`.
+   */
+  private static readonly EXTERNAL_VENDOR_KEYWORDS: ReadonlyArray<string> = [
+    // Payment processors
+    'stripe', 'adyen', 'openpay', 'kushki', 'paypal', 'mercado pago', 'mercadopago',
+    'conekta', 'culqi', 'bancomer', 'payu',
+    // Messaging / comms
+    'twilio', 'sendgrid', 'mailgun', 'postmark', 'sns',
+    // Auth / identity
+    'auth0', 'okta', 'cognito', 'clerk',
+    // Storage / CDN (cuando no sea infra core — heurística imperfecta)
+    's3 bucket', 'cloudflare',
+    // Integration / PaaS
+    'sap ariba', 'salesforce', 'hubspot', 'slack api', 'github app',
+    // Generic keywords that strongly imply external credential
+    'api key', 'client_secret', 'client secret', 'merchant id', 'merchant code',
+    'oauth client', 'bearer token', 'service account',
+  ];
+
+  private checkDependencyEmissionHeuristics(
+    designs: Map<number, StoryTechnicalFields>,
+    technicalDependencies: DiscoveredDependency[],
+  ): void {
+    // Concatenar toda la prose del batch para búsqueda única.
+    const prose = Array.from(designs.values())
+      .map((d) => `${d.architecture ?? ''}\n${d.integrationFlow ?? ''}`)
+      .join('\n')
+      .toLowerCase();
+
+    const emittedVendors = new Set(
+      technicalDependencies
+        .map((d) => d.vendor?.toLowerCase().trim())
+        .filter((v): v is string => !!v),
+    );
+    const emittedTitles = new Set(
+      technicalDependencies.map((d) => d.title.toLowerCase()),
+    );
+
+    const suspiciousMatches: string[] = [];
+    for (const keyword of StoryGenerationService.EXTERNAL_VENDOR_KEYWORDS) {
+      if (!prose.includes(keyword)) continue;
+      // Si el keyword coincide con un vendor YA emitido o con un título de
+      // dep emitida, el TL sí lo cubrió. No es sospechoso.
+      const isVendorEmitted = Array.from(emittedVendors).some(
+        (v) => v.includes(keyword) || keyword.includes(v),
+      );
+      const isTitleEmitted = Array.from(emittedTitles).some((t) => t.includes(keyword));
+      if (!isVendorEmitted && !isTitleEmitted) {
+        suspiciousMatches.push(keyword);
+      }
+    }
+
+    if (suspiciousMatches.length > 0) {
+      this.logger.warn(
+        `[StoryGen:TL] SUSPICIOUS MISMATCH — el TL mencionó vendors externos en la prose pero NO emitió technicalDependencies para ellos. ` +
+          `Keywords detectados: [${suspiciousMatches.join(', ')}]. ` +
+          `Deps emitidas: ${technicalDependencies.length}. ` +
+          `Considera refinar el prompt o revisar manualmente si estas deps requieren credencial externa.`,
+      );
+    }
   }
 
   // ─────────────────────────────────────────────────────────────────────
@@ -1102,7 +1297,7 @@ NO cambies titles, descriptions, acceptanceCriteria — esos estan congelados. S
           },
           discoveredDependencies: {
             type: 'array',
-            description: 'Dependencias descubiertas al trazar testing (APIs externas, servicios, datos, equipos). Cada una con mdContent markdown que se guardara como archivo individual en el vault.',
+            description: 'Dependencias descubiertas al trazar testing (mocks, fixtures, datos semilla). NO dupliques credenciales externas que el Tech Lead ya emitio en technicalDependencies — el merge deduplica, pero es ruido innecesario. Cada una con mdContent markdown que se guardara como archivo individual en el vault.',
             items: {
               type: 'object',
               properties: {
@@ -1111,6 +1306,9 @@ NO cambies titles, descriptions, acceptanceCriteria — esos estan congelados. S
                 severity: { type: 'string', enum: ['critical', 'high', 'medium', 'low'] },
                 type: { type: 'string', enum: ['api', 'service', 'data', 'team', 'other'] },
                 mdContent: { type: 'string', description: 'Markdown extenso: naturaleza, impacto en testing, estrategia de mock, owner sugerido, links' },
+                vendor: { type: 'string', description: 'Opcional: proveedor externo si aplica ("Stripe", "Twilio")' },
+                requiresCredential: { type: 'boolean', description: 'Opcional: true si la dep requiere una credencial externa que el sistema no puede generar solo' },
+                isBlocking: { type: 'boolean', description: 'Opcional: true si la dep bloquea el funcionamiento del backend' },
               },
               required: ['title', 'description', 'severity', 'type', 'mdContent'],
             },
@@ -1656,11 +1854,27 @@ NO cambies PO ni technical. Si una historia es dificil de testear, dilo en su te
 
     // Las dependencias son transversales al batch — se adjuntan a CADA historia
     // propuesta (el backend al aceptar solo persiste deps de la historia aceptada).
-    const depsAll = qaResult.discoveredDependencies;
+    //
+    // MERGE TL + QA: el Tech Lead emite deps de arquitectura (credenciales
+    // externas, APIs de terceros) y el QA emite deps de testing (mocks,
+    // fixtures). Pueden solaparse — dedup por `(vendor?.toLowerCase(), type)`
+    // cuando hay vendor, o por `title.toLowerCase()` como fallback. El item
+    // ganador fusiona campos: prefiere el que tenga `requiresCredential:true`
+    // + `mdContent` más largo (más información).
+    const depsAll = this.mergeDiscoveredDependencies(
+      tlResult.technicalDependencies,
+      qaResult.discoveredDependencies,
+    );
 
     this.logger.log(
-      `[StoryGen] Consolidating ${poResult.outlines.length} proposals (docs=${poResult.relatedDocuments.length} deps=${depsAll.length})`,
+      `[StoryGen] Consolidating ${poResult.outlines.length} proposals (docs=${poResult.relatedDocuments.length} deps=${depsAll.length}, tl=${tlResult.technicalDependencies.length} qa=${qaResult.discoveredDependencies.length}, storyEdges=${tlResult.storyOrderEdges.length})`,
     );
+
+    // Pre-asignar clientIds estables para poder mapear los edges del DAG
+    // (emitidos por el TL usando outlineIndex) a clientIds antes de emitir
+    // las proposals. Así cada ProposedStory ya llega con su `blockedBy`
+    // referenciando clientIds de historias del MISMO batch.
+    const clientIdByIndex = poResult.outlines.map(() => `ai-story-${randomUUID()}`);
 
     for (let i = 0; i < poResult.outlines.length; i++) {
       const outline = poResult.outlines[i];
@@ -1670,8 +1884,20 @@ NO cambies PO ni technical. Si una historia es dificil de testear, dilo en su te
       const podId = podIdSet.has(outline.podId) ? outline.podId : fallbackPodId;
       const podFallbackUsed = podId !== outline.podId;
 
+      // Construir el array de deps de orden para ESTA historia: todos los
+      // edges cuyo `fromIndex === i` significan que i está bloqueada por
+      // `blockedByIndex`. Convertir indices a clientIds.
+      const blockedBy = tlResult.storyOrderEdges
+        .filter((edge) => edge.fromIndex === i)
+        .map((edge) => ({
+          storyClientId: clientIdByIndex[edge.blockedByIndex],
+          hardness: edge.hardness,
+          reason: edge.reason,
+          description: edge.description,
+        }));
+
       const proposed: ProposedStory = {
-        clientId: `ai-story-${randomUUID()}`,
+        clientId: clientIdByIndex[i],
         title: outline.title,
         description: outline.description,
         status: 'backlog' as StoryStatus,
@@ -1685,6 +1911,7 @@ NO cambies PO ni technical. Si una historia es dificil de testear, dilo en su te
         qa,
         relatedDocuments: poResult.relatedDocuments,
         discoveredDependencies: depsAll,
+        blockedBy: blockedBy.length > 0 ? blockedBy : undefined,
       };
 
       this.logger.log(
@@ -1811,7 +2038,7 @@ NO cambies PO ni technical. Si una historia es dificil de testear, dilo en su te
     const type = validTypes.includes(raw.type as DiscoveredDependencyType)
       ? (raw.type as DiscoveredDependencyType)
       : 'other';
-    return {
+    const dep: DiscoveredDependency = {
       id: `ai-dep-${randomUUID()}`,
       title,
       description: cap(String(raw.description ?? ''), MAX_LIST_ITEM_LEN),
@@ -1819,6 +2046,44 @@ NO cambies PO ni technical. Si una historia es dificil de testear, dilo en su te
       type,
       mdContent: cap(String(raw.mdContent ?? ''), MAX_DEP_MD_LEN),
     };
+    // Campos opcionales introducidos por el feature "External Secrets".
+    // Solo los asignamos cuando el agente los emite para no poblar objetos
+    // existentes con `undefined` explícito.
+    if (typeof raw.vendor === 'string' && raw.vendor.trim()) {
+      dep.vendor = cap(raw.vendor.trim(), 200);
+    }
+    if (typeof raw.requiresCredential === 'boolean') {
+      dep.requiresCredential = raw.requiresCredential;
+    }
+    if (typeof raw.isBlocking === 'boolean') {
+      dep.isBlocking = raw.isBlocking;
+    }
+    return dep;
+  }
+
+  /**
+   * Consolida deps emitidas por el Tech Lead (foco: arquitectura/credenciales
+   * externas) y por el QA (foco: mocks/fixtures) deduplicando por identidad
+   * lógica:
+   *
+   *  1. Primero por `(vendor?.toLowerCase(), type)` — dos agentes detectando
+   *     a "Stripe" como dep colapsan a una sola entry.
+   *  2. Fallback a `title.toLowerCase()` cuando no hay vendor.
+   *
+   * Al fusionar items coincidentes, prefiere el que tenga `requiresCredential`
+   * explícito + `mdContent` más largo (más información accionable). El TL
+   * típicamente emite primero, así que sus flags (`vendor`, `isBlocking`) se
+   * preservan aunque el QA llegue después con `mdContent` extenso.
+   */
+  private mergeDiscoveredDependencies(
+    tlDeps: DiscoveredDependency[],
+    qaDeps: DiscoveredDependency[],
+  ): DiscoveredDependency[] {
+    return mergeDiscoveredDependenciesPure(tlDeps, qaDeps, (details) => {
+      this.logger.log(
+        `[mergeDiscoveredDependencies] deduped ${details.input} → ${details.output} (tl=${details.tl} qa=${details.qa})`,
+      );
+    });
   }
 
   // ─────────────────────────────────────────────────────────────────────
@@ -1936,6 +2201,144 @@ TU MISION: para cada outline del PO (que recibes en el user message), escribe la
 3. Para CADA outline (respetando outlineIndex), genera su design SIENDO CONCISO.
 4. Llama \`submit_technical_designs\` UNA sola vez.
 
+## Credenciales externas y dependencias bloqueantes
+
+Si durante el diseno de architecture/integrationFlow identificas que el backend necesita integrar con un proveedor externo que demanda credenciales que el sistema NO puede generar por si solo, debes emitir una entry en \`technicalDependencies\` del tool terminal.
+
+**IMPORTANTE**: \`technicalDependencies\` es un campo obligatorio del tool. SIEMPRE debes emitirlo, aunque sea como array vacio \`[]\` (cuando el diseno es autocontenido). NO omitas el campo.
+
+Casos tipicos:
+- API keys de proveedores SaaS: Stripe, Twilio, SendGrid, Auth0 Management API.
+- Merchant codes / IDs de comercio de PSPs (Adyen, OpenPay, Kushki).
+- OAuth client_id + client_secret para integraciones tipo Slack/GitHub App.
+- Certificados o keys de firma (Apple Pay merchant identity, Google Pay gateway).
+
+Para cada una emite:
+- \`title\`: "Stripe API Key" / "Adyen Merchant Account ID" / etc.
+- \`vendor\`: "Stripe" / "Adyen" / "Twilio".
+- \`severity\`: "critical" si bloquea ship; "high" si bloquea un flujo; "medium" si solo aplica a features opcionales.
+- \`requiresCredential: true\` (siempre que aplique; es el signal para que el user abra el flow de agregar secret).
+- \`isBlocking: true\` cuando el backend NO puede arrancar/funcionar sin la credencial.
+- \`mdContent\` (markdown extenso): naturaleza, donde se usa, como obtenerla (link al portal del proveedor), quien deberia ser el owner, impacto si falta.
+
+NO dupliques deps que el QA ya suele cubrir (mocks, fixtures, datos semilla). Esas son dominio del QA agent.
+
+### Ejemplos concretos (few-shot)
+
+**Ejemplo A** — Historia: "Tokenizar tarjetas en checkout". El architecture menciona "AWS KMS + Stripe SDK para tokenizar tarjetas". CORRECTO emitir:
+\`\`\`json
+[
+  {
+    "title": "Stripe API Key",
+    "vendor": "Stripe",
+    "severity": "critical",
+    "type": "api",
+    "requiresCredential": true,
+    "isBlocking": true,
+    "mdContent": "Credencial secreta (sk_live_*) emitida por dashboard.stripe.com/apikeys. Usada por PaymentGatewayService.chargeCard() en el endpoint POST /api/checkout/charge. Sin ella: 503 PAYMENT_GATEWAY_UNAVAILABLE, flujo de compra bloqueado. Owner: PO Pagos + CFO (autoriza gasto prod). Link: https://stripe.com/docs/keys"
+  }
+]
+\`\`\`
+
+**Ejemplo B** — Historia: "Enviar SMS 2FA al login". El architecture menciona Twilio como opcional (fallback a TOTP). CORRECTO emitir:
+\`\`\`json
+[
+  {
+    "title": "Twilio Auth Token",
+    "vendor": "Twilio",
+    "severity": "medium",
+    "type": "api",
+    "requiresCredential": true,
+    "isBlocking": false,
+    "mdContent": "Auth Token de Twilio Console. Usado por SmsVerificationService.sendOtp(). Si falta: 2FA por SMS se desactiva, users usan TOTP como fallback. Owner: Security Engineer."
+  }
+]
+\`\`\`
+
+**Ejemplo C** — Historia: "Calcular promedio de ventas mensuales". Solo queries a Postgres local, sin integraciones externas. CORRECTO emitir array vacio:
+\`\`\`json
+[]
+\`\`\`
+
+**Ejemplo D** — Historia con MULTIPLES deps externas: "Checkout con Apple Pay". CORRECTO emitir lista:
+\`\`\`json
+[
+  { "title": "Apple Pay Merchant Identity Cert", "vendor": "Apple", "severity": "critical", "type": "api", "requiresCredential": true, "isBlocking": true, "mdContent": "..." },
+  { "title": "Apple Developer Team ID", "vendor": "Apple", "severity": "high", "type": "api", "requiresCredential": true, "isBlocking": true, "mdContent": "..." }
+]
+\`\`\`
+
+**Regla de oro**: si mencionas un proveedor externo por nombre en \`architecture\` o \`integrationFlow\` (Stripe, Twilio, SAP, AWS cuando no sea infra core, Slack API, etc.), DEBE aparecer como dep aqui. El sistema tiene un detector heuristico que lanza WARN cuando mencionas un vendor en prose pero no emites la dep — te van a pedir re-generar.
+
+## Orden entre historias del MISMO batch (\`storyOrderDependencies\`)
+
+Tienes vista completa de las N historias del batch al momento de emitir. Cuando DOS historias no pueden desarrollarse en paralelo, emite un edge en \`storyOrderDependencies\` apuntando desde la bloqueada (\`fromOutlineIndex\`) a la que bloquea (\`blockedByOutlineIndex\`).
+
+**Tipos de reason:**
+- **api_contract**: B consume el endpoint que A crea. B no puede implementarse hasta que A publique la firma del endpoint.
+- **migration_order**: ambas tocan la misma tabla/modelo. B requiere el schema que A define.
+- **shared_model**: B importa un DTO/tipo/interface que A exporta.
+- **sequential_logic**: B asume que A ya corrió (populación de datos semilla, features toggle, etc.).
+- **other**: otra razón que encaja con ninguno de los anteriores (describir en \`description\`).
+
+**Hardness:**
+- \`hard\`: B NO puede arrancar hasta que A termine (migration irreversible, API sin contrato previo).
+- \`soft\`: B puede arrancar con mock/stub y sincronizar al final (API con contrato pre-definido, datos de prueba).
+
+### Ejemplos
+
+**Ejemplo A** — Batch con dep clara API:
+\`\`\`
+historias:
+  0: "Crear endpoint POST /api/users"
+  1: "Frontend del formulario de registro"  ← consume /api/users
+  2: "Reporte mensual de usuarios"           ← paralelo a 0 y 1
+\`\`\`
+CORRECTO:
+\`\`\`json
+[
+  { "fromOutlineIndex": 1, "blockedByOutlineIndex": 0,
+    "hardness": "soft", "reason": "api_contract",
+    "description": "Frontend registro consume POST /api/users; puede arrancar con mock mientras backend termina." }
+]
+\`\`\`
+
+**Ejemplo B** — Batch con migration order:
+\`\`\`
+historias:
+  0: "Agregar columna 'tier' a users"
+  1: "Endpoint GET /users/:id/tier"          ← lee columna 'tier'
+  2: "Dashboard de tiers"                    ← consume endpoint
+\`\`\`
+CORRECTO:
+\`\`\`json
+[
+  { "fromOutlineIndex": 1, "blockedByOutlineIndex": 0,
+    "hardness": "hard", "reason": "migration_order",
+    "description": "Endpoint GET /users/:id/tier requiere columna 'tier' que historia 0 agrega." },
+  { "fromOutlineIndex": 2, "blockedByOutlineIndex": 1,
+    "hardness": "soft", "reason": "api_contract",
+    "description": "Dashboard consume GET /users/:id/tier; puede arrancar con mock." }
+]
+\`\`\`
+
+**Ejemplo C** — Batch 100% paralelizable:
+\`\`\`
+historias:
+  0: "Ajustar estilos del header"
+  1: "Fix bug en footer"
+  2: "Actualizar copy de landing"
+\`\`\`
+CORRECTO: \`[]\` — no hay deps entre ellas.
+
+### Anti-patrones
+
+- Emitir dep por "similitud temática" (ej: "ambas tocan users"). Solo emite si hay acoplamiento TÉCNICO real.
+- Inventar ciclos: A bloquea B y B bloquea A. El sistema los valida y rechaza.
+- Self-bloqueo: A bloquea A. Validado y rechazado.
+- Duplicar edges: mismo \`(from, blockedBy)\` dos veces. Dedup en el parser.
+- Emitir "soft" cuando es "hard" para no ralentizar — sé preciso, los PMs lo necesitan para planear paralelización.
+
 ## Anti-patrones
 
 - architecture con sub-headings ## o ### (consume tokens innecesariamente).
@@ -1943,6 +2346,7 @@ TU MISION: para cada outline del PO (que recibes en el user message), escribe la
 - Listas con items de 50+ palabras cada uno (corta a 1-2 lineas por item).
 - Tech generico sin referencia al codigo ("usa Kubernetes") cuando no esta en el stack.
 - Cambiar alcance del outline. Tu trabajo es COMO, no QUE.
+- Emitir technicalDependencies que NO son requeridas por la arquitectura propuesta (no inventes integraciones con Stripe si la historia no habla de pagos).
 
 Idioma: espanol. Codigo en ingles si el repo lo usa asi.`;
   }
@@ -1984,9 +2388,13 @@ EJEMPLO MINIMO (600 tokens aprox):
 
 NO incluyas "**Alcance**" (redundante con TL), NO "**Cobertura**" separada (va en Herramientas).
 
-## Dependencias descubiertas (mdContent)
+## Dependencias descubiertas (foco QA)
 
 Cada una max ~100 palabras de mdContent. Info accionable: naturaleza, impacto, mock, owner. Sin repetir.
+
+**Foco QA**: mocks necesarios para tests, fixtures, datos semilla, dependencias con otros equipos para datos de prueba. Estas son TUS dependencias.
+
+**NO dupliques** credenciales externas/API keys bloqueantes (STRIPE_API_KEY, merchant codes, OAuth client_secret) — esas las emite el Tech Lead en technicalDependencies porque son decisiones de arquitectura, no de testing. El merge downstream deduplica por (vendor, type). Si detectas una credencial que el TL claramente omitio, si emitela con requiresCredential:true — el merge la integrara, pero es señal de hueco en el design del TL.
 
 Tipos:
 - **api**: API externa.

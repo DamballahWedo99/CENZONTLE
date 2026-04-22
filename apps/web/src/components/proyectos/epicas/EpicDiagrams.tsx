@@ -5,7 +5,7 @@ import Link from 'next/link';
 import { toast } from 'sonner';
 import { Epic, EpicDiagram } from '@cenzontle/shared';
 import { Button } from '@/components/ui/button';
-import { ConfirmDialog } from '@/components/ui/confirm-dialog';
+import { TypeToConfirmDialog } from '@/components/ui/type-to-confirm-dialog';
 import { DiagramViewer } from './DiagramViewer';
 import { streamDiagramGeneration, type DiagramGenerationEventWithMeta } from '@/lib/diagram-agent';
 import { AgentThinkingDisplay } from '@/components/proyectos/overview/agent-thinking';
@@ -389,16 +389,19 @@ export function EpicDiagrams({
         )}
       </div>
 
-      {/* Confirmación antes de regenerar. Pedimos confirmación SIEMPRE que
-          haya un diagrama existente (puede tener ediciones manuales que se
-          perderían). Si regenerar no tiene nada que perder, no se muestra
-          porque el render de este header completo depende de `businessDiagram`. */}
-      <ConfirmDialog
+      {/* Confirmación type-to-confirm antes de regenerar. Regenerar es una
+          operación destructiva: sobrescribe el diagrama persistido en Postgres
+          y borra el documento de flujo (pasos) asociado del vault. Por eso
+          exigimos que el user escriba "regenerar diagrama" literal —  fricción
+          proporcional al impacto, el mismo patrón que el delete de iniciativas. */}
+      <TypeToConfirmDialog
         open={confirmRegenerateOpen}
         onOpenChange={setConfirmRegenerateOpen}
         title="Regenerar diagrama con IA"
-        description="Se reemplazará el diagrama actual. Las ediciones manuales, posiciones personalizadas y el tema de colores aplicado a los nodos se perderán. ¿Continuar?"
-        confirmText="Regenerar"
+        resourceLabel="acción"
+        expectedValue="regenerar diagrama"
+        description="Se reemplazará el diagrama actual, incluyendo ediciones manuales, posiciones personalizadas, tema de colores, Y el documento de pasos del flujo de integración del vault. Esta acción NO se puede deshacer."
+        confirmText="Regenerar diagrama"
         cancelText="Conservar"
         onConfirm={handleConfirmRegenerate}
       />

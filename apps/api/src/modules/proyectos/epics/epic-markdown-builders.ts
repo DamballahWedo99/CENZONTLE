@@ -16,9 +16,13 @@ import type {
   EpicQAMatrix,
   DiagramNodeGroup,
   EpicQATestCategory,
+  DiscoveredDependency,
+  DiscoveredDependencyType,
+  DependencySeverity,
 } from '@cenzontle/shared';
 import { DIAGRAM_NODE_GROUPS, EPIC_QA_CATEGORY_LABELS } from '@cenzontle/shared';
 import { scrubSecrets } from '../../../common/utils/scrub-secrets.util';
+import { buildFrontmatter } from '../vault-frontmatter';
 
 // ─────────────────────────────────────────────────────────────────────
 //   Utilidades internas
@@ -48,24 +52,6 @@ function buildTable(headers: string[], rows: string[][]): string {
     .map((row) => `| ${row.map(escapeCell).join(' | ')} |`)
     .join('\n');
   return `${head}\n${sep}\n${body}`;
-}
-
-/**
- * Genera el bloque frontmatter YAML a partir de pares clave-valor.
- * Los valores ya deben estar formateados (strings, booleans o null).
- */
-function frontmatter(pairs: Array<[string, string | boolean | number | null]>): string {
-  const body = pairs
-    .map(([k, v]) => {
-      if (v === null || v === undefined) return `${k}: ~`;
-      if (typeof v === 'boolean') return `${k}: ${v}`;
-      if (typeof v === 'number') return `${k}: ${v}`;
-      // Entrecomilla strings con caracteres especiales YAML
-      const needsQuotes = /[:#[\]{}&*!,|>'"?@`]/.test(String(v)) || String(v).trim() !== String(v);
-      return needsQuotes ? `${k}: ${JSON.stringify(String(v))}` : `${k}: ${v}`;
-    })
-    .join('\n');
-  return `---\n${body}\n---`;
 }
 
 // ─────────────────────────────────────────────────────────────────────
@@ -158,13 +144,13 @@ const AUTOMATION_STATUS_LABELS: Record<string, string> = {
  */
 export function buildDiagramMarkdown(diagram: EpicDiagram): string {
   // ── Frontmatter ──
-  const fm = frontmatter([
-    ['id', diagram.id],
-    ['type', diagram.type],
-    ['generatedAt', diagram.generatedAt],
-    ['generatedBy', diagram.generatedBy],
-    ['hasManualLayout', diagram.hasManualLayout ?? false],
-  ]);
+  const fm = buildFrontmatter({
+    id: diagram.id,
+    type: diagram.type,
+    generatedAt: diagram.generatedAt,
+    generatedBy: diagram.generatedBy,
+    hasManualLayout: diagram.hasManualLayout ?? false,
+  });
 
   // ── Nodos agrupados ──
   // Recopilar todos los grupos presentes, respetando el orden canónico
@@ -277,21 +263,21 @@ export function buildDiagramMarkdown(diagram: EpicDiagram): string {
  */
 export function buildDependencyMarkdown(dep: EpicDependency): string {
   // ── Frontmatter ──
-  const fm = frontmatter([
-    ['id', dep.id],
-    ['type', dep.type],
-    ['direction', dep.direction],
-    ['severity', dep.severity],
-    ['status', dep.status],
-    ['scheduling', dep.scheduling],
-    ['isBlocking', dep.isBlocking],
-    ['targetEpicId', dep.targetEpicId ?? null],
-    ['targetExternalName', dep.targetExternalName ? scrubSecrets(dep.targetExternalName) : null],
-    ['owner', scrubSecrets(dep.owner)],
-    ['dueDate', dep.dueDate ?? null],
-    ['createdAt', dep.createdAt],
-    ['updatedAt', dep.updatedAt],
-  ]);
+  const fm = buildFrontmatter({
+    id: dep.id,
+    type: dep.type,
+    direction: dep.direction,
+    severity: dep.severity,
+    status: dep.status,
+    scheduling: dep.scheduling,
+    isBlocking: dep.isBlocking,
+    targetEpicId: dep.targetEpicId ?? null,
+    targetExternalName: dep.targetExternalName ? scrubSecrets(dep.targetExternalName) : null,
+    owner: scrubSecrets(dep.owner),
+    dueDate: dep.dueDate ?? null,
+    createdAt: dep.createdAt,
+    updatedAt: dep.updatedAt,
+  });
 
   // ── Metadatos en tabla ──
   const metaRows = [
@@ -336,13 +322,13 @@ export function buildDependencyMarkdown(dep: EpicDependency): string {
  */
 export function buildQAMatrixMarkdown(matrix: QAMatrix): string {
   // ── Frontmatter ──
-  const fm = frontmatter([
-    ['id', matrix.id],
-    ['epicId', matrix.epicId],
-    ['generatedAt', matrix.generatedAt],
-    ['generatedBy', matrix.generatedBy],
-    ['updatedAt', matrix.updatedAt],
-  ]);
+  const fm = buildFrontmatter({
+    id: matrix.id,
+    epicId: matrix.epicId,
+    generatedAt: matrix.generatedAt,
+    generatedBy: matrix.generatedBy,
+    updatedAt: matrix.updatedAt,
+  });
 
   // ── Resumen global ──
   const totalTests = matrix.rows.reduce((sum, r) => sum + r.testCases.length, 0);
@@ -410,13 +396,13 @@ export function buildQAMatrixMarkdown(matrix: QAMatrix): string {
  */
 export function buildEpicQAMatrixMarkdown(matrix: EpicQAMatrix): string {
   // ── Frontmatter ──
-  const fm = frontmatter([
-    ['id', matrix.id],
-    ['epicId', matrix.epicId],
-    ['generatedAt', matrix.generatedAt],
-    ['generatedBy', matrix.generatedBy],
-    ['updatedAt', matrix.updatedAt],
-  ]);
+  const fm = buildFrontmatter({
+    id: matrix.id,
+    epicId: matrix.epicId,
+    generatedAt: matrix.generatedAt,
+    generatedBy: matrix.generatedBy,
+    updatedAt: matrix.updatedAt,
+  });
 
   // ── Cobertura NFR ──
   const coverageRows = (
@@ -511,4 +497,209 @@ export function buildEpicQAMatrixMarkdown(matrix: EpicQAMatrix): string {
     '',
     categorySections.length > 0 ? categorySections.join('\n\n') : '_Sin tests definidos._',
   ].join('\n');
+}
+
+// ─────────────────────────────────────────────────────────────────────
+//   DiscoveredDependency (generadas por agente QA, viven solo en vault)
+// ─────────────────────────────────────────────────────────────────────
+
+/**
+ * Serializa una DiscoveredDependency a markdown con frontmatter YAML.
+ *
+ * El builder y el parser son inversos: cualquier cambio al formato debe
+ * actualizar ambos. Por eso viven colocados en este archivo (single source
+ * of truth del contrato wire), no dispersos en los services que los usan.
+ */
+export function buildDiscoveredDependencyMarkdown(dep: DiscoveredDependency): string {
+  // Los 3 campos opcionales del feature "External Secrets" se emiten solo
+  // cuando el agente los aportó — evita poblar el frontmatter con `~` cuando
+  // la dep es una regular sin vendor/credential.
+  const fm = buildFrontmatter({
+    id: dep.id,
+    type: 'dependency',
+    title: dep.title,
+    severity: dep.severity,
+    depType: dep.type,
+    vendor: dep.vendor,
+    requiresCredential: dep.requiresCredential,
+    isBlocking: dep.isBlocking,
+    linkedSecretId: dep.linkedSecretId,
+    created: new Date().toISOString().slice(0, 10),
+  });
+  // En el cuerpo también agregamos líneas humanas para vendor y flags
+  // cuando existen — el Tiptap viewer del vault las muestra como texto
+  // ayudando a equipos que no lean el frontmatter.
+  const extraLines: string[] = [];
+  if (dep.vendor) extraLines.push(`**Proveedor:** ${dep.vendor}  `);
+  if (dep.requiresCredential) extraLines.push(`**Requiere credencial externa:** sí  `);
+  if (dep.isBlocking) extraLines.push(`**Bloqueante:** sí  `);
+  const extraBlock = extraLines.length > 0 ? `${extraLines.join('\n')}\n\n` : '';
+  return (
+    `${fm}\n\n` +
+    `# ${dep.title}\n\n` +
+    `**Severidad:** ${dep.severity}  \n` +
+    `**Tipo:** ${dep.type}  \n` +
+    `**ID local:** \`${dep.id}\`\n\n` +
+    extraBlock +
+    `## Resumen\n\n${dep.description}\n\n` +
+    `## Detalle\n\n${dep.mdContent}\n`
+  );
+}
+
+const VALID_DISCOVERED_TYPES: readonly DiscoveredDependencyType[] = ['api', 'service', 'data', 'team', 'other'];
+const VALID_DISCOVERED_SEVERITIES: readonly DependencySeverity[] = ['critical', 'high', 'medium', 'low'];
+
+/**
+ * Parsea un markdown escrito por `buildDiscoveredDependencyMarkdown` (o por
+ * versiones anteriores sin frontmatter) de vuelta a un objeto
+ * `DiscoveredDependency`. Retorna `null` si no se pueden extraer los campos
+ * mínimos (id + title).
+ *
+ * Soporta dos formatos:
+ *  1. **Con frontmatter YAML** (formato nuevo): metadata en `---...---`.
+ *  2. **Sin frontmatter** (formato legacy): metadata inline en el body con
+ *     `**Severidad:** ...`, `**Tipo:** ...`, `**ID local:** \`...\``.
+ *
+ * Robusto ante:
+ *  - Terminaciones de línea CRLF, BOM.
+ *  - Títulos con comillas mal formadas (fallback al string crudo).
+ *  - Orden arbitrario de las secciones `## Resumen` y `## Detalle`.
+ *  - Tipos/severidades inválidos (fallback a 'other' / 'medium').
+ */
+export function parseDiscoveredDependencyMarkdown(raw: string): DiscoveredDependency | null {
+  const normalized = raw.replace(/^\uFEFF/, '').replace(/\r\n/g, '\n');
+  const fmMatch = normalized.match(/^---\n([\s\S]*?)\n---\n([\s\S]*)$/);
+
+  // Path 1: con frontmatter YAML
+  if (fmMatch) {
+    const [, frontmatterBlock, body] = fmMatch;
+    const meta: Record<string, string> = {};
+    for (const line of frontmatterBlock.split('\n')) {
+      const m = line.match(/^(\w+):\s*(.*)$/);
+      if (m) meta[m[1]] = m[2].trim();
+    }
+
+    if (meta.type !== 'dependency' || !meta.id) return null;
+
+    const titleRaw = meta.title ?? '';
+    let title = titleRaw;
+    if (titleRaw.startsWith('"')) {
+      try {
+        const parsed = JSON.parse(titleRaw);
+        if (typeof parsed === 'string') title = parsed;
+      } catch {
+        title = titleRaw.replace(/^"|"$/g, '');
+      }
+    }
+
+    const dep: DiscoveredDependency = {
+      id: meta.id,
+      title,
+      description: extractSection(body, 'Resumen'),
+      severity: coerceSeverity(meta.severity),
+      type: coerceType(meta.depType),
+      mdContent: extractSection(body, 'Detalle'),
+    };
+    // Campos opcionales del feature "External Secrets": solo asignamos si
+    // existen para no emitir keys con undefined explícito (el consumer
+    // diferencia "no aplica" vs "false explícito").
+    if (meta.vendor) dep.vendor = unquote(meta.vendor);
+    if (meta.requiresCredential === 'true') dep.requiresCredential = true;
+    else if (meta.requiresCredential === 'false') dep.requiresCredential = false;
+    if (meta.isBlocking === 'true') dep.isBlocking = true;
+    else if (meta.isBlocking === 'false') dep.isBlocking = false;
+    if (meta.linkedSecretId) dep.linkedSecretId = unquote(meta.linkedSecretId);
+    return dep;
+  }
+
+  // Path 2: sin frontmatter (legacy) — metadata inline en el body
+  return parseDiscoveredDependencyLegacyMarkdown(normalized);
+}
+
+/**
+ * Remueve comillas JSON-wrap de un valor si las tiene. El helper `buildFrontmatter`
+ * entrecomilla strings con caracteres especiales YAML via JSON.stringify;
+ * aquí revertimos para obtener el valor plano.
+ */
+function unquote(value: string): string {
+  if (value.startsWith('"')) {
+    try {
+      const parsed = JSON.parse(value);
+      if (typeof parsed === 'string') return parsed;
+    } catch {
+      return value.replace(/^"|"$/g, '');
+    }
+  }
+  return value;
+}
+
+/**
+ * Parser para el formato legacy sin frontmatter:
+ *   # Title
+ *
+ *   **Severidad:** high
+ *   **Tipo:** api
+ *   **ID local:** `ai-dep-...`
+ *
+ *   ## Resumen
+ *   ...
+ *
+ *   ## Detalle
+ *   ...
+ */
+function parseDiscoveredDependencyLegacyMarkdown(body: string): DiscoveredDependency | null {
+  const titleMatch = body.match(/^#\s+(.+)$/m);
+  const idMatch = body.match(/\*\*ID local:\*\*\s*`([^`]+)`/);
+  if (!titleMatch || !idMatch) return null;
+
+  const severityMatch = body.match(/\*\*Severidad:\*\*\s*(\S+)/i);
+  const typeMatch = body.match(/\*\*Tipo:\*\*\s*(\S+)/i);
+  // Nuevos campos opcionales renderizados en el body por el builder.
+  const vendorMatch = body.match(/\*\*Proveedor:\*\*\s*(.+?)(?:\s{2,}|\n)/i);
+  const needsCredMatch = body.match(/\*\*Requiere credencial externa:\*\*\s*s[ií]/i);
+  const blockingMatch = body.match(/\*\*Bloqueante:\*\*\s*s[ií]/i);
+
+  const dep: DiscoveredDependency = {
+    id: idMatch[1].trim(),
+    title: titleMatch[1].trim(),
+    description: extractSection(body, 'Resumen'),
+    severity: coerceSeverity(severityMatch?.[1]),
+    type: coerceType(typeMatch?.[1]),
+    mdContent: extractSection(body, 'Detalle'),
+  };
+  if (vendorMatch?.[1]) dep.vendor = vendorMatch[1].trim();
+  if (needsCredMatch) dep.requiresCredential = true;
+  if (blockingMatch) dep.isBlocking = true;
+  return dep;
+}
+
+function coerceSeverity(value: string | undefined | null): DependencySeverity {
+  const normalized = (value ?? '').toLowerCase();
+  return VALID_DISCOVERED_SEVERITIES.includes(normalized as DependencySeverity)
+    ? (normalized as DependencySeverity)
+    : 'medium';
+}
+
+function coerceType(value: string | undefined | null): DiscoveredDependencyType {
+  const normalized = (value ?? '').toLowerCase();
+  return VALID_DISCOVERED_TYPES.includes(normalized as DiscoveredDependencyType)
+    ? (normalized as DiscoveredDependencyType)
+    : 'other';
+}
+
+/**
+ * Extrae el contenido de una sección markdown identificada por `## <name>`,
+ * hasta la siguiente sección `## ...` o EOF. Retorna string vacío si no existe.
+ *
+ * Limitación conocida: si el contenido de la sección incluye un heading `## ...`
+ * dentro de un bloque de código, será tratado como inicio de la siguiente
+ * sección. Aceptable para el scope actual (texto generado por agente IA con
+ * shape controlado), no robusto para markdown arbitrario editado por humanos.
+ */
+function extractSection(body: string, name: string): string {
+  const escaped = name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  // `\n?$` tolera archivos sin newline final (edición manual en el vault).
+  const re = new RegExp(`##\\s+${escaped}\\s*\\n+([\\s\\S]*?)(?=\\n##\\s+|\\n?$)`, '');
+  const match = body.match(re);
+  return (match?.[1] ?? '').trim();
 }

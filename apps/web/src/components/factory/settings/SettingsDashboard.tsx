@@ -58,10 +58,12 @@ import {
   Zap,
   Code,
   RefreshCw,
+  KeyRound,
 } from 'lucide-react';
 import { TeamSection } from './TeamSection';
 import { RolesPermissionsSection } from './RolesPermissionsSection';
 import { PodsSection } from './PodsSection';
+import { ExternalSecretsSection } from './ExternalSecretsSection';
 import { UserRole, AccessLevel, USER_ROLE_LABELS, DEFAULT_ROLE_ACCESS, USER_ROLE_COLORS } from '@cenzontle/shared';
 import { useAuthContext } from '@/context/AuthContext';
 
@@ -69,7 +71,7 @@ import { useAuthContext } from '@/context/AuthContext';
 // Types
 // ---------------------------------------------------------------------------
 
-type SettingsSection = 'repository' | 'branches' | 'linear' | 'jira' | 'vault' | 'codigo' | 'nodes' | 'agents' | 'dod' | 'pods' | 'team' | 'roles';
+type SettingsSection = 'repository' | 'branches' | 'linear' | 'jira' | 'vault' | 'codigo' | 'external-secrets' | 'nodes' | 'agents' | 'dod' | 'pods' | 'team' | 'roles';
 
 interface SidebarItem {
   id: SettingsSection;
@@ -85,6 +87,7 @@ const SIDEBAR_ITEMS: SidebarItem[] = [
   { id: 'jira', label: 'Jira', icon: TicketCheck, group: 'Integraciones' },
   { id: 'vault', label: 'Vault', icon: BookMarked, group: 'Integraciones' },
   { id: 'codigo', label: 'Código', icon: Code, group: 'Integraciones' },
+  { id: 'external-secrets', label: 'Secretos externos', icon: KeyRound, group: 'Integraciones' },
   { id: 'nodes', label: 'Nodos de cómputo', icon: Server, group: 'Infraestructura' },
   { id: 'agents', label: 'Agentes', icon: Bot, group: 'Automatización' },
   { id: 'dod', label: 'Definition of Done', icon: ClipboardCheck, group: 'Automatización' },
@@ -2082,6 +2085,8 @@ function SectionContent({ section }: { section: SettingsSection }) {
       return <VaultSection />;
     case 'codigo':
       return <CodigoSection />;
+    case 'external-secrets':
+      return <ExternalSecretsSection />;
     case 'nodes':
       return <ComputeNodesSection />;
     case 'agents':

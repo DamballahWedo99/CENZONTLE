@@ -1,5 +1,6 @@
 import { BadRequestException, Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
+import { Prisma } from '@prisma/client';
 import Anthropic from '@anthropic-ai/sdk';
 import { Subject } from 'rxjs';
 import { PrismaService } from '../../../prisma/prisma.service';
@@ -12,7 +13,8 @@ import { VaultGrepTool } from '../../../factory/agent-tools/vault-grep.tool';
 import { VaultReadTool } from '../../../factory/agent-tools/vault-read.tool';
 import { CodeRepoCloneService } from '../../../code-repositories/code-repo-clone.service';
 import { VaultService } from '../../../vault/vault.service';
-import { epicDiagramPath } from '../../vault-paths';
+import { epicDiagramPath, epicFolderPath } from '../../vault-paths';
+import { buildFrontmatter } from '../../vault-frontmatter';
 import type {
   AgentTool,
   AgentToolContext,
@@ -270,15 +272,55 @@ export class DiagramGenerationService {
   /**
    * Lee del cache Redis un diagrama generado previamente.
    *
-   * Retorna `null` si no hay cache (nunca se generó, TTL caducó, o Redis
-   * no está disponible). El caller debe interpretar `null` como "no hay
-   * diagrama" y ofrecer la opción de generar uno nuevo — no es un error.
+   * Estrategia de lectura: **Redis primero** (TTL 5 días, latencia ~ms) y
+   * **fallback a Postgres** si Redis está vacío o falla. Sin fallback, una
+   * expiración del cache o un flush de Redis haría que el user pierda acceso
+   * a diagramas que SÍ están persistidos en `epic.diagrams[]` (la persistencia
+   * a PG es la fuente de verdad desde la refactorización del TTL).
+   *
+   * Retorna `null` solo si NO hay diagrama ni en Redis ni en Postgres — el
+   * caller interpreta `null` como "no hay diagrama" y ofrece generar uno.
    */
   async getCached(
     epicId: string,
     type: DiagramGenerationType,
   ): Promise<EpicDiagram | null> {
-    return this.diagramCache.getDiagram(epicId, type);
+    const cached = await this.diagramCache.getDiagram(epicId, type).catch(() => null);
+    if (cached) {
+      this.logger.log(
+        `[getCached] HIT Redis epic=${epicId} type=${type} id=${cached.id}`,
+      );
+      return cached;
+    }
+
+    // Fallback a Postgres: lee el diagrama persistido en epic.diagrams[].
+    // Al hit, re-hidratamos Redis para que subsiguientes lecturas sean rápidas.
+    this.logger.log(
+      `[getCached] MISS Redis epic=${epicId} type=${type} → fallback Postgres`,
+    );
+    const persisted = await this.getPreviousDiagram(epicId, type);
+    if (persisted) {
+      this.logger.log(
+        `[getCached] HIT Postgres fallback epic=${epicId} type=${type} id=${persisted.id} → re-hidrating Redis`,
+      );
+      this.diagramCache
+        .saveDiagram(epicId, type, persisted)
+        .then(() => {
+          this.logger.log(
+            `[getCached] Redis re-hidration OK epic=${epicId} type=${type}`,
+          );
+        })
+        .catch((err) => {
+          this.logger.warn(
+            `[getCached] Redis re-hidration FAILED epic=${epicId} type=${type}: ${(err as Error)?.message ?? err}`,
+          );
+        });
+    } else {
+      this.logger.log(
+        `[getCached] MISS Postgres too — no diagram exists epic=${epicId} type=${type}`,
+      );
+    }
+    return persisted;
   }
 
   /**
@@ -465,13 +507,29 @@ export class DiagramGenerationService {
     // tener auditoría precisa de primera creación vs iteración.
     const existing = await this.diagramCache.getDiagram(epicId, type);
 
+    // SEGURIDAD: allowlist explícito de campos que el cliente puede persistir
+    // al cache. Spread sin filtrar permitiría inyectar `integrationFlowDocPath`
+    // arbitrario, que luego `getPreviousDiagram` lee y podría pasarse al
+    // `vault.deleteNote` en una regeneración — enabling arbitrary file delete
+    // via cache poisoning. Los campos server-managed (`integrationFlowDocPath`,
+    // `integrationFlowGeneratedAt`) solo se preservan del `existing`
+    // (diagrama actual del cache), nunca del payload del cliente.
+    const clientInput = diagram as Partial<EpicDiagram>;
     const updated: EpicDiagram = migrateLegacyDiagramGroups({
-      ...diagram,
+      id: clientInput.id ?? existing?.id ?? '',
+      name: clientInput.name ?? existing?.name ?? '',
       nodes: validation.data.nodes,
       edges: validation.data.edges,
+      steps: clientInput.steps ?? existing?.steps,
       type,
       generatedAt: new Date().toISOString(),
       generatedBy: 'manual',
+      // Campos server-managed: NUNCA del cliente. Solo se heredan del cache
+      // existente (que fue escrito server-side por la generación previa).
+      integrationFlowDocPath: existing?.integrationFlowDocPath,
+      integrationFlowGeneratedAt: existing?.integrationFlowGeneratedAt,
+      hasManualLayout: clientInput.hasManualLayout ?? existing?.hasManualLayout,
+      manualPositions: clientInput.manualPositions ?? existing?.manualPositions,
     });
 
     await this.diagramCache.saveDiagram(epicId, type, updated);
@@ -627,8 +685,21 @@ export class DiagramGenerationService {
     // Pre-check: distingue `created` vs `updated` en el changelog emitido
     // tras `submit_diagram`. Capturado una sola vez al inicio — si el agente
     // sobrescribe un diagrama previo, queremos que la entrada diga "updated".
-    const hadPreviousDiagram = Boolean(
-      await this.diagramCache.getDiagram(epicId, type).catch(() => null),
+    //
+    // Además capturamos el `integrationFlowDocPath` del diagrama anterior
+    // (fuente preferente: Postgres `epic.diagrams`, que ahora es source of
+    // truth — fallback a Redis). Al regenerar, lo borramos del vault para
+    // evitar docs huérfanos: el nuevo diagrama tiene un `id` UUID distinto
+    // y por ende un path distinto. Sin esta limpieza los vault folders
+    // crecerían con documentos de regeneraciones pasadas sin referencia.
+    const previousDiagram = await this.getPreviousDiagram(epicId, type);
+    const hadPreviousDiagram = previousDiagram !== null;
+    const previousDocPath = previousDiagram?.integrationFlowDocPath ?? null;
+    this.logger.log(
+      `[generate] Pre-check epic=${epicId} type=${type} hadPrevious=${hadPreviousDiagram}` +
+        (hadPreviousDiagram
+          ? ` previousId=${previousDiagram!.id} previousDocPath=${previousDocPath ?? 'none'}`
+          : ''),
     );
 
     const enabledRepos = await this.codeRepoClones.getEnabled().catch(() => []);
@@ -1005,10 +1076,28 @@ export class DiagramGenerationService {
             );
           }
 
-          // Persist to Redis (TTL 5 days) before emitting to client, so a
-          // subsequent reload of the epic can read from cache without
-          // regenerating. Failure to cache is non-fatal — we still emit the
-          // diagram to the client and let the error surface in logs.
+          // Persist to Postgres (source of truth, no TTL) BEFORE Redis. Sin
+          // esto los diagramas IA desaparecerían tras 5 días si nadie los
+          // edita manualmente — solo los edits explícitos llegaban a
+          // epic.diagrams[]. La persistencia hace que el diagrama IA sobreviva
+          // expiraciones de cache y redeploys de Redis.
+          //
+          // Upsert semántico: si existe un diagrama del mismo `type` en el
+          // array, se reemplaza; si no, se agrega. Un type (business /
+          // technical) = máximo un diagrama por épica.
+          try {
+            await this.persistAiDiagramToEpic(epicId, currentDiagram);
+          } catch (err) {
+            // Log pero no interrumpe — el cliente sigue recibiendo el diagrama
+            // vía SSE y el cache Redis actúa como backup efímero. El próximo
+            // edit/regenerate lo reconciliará.
+            this.logger.warn(
+              `[generate] Failed to persist AI diagram to Postgres epic=${epicId} type=${type}: ${(err as Error)?.message ?? err}`,
+            );
+          }
+
+          // Persist to Redis (cache layer) después del upsert a Postgres.
+          // Lectura rápida para el endpoint GET /cached sin tocar Postgres.
           await this.diagramCache
             .saveDiagram(epicId, type, currentDiagram)
             .catch((err) => {
@@ -1016,6 +1105,58 @@ export class DiagramGenerationService {
                 `Failed to cache diagram for epic=${epicId} type=${type}: ${err?.message ?? err}`,
               );
             });
+
+          // Si era una regeneración sobre un diagrama previo con doc de flujo,
+          // borrar el doc huérfano del vault (el nuevo diagrama tiene un id
+          // UUID distinto → path distinto → el viejo queda sin referencia).
+          //
+          // SEGURIDAD (path traversal): `previousDocPath` proviene del JSONB
+          // `epic.diagrams` — un valor que en teoría escribe el backend, pero
+          // que podría haber sido envenenado vía endpoints de edición antes
+          // de este fix. Validamos que el path esté contenido en el folder
+          // de la épica actual (`iniciativas/.../epics/<slug>-<id6>/`) antes
+          // de pasar a `vault.deleteNote`. Path traversal (`..`, `//`,
+          // paths absolutos) o cross-epic (otro folder) se rechazan con log.
+          if (
+            previousDocPath &&
+            previousDocPath !== currentDiagram.integrationFlowDocPath
+          ) {
+            const epicFolder = epicFolderPath(
+              { id: epicContext.initiative.id, name: epicContext.initiative.name },
+              { id: epicContext.id, title: epicContext.title },
+            );
+            const expectedPrefix = `${epicFolder}/`;
+            const hasTraversal =
+              previousDocPath.includes('..') ||
+              previousDocPath.includes('//') ||
+              previousDocPath.startsWith('/') ||
+              previousDocPath.includes('\0');
+            const inEpicFolder = previousDocPath.startsWith(expectedPrefix);
+            if (hasTraversal || !inEpicFolder) {
+              this.logger.warn(
+                `[generate] REFUSED to delete suspicious previousDocPath — not within epic folder. path=${previousDocPath} epic=${epicId} expectedPrefix=${expectedPrefix}`,
+              );
+            } else {
+              this.logger.log(
+                `[generate] Deleting previous flow doc (regeneration) path=${previousDocPath} epic=${epicId}`,
+              );
+              await this.vault
+                .deleteNote(
+                  previousDocPath,
+                  `chore(diagram): remove integration-flow doc of replaced ${type} diagram [${epicId}]`,
+                )
+                .then(() => {
+                  this.logger.log(
+                    `[generate] Previous flow doc deleted OK path=${previousDocPath} epic=${epicId}`,
+                  );
+                })
+                .catch((err) => {
+                  this.logger.warn(
+                    `[generate] Failed to delete previous flow doc path=${previousDocPath} epic=${epicId}: ${(err as Error)?.message ?? err}`,
+                  );
+                });
+            }
+          }
           // Registra la generación en el changelog de la épica. El método
           // `emitDiagramChangelog` encapsula el try/catch para que un fallo
           // de auditoría no afecte la entrega del diagrama al cliente.
@@ -2918,25 +3059,17 @@ Básate en vault_grep (Vault de definiciones y conocimiento de negocio) y en los
     // razonable para evitar la fuga.
     const scrubbedMarkdown = scrubSecrets(markdown);
     const cleaned = scrubbedMarkdown.replace(/^---\n[\s\S]*?\n---\n?/, '').trim();
-    // YAML safe-quoting: JSON.stringify produce un string válido como
-    // "double-quoted scalar" en YAML 1.2 — escapa quotes, newlines, tabs,
-    // backslashes y controla los caracteres invisibles. Sin esto un title
-    // con `\n---\n` rompería el frontmatter o inyectaría keys arbitrarias.
-    const safeTitle = JSON.stringify(epicContext.title);
-    const frontmatter = [
-      '---',
-      'type: integration-flow-documentation',
-      `epicId: ${epicContext.id}`,
-      `epicTitle: ${safeTitle}`,
-      `diagramId: ${diagram.id}`,
-      `diagramType: ${diagram.type}`,
-      `generatedAt: ${diagram.generatedAt}`,
-      'generatedBy: ai',
-      'version: 1',
-      '---',
-      '',
-    ].join('\n');
-    return frontmatter + cleaned + '\n';
+    const fm = buildFrontmatter({
+      type: 'integration-flow-documentation',
+      epicId: epicContext.id,
+      epicTitle: epicContext.title,
+      diagramId: diagram.id,
+      diagramType: diagram.type,
+      generatedAt: diagram.generatedAt,
+      generatedBy: 'ai',
+      version: 1,
+    });
+    return `${fm}\n\n${cleaned}\n`;
   }
 
   /**
@@ -3883,6 +4016,98 @@ Output vía tool \`layout_pass\`:
     });
     (promise as Promise<never> & { clear: () => void }).clear = () => clearTimeout(timerId!);
     return promise as Promise<never> & { clear: () => void };
+  }
+
+  /**
+   * Recupera el diagrama anterior de una épica+tipo para decidir si la
+   * generación actual es create vs update y capturar su `integrationFlowDocPath`.
+   *
+   * Fuente de verdad: Postgres (`epic.diagrams[]`). Fallback a Redis por si
+   * el upsert a Postgres del submit previo falló pero Redis sí tiene el
+   * diagrama — así no perdemos continuidad de changelog.
+   */
+  private async getPreviousDiagram(
+    epicId: string,
+    type: DiagramGenerationType,
+  ): Promise<EpicDiagram | null> {
+    try {
+      const epic = await this.prisma.epic.findUnique({
+        where: { id: epicId },
+        select: { diagrams: true },
+      });
+      const diagrams = Array.isArray(epic?.diagrams)
+        ? (epic!.diagrams as unknown as EpicDiagram[])
+        : [];
+      const match = diagrams.find((d) => d.type === type);
+      if (match) {
+        this.logger.log(
+          `[getPreviousDiagram] from Postgres epic=${epicId} type=${type} id=${match.id}`,
+        );
+        return match;
+      }
+    } catch (err) {
+      this.logger.warn(
+        `[getPreviousDiagram] Postgres read failed epic=${epicId} → falling back to Redis: ${(err as Error)?.message ?? err}`,
+      );
+    }
+    const fromRedis = await this.diagramCache.getDiagram(epicId, type).catch(() => null);
+    if (fromRedis) {
+      this.logger.log(
+        `[getPreviousDiagram] from Redis fallback epic=${epicId} type=${type} id=${fromRedis.id}`,
+      );
+    }
+    return fromRedis;
+  }
+
+  /**
+   * Persiste un diagrama generado por IA al campo `epic.diagrams` (JSONB).
+   * Upsert por `type`: si ya existe un diagrama del mismo tipo lo reemplaza
+   * — una épica tiene un solo diagrama por tipo (business | technical). El
+   * diagrama anterior del mismo tipo se descarta; los del otro tipo (y
+   * cualquier diagrama manual) se preservan.
+   *
+   * Este método es la **fuente de verdad** de los diagramas IA. El cache de
+   * Redis (`diagramCache.saveDiagram`) es solo una capa de lectura rápida.
+   *
+   * Implementación **atómica** via `jsonb_array_elements` + `jsonb_agg`: el
+   * upsert se hace en una sola query SQL, eliminando el lost-update que
+   * tendría un read-modify-write si dos regeneraciones concurrentes (business
+   * + technical) se ejecutaran en paralelo sobre el mismo epic.
+   */
+  private async persistAiDiagramToEpic(
+    epicId: string,
+    diagram: EpicDiagram,
+  ): Promise<void> {
+    // Serializar el diagrama nuevo como JSON para pasarlo via parameter a
+    // Postgres. El cast a ::jsonb lo convierte al tipo correcto sin riesgo de
+    // interpolación textual (Prisma parametriza).
+    const diagramJson = JSON.stringify(diagram);
+
+    const affected = await this.prisma.$executeRaw`
+      UPDATE epics
+      SET diagrams = COALESCE(
+        (
+          SELECT jsonb_agg(elem)
+          FROM (
+            SELECT elem
+            FROM jsonb_array_elements(diagrams) AS elem
+            WHERE elem->>'type' <> ${diagram.type}
+            UNION ALL
+            SELECT ${diagramJson}::jsonb AS elem
+          ) sub
+        ),
+        '[]'::jsonb
+      )
+      WHERE id = ${epicId}::uuid
+    `;
+
+    if (affected === 0) {
+      throw new Error(`persistAiDiagramToEpic: epic ${epicId} not found`);
+    }
+
+    this.logger.log(
+      `[persistAiDiagramToEpic] epic=${epicId} type=${diagram.type} id=${diagram.id} (atomic upsert)`,
+    );
   }
 }
 

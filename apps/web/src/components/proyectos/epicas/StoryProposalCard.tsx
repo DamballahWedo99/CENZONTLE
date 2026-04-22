@@ -30,6 +30,12 @@ const depSeverityColor: Record<DependencySeverity, string> = {
 interface StoryProposalCardProps {
   proposal: ProposedStory;
   pods: Pod[];
+  /**
+   * Resto de propuestas del mismo batch. Se usa para resolver los títulos
+   * de las historias en `proposal.blockedBy` (que vienen como `clientId`).
+   * Opcional: si no se pasa, el badge muestra solo el count sin título.
+   */
+  batchProposals?: ProposedStory[];
   onAccept: (proposal: ProposedStory) => void;
   onDiscard: (clientId: string) => void;
   accepting?: boolean;
@@ -38,6 +44,7 @@ interface StoryProposalCardProps {
 export function StoryProposalCard({
   proposal,
   pods,
+  batchProposals,
   onAccept,
   onDiscard,
   accepting,
@@ -46,6 +53,20 @@ export function StoryProposalCard({
   const pod = pods.find((p) => p.id === proposal.podId);
   const docsCount = proposal.relatedDocuments?.length ?? 0;
   const depsCount = proposal.discoveredDependencies?.length ?? 0;
+  const blockedBy = proposal.blockedBy ?? [];
+
+  // Lookup de títulos para los clientIds bloqueantes. Fallback a truncated
+  // clientId si el batch no pasa el contexto (edge case).
+  const blockerTitles = blockedBy.map((edge) => {
+    const src = batchProposals?.find((p) => p.clientId === edge.storyClientId);
+    return {
+      title: src?.title ?? edge.storyClientId.slice(0, 20),
+      hardness: edge.hardness,
+      reason: edge.reason,
+      description: edge.description,
+    };
+  });
+  const hasHardBlocker = blockerTitles.some((b) => b.hardness === 'hard');
 
   const toggleSection = (section: Exclude<ExpandedSection, null>) => {
     setExpandedSection((prev) => (prev === section ? null : section));
@@ -88,8 +109,46 @@ export function StoryProposalCard({
                 {depsCount} deps
               </span>
             )}
+            {blockerTitles.length > 0 && (
+              <span
+                className={`inline-flex items-center gap-1 text-[10px] px-1.5 py-0.5 rounded-full border ${
+                  hasHardBlocker
+                    ? 'bg-destructive/10 text-destructive border-destructive/20'
+                    : 'bg-muted text-foreground/80 border-border'
+                }`}
+                title={
+                  blockerTitles
+                    .map((b) => `[${b.hardness}] ${b.reason}: ${b.title}${b.description ? ` — ${b.description}` : ''}`)
+                    .join('\n')
+                }
+              >
+                <GitBranch className="h-2.5 w-2.5" />
+                Bloqueada por {blockerTitles.length}
+              </span>
+            )}
           </div>
           <h4 className="text-sm font-medium mt-1.5 leading-snug">{proposal.title}</h4>
+          {blockerTitles.length > 0 && (
+            <ul className="mt-1 space-y-0.5">
+              {blockerTitles.slice(0, 3).map((b, idx) => (
+                <li
+                  key={idx}
+                  className="text-[11px] text-muted-foreground flex items-start gap-1"
+                >
+                  <GitBranch className="h-3 w-3 mt-0.5 shrink-0 opacity-60" />
+                  <span className="truncate">
+                    <span className={b.hardness === 'hard' ? 'text-destructive font-medium' : ''}>
+                      [{b.hardness === 'hard' ? 'hard' : 'soft'}]
+                    </span>{' '}
+                    {b.title}
+                  </span>
+                </li>
+              ))}
+              {blockerTitles.length > 3 && (
+                <li className="text-[10px] text-muted-foreground/70 pl-4">+{blockerTitles.length - 3} más…</li>
+              )}
+            </ul>
+          )}
         </div>
       </div>
 

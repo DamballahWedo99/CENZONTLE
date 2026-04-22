@@ -24,6 +24,7 @@ import {
   buildQAMatrixMarkdown,
   buildEpicQAMatrixMarkdown,
 } from '../epics/epic-markdown-builders';
+import { buildFrontmatter } from '../vault-frontmatter';
 import type {
   EpicDiagram,
   EpicDependency,
@@ -615,13 +616,14 @@ export class VaultMigrationService {
     name: string;
     description?: string;
   }): string {
-    const now = new Date().toISOString();
+    const fm = buildFrontmatter({
+      id: ini.id,
+      type: 'initiative',
+      name: ini.name,
+      migratedAt: new Date().toISOString(),
+    });
     return [
-      `---`,
-      `id: ${ini.id}`,
-      `name: ${JSON.stringify(ini.name)}`,
-      `migratedAt: ${now}`,
-      `---`,
+      fm,
       ``,
       `# ${ini.name}`,
       ``,
@@ -659,12 +661,14 @@ export class VaultMigrationService {
     const now = new Date().toISOString();
 
     // index.md — siempre construido desde PG (no depende del legacy)
+    const indexFm = buildFrontmatter({
+      id: epic.id,
+      type: 'epic',
+      title: epic.title,
+      migratedAt: now,
+    });
     const indexMd = [
-      `---`,
-      `id: ${epic.id}`,
-      `title: ${JSON.stringify(epic.title)}`,
-      `migratedAt: ${now}`,
-      `---`,
+      indexFm,
       ``,
       `# ${epic.title}`,
       ``,
@@ -702,12 +706,14 @@ export class VaultMigrationService {
         .map(([label, value]) => `## ${label}\n\n${value || '_Sin definir._'}`)
         .join('\n\n');
 
+      const defFm = buildFrontmatter({
+        id: epic.id,
+        type: 'epic-definition',
+        title: epic.title,
+        migratedAt: now,
+      });
       definicionMd = [
-        `---`,
-        `id: ${epic.id}`,
-        `title: ${JSON.stringify(epic.title)}`,
-        `migratedAt: ${now}`,
-        `---`,
+        defFm,
         ``,
         `# Definición de épica: ${epic.title}`,
         ``,
