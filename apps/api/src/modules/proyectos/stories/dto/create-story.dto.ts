@@ -1,6 +1,7 @@
 import {
   IsString, IsNotEmpty, MaxLength, IsEnum, IsOptional,
   IsUUID, IsInt, Min, IsArray, ValidateNested, IsIn, ArrayMaxSize,
+  IsBoolean,
 } from 'class-validator';
 import { Type } from 'class-transformer';
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
@@ -19,6 +20,29 @@ export class RelatedDocumentDto {
   @ApiProperty() @IsString() @MaxLength(20_000) relevanceSummary!: string;
 }
 
+/**
+ * Entry del DAG de orden entre historias del batch. Referencia a otra
+ * historia por `storyId` o por `clientId` (staging).
+ */
+export class StoryOrderDependencyDto {
+  @ApiProperty({ description: 'clientId (staging) o storyId (post-accept) de la historia que bloquea' })
+  @IsString()
+  @MaxLength(200)
+  storyClientId!: string;
+
+  @ApiProperty({ enum: ['hard', 'soft'] })
+  @IsString()
+  @IsIn(['hard', 'soft'])
+  hardness!: string;
+
+  @ApiProperty({ enum: ['api_contract', 'migration_order', 'shared_model', 'sequential_logic', 'other'] })
+  @IsString()
+  @IsIn(['api_contract', 'migration_order', 'shared_model', 'sequential_logic', 'other'])
+  reason!: string;
+
+  @ApiProperty() @IsString() @MaxLength(500) description!: string;
+}
+
 export class DiscoveredDependencyDto {
   @ApiProperty() @IsString() @MaxLength(120) id!: string;
   @ApiProperty() @IsString() @MaxLength(300) title!: string;
@@ -26,6 +50,15 @@ export class DiscoveredDependencyDto {
   @ApiProperty() @IsString() @IsIn(['critical', 'high', 'medium', 'low']) severity!: string;
   @ApiProperty() @IsString() @IsIn(['api', 'service', 'data', 'team', 'other']) type!: string;
   @ApiProperty() @IsString() @MaxLength(MAX_DEP_MD) mdContent!: string;
+  /**
+   * Campos opcionales del feature "External Secrets". Los emite el agente
+   * Tech Lead cuando la dep requiere credencial externa (API key de Stripe,
+   * merchant code, OAuth client_secret). El QA puede emitirlos también
+   * pero su foco es mocks/fixtures.
+   */
+  @ApiPropertyOptional() @IsOptional() @IsString() @MaxLength(200) vendor?: string;
+  @ApiPropertyOptional() @IsOptional() @IsBoolean() requiresCredential?: boolean;
+  @ApiPropertyOptional() @IsOptional() @IsBoolean() isBlocking?: boolean;
 }
 
 export class CreateStoryDto {
@@ -58,6 +91,17 @@ export class CreateStoryDto {
   @IsOptional()
   @IsString()
   sprintId?: string;
+
+  /**
+   * clientId de la propuesta staging (`ai-story-<uuid>`) que originó esta
+   * historia. Persistido en `story.sourceClientId` para poder resolver
+   * `blockedBy` cuando otras historias del mismo batch se aceptan después.
+   */
+  @ApiPropertyOptional()
+  @IsOptional()
+  @IsString()
+  @MaxLength(200)
+  sourceClientId?: string;
 
   @ApiPropertyOptional({ type: [String] })
   @IsOptional()
@@ -98,4 +142,18 @@ export class CreateStoryDto {
   @ValidateNested({ each: true })
   @Type(() => DiscoveredDependencyDto)
   discoveredDependencies?: DiscoveredDependencyDto[];
+
+  /**
+   * DAG de orden entre historias del mismo batch (emitido por el Tech Lead).
+   * Cada entry apunta a una historia bloqueante por `clientId` (si viene de
+   * staging) o `storyId` (si viene de un sistema externo). El service busca
+   * matches en el mismo batch al aceptar y crea rows en `StoryDependency`.
+   */
+  @ApiPropertyOptional({ type: [StoryOrderDependencyDto], description: 'DAG de orden entre historias del batch' })
+  @IsOptional()
+  @IsArray()
+  @ArrayMaxSize(50)
+  @ValidateNested({ each: true })
+  @Type(() => StoryOrderDependencyDto)
+  blockedBy?: StoryOrderDependencyDto[];
 }

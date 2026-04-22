@@ -6,6 +6,7 @@ export * from "./types/aprobacion";
 export * from "./types/reportes";
 export * from "./types/integrations";
 export * from "./types/access";
+export * from "./types/external-secrets";
 
 // Diagram quality metrics — usado por el frontend `ValidationPanel` para
 // mostrar el score deterministic (0-1) del diagrama actual al usuario.

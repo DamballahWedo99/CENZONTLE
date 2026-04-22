@@ -1,6 +1,7 @@
 import { Injectable, Logger, NotFoundException } from '@nestjs/common';
 import { Prisma } from '@prisma/client';
 import { randomUUID } from 'crypto';
+import type { DiscoveredDependency } from '@cenzontle/shared';
 import { PrismaService } from '../../prisma/prisma.service';
 import { VaultService } from '../../vault/vault.service';
 import { VaultFolderService } from '../../vault/vault-folder.service';
@@ -25,7 +26,9 @@ import {
   buildDependencyMarkdown,
   buildQAMatrixMarkdown,
   buildEpicQAMatrixMarkdown,
+  parseDiscoveredDependencyMarkdown,
 } from './epic-markdown-builders';
+import { buildFrontmatter } from '../vault-frontmatter';
 
 const EPIC_INCLUDE = {
   initiative: { select: { id: true, name: true, status: true } },
@@ -642,19 +645,16 @@ export class EpicsService {
     description: string;
     created?: string;
   }): string {
-    const frontmatter = [
-      '---',
-      `id: ${data.id}`,
-      'type: epic',
-      `initiativeId: ${data.initiativeId}`,
-      `title: ${JSON.stringify(data.title)}`,
-      `created: ${data.created ?? new Date().toISOString().slice(0, 10)}`,
-      '---',
-      '',
-    ].join('\n');
+    const fm = buildFrontmatter({
+      id: data.id,
+      type: 'epic',
+      initiativeId: data.initiativeId,
+      title: data.title,
+      created: data.created ?? new Date().toISOString().slice(0, 10),
+    });
 
     return (
-      frontmatter +
+      `${fm}\n\n` +
       `# ${data.title}\n\n` +
       `## Descripción\n\n${data.description ?? ''}\n\n` +
       `---\n\n` +
@@ -680,16 +680,13 @@ export class EpicsService {
     narrative: NarrativeContent;
     created?: string;
   }): string {
-    const frontmatter = [
-      '---',
-      `id: ${data.id}`,
-      'type: epic-definition',
-      `initiativeId: ${data.initiativeId}`,
-      `title: ${JSON.stringify(data.title)}`,
-      `created: ${data.created ?? new Date().toISOString().slice(0, 10)}`,
-      '---',
-      '',
-    ].join('\n');
+    const fm = buildFrontmatter({
+      id: data.id,
+      type: 'epic-definition',
+      initiativeId: data.initiativeId,
+      title: data.title,
+      created: data.created ?? new Date().toISOString().slice(0, 10),
+    });
 
     const narrativeSections = NARRATIVE_FIELDS.map((field) => {
       const value = data.narrative[field] ?? '';
@@ -697,7 +694,7 @@ export class EpicsService {
       return `## ${label}\n\n${value}\n`;
     }).join('\n');
 
-    return frontmatter + `# ${data.title} — Definición\n\n` + narrativeSections;
+    return `${fm}\n\n# ${data.title} — Definición\n\n${narrativeSections}`;
   }
 
   /**
@@ -712,15 +709,13 @@ export class EpicsService {
     narrative: NarrativeContent;
     created?: string;
   }): string {
-    const frontmatter = [
-      '---',
-      `id: ${data.id}`,
-      'type: epic',
-      `initiativeId: ${data.initiativeId}`,
-      `created: ${data.created ?? new Date().toISOString().slice(0, 10)}`,
-      '---',
-      '',
-    ].join('\n');
+    const fm = buildFrontmatter({
+      id: data.id,
+      type: 'epic',
+      initiativeId: data.initiativeId,
+      title: data.title,
+      created: data.created ?? new Date().toISOString().slice(0, 10),
+    });
 
     const title = `# ${data.title}\n\n`;
     const descriptionSection = `## Descripción\n\n${data.description ?? ''}\n\n`;
@@ -730,7 +725,7 @@ export class EpicsService {
       return `## ${label}\n\n${value}\n`;
     }).join('\n');
 
-    return frontmatter + title + descriptionSection + narrativeSections;
+    return `${fm}\n\n${title}${descriptionSection}${narrativeSections}`;
   }
 
   /**
@@ -889,5 +884,150 @@ export class EpicsService {
         this.logger.log(`[writeEpicArtifacts] qa-sistemica escrita → ${path}`);
       }
     }
+  }
+
+  // ─────────────────────────────────────────────────────────────────────
+  //   Discovered dependencies (vault-sourced, AI-generated)
+  // ─────────────────────────────────────────────────────────────────────
+
+  /**
+   * Lista las DiscoveredDependency de una épica leyéndolas del folder
+   * `dependencias/` del vault. Estas son dependencias descubiertas por el
+   * agente QA durante la generación de historias — viven SOLO en el vault
+   * (no en Postgres), por eso se parsean en cada request.
+   *
+   * Diferente del campo `epic.dependencies` (JSONB en PG) que contiene las
+   * `EpicDependency` creadas manualmente por el usuario.
+   */
+  async listDiscoveredDependencies(epicId: string): Promise<DiscoveredDependency[]> {
+    const epic = await this.prisma.epic.findUnique({
+      where: { id: epicId },
+      include: { initiative: { select: { id: true, name: true } } },
+    });
+    if (!epic) throw new NotFoundException('Épica no encontrada');
+
+    if (!epic.vaultPath || !isNewFormatVaultPath(epic.vaultPath)) {
+      return [];
+    }
+
+    const iniRef: InitiativeRef = { id: epic.initiative.id, name: epic.initiative.name };
+    const epicRef: EpicRef = { id: epic.id, title: epic.title };
+    const folder = `${epicFolderPath(iniRef, epicRef)}/dependencias`;
+
+    const paths = await this.vault.listNotes(folder);
+    if (paths.length === 0) return [];
+
+    const notes = await Promise.all(
+      paths.map((p) =>
+        this.vault.readNote(p).catch((err: unknown) => {
+          this.logger.warn(
+            `[listDiscoveredDependencies] readNote failed path=${p} err=${(err as Error)?.message ?? err}`,
+          );
+          return null;
+        }),
+      ),
+    );
+
+    let parseFailures = 0;
+    const vaultDeps = notes
+      .map((note) => {
+        if (!note) return null;
+        const parsed = parseDiscoveredDependencyMarkdown(note.content);
+        if (!parsed) parseFailures++;
+        return parsed;
+      })
+      .filter((d): d is DiscoveredDependency => d !== null);
+
+    // Enriquecer con estado del JSONB `epic.dependencies[]`: cuando una dep
+    // fue resuelta (linkedSecretId / status: 'resolved'), esa info vive en
+    // Postgres, no en el vault (el vault es documentación inmutable). Si el
+    // id coincide, preferimos los campos de estado del JSONB.
+    const jsonbDeps = Array.isArray(epic.dependencies)
+      ? (epic.dependencies as unknown as Array<{ id: string; linkedSecretId?: string; status?: string; vendor?: string; requiresCredential?: boolean; isBlocking?: boolean }>)
+      : [];
+    const jsonbById = new Map(jsonbDeps.map((d) => [d.id, d]));
+
+    const merged = vaultDeps.map<DiscoveredDependency>((vaultDep) => {
+      const jsonbMatch = jsonbById.get(vaultDep.id);
+      if (!jsonbMatch) return vaultDep;
+      // JSONB es source of truth para state (resolved, linkedSecretId) y
+      // para los flags que el agente más reciente haya emitido. El vault
+      // es source of truth para mdContent/description (markdown extenso).
+      return {
+        ...vaultDep,
+        vendor: jsonbMatch.vendor ?? vaultDep.vendor,
+        requiresCredential: jsonbMatch.requiresCredential ?? vaultDep.requiresCredential,
+        isBlocking: jsonbMatch.isBlocking ?? vaultDep.isBlocking,
+        linkedSecretId: jsonbMatch.linkedSecretId ?? vaultDep.linkedSecretId,
+      };
+    });
+
+    this.logger.log(
+      `[listDiscoveredDependencies] epic=${epicId} paths=${paths.length} parsed=${vaultDeps.length} parseFailures=${parseFailures} enrichedFromJsonb=${merged.filter((d) => jsonbById.has(d.id)).length}`,
+    );
+    return merged;
+  }
+
+  /**
+   * Lista el DAG de orden entre historias del epic. Retorna cada historia
+   * que tiene al menos una dep entrante (está bloqueada por algo) junto con
+   * los edges de sus bloqueantes. Las historias sin deps se omiten — el
+   * frontend las asume paralelizables.
+   *
+   * Shape retornado optimizado para render: cada item incluye el título de
+   * la historia bloqueada y el de cada bloqueante para evitar N+1 lookups.
+   */
+  async listStoryDependencies(epicId: string): Promise<Array<{
+    story: { id: string; title: string };
+    blockedBy: Array<{
+      story: { id: string; title: string };
+      hardness: string;
+      reason: string;
+      description: string;
+    }>;
+  }>> {
+    const epic = await this.prisma.epic.findUnique({ where: { id: epicId }, select: { id: true } });
+    if (!epic) throw new NotFoundException('Épica no encontrada');
+
+    // Una sola query: todas las story dependencies donde la historia
+    // bloqueada (storyId) pertenece a este epic. Incluimos ambas puntas
+    // con su title para render directo.
+    const edges = await this.prisma.storyDependency.findMany({
+      where: { story: { epicId } },
+      include: {
+        story: { select: { id: true, title: true } },
+        blockedBy: { select: { id: true, title: true } },
+      },
+      orderBy: [{ storyId: 'asc' }, { createdAt: 'asc' }],
+    });
+
+    // Agrupa por storyId — retorno es una entry por historia bloqueada.
+    const byStoryId = new Map<string, {
+      story: { id: string; title: string };
+      blockedBy: Array<{
+        story: { id: string; title: string };
+        hardness: string;
+        reason: string;
+        description: string;
+      }>;
+    }>();
+    for (const edge of edges) {
+      const key = edge.storyId;
+      if (!byStoryId.has(key)) {
+        byStoryId.set(key, { story: edge.story, blockedBy: [] });
+      }
+      byStoryId.get(key)!.blockedBy.push({
+        story: edge.blockedBy,
+        hardness: edge.hardness,
+        reason: edge.reason,
+        description: edge.description,
+      });
+    }
+
+    const result = Array.from(byStoryId.values());
+    this.logger.log(
+      `[listStoryDependencies] epic=${epicId} stories-with-deps=${result.length} total-edges=${edges.length}`,
+    );
+    return result;
   }
 }

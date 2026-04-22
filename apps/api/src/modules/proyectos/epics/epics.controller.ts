@@ -24,6 +24,24 @@ export class EpicsController {
     return this.epicsService.findOne(id, includeContent === 'true');
   }
 
+  @Get(':id/discovered-dependencies')
+  @ApiOperation({
+    summary:
+      'Lista las dependencias descubiertas por el agente QA (leídas del vault). Estas son diferentes de epic.dependencies (manuales en Postgres).',
+  })
+  listDiscoveredDependencies(@Param('id') id: string) {
+    return this.epicsService.listDiscoveredDependencies(id);
+  }
+
+  @Get(':id/story-dependencies')
+  @ApiOperation({
+    summary:
+      'Lista el DAG de orden entre historias de la épica. Cada entry es una historia con sus bloqueantes directos (edges del modelo StoryDependency).',
+  })
+  listStoryDependencies(@Param('id') id: string) {
+    return this.epicsService.listStoryDependencies(id);
+  }
+
   @Post()
   @Permissions(Permission.CREATE_EPIC)
   @ApiOperation({ summary: 'Crear una épica' })

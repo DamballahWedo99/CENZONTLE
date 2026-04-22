@@ -17,6 +17,8 @@ import {
   type EpicRef,
   type StoryRef,
 } from '../vault-paths';
+import { buildDiscoveredDependencyMarkdown } from '../epics/epic-markdown-builders';
+import { buildFrontmatter } from '../vault-frontmatter';
 
 export interface StoryMarkdownData {
   po?: StoryPoFieldsDto;
@@ -135,6 +137,7 @@ export class StoriesService {
         id,
         dto.relatedDocuments,
         dto.discoveredDependencies,
+        dto.epicId,
       ),
     ]);
     this.logger.log(
@@ -154,9 +157,30 @@ export class StoriesService {
           sprintId: dto.sprintId,
           labels: dto.labels ?? [],
           vaultPath: indexPath,
+          sourceClientId: dto.sourceClientId ?? null,
         },
       });
-      this.logger.log(`[StoryVault:create] ═══ DONE story.id=${result.id} vaultPath=${indexPath}`);
+
+      // 3. Persistir edges de `blockedBy` al modelo `StoryDependency`. Solo
+      // crear rows para las bloqueantes que YA existen en DB (búsqueda por
+      // sourceClientId). Si una bloqueante aún está en staging, la row se
+      // creará cuando esa historia se acepte (hace lookup inverso vía el
+      // mismo mecanismo — ver bloque abajo).
+      if (dto.blockedBy && dto.blockedBy.length > 0) {
+        await this.persistBlockedByEdges(result.id, dto.epicId, dto.blockedBy);
+      }
+
+      // 4. Lookup inverso: si otras historias YA aceptadas del mismo epic
+      // tenían en su sourceClientId un valor que coincide con el clientId
+      // DE ESTA historia, y apuntaban a mí como bloqueante (guardamos ese
+      // estado no persistido... wait, no lo guardamos). Entonces el caso
+      // "A aceptada después de B que la bloquea" requeriría re-send del
+      // blockedBy desde el frontend al aceptar A. No lo resolvemos en MVP:
+      // el frontend debe aceptar en orden topológico o todas juntas, y las
+      // deps se pierden si se aceptan fuera de orden — loggeado como warn.
+      // Ver comentario en `persistBlockedByEdges`.
+
+      this.logger.log(`[StoryVault:create] ═══ DONE story.id=${result.id} vaultPath=${indexPath} sourceClientId=${result.sourceClientId ?? 'none'}`);
       return result;
     } catch (err) {
       this.logger.error(`[StoryVault:create] ✗ PG insert FAILED, rolling back ${writtenPaths.length} vault files`, err);
@@ -183,7 +207,19 @@ export class StoriesService {
       throw new NotFoundException('Historia no encontrada');
     }
 
-    const { po, technical, qa, ...structuralData } = dto;
+    // Excluir campos que no son columnas escalares de `story`: los 3 de
+    // contenido (po/technical/qa van al vault), `relatedDocuments` y
+    // `discoveredDependencies` (se escriben al vault + JSONB del epic, no a
+    // la story directamente), y `blockedBy` (se persiste como rows en
+    // `story_dependencies`, no como columna). El resto son campos escalares
+    // que Prisma acepta directo en el update.
+    const {
+      po, technical, qa,
+      relatedDocuments: _rd,
+      discoveredDependencies: _dd,
+      blockedBy: _bb,
+      ...structuralData
+    } = dto;
     const isLegacy = existing.vaultPath ? !existing.vaultPath.endsWith('/index.md') : false;
     this.logger.log(`[StoryVault:update] format=${isLegacy ? 'LEGACY' : 'NEW'} vaultPath=${existing.vaultPath}`);
 
@@ -436,7 +472,30 @@ export class StoriesService {
     storyId: string,
     relatedDocuments?: RelatedDocumentDto[],
     discoveredDependencies?: DiscoveredDependencyDto[],
+    epicId?: string,
   ): Promise<void> {
+    // Persist discoveredDependencies AL JSONB `epic.dependencies[]` con dedup
+    // por `id`. Sin esto las deps vivirían solo en el vault y el auto-resolve
+    // con `sourceDependencyId` (ExternalSecretsService) no las encontraría —
+    // el resolve busca en `epic.dependencies @> [{id}]`.
+    //
+    // Semántica: cada dep descubierta se guarda con `status: 'identified'` +
+    // `isBlocking` + `vendor` + `requiresCredential` desde el DTO. Al resolver
+    // con secret, el service actualiza `status: 'resolved'` + `linkedSecretId`.
+    if (epicId && discoveredDependencies && discoveredDependencies.length > 0) {
+      try {
+        await this.persistDiscoveredDependenciesToEpicJsonb(
+          epicId,
+          discoveredDependencies,
+        );
+      } catch (err: unknown) {
+        // Best-effort: el vault ya tiene la doc, y la próxima vez que el
+        // agente corra se reintentará. No abortar la historia.
+        this.logger.warn(
+          `[StoryVault:epic-artifacts] persist to epic.dependencies JSONB failed (non-fatal): ${(err as Error)?.message ?? err}`,
+        );
+      }
+    }
     const docPromises = (relatedDocuments ?? []).map(async (doc) => {
       const path = initiativeDocumentPath(iniRef, doc.docName);
       try {
@@ -464,7 +523,7 @@ export class StoriesService {
       const path = epicDependencyPath(iniRef, epicRef, dep.title);
       try {
         const existing = await this.vault.readNote(path).catch(() => null);
-        const newContent = this.buildDependencyMarkdown(dep);
+        const newContent = buildDiscoveredDependencyMarkdown(dep as unknown as Parameters<typeof buildDiscoveredDependencyMarkdown>[0]);
         if (existing && existing.content === newContent) {
           this.logger.log(`[StoryVault:epic-artifacts] dep ${path} already exists with same content — skip`);
           return;
@@ -620,22 +679,23 @@ export class StoriesService {
     podId?: string;
     created?: string;
   }): string {
-    const frontmatter = [
-      '---',
-      `id: ${data.id}`,
-      'type: story',
-      `epicId: ${data.epicId}`,
-      `status: ${data.status ?? 'backlog'}`,
-      `storyPoints: ${data.storyPoints ?? 0}`,
-      `podId: ${data.podId ?? ''}`,
-      `labels: [${(data.labels ?? []).map((l) => `"${l}"`).join(', ')}]`,
-      `created: ${data.created ?? new Date().toISOString().slice(0, 10)}`,
-      '---',
-      '',
-    ].join('\n');
+    const fm = buildFrontmatter({
+      id: data.id,
+      type: 'story',
+      epicId: data.epicId,
+      title: data.title,
+      status: data.status ?? 'backlog',
+      storyPoints: data.storyPoints ?? 0,
+      // Preserva la clave aun cuando no hay pod asignado — parsers downstream
+      // pueden esperar presencia siempre. `null` es el idioma YAML para "vacío
+      // pero presente", vs `undefined` que omitiría la clave (breaking change).
+      podId: data.podId || null,
+      labels: data.labels ?? [],
+      created: data.created ?? new Date().toISOString().slice(0, 10),
+    });
 
     return (
-      frontmatter +
+      `${fm}\n\n` +
       `# ${data.title}\n\n` +
       `Entrada de referencia de la historia. Archivos en este folder:\n\n` +
       `- [\`definicion-negocio.md\`](./definicion-negocio.md) — seccion PO (Product Owner).\n` +
@@ -657,16 +717,14 @@ export class StoriesService {
     meta: { id: string; title: string; epicId: string; created?: string },
     sectionType: 'story-po' | 'story-technical' | 'story-qa',
   ): string {
-    return [
-      '---',
-      `id: ${meta.id}`,
-      `type: ${sectionType}`,
-      `storyTitle: ${JSON.stringify(meta.title)}`,
-      `epicId: ${meta.epicId}`,
-      `created: ${meta.created ?? new Date().toISOString().slice(0, 10)}`,
-      '---',
-      '',
-    ].join('\n');
+    const fm = buildFrontmatter({
+      id: meta.id,
+      type: sectionType,
+      storyTitle: meta.title,
+      epicId: meta.epicId,
+      created: meta.created ?? new Date().toISOString().slice(0, 10),
+    });
+    return `${fm}\n\n`;
   }
 
   private buildPOMarkdown(
@@ -745,45 +803,19 @@ export class StoriesService {
 
   private buildDocReferenceMarkdown(doc: RelatedDocumentDto): string {
     const shortName = this.shortenDocName(doc.docName);
-    const frontmatter = [
-      '---',
-      `id: ${doc.docId}`,
-      'type: document-reference',
-      `docName: ${JSON.stringify(doc.docName)}`,
-      `bucketUrl: ${JSON.stringify(doc.bucketUrl)}`,
-      `created: ${new Date().toISOString().slice(0, 10)}`,
-      '---',
-      '',
-    ].join('\n');
+    const fm = buildFrontmatter({
+      id: doc.docId,
+      type: 'document-reference',
+      docName: doc.docName,
+      bucketUrl: doc.bucketUrl,
+      created: new Date().toISOString().slice(0, 10),
+    });
     return (
-      frontmatter +
+      `${fm}\n\n` +
       `# ${shortName}\n\n` +
       `**Ubicacion en bucket:** [\`${doc.bucketUrl}\`](${doc.bucketUrl})\n\n` +
       `**Document ID:** \`${doc.docId}\`\n\n` +
       `## Relevancia para la historia\n\n${doc.relevanceSummary}\n`
-    );
-  }
-
-  private buildDependencyMarkdown(dep: DiscoveredDependencyDto): string {
-    const frontmatter = [
-      '---',
-      `id: ${dep.id}`,
-      'type: dependency',
-      `title: ${JSON.stringify(dep.title)}`,
-      `severity: ${dep.severity}`,
-      `depType: ${dep.type}`,
-      `created: ${new Date().toISOString().slice(0, 10)}`,
-      '---',
-      '',
-    ].join('\n');
-    return (
-      frontmatter +
-      `# ${dep.title}\n\n` +
-      `**Severidad:** ${dep.severity}  \n` +
-      `**Tipo:** ${dep.type}  \n` +
-      `**ID local:** \`${dep.id}\`\n\n` +
-      `## Resumen\n\n${dep.description}\n\n` +
-      `## Detalle\n\n${dep.mdContent}\n`
     );
   }
 
@@ -997,15 +1029,13 @@ export class StoriesService {
     qa?: StoryQaFieldsDto;
     created?: string;
   }): string {
-    const frontmatter = [
-      '---',
-      `id: ${data.id}`,
-      'type: story',
-      `epicId: ${data.epicId}`,
-      `created: ${data.created ?? new Date().toISOString().slice(0, 10)}`,
-      '---',
-      '',
-    ].join('\n');
+    const frontmatter = `${buildFrontmatter({
+      id: data.id,
+      type: 'story',
+      epicId: data.epicId,
+      title: data.title,
+      created: data.created ?? new Date().toISOString().slice(0, 10),
+    })}\n\n`;
 
     const po = data.po ?? {};
     const technical = data.technical ?? {};
@@ -1072,5 +1102,171 @@ export class StoriesService {
   private basename(path: string): string {
     const idx = path.lastIndexOf('/');
     return idx >= 0 ? path.slice(idx + 1) : path;
+  }
+
+  /**
+   * Persiste edges del DAG de orden entre historias (`blockedBy`) como rows
+   * en la tabla `story_dependencies`.
+   *
+   * Cada entry en `blockedBy` referencia a la bloqueante por `storyClientId`
+   * (clientId de la propuesta staging). Buscamos en la DB una Story con el
+   * mismo `epicId` y `sourceClientId === storyClientId` — si existe, creamos
+   * el row. Si no (porque esa historia aún está en staging), loggeamos WARN
+   * y skippeamos — el edge NO se persiste.
+   *
+   * Limitación conocida del MVP: el flujo "acepta B antes que A aunque A
+   * bloquea a B" pierde el edge. La mitigación es que el frontend acepte
+   * en orden topológico (o usar el botón "Aceptar todas"). Si a futuro se
+   * vuelve un dolor, podemos persistir edges pending en una tabla auxiliar
+   * `story_dependency_pending` con el clientId sin resolver.
+   */
+  private async persistBlockedByEdges(
+    storyId: string,
+    epicId: string,
+    blockedBy: NonNullable<CreateStoryDto['blockedBy']>,
+  ): Promise<void> {
+    if (blockedBy.length === 0) return;
+
+    // Lookup batch: fetch todas las bloqueantes candidatas de una vez en
+    // lugar de N queries separadas.
+    const targetClientIds = Array.from(
+      new Set(blockedBy.map((b) => b.storyClientId).filter(Boolean)),
+    );
+    if (targetClientIds.length === 0) return;
+
+    const resolvedStories = await this.prisma.story.findMany({
+      where: {
+        epicId,
+        sourceClientId: { in: targetClientIds },
+      },
+      select: { id: true, sourceClientId: true },
+    });
+    const clientIdToStoryId = new Map<string, string>();
+    for (const s of resolvedStories) {
+      if (s.sourceClientId) clientIdToStoryId.set(s.sourceClientId, s.id);
+    }
+
+    let created = 0;
+    let skipped = 0;
+    for (const edge of blockedBy) {
+      // También soportamos el caso donde el cliente envía directamente un
+      // storyId real (no un clientId) — útil si el frontend ya hizo la
+      // resolución local antes de enviar.
+      const resolvedId =
+        clientIdToStoryId.get(edge.storyClientId) ??
+        (resolvedStories.some((s) => s.id === edge.storyClientId)
+          ? edge.storyClientId
+          : null);
+      if (!resolvedId) {
+        this.logger.warn(
+          `[StoryDep] Skip edge: story ${storyId} blockedBy unresolved clientId=${edge.storyClientId}. ` +
+            `La historia bloqueante aún no está aceptada (acepta en orden topológico o usa "Aceptar todas").`,
+        );
+        skipped++;
+        continue;
+      }
+      if (resolvedId === storyId) {
+        this.logger.warn(`[StoryDep] Skip edge: self-block story=${storyId}`);
+        skipped++;
+        continue;
+      }
+      try {
+        await this.prisma.storyDependency.create({
+          data: {
+            storyId,
+            blockedById: resolvedId,
+            hardness: edge.hardness,
+            reason: edge.reason,
+            description: edge.description ?? '',
+          },
+        });
+        created++;
+      } catch (err: unknown) {
+        // P2002 unique violation = edge ya existía (usuario aceptó 2x o
+        // caso de doble envío). Silenciar.
+        const message = (err as Error)?.message ?? String(err);
+        if (message.includes('P2002') || message.includes('Unique constraint')) {
+          skipped++;
+          continue;
+        }
+        this.logger.warn(
+          `[StoryDep] Failed to create edge story=${storyId} blockedBy=${resolvedId}: ${message}`,
+        );
+        skipped++;
+      }
+    }
+    this.logger.log(
+      `[StoryDep] story=${storyId} edges: created=${created} skipped=${skipped} (of ${blockedBy.length})`,
+    );
+  }
+
+  /**
+   * Inserta las `discoveredDependencies` al JSONB `epic.dependencies[]` con
+   * dedup por `id`. Las deps ya existentes se preservan (no se sobreescriben)
+   * — solo se agregan las nuevas del batch actual.
+   *
+   * SQL atómico para evitar race conditions si dos historias del mismo batch
+   * se aceptan simultáneamente. El `jsonb_agg + WHERE NOT EXISTS` hace
+   * upsert in-place sin read-modify-write.
+   *
+   * Campos core persistidos: id, title, description, severity, type, vendor,
+   * requiresCredential, isBlocking, + status: 'identified' + createdAt/
+   * updatedAt. Se omite `mdContent` del JSONB (vive en el vault) para evitar
+   * bloatear el campo.
+   */
+  private async persistDiscoveredDependenciesToEpicJsonb(
+    epicId: string,
+    deps: DiscoveredDependencyDto[],
+  ): Promise<void> {
+    if (deps.length === 0) return;
+    const now = new Date().toISOString();
+
+    // Shape del item que guardamos en JSONB — coherente con `EpicDependency`
+    // donde aplique, + flags nuevos del feature External Secrets.
+    const jsonbItems = deps.map((d) => ({
+      id: d.id,
+      title: d.title,
+      description: d.description,
+      type: d.type,
+      severity: d.severity,
+      status: 'identified' as const,
+      isBlocking: d.isBlocking ?? false,
+      vendor: d.vendor ?? null,
+      requiresCredential: d.requiresCredential ?? false,
+      linkedSecretId: null,
+      createdAt: now,
+      updatedAt: now,
+      // Campos de `EpicDependency` que no aplican para discovered — se dejan
+      // como null/defaults razonables para que el UI los maneje.
+      direction: 'depends_on' as const,
+      scheduling: 'finish-to-start' as const,
+      targetEpicId: null,
+      targetExternalName: null,
+      owner: '',
+      dueDate: null,
+      resolutionNotes: '',
+    }));
+
+    const payload = JSON.stringify(jsonbItems);
+
+    // Filtra del payload los items cuyo id ya existe en `epic.dependencies`,
+    // luego concatena los nuevos. Atomic per-epic.
+    await this.prisma.$executeRaw`
+      UPDATE epics
+      SET dependencies = COALESCE(dependencies, '[]'::jsonb) || (
+        SELECT COALESCE(jsonb_agg(item), '[]'::jsonb)
+        FROM jsonb_array_elements(${payload}::jsonb) AS item
+        WHERE NOT EXISTS (
+          SELECT 1
+          FROM jsonb_array_elements(COALESCE(dependencies, '[]'::jsonb)) AS existing
+          WHERE existing->>'id' = item->>'id'
+        )
+      )
+      WHERE id = ${epicId}
+    `;
+
+    this.logger.log(
+      `[persistDiscoveredDependenciesToEpicJsonb] epic=${epicId} attempted=${deps.length} (duplicates by id are skipped)`,
+    );
   }
 }

@@ -1,6 +1,10 @@
 'use client';
 
 import { useState, useCallback, useMemo } from 'react';
+import ReactMarkdown from 'react-markdown';
+import remarkGfm from 'remark-gfm';
+import { CreateExternalSecretDialog } from '@/components/secrets/CreateExternalSecretDialog';
+import type { StoryDependencyItem } from '@/lib/api/epics';
 import {
   Epic,
   EpicDependency,
@@ -9,6 +13,9 @@ import {
   DependencyStatus,
   DependencyScheduling,
   Priority,
+  DiscoveredDependency,
+  DiscoveredDependencyType,
+  DependencySeverity,
 } from '@cenzontle/shared';
 import { useProyectos } from '@/context/ProyectosContext';
 import { Button } from '@/components/ui/button';
@@ -48,6 +55,12 @@ import {
   BookOpen,
   Zap,
   Filter,
+  Sparkles,
+  Database,
+  ChevronDown,
+  ChevronRight,
+  KeyRound,
+  ShieldCheck,
 } from 'lucide-react';
 
 // ---------------------------------------------------------------------------
@@ -89,6 +102,30 @@ const SCHEDULING_LABELS: Record<DependencyScheduling, string> = {
   'start-to-finish': 'Inicio → Fin',
 };
 
+const DISCOVERED_TYPE_CONFIG: Record<DiscoveredDependencyType, { label: string; icon: typeof Server; color: string }> = {
+  api: { label: 'API', icon: Server, color: 'bg-blue-100 text-blue-700 dark:bg-blue-900/30 dark:text-blue-300' },
+  service: { label: 'Servicio', icon: Link2, color: 'bg-teal-100 text-teal-700 dark:bg-teal-900/30 dark:text-teal-300' },
+  data: { label: 'Datos', icon: Database, color: 'bg-cyan-100 text-cyan-700 dark:bg-cyan-900/30 dark:text-cyan-300' },
+  team: { label: 'Equipo', icon: Users, color: 'bg-amber-100 text-amber-700 dark:bg-amber-900/30 dark:text-amber-300' },
+  other: { label: 'Otro', icon: GitBranch, color: 'bg-slate-100 text-slate-700 dark:bg-slate-800/40 dark:text-slate-300' },
+};
+
+const DISCOVERED_SEVERITY_CONFIG: Record<DependencySeverity, { label: string; color: string }> = {
+  critical: { label: 'Crítica', color: 'bg-red-100 text-red-700 dark:bg-red-900/30 dark:text-red-300' },
+  high: { label: 'Alta', color: 'bg-orange-100 text-orange-700 dark:bg-orange-900/30 dark:text-orange-300' },
+  medium: { label: 'Media', color: 'bg-yellow-100 text-yellow-700 dark:bg-yellow-900/30 dark:text-yellow-300' },
+  low: { label: 'Baja', color: 'bg-green-100 text-green-700 dark:bg-green-900/30 dark:text-green-300' },
+};
+
+/** Labels humanos para los `reason` del DAG story-to-story. */
+const STORY_ORDER_REASON_LABELS: Record<string, string> = {
+  api_contract: 'API contract',
+  migration_order: 'Migration order',
+  shared_model: 'Shared model',
+  sequential_logic: 'Sequential logic',
+  other: 'Otro',
+};
+
 // ---------------------------------------------------------------------------
 // Empty form
 // ---------------------------------------------------------------------------
@@ -117,6 +154,18 @@ function emptyForm(): Omit<EpicDependency, 'id' | 'createdAt' | 'updatedAt'> {
 
 interface EpicDependenciesProps {
   epic: Epic;
+  discoveredDependencies?: DiscoveredDependency[];
+  /**
+   * DAG de orden entre historias del epic (emitido por el Tech Lead al
+   * generar el batch). Cada item = historia bloqueada + lista de sus
+   * bloqueantes directos con hardness/reason/description.
+   */
+  storyOrderDependencies?: StoryDependencyItem[];
+  /**
+   * Callback opcional para refrescar las discovered deps desde el backend.
+   * Usado tras resolver una dep con un secret externo — evita recarga completa.
+   */
+  onDiscoveredDepsRefresh?: () => void | Promise<void>;
   onAddDependency: (dep: EpicDependency) => void;
   onUpdateDependency: (dep: EpicDependency) => void;
   onDeleteDependency: (depId: string) => void;
@@ -128,6 +177,9 @@ interface EpicDependenciesProps {
 
 export function EpicDependencies({
   epic,
+  discoveredDependencies = [],
+  storyOrderDependencies = [],
+  onDiscoveredDepsRefresh,
   onAddDependency,
   onUpdateDependency,
   onDeleteDependency,
@@ -140,21 +192,43 @@ export function EpicDependencies({
   const [form, setForm] = useState(emptyForm());
   const [statusFilter, setStatusFilter] = useState<DependencyStatus | 'all'>('all');
   const [deleteConfirmId, setDeleteConfirmId] = useState<string | null>(null);
+  const [expandedDiscoveredId, setExpandedDiscoveredId] = useState<string | null>(null);
+  /**
+   * Dep IA que el user está a punto de resolver con un secret. Abre el
+   * `CreateExternalSecretDialog` pre-llenado con vendor/name sugeridos.
+   * `sourceDependencyId` le dice al backend que auto-resuelva la dep.
+   */
+  const [resolvingDep, setResolvingDep] = useState<DiscoveredDependency | null>(null);
 
   // --- Derived data ---
+  /**
+   * El JSONB `epic.dependencies[]` contiene dos tipos mezclados:
+   *  1. `EpicDependency` creadas manualmente (dialog "Agregar dependencia"):
+   *     type ∈ {technical, resource, knowledge, external, cross-team}, id = crypto.randomUUID() (sin prefijo).
+   *  2. `DiscoveredDependency` persistidas por el agente (stories.service):
+   *     type ∈ {api, service, data, team, other}, id = "ai-dep-<uuid>".
+   *
+   * Esta sección renderiza SOLO las manuales — las IA se muestran abajo en
+   * "Descubiertas por IA" con un TYPE_CONFIG distinto. Filtramos por prefijo
+   * del id para evitar duplicados y evitar que TYPE_CONFIG[dep.type] sea
+   * undefined cuando llega un type IA al render de manuales.
+   */
+  const manualDeps = useMemo(
+    () => (epic.dependencies ?? []).filter((d) => !d.id?.startsWith('ai-dep-')),
+    [epic.dependencies],
+  );
+
   const filteredDeps = useMemo(() => {
-    const deps = epic.dependencies ?? [];
-    if (statusFilter === 'all') return deps;
-    return deps.filter((d) => d.status === statusFilter);
-  }, [epic.dependencies, statusFilter]);
+    if (statusFilter === 'all') return manualDeps;
+    return manualDeps.filter((d) => d.status === statusFilter);
+  }, [manualDeps, statusFilter]);
 
   const stats = useMemo(() => {
-    const deps = epic.dependencies ?? [];
-    const blocking = deps.filter((d) => d.isBlocking && d.status !== 'resolved' && d.status !== 'mitigated');
-    const active = deps.filter((d) => d.status !== 'resolved' && d.status !== 'mitigated');
-    const resolved = deps.filter((d) => d.status === 'resolved' || d.status === 'mitigated');
-    return { total: deps.length, blocking: blocking.length, active: active.length, resolved: resolved.length };
-  }, [epic.dependencies]);
+    const blocking = manualDeps.filter((d) => d.isBlocking && d.status !== 'resolved' && d.status !== 'mitigated');
+    const active = manualDeps.filter((d) => d.status !== 'resolved' && d.status !== 'mitigated');
+    const resolved = manualDeps.filter((d) => d.status === 'resolved' || d.status === 'mitigated');
+    return { total: manualDeps.length, blocking: blocking.length, active: active.length, resolved: resolved.length };
+  }, [manualDeps]);
 
   // --- Handlers ---
   const openCreate = useCallback(() => {
@@ -222,8 +296,12 @@ export function EpicDependencies({
     return e ? (e.tracker?.externalKey ? `${e.tracker.externalKey} · ${e.title}` : e.title) : epicId;
   }, [state.epics]);
 
-  // --- Empty state ---
-  if ((epic.dependencies ?? []).length === 0) {
+  // --- Empty state (solo cuando no hay ni manuales, ni descubiertas, ni DAG) ---
+  if (
+    manualDeps.length === 0 &&
+    discoveredDependencies.length === 0 &&
+    storyOrderDependencies.length === 0
+  ) {
     return (
       <div className="rounded-xl border-2 border-dashed py-12 flex flex-col items-center gap-4 text-center">
         <div className="h-12 w-12 rounded-full bg-muted flex items-center justify-center">
@@ -244,48 +322,60 @@ export function EpicDependencies({
     );
   }
 
+  const hasManualDeps = manualDeps.length > 0;
+
   return (
     <div className="space-y-5">
-      {/* --- Stats bar --- */}
+      {/* --- Stats bar (solo si hay manuales, sino solo mostrar botón Agregar) --- */}
       <div className="flex items-center gap-6">
         <div className="flex items-center gap-4 flex-1">
-          <div className="flex items-center gap-1.5 text-sm">
-            <span className="font-semibold">{stats.total}</span>
-            <span className="text-muted-foreground">total</span>
-          </div>
-          {stats.blocking > 0 && (
-            <div className="flex items-center gap-1.5 text-sm text-red-600 dark:text-red-400">
-              <AlertTriangle className="h-3.5 w-3.5" />
-              <span className="font-semibold">{stats.blocking}</span>
-              <span>bloqueantes</span>
-            </div>
+          {hasManualDeps ? (
+            <>
+              <div className="flex items-center gap-1.5 text-sm">
+                <span className="font-semibold">{stats.total}</span>
+                <span className="text-muted-foreground">total</span>
+              </div>
+              {stats.blocking > 0 && (
+                <div className="flex items-center gap-1.5 text-sm text-red-600 dark:text-red-400">
+                  <AlertTriangle className="h-3.5 w-3.5" />
+                  <span className="font-semibold">{stats.blocking}</span>
+                  <span>bloqueantes</span>
+                </div>
+              )}
+              <div className="flex items-center gap-1.5 text-sm text-amber-600 dark:text-amber-400">
+                <Clock className="h-3.5 w-3.5" />
+                <span className="font-semibold">{stats.active}</span>
+                <span>activas</span>
+              </div>
+              <div className="flex items-center gap-1.5 text-sm text-green-600 dark:text-green-400">
+                <CheckCircle2 className="h-3.5 w-3.5" />
+                <span className="font-semibold">{stats.resolved}</span>
+                <span>resueltas</span>
+              </div>
+            </>
+          ) : (
+            <p className="text-sm text-muted-foreground">
+              Sin dependencias manuales registradas
+            </p>
           )}
-          <div className="flex items-center gap-1.5 text-sm text-amber-600 dark:text-amber-400">
-            <Clock className="h-3.5 w-3.5" />
-            <span className="font-semibold">{stats.active}</span>
-            <span>activas</span>
-          </div>
-          <div className="flex items-center gap-1.5 text-sm text-green-600 dark:text-green-400">
-            <CheckCircle2 className="h-3.5 w-3.5" />
-            <span className="font-semibold">{stats.resolved}</span>
-            <span>resueltas</span>
-          </div>
         </div>
 
         {/* Filter + Add */}
         <div className="flex items-center gap-2">
-          <Select value={statusFilter} onValueChange={(v) => setStatusFilter(v as DependencyStatus | 'all')}>
-            <SelectTrigger className="h-8 text-xs w-[140px]">
-              <Filter className="h-3 w-3 mr-1" />
-              <SelectValue />
-            </SelectTrigger>
-            <SelectContent>
-              <SelectItem value="all">Todas</SelectItem>
-              {(Object.entries(STATUS_CONFIG) as [DependencyStatus, typeof STATUS_CONFIG[DependencyStatus]][]).map(([key, cfg]) => (
-                <SelectItem key={key} value={key}>{cfg.label}</SelectItem>
-              ))}
-            </SelectContent>
-          </Select>
+          {hasManualDeps && (
+            <Select value={statusFilter} onValueChange={(v) => setStatusFilter(v as DependencyStatus | 'all')}>
+              <SelectTrigger className="h-8 text-xs w-[140px]">
+                <Filter className="h-3 w-3 mr-1" />
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="all">Todas</SelectItem>
+                {(Object.entries(STATUS_CONFIG) as [DependencyStatus, typeof STATUS_CONFIG[DependencyStatus]][]).map(([key, cfg]) => (
+                  <SelectItem key={key} value={key}>{cfg.label}</SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+          )}
           <Button size="sm" onClick={openCreate} className="gap-1.5 h-8 text-xs">
             <Plus className="h-3.5 w-3.5" />
             Agregar
@@ -296,10 +386,17 @@ export function EpicDependencies({
       {/* --- Dependency cards --- */}
       <div className="space-y-2">
         {filteredDeps.map((dep) => {
-          const typeCfg = TYPE_CONFIG[dep.type];
-          const statusCfg = STATUS_CONFIG[dep.status];
-          const sevCfg = SEVERITY_CONFIG[dep.severity];
-          const dirCfg = DIRECTION_LABELS[dep.direction];
+          // Defensive fallback para cualquier `type` que no esté en el config
+          // (ej: una dep con type desconocido que llega de datos heredados).
+          // Evita TypeError al destructurar `.icon` en el render.
+          const typeCfg = TYPE_CONFIG[dep.type] ?? {
+            label: dep.type ?? 'Desconocida',
+            icon: GitBranch,
+            color: 'bg-muted text-muted-foreground border border-border',
+          };
+          const statusCfg = STATUS_CONFIG[dep.status] ?? STATUS_CONFIG.identified;
+          const sevCfg = SEVERITY_CONFIG[dep.severity] ?? SEVERITY_CONFIG[Priority.Medium];
+          const dirCfg = DIRECTION_LABELS[dep.direction] ?? DIRECTION_LABELS.depends_on;
           const TypeIcon = typeCfg.icon;
           const StatusIcon = statusCfg.icon;
           const DirIcon = dirCfg.icon;
@@ -410,6 +507,124 @@ export function EpicDependencies({
       {filteredDeps.length === 0 && statusFilter !== 'all' && (
         <div className="text-center py-8 text-sm text-muted-foreground">
           No hay dependencias con estado &quot;{STATUS_CONFIG[statusFilter].label}&quot;
+        </div>
+      )}
+
+      {/* --- Dependencias descubiertas por IA (read-only, leídas del vault) --- */}
+      {discoveredDependencies.length > 0 && (
+        <div className="space-y-2 pt-2">
+          <div className="flex items-center gap-2 border-t pt-5">
+            <Sparkles className="h-3.5 w-3.5 text-primary" />
+            <h4 className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">
+              Descubiertas por IA
+            </h4>
+            <span className="text-xs text-muted-foreground">
+              ({discoveredDependencies.length} en el vault)
+            </span>
+          </div>
+          <p className="text-[11px] text-muted-foreground -mt-1">
+            Identificadas por el agente QA durante la generación de historias. Se almacenan en el vault como documentación.
+          </p>
+
+          {discoveredDependencies.map((dep) => {
+            const typeCfg = DISCOVERED_TYPE_CONFIG[dep.type];
+            const sevCfg = DISCOVERED_SEVERITY_CONFIG[dep.severity];
+            const TypeIcon = typeCfg.icon;
+            const isExpanded = expandedDiscoveredId === dep.id;
+            // Flag bloqueante que el TL/QA emitieron para credenciales
+            // externas (API keys, merchant codes) que el sistema no puede
+            // generar por sí solo. Dispara la UI de "Resolver con secret".
+            const needsSecret = dep.requiresCredential && !dep.linkedSecretId;
+            const isResolved = !!dep.linkedSecretId;
+
+            return (
+              <div
+                key={dep.id}
+                className="rounded-lg border border-primary/20 bg-primary/[0.02] p-4"
+              >
+                <div className="flex items-start justify-between gap-3">
+                  <button
+                    type="button"
+                    onClick={() => setExpandedDiscoveredId(isExpanded ? null : dep.id)}
+                    className="flex items-start gap-3 flex-1 min-w-0 text-left"
+                  >
+                    <Sparkles className="h-3.5 w-3.5 text-primary mt-0.5 shrink-0" />
+                    <div className="flex-1 min-w-0">
+                      <p className="text-sm font-medium leading-tight">{dep.title}</p>
+                      {dep.description && (
+                        <p className="text-xs text-muted-foreground mt-1 line-clamp-2">{dep.description}</p>
+                      )}
+                    </div>
+                    {dep.mdContent ? (
+                      isExpanded ? (
+                        <ChevronDown className="h-3.5 w-3.5 text-muted-foreground shrink-0 mt-1" />
+                      ) : (
+                        <ChevronRight className="h-3.5 w-3.5 text-muted-foreground shrink-0 mt-1" />
+                      )
+                    ) : null}
+                  </button>
+                  {needsSecret && (
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      onClick={() => setResolvingDep(dep)}
+                      className="shrink-0 h-7 gap-1 text-[11px] border-primary/30 hover:bg-primary/5"
+                    >
+                      <KeyRound className="h-3 w-3" />
+                      Resolver con secret
+                    </Button>
+                  )}
+                </div>
+
+                <div className="flex flex-wrap items-center gap-1.5 mt-3">
+                  <span className={`inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[10px] font-medium ${typeCfg.color}`}>
+                    <TypeIcon className="h-2.5 w-2.5" />
+                    {typeCfg.label}
+                  </span>
+                  <span className={`inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[10px] font-medium ${sevCfg.color}`}>
+                    {sevCfg.label}
+                  </span>
+                  <span className="inline-flex items-center gap-1 rounded-full border border-primary/20 bg-primary/10 text-primary px-2 py-0.5 text-[10px] font-medium">
+                    <Sparkles className="h-2.5 w-2.5" />
+                    IA
+                  </span>
+                  {dep.vendor && (
+                    <span className="inline-flex items-center rounded-full border border-border bg-muted/50 px-2 py-0.5 text-[10px] font-medium text-foreground/80">
+                      {dep.vendor}
+                    </span>
+                  )}
+                  {needsSecret && (
+                    <span className="inline-flex items-center gap-1 rounded-full border border-destructive/30 bg-destructive/10 text-destructive px-2 py-0.5 text-[10px] font-medium">
+                      <KeyRound className="h-2.5 w-2.5" />
+                      Requiere credencial
+                    </span>
+                  )}
+                  {dep.isBlocking && !isResolved && (
+                    <span className="inline-flex items-center gap-1 rounded-full border border-destructive/30 bg-destructive/15 text-destructive px-2 py-0.5 text-[10px] font-semibold">
+                      Bloqueante
+                    </span>
+                  )}
+                  {isResolved && (
+                    <span className="inline-flex items-center gap-1 rounded-full border border-green-500/30 bg-green-500/10 text-green-600 dark:text-green-400 px-2 py-0.5 text-[10px] font-medium">
+                      <ShieldCheck className="h-2.5 w-2.5" />
+                      Secret provisto
+                    </span>
+                  )}
+                </div>
+
+                {isExpanded && dep.mdContent && (
+                  <div className="mt-3 rounded-md bg-background/60 border border-border px-3 py-2.5">
+                    <p className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground mb-2">Detalle</p>
+                    <div className="prose prose-sm dark:prose-invert max-w-none prose-headings:mt-3 prose-headings:mb-2 prose-p:my-2 prose-p:text-foreground/80 prose-li:my-0.5 prose-code:text-[11px] prose-code:bg-muted prose-code:px-1 prose-code:py-0.5 prose-code:rounded prose-code:before:content-none prose-code:after:content-none prose-strong:text-foreground">
+                      <ReactMarkdown remarkPlugins={[remarkGfm]}>
+                        {dep.mdContent}
+                      </ReactMarkdown>
+                    </div>
+                  </div>
+                )}
+              </div>
+            );
+          })}
         </div>
       )}
 
@@ -604,6 +819,119 @@ export function EpicDependencies({
           </DialogFooter>
         </DialogContent>
       </Dialog>
+
+      {/* --- Orden entre historias del epic (DAG emitido por el Tech Lead) --- */}
+      {storyOrderDependencies.length > 0 && (
+        <div className="space-y-2 pt-2">
+          <div className="flex items-center gap-2 border-t pt-5">
+            <GitBranch className="h-3.5 w-3.5 text-primary" />
+            <h4 className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">
+              Orden entre historias
+            </h4>
+            <span className="text-xs text-muted-foreground">
+              ({storyOrderDependencies.length} {storyOrderDependencies.length === 1 ? 'historia bloqueada' : 'historias bloqueadas'})
+            </span>
+          </div>
+          <p className="text-[11px] text-muted-foreground -mt-1">
+            DAG de precedencia emitido por el Tech Lead al generar el batch. <span className="font-semibold">Hard</span> = no puede arrancar hasta que la otra termine. <span className="font-semibold">Soft</span> = arranca con mock y sincroniza al final.
+          </p>
+
+          {storyOrderDependencies.map((item) => (
+            <div
+              key={item.story.id}
+              className="rounded-lg border border-primary/20 bg-primary/[0.02] p-4"
+            >
+              {/* Historia bloqueada */}
+              <div className="flex items-start gap-3">
+                <GitBranch className="h-3.5 w-3.5 text-primary mt-0.5 shrink-0" />
+                <div className="flex-1 min-w-0">
+                  <p className="text-sm font-medium leading-tight">{item.story.title}</p>
+                  <p className="text-[11px] text-muted-foreground mt-0.5">
+                    Bloqueada por {item.blockedBy.length} {item.blockedBy.length === 1 ? 'historia' : 'historias'}
+                  </p>
+                </div>
+              </div>
+
+              {/* Lista de bloqueantes */}
+              <ul className="mt-3 space-y-1.5 pl-6">
+                {item.blockedBy.map((edge, idx) => {
+                  const isHard = edge.hardness === 'hard';
+                  const reasonLabel = STORY_ORDER_REASON_LABELS[edge.reason] ?? edge.reason;
+                  return (
+                    <li
+                      key={`${item.story.id}-${edge.story.id}-${idx}`}
+                      className="flex items-start gap-2 text-xs"
+                    >
+                      <span
+                        className={`inline-flex items-center shrink-0 rounded-full border px-1.5 py-0.5 text-[10px] font-medium uppercase tracking-wide mt-0.5 ${
+                          isHard
+                            ? 'border-destructive/30 bg-destructive/10 text-destructive'
+                            : 'border-border bg-muted text-foreground/80'
+                        }`}
+                      >
+                        {isHard ? 'hard' : 'soft'}
+                      </span>
+                      <div className="flex-1 min-w-0">
+                        <div className="flex items-center gap-1.5 flex-wrap">
+                          <span className="font-medium text-foreground">{edge.story.title}</span>
+                          <span className="inline-flex items-center rounded-full border border-border bg-muted/50 px-1.5 py-0.5 text-[9px] font-medium text-muted-foreground uppercase tracking-wide">
+                            {reasonLabel}
+                          </span>
+                        </div>
+                        {edge.description && (
+                          <p className="text-[11px] text-muted-foreground mt-0.5 line-clamp-2">
+                            {edge.description}
+                          </p>
+                        )}
+                      </div>
+                    </li>
+                  );
+                })}
+              </ul>
+            </div>
+          ))}
+        </div>
+      )}
+
+      {/* --- Dialog para resolver una dep IA con un secret externo --- */}
+      {resolvingDep && (
+        <CreateExternalSecretDialog
+          open={!!resolvingDep}
+          onOpenChange={(open) => !open && setResolvingDep(null)}
+          // Sugerimos un `name` UPPER_SNAKE a partir del vendor si lo hay,
+          // sino del título de la dep — el user puede ajustar en el input.
+          defaultName={suggestSecretName(resolvingDep)}
+          defaultVendor={resolvingDep.vendor ?? ''}
+          defaultDescription={resolvingDep.description}
+          sourceDependencyId={resolvingDep.id}
+          onCreated={() => {
+            setResolvingDep(null);
+            // El backend auto-resolvió la dep con `linkedSecretId`. Pedimos
+            // al parent que re-fetche las discovered deps para reflejar el
+            // nuevo estado sin perder el resto del UI (diagramas, tabs,
+            // scroll, otros dialogs).
+            onDiscoveredDepsRefresh?.();
+          }}
+        />
+      )}
     </div>
   );
+}
+
+/**
+ * Genera un name sugerido UPPER_SNAKE_CASE para un secret a partir de una
+ * `DiscoveredDependency`. Prefiere el vendor si existe; fallback al title.
+ * Añade sufijo `_API_KEY` si el nombre no sugiere explícitamente otro tipo.
+ */
+function suggestSecretName(dep: DiscoveredDependency): string {
+  const base = dep.vendor || dep.title;
+  const normalized = base
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .toUpperCase()
+    .replace(/[^A-Z0-9]+/g, '_')
+    .replace(/^_+|_+$/g, '');
+  // Si el título ya contiene "KEY", "SECRET", "TOKEN", no agregamos sufijo.
+  if (/(KEY|SECRET|TOKEN|CODE|ID)$/.test(normalized)) return normalized.slice(0, 100);
+  return `${normalized}_API_KEY`.slice(0, 100);
 }

@@ -516,6 +516,12 @@ export interface EpicDependency {
   owner: string; // person responsible for resolution
   dueDate: string | null; // ISO date
   resolutionNotes: string;
+  /** Proveedor externo (Stripe, Twilio, etc.) cuando aplica. */
+  vendor?: string;
+  /** True si la dep requiere una credencial externa (API key, merchant code). */
+  requiresCredential?: boolean;
+  /** Si `requiresCredential` y ya se registró, apunta al `ExternalSecret.id` que la resuelve. */
+  linkedSecretId?: string | null;
   createdAt: string;
   updatedAt: string;
 }
@@ -799,8 +805,12 @@ export type DependencySeverity = 'critical' | 'high' | 'medium' | 'low';
 export type DiscoveredDependencyType = 'api' | 'service' | 'data' | 'team' | 'other';
 
 /**
- * Dependencia descubierta por el agente QA al trazar la estrategia de testing.
- * Se persiste como .md individual en `stories/<folder>/dependencias/<slug>.md`.
+ * Dependencia descubierta por los agentes durante generación de historias.
+ * Emitida por el **Tech Lead** (foco: arquitectura/credenciales externas) y
+ * por el **QA** (foco: mocks/fixtures/datos). Los dos agentes comparten el
+ * mismo shape; el merge final deduplica por `(vendor, type)`.
+ *
+ * Se persiste como .md individual en `epics/<folder>/dependencias/<slug>.md`.
  */
 export interface DiscoveredDependency {
   id: string;               // clientId local (ai-dep-<uuid>)
@@ -809,6 +819,21 @@ export interface DiscoveredDependency {
   severity: DependencySeverity;
   type: DiscoveredDependencyType;
   mdContent: string;        // markdown extenso con detalles, refs, mitigacion
+  /** Proveedor externo (Stripe, Twilio, SAP Ariba, etc.) si aplica. */
+  vendor?: string;
+  /**
+   * True cuando la dep requiere una credencial externa (API key, merchant
+   * code, OAuth client_secret) que el sistema NO puede resolver por sí solo.
+   * El TL la marca cuando diseña una integración con proveedor.
+   */
+  requiresCredential?: boolean;
+  /**
+   * True cuando la dep es bloqueante para que el backend funcione. Usado
+   * junto con `requiresCredential` para priorizar la resolución en settings.
+   */
+  isBlocking?: boolean;
+  /** Si el secret ya se registró en `/factory/settings`, apunta al `ExternalSecret.id`. */
+  linkedSecretId?: string | null;
 }
 
 /**
@@ -824,7 +849,40 @@ export type ProposedStory = Omit<
   relatedDocuments?: RelatedDocument[];
   /** Dependencias descubiertas por el agente QA durante el trazo de testing. */
   discoveredDependencies?: DiscoveredDependency[];
+  /**
+   * Historias del MISMO batch que bloquean a ésta. Las detecta el Tech Lead
+   * cuando razona sobre la arquitectura (B consume API que A crea, B requiere
+   * migration que A define, etc.).
+   *
+   * `storyClientId` referencia el `clientId` de otra propuesta staging del
+   * mismo batch — estable aunque el user regenere historias individuales.
+   * Al aceptar las historias, el backend mapea `clientId → id` real.
+   */
+  blockedBy?: StoryOrderDependency[];
 };
+
+/** Razón por la que una historia bloquea a otra. Diferencia tipos de acoplamiento. */
+export type StoryOrderDependencyReason =
+  | 'api_contract'      // B consume el endpoint que A crea
+  | 'migration_order'   // Ambas tocan la misma tabla; B requiere schema de A
+  | 'shared_model'      // B importa un DTO/tipo que A exporta
+  | 'sequential_logic'  // B asume que A ya corrió (populación de datos, etc.)
+  | 'other';
+
+/**
+ * Hard = no puede arrancar hasta que termine la otra (bloqueante absoluto).
+ * Soft = arranca con mock/stub, termina cuando la otra está (permite paralelizar).
+ */
+export type StoryOrderDependencyHardness = 'hard' | 'soft';
+
+export interface StoryOrderDependency {
+  /** clientId (en staging) o storyId (post-accept) de la historia que bloquea. */
+  storyClientId: string;
+  hardness: StoryOrderDependencyHardness;
+  reason: StoryOrderDependencyReason;
+  /** Descripción humana corta: "B consume /api/users que A crea". */
+  description: string;
+}
 
 export interface Pod {
   id: string;

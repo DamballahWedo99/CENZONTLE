@@ -69,6 +69,10 @@ export enum Permission {
   MANAGE_USERS = 'manage:users',
   MANAGE_INTEGRATIONS = 'manage:integrations',
   MANAGE_DIAGRAM_THEME = 'manage:diagram-theme',
+  // Acceso a secrets externos (API keys de terceros, merchant codes). Separado
+  // de MANAGE_INTEGRATIONS porque operaciones cripto (encrypt/rotate/delete)
+  // son más sensibles y queremos poder otorgar/revocar independiente.
+  MANAGE_EXTERNAL_SECRETS = 'manage:external_secrets',
 
   // View
   VIEW_ALL = 'view:all',
@@ -96,6 +100,7 @@ export const PERMISSION_LABELS: Record<Permission, string> = {
   [Permission.MANAGE_USERS]: 'Gestionar Usuarios',
   [Permission.MANAGE_INTEGRATIONS]: 'Gestionar Integraciones',
   [Permission.MANAGE_DIAGRAM_THEME]: 'Gestionar tema de diagramas',
+  [Permission.MANAGE_EXTERNAL_SECRETS]: 'Gestionar secretos externos',
   [Permission.VIEW_ALL]: 'Ver Todo',
 };
 
@@ -127,7 +132,7 @@ export const PERMISSION_CATEGORIES: PermissionCategory[] = [
   },
   {
     label: 'Gestión',
-    permissions: [Permission.MANAGE_DOCUMENTS, Permission.MANAGE_DEPENDENCIES, Permission.MANAGE_USERS, Permission.MANAGE_INTEGRATIONS, Permission.MANAGE_DIAGRAM_THEME],
+    permissions: [Permission.MANAGE_DOCUMENTS, Permission.MANAGE_DEPENDENCIES, Permission.MANAGE_USERS, Permission.MANAGE_INTEGRATIONS, Permission.MANAGE_DIAGRAM_THEME, Permission.MANAGE_EXTERNAL_SECRETS],
   },
   {
     label: 'Acceso',
@@ -144,6 +149,7 @@ export const DEFAULT_ROLE_PERMISSIONS: Record<UserRole, Permission[]> = {
     Permission.CREATE_QA_MATRIX, Permission.EDIT_QA_MATRIX,
     Permission.MANAGE_DOCUMENTS, Permission.MANAGE_DEPENDENCIES,
     Permission.MANAGE_USERS, Permission.MANAGE_INTEGRATIONS, Permission.MANAGE_DIAGRAM_THEME,
+    Permission.MANAGE_EXTERNAL_SECRETS,
     Permission.VIEW_ALL,
   ],
   [UserRole.ProductOwner]: [
@@ -160,6 +166,7 @@ export const DEFAULT_ROLE_PERMISSIONS: Record<UserRole, Permission[]> = {
     Permission.CREATE_DIAGRAM, Permission.EDIT_DIAGRAM,
     Permission.APPROVE_EPIC_TL,
     Permission.MANAGE_DOCUMENTS, Permission.MANAGE_DEPENDENCIES,
+    Permission.MANAGE_EXTERNAL_SECRETS,
     Permission.VIEW_ALL,
   ],
   [UserRole.QA]: [
@@ -182,6 +189,7 @@ export const ROLE_PERMISSIONS: Record<UserRole, Permission[]> = {
     Permission.CREATE_QA_MATRIX, Permission.EDIT_QA_MATRIX,
     Permission.MANAGE_DOCUMENTS, Permission.MANAGE_DEPENDENCIES,
     Permission.MANAGE_USERS, Permission.MANAGE_INTEGRATIONS, Permission.MANAGE_DIAGRAM_THEME,
+    Permission.MANAGE_EXTERNAL_SECRETS,
     Permission.VIEW_ALL,
   ],
   [UserRole.ProductOwner]: [
@@ -198,6 +206,7 @@ export const ROLE_PERMISSIONS: Record<UserRole, Permission[]> = {
     Permission.CREATE_DIAGRAM, Permission.EDIT_DIAGRAM,
     Permission.APPROVE_EPIC_TL,
     Permission.MANAGE_DOCUMENTS, Permission.MANAGE_DEPENDENCIES,
+    Permission.MANAGE_EXTERNAL_SECRETS,
     Permission.VIEW_ALL,
   ],
   [UserRole.QA]: [

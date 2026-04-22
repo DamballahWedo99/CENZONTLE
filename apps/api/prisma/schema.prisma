@@ -147,13 +147,49 @@ model Story {
   // Path to the markdown file in the vault (GitHub repo)
   vaultPath      String?
 
+  // clientId de la propuesta staging que originó esta historia (si vino de un
+  // batch del agente IA). Null para historias creadas manualmente. Sirve como
+  // ancla para resolver story-to-story deps cuyos edges referencian clientIds
+  // del batch antes de conocer los storyId reales.
+  sourceClientId String?
+
   createdAt      DateTime    @default(now())
   updatedAt      DateTime    @updatedAt
+
+  // Story-to-story ordering dependencies (emitidas por el agente Tech Lead).
+  // "blockedBy" = historias que me bloquean a mí; "blocks" = historias que yo bloqueo.
+  blockedBy      StoryDependency[] @relation("BlockedStory")
+  blocks         StoryDependency[] @relation("BlockerStory")
 
   @@index([epicId])
   @@index([podId])
   @@index([sprintId])
+  @@index([sourceClientId])
   @@map("stories")
+}
+
+/// Arista del DAG de historias — B depende de A significa que A debe completarse
+/// antes que B pueda arrancar (hard) o terminar (soft). Self-reference many-to-many
+/// en la tabla `stories`.
+///
+/// CASCADE en ambas relaciones: borrar una historia quita sus edges a/desde ella
+/// automáticamente, evitando deps huérfanas que romperían queries inversas.
+model StoryDependency {
+  id            String   @id @default(uuid())
+  storyId       String   // historia bloqueada
+  blockedById   String   // historia que bloquea
+  hardness      String   // 'hard' | 'soft'
+  reason        String   // 'api_contract' | 'migration_order' | 'shared_model' | 'sequential_logic' | 'other'
+  description   String   @default("")
+  createdAt     DateTime @default(now())
+
+  story     Story @relation("BlockedStory", fields: [storyId], references: [id], onDelete: Cascade)
+  blockedBy Story @relation("BlockerStory", fields: [blockedById], references: [id], onDelete: Cascade)
+
+  @@unique([storyId, blockedById])
+  @@index([storyId])
+  @@index([blockedById])
+  @@map("story_dependencies")
 }
 
 /// Configuración de un vault de GitHub respaldando el knowledge base de CENZONTLE.
@@ -248,6 +284,33 @@ model CodeRepository {
   updatedAt       DateTime @updatedAt
 
   @@map("code_repositories")
+}
+
+// Credenciales externas (API keys de terceros, merchant codes, OAuth secrets)
+// que el backend necesita para integrar con proveedores externos. El valor se
+// guarda encriptado con el mismo esquema que VaultConfig/CodeRepository
+// (AES-256-GCM vía CryptoService, deriva key de VAULT_ENCRYPTION_KEY).
+//
+// Scope: global por organización. `name` único estilo env var
+// (STRIPE_API_KEY, TWILIO_AUTH_TOKEN). Runtime consumption vía
+// ExternalSecretsService.getByName() — nunca expuesto por HTTP ni persistido
+// plaintext.
+model ExternalSecret {
+  id              String   @id @default(uuid())
+  name            String   @unique   // e.g. "STRIPE_API_KEY"
+  vendor          String?            // e.g. "Stripe"
+  description     String?
+
+  tokenCiphertext String
+  tokenIv         String
+  tokenAuthTag    String
+
+  lastRotatedAt   DateTime @default(now())
+  createdBy       String?
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  @@map("external_secrets")
 }
 
 model ChangelogEntry {

@@ -61,6 +61,14 @@ export interface DiscoveredDependencyInput {
   mdContent: string;
 }
 
+export interface StoryOrderDependencyInput {
+  /** clientId (staging) o storyId real de la historia que bloquea. */
+  storyClientId: string;
+  hardness: 'hard' | 'soft';
+  reason: 'api_contract' | 'migration_order' | 'shared_model' | 'sequential_logic' | 'other';
+  description: string;
+}
+
 export interface CreateStoryInput {
   title: string;
   epicId: string;
@@ -74,6 +82,10 @@ export interface CreateStoryInput {
   qa?: StoryQaFields;
   relatedDocuments?: RelatedDocumentInput[];
   discoveredDependencies?: DiscoveredDependencyInput[];
+  /** clientId de staging — ancla para resolución de DAG de orden. */
+  sourceClientId?: string;
+  /** DAG de orden entre historias del MISMO batch (emitido por el TL). */
+  blockedBy?: StoryOrderDependencyInput[];
 }
 
 export function getStories(params?: { epicId?: string; podId?: string; status?: string }) {

@@ -5,7 +5,10 @@ import { useRouter, useSearchParams } from 'next/navigation';
 import Link from 'next/link';
 import { useProyectos } from '@/context/ProyectosContext';
 import { useBreadcrumb } from '@/context/BreadcrumbContext';
-import { updateEpic as apiUpdateEpic, deleteEpic as apiDeleteEpic, getEpic as apiGetEpic } from '@/lib/api/epics';
+import { updateEpic as apiUpdateEpic, deleteEpic as apiDeleteEpic, getEpic as apiGetEpic, getDiscoveredDependencies as apiGetDiscoveredDependencies, getStoryDependencies as apiGetStoryDependencies, type StoryDependencyItem } from '@/lib/api/epics';
+import { MOCK_DISCOVERED_DEPENDENCIES } from '@/data/mock/discovered-dependencies';
+import { MOCK_PROPOSED_STORIES, MOCK_STORY_DEPENDENCIES } from '@/data/mock/proposed-stories';
+import { topologicalSortProposals } from '@/lib/story-dag';
 import { TypeToConfirmDialog } from '@/components/ui/type-to-confirm-dialog';
 import { createStory as apiCreateStory, updateStory as apiUpdateStory, deleteStory as apiDeleteStory } from '@/lib/api/stories';
 import { toast } from 'sonner';
@@ -52,6 +55,7 @@ import {
 import type {
   ProposedStory,
   StoryGenerationEvent,
+  DiscoveredDependency,
 } from '@cenzontle/shared';
 import { useDiagramCacheHydration } from '@/hooks/useDiagramCacheHydration';
 import {
@@ -316,6 +320,84 @@ function EpicFullPageInner({ epicId }: { epicId: string }) {
   const [showRejectForm, setShowRejectForm] = useState(false);
   const [activeTab, setActiveTab] = useState(() => searchParams.get('tab') ?? 'definicion');
   const [showChecklist, setShowChecklist] = useState(false);
+  const [discoveredDeps, setDiscoveredDeps] = useState<DiscoveredDependency[]>([]);
+  const [storyDeps, setStoryDeps] = useState<StoryDependencyItem[]>([]);
+  // Dev-only toggle: `?mockDeps=true` muestra dependencias de ejemplo con
+  // todos los estados (requiere credencial, resuelta, sin credencial) para
+  // poder validar la UI sin ejecutar el agente. Los datos viven en
+  // `data/mock/discovered-dependencies.ts` y no tocan el backend.
+  const useMockDeps = searchParams.get('mockDeps') === 'true';
+  const effectiveDiscoveredDeps = useMockDeps ? MOCK_DISCOVERED_DEPENDENCIES : discoveredDeps;
+
+  /**
+   * Dev-only toggle: `?mockStoryDeps=true` inyecta un batch mock de
+   * propuestas con DAG rico (cadenas, diamantes, soft/hard) para validar
+   * los badges de "Bloqueada por" en StoryProposalCard sin correr el
+   * agente completo. Los mocks viven en `data/mock/proposed-stories.ts`.
+   */
+  const useMockStoryDeps = searchParams.get('mockStoryDeps') === 'true';
+  const effectiveStoryDeps = useMockStoryDeps ? MOCK_STORY_DEPENDENCIES : storyDeps;
+
+  /**
+   * Refetch de discoveredDeps. Se dispara al montar/cambiar epic y también
+   * desde `EpicDependencies` tras resolver una dep con un secret externo
+   * (evita el hack de `window.location.reload()`).
+   */
+  const refreshDiscoveredDeps = useCallback(async () => {
+    if (!rawEpic?.id) {
+      setDiscoveredDeps([]);
+      return;
+    }
+    try {
+      const deps = await apiGetDiscoveredDependencies(rawEpic.id);
+      setDiscoveredDeps(deps);
+    } catch {
+      setDiscoveredDeps([]);
+    }
+  }, [rawEpic?.id]);
+
+  /**
+   * Refetch del DAG story-to-story. Se dispara al montar/cambiar epic y
+   * también después de aceptar propuestas (individual o batch), porque el
+   * backend persiste los edges `blockedBy` al crear historias y sin refetch
+   * el panel "Orden entre historias" queda stale hasta un reload manual.
+   */
+  const refreshStoryDeps = useCallback(async () => {
+    if (!rawEpic?.id) {
+      setStoryDeps([]);
+      return;
+    }
+    try {
+      const deps = await apiGetStoryDependencies(rawEpic.id);
+      setStoryDeps(deps);
+    } catch {
+      setStoryDeps([]);
+    }
+  }, [rawEpic?.id]);
+
+  useEffect(() => {
+    if (!rawEpic?.id) {
+      setDiscoveredDeps([]);
+      setStoryDeps([]);
+      return;
+    }
+    const controller = new AbortController();
+    apiGetDiscoveredDependencies(rawEpic.id)
+      .then((deps) => {
+        if (!controller.signal.aborted) setDiscoveredDeps(deps);
+      })
+      .catch(() => {
+        if (!controller.signal.aborted) setDiscoveredDeps([]);
+      });
+    apiGetStoryDependencies(rawEpic.id)
+      .then((deps) => {
+        if (!controller.signal.aborted) setStoryDeps(deps);
+      })
+      .catch(() => {
+        if (!controller.signal.aborted) setStoryDeps([]);
+      });
+    return () => controller.abort();
+  }, [rawEpic?.id]);
 
   const epicChangelog = useMemo(() => {
     if (!epic) return [];
@@ -579,6 +661,12 @@ function EpicFullPageInner({ epicId }: { epicId: string }) {
         },
         relatedDocuments: proposal.relatedDocuments,
         discoveredDependencies: proposal.discoveredDependencies,
+        // `sourceClientId` sirve como ancla para que edges del DAG (blockedBy)
+        // emitidos por otras historias del mismo batch puedan resolver el
+        // storyId real cuando se acepten. Ver `persistBlockedByEdges` en el
+        // backend.
+        sourceClientId: proposal.clientId,
+        blockedBy: proposal.blockedBy,
       });
 
       const nowIso = new Date().toISOString();
@@ -626,16 +714,25 @@ function EpicFullPageInner({ epicId }: { epicId: string }) {
     setAcceptingAllStories(true);
     const snapshot = [...storyProposals];
     const startMs = Date.now();
+
+    // Orden topológico de las historias por su DAG de `blockedBy`:
+    // garantiza que las bloqueantes se acepten antes que las bloqueadas,
+    // para que `persistBlockedByEdges` del backend pueda resolver los
+    // clientIds a storyIds reales. Kahn's algorithm (BFS con in-degree).
+    const ordered = topologicalSortProposals(snapshot);
+    const hasDag = snapshot.some((p) => (p.blockedBy?.length ?? 0) > 0);
     // eslint-disable-next-line no-console
-    console.log(`[StoryAccept:batch] ▶ aceptando ${snapshot.length} historias en paralelo`);
+    console.log(
+      `[StoryAccept:batch] ▶ aceptando ${ordered.length} historias ` +
+        (hasDag ? 'en orden topológico (DAG detectado)' : 'en paralelo (sin DAG)'),
+    );
     try {
-      // Paralelizamos las aceptaciones — cada historia tiene su propio folder
-      // en el vault (iniciativas/.../historias/<slug>-<id6>/) entonces no hay
-      // colision de SHA entre writes. Promise.allSettled permite que unas
-      // fallen sin abortar las demas.
-      const results = await Promise.allSettled(
-        snapshot.map((proposal) => handleAcceptStoryProposal(proposal)),
-      );
+      // Si hay DAG: aceptar secuencialmente en orden topológico para que
+      // las bloqueantes existan en DB antes que sus bloqueadas.
+      // Si NO hay DAG: paralelizar como antes (máxima velocidad).
+      const results: PromiseSettledResult<void>[] = hasDag
+        ? await runSequentiallySettled(ordered, handleAcceptStoryProposal)
+        : await Promise.allSettled(ordered.map((p) => handleAcceptStoryProposal(p)));
       const successCount = results.filter((r) => r.status === 'fulfilled').length;
       const failureCount = results.filter((r) => r.status === 'rejected').length;
       const durMs = Date.now() - startMs;
@@ -652,8 +749,14 @@ function EpicFullPageInner({ epicId }: { epicId: string }) {
       }
     } finally {
       setAcceptingAllStories(false);
+      // Refetch del DAG story-to-story y las discovered deps. El backend
+      // persiste `blockedBy` y `discoveredDependencies` al crear cada story,
+      // pero el panel "Dependencias" lee del estado local — sin este refresh
+      // el user tiene que recargar para ver los nuevos nodos del DAG.
+      void refreshStoryDeps();
+      void refreshDiscoveredDeps();
     }
-  }, [storyProposals, handleAcceptStoryProposal, acceptingAllStories, acceptingStoryId]);
+  }, [storyProposals, handleAcceptStoryProposal, acceptingAllStories, acceptingStoryId, refreshStoryDeps, refreshDiscoveredDeps]);
 
   const handleDiscardStoryProposal = useCallback(async (clientId: string) => {
     if (!rawEpic) return;
@@ -1031,7 +1134,9 @@ function EpicFullPageInner({ epicId }: { epicId: string }) {
                 </TabsTrigger>
                 <TabsTrigger value="dependencias" className="gap-1.5 rounded-none border-b-2 border-transparent data-[state=active]:border-foreground data-[state=active]:shadow-none">
                   <GitBranch className="h-3.5 w-3.5" />
-                  Dependencias ({(epic.dependencies ?? []).length})
+                  {/* Contamos solo las manuales del JSONB (no las IA persistidas con id="ai-dep-*"
+                      que también viven ahí) para evitar double-count con effectiveDiscoveredDeps. */}
+                  Dependencias ({(epic.dependencies ?? []).filter((d) => !d.id?.startsWith('ai-dep-')).length + effectiveDiscoveredDeps.length + effectiveStoryDeps.length})
                 </TabsTrigger>
                 <TabsTrigger value="changelog" className="gap-1.5 rounded-none border-b-2 border-transparent data-[state=active]:border-foreground data-[state=active]:shadow-none">
                   <History className="h-3.5 w-3.5" />
@@ -1158,15 +1263,53 @@ function EpicFullPageInner({ epicId }: { epicId: string }) {
                 {/* Lista de propuestas en staging */}
                 {storyAgentMode === 'staging' && storyProposals.length > 0 && (
                   <StoryProposalList
+                    epicId={rawEpic!.id}
                     proposals={storyProposals}
                     pods={state.pods}
                     acceptingId={acceptingStoryId}
-                    onAccept={handleAcceptStoryProposal}
+                    onAccept={async (proposal) => {
+                      await handleAcceptStoryProposal(proposal);
+                      // Refetch tras aceptación individual para que el panel
+                      // "Dependencias" muestre los nuevos edges del DAG y las
+                      // discovered deps sin necesidad de un reload manual.
+                      // (En batch, el refresh se hace una sola vez al final
+                      // desde `handleAcceptAllStories`, no por cada item.)
+                      void refreshStoryDeps();
+                      void refreshDiscoveredDeps();
+                    }}
                     onAcceptAll={handleAcceptAllStories}
                     onDiscard={handleDiscardStoryProposal}
                     onDiscardAll={handleDiscardAllStories}
                     onRefinePrompt={handleRefineStoryPrompt}
                   />
+                )}
+
+                {/* Dev-only: mocks de propuestas con DAG rico para validar
+                    los badges de "Bloqueada por" sin correr el agente.
+                    Activar con ?mockStoryDeps=true */}
+                {useMockStoryDeps && storyAgentMode === 'idle' && (
+                  <div className="space-y-2">
+                    <div className="flex items-center gap-2 rounded-md border border-dashed border-amber-400/40 bg-amber-50/30 dark:bg-amber-950/20 px-3 py-2">
+                      <span className="text-[10px] font-semibold uppercase tracking-wider text-amber-700 dark:text-amber-400">
+                        Mock dev
+                      </span>
+                      <span className="text-xs text-muted-foreground">
+                        Batch simulado con 6 propuestas y DAG (cadena + diamante + paralelo). Quita{' '}
+                        <code className="font-mono">?mockStoryDeps=true</code> de la URL para salir.
+                      </span>
+                    </div>
+                    <StoryProposalList
+                      epicId={rawEpic!.id}
+                      proposals={MOCK_PROPOSED_STORIES}
+                      pods={state.pods}
+                      acceptingId={null}
+                      onAccept={() => toast.info('Mock: acepta usa mocks — genera un batch real para persistir')}
+                      onAcceptAll={() => toast.info('Mock: usa un batch real para persistir')}
+                      onDiscard={() => toast.info('Mock: descarta solo funciona en staging real')}
+                      onDiscardAll={() => toast.info('Mock: usa un batch real para descartar')}
+                      onRefinePrompt={() => toast.info('Mock: usa un batch real para refinar')}
+                    />
+                  </div>
                 )}
 
                 {/* Story list with create/edit/delete */}
@@ -1415,6 +1558,9 @@ function EpicFullPageInner({ epicId }: { epicId: string }) {
               <TabsContent value="dependencias" className="mt-8">
                 <EpicDependencies
                   epic={epic}
+                  discoveredDependencies={effectiveDiscoveredDeps}
+                  storyOrderDependencies={effectiveStoryDeps}
+                  onDiscoveredDepsRefresh={refreshDiscoveredDeps}
                   onAddDependency={(dep) => dispatch({ type: 'ADD_EPIC_DEPENDENCY', payload: { epicId: rawEpic!.id, dependency: dep } })}
                   onUpdateDependency={(dep) => dispatch({ type: 'UPDATE_EPIC_DEPENDENCY', payload: { epicId: rawEpic!.id, dependency: dep } })}
                   onDeleteDependency={(depId) => dispatch({ type: 'DELETE_EPIC_DEPENDENCY', payload: { epicId: rawEpic!.id, dependencyId: depId } })}
@@ -1503,4 +1649,25 @@ function EpicFullPageInner({ epicId }: { epicId: string }) {
 
 export function EpicFullPage({ epicId }: { epicId: string }) {
   return <EpicFullPageInner epicId={epicId} />;
+}
+
+/**
+ * `Promise.allSettled` equivalente pero secuencial. Útil cuando el orden
+ * importa (p.ej. DAG de deps). Captura throws por item individual sin
+ * abortar el batch.
+ */
+async function runSequentiallySettled<T>(
+  items: T[],
+  fn: (item: T) => Promise<void>,
+): Promise<PromiseSettledResult<void>[]> {
+  const results: PromiseSettledResult<void>[] = [];
+  for (const item of items) {
+    try {
+      await fn(item);
+      results.push({ status: 'fulfilled', value: undefined });
+    } catch (err) {
+      results.push({ status: 'rejected', reason: err });
+    }
+  }
+  return results;
 }

@@ -14,6 +14,7 @@ import {
   isNewFormatVaultPath,
   type InitiativeRef,
 } from '../vault-paths';
+import { buildFrontmatter } from '../vault-frontmatter';
 
 const INITIATIVE_INCLUDE = {
   epics: {
@@ -395,20 +396,17 @@ export class InitiativesService {
     description: string;
     created?: string;
   }): string {
-    const frontmatter = [
-      '---',
-      `id: ${data.id}`,
-      'type: initiative',
-      `name: ${JSON.stringify(data.name)}`,
-      `created: ${data.created ?? new Date().toISOString().slice(0, 10)}`,
-      '---',
-      '',
-    ].join('\n');
+    const fm = buildFrontmatter({
+      id: data.id,
+      type: 'initiative',
+      name: data.name,
+      created: data.created ?? new Date().toISOString().slice(0, 10),
+    });
 
     const title = `# ${data.name}\n\n`;
     const descriptionSection = `## Descripción\n\n${data.description ?? ''}\n`;
 
-    return frontmatter + title + descriptionSection;
+    return `${fm}\n\n${title}${descriptionSection}`;
   }
 
   /**

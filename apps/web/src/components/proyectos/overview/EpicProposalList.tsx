@@ -1,9 +1,11 @@
 'use client';
 
+import { useCallback } from 'react';
 import { Button } from '@/components/ui/button';
 import { Check, Trash2, RefreshCw, Sparkles } from 'lucide-react';
 import { EpicProposalCard } from './EpicProposalCard';
 import { ProposalTtlCountdown } from './ProposalTtlCountdown';
+import { getCacheTtl } from '@/lib/api/epic-generation';
 import type { ProposedEpic, Pod } from '@cenzontle/shared';
 
 interface EpicProposalListProps {
@@ -33,6 +35,8 @@ export function EpicProposalList({
   onDiscardAll,
   onRefinePrompt,
 }: EpicProposalListProps) {
+  const fetchTtl = useCallback(() => getCacheTtl(initiativeId), [initiativeId]);
+
   if (proposals.length === 0) return null;
 
   return (
@@ -44,7 +48,7 @@ export function EpicProposalList({
           <span className="text-xs font-medium">
             {proposals.length} {proposals.length === 1 ? 'épica propuesta' : 'épicas propuestas'}
           </span>
-          <ProposalTtlCountdown initiativeId={initiativeId} onExpired={onDiscardAll} />
+          <ProposalTtlCountdown fetchTtl={fetchTtl} onExpired={onDiscardAll} />
         </div>
         <div className="flex items-center gap-1.5">
           <Button

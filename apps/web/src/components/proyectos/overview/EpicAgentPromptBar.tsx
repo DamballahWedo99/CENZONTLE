@@ -13,7 +13,18 @@ interface EpicAgentPromptBarProps {
 
 export function EpicAgentPromptBar({ mode, events, onSubmit, onCancel }: EpicAgentPromptBarProps) {
   if (mode === 'prompting') {
-    return <PromptInput onSubmit={onSubmit} onCancel={onCancel} />;
+    // Defaults paralelos al StoryAgentPromptBar:
+    //  - Modo Auto ON: el agente decide el foco sin instrucciones manuales
+    //  - Búsqueda en internet ON: enriquece contexto con fuentes externas
+    return (
+      <PromptInput
+        onSubmit={onSubmit}
+        onCancel={onCancel}
+        showAutoToggle
+        defaultAuto={true}
+        defaultWebSearch={true}
+      />
+    );
   }
 
   return <AgentThinkingDisplay events={events} isStreaming={mode === 'streaming'} onCancel={onCancel} />;
