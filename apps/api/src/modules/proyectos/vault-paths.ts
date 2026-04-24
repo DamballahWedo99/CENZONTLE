@@ -187,6 +187,29 @@ export function epicDependencyPath(
   return `${epicFolderPath(ini, epic)}/dependencias/${slugify(depTitle) || 'dependencia'}.md`;
 }
 
+/**
+ * Path de un diseño en el vault. Incluye `slugifyWithId(name, id)` para
+ * garantizar unicidad cuando dos diseños tienen el mismo nombre (caso real:
+ * "Checkout Mobile" creado dos veces por distintos designers). Sin el
+ * suffix de id, el segundo write sobrescribiría silenciosamente al primero
+ * y el agente leería datos incorrectos vía `vault_read`.
+ *
+ * Valida `id` con el mismo charset UUID-safe que `epicDiagramPath` para
+ * defensa en profundidad contra path traversal aunque el DTO ya lo valide.
+ */
+const DESIGN_ID_RE = /^[a-fA-F0-9-]+$/;
+
+export function epicDesignPath(
+  ini: InitiativeRef,
+  epic: EpicRef,
+  design: { id: string; name: string },
+): string {
+  if (!DESIGN_ID_RE.test(design.id)) {
+    throw new Error(`epicDesignPath: design id invalido (charset fuera de [a-fA-F0-9-])`);
+  }
+  return `${epicFolderPath(ini, epic)}/disenos/${slugifyWithId(design.name, design.id)}.md`;
+}
+
 export type EpicMatrixKind = 'qa-funcional' | 'qa-sistemica';
 
 export function epicMatrixPath(

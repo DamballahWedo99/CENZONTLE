@@ -1,4 +1,4 @@
-import type { DiscoveredDependency } from '@cenzontle/shared';
+import type { DiscoveredDependency, EpicDesign } from '@cenzontle/shared';
 import { apiFetch } from './client';
 
 export interface EpicResponse {
@@ -28,6 +28,8 @@ export interface EpicResponse {
   documents: any[];
   diagrams: any[];
   dependencies: any[];
+  designs: EpicDesign[];
+  designSkipped: boolean;
   poApproval: any;
   tlApproval: any;
   qaApproval: any;

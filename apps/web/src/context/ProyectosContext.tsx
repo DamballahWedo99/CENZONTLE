@@ -195,6 +195,10 @@ type ProyectosAction =
   | { type: 'ADD_EPIC_DEPENDENCY'; payload: { epicId: string; dependency: import('@cenzontle/shared').EpicDependency } }
   | { type: 'UPDATE_EPIC_DEPENDENCY'; payload: { epicId: string; dependency: import('@cenzontle/shared').EpicDependency } }
   | { type: 'DELETE_EPIC_DEPENDENCY'; payload: { epicId: string; dependencyId: string } }
+  | { type: 'ADD_EPIC_DESIGN'; payload: { epicId: string; design: import('@cenzontle/shared').EpicDesign } }
+  | { type: 'UPDATE_EPIC_DESIGN'; payload: { epicId: string; design: import('@cenzontle/shared').EpicDesign } }
+  | { type: 'DELETE_EPIC_DESIGN'; payload: { epicId: string; designId: string } }
+  | { type: 'TOGGLE_EPIC_DESIGN_SKIP'; payload: { epicId: string; skipped: boolean } }
   | { type: 'SET_CURRENT_USER'; payload: string };
 
 function proyectosReducer(state: ProyectosState, action: ProyectosAction): ProyectosState {
@@ -698,6 +702,75 @@ function proyectosReducer(state: ProyectosState, action: ProyectosAction): Proye
           e.id === epicId
             ? { ...e, dependencies: e.dependencies.filter((d) => d.id !== dependencyId), updatedAt: new Date().toISOString() }
             : e
+        ),
+        changelog: [changelogEntry, ...state.changelog],
+      };
+    }
+    case 'ADD_EPIC_DESIGN': {
+      const { epicId, design } = action.payload;
+      const epic = state.epics.find((e) => e.id === epicId);
+      if (!epic) return state;
+      const changelogEntry = createChangelogEntry(
+        ChangelogEntityType.Epic, epicId, epic.title,
+        ChangelogAction.Created, 'diseño', null, design.name,
+      );
+      return {
+        ...state,
+        epics: state.epics.map((e) =>
+          e.id === epicId ? { ...e, designs: [...(e.designs ?? []), design], updatedAt: new Date().toISOString() } : e
+        ),
+        changelog: [changelogEntry, ...state.changelog],
+      };
+    }
+    case 'UPDATE_EPIC_DESIGN': {
+      const { epicId, design } = action.payload;
+      const epic = state.epics.find((e) => e.id === epicId);
+      if (!epic) return state;
+      const changelogEntry = createChangelogEntry(
+        ChangelogEntityType.Epic, epicId, epic.title,
+        ChangelogAction.Updated, 'diseño', null, design.name,
+      );
+      return {
+        ...state,
+        epics: state.epics.map((e) =>
+          e.id === epicId
+            ? { ...e, designs: (e.designs ?? []).map((d) => d.id === design.id ? design : d), updatedAt: new Date().toISOString() }
+            : e
+        ),
+        changelog: [changelogEntry, ...state.changelog],
+      };
+    }
+    case 'DELETE_EPIC_DESIGN': {
+      const { epicId, designId } = action.payload;
+      const epic = state.epics.find((e) => e.id === epicId);
+      if (!epic) return state;
+      const design = (epic.designs ?? []).find((d) => d.id === designId);
+      const changelogEntry = createChangelogEntry(
+        ChangelogEntityType.Epic, epicId, epic.title,
+        ChangelogAction.Deleted, 'diseño', design?.name ?? designId, null,
+      );
+      return {
+        ...state,
+        epics: state.epics.map((e) =>
+          e.id === epicId
+            ? { ...e, designs: (e.designs ?? []).filter((d) => d.id !== designId), updatedAt: new Date().toISOString() }
+            : e
+        ),
+        changelog: [changelogEntry, ...state.changelog],
+      };
+    }
+    case 'TOGGLE_EPIC_DESIGN_SKIP': {
+      const { epicId, skipped } = action.payload;
+      const epic = state.epics.find((e) => e.id === epicId);
+      if (!epic) return state;
+      const changelogEntry = createChangelogEntry(
+        ChangelogEntityType.Epic, epicId, epic.title,
+        ChangelogAction.Updated, 'requiere diseño', epic.designSkipped ? 'no' : 'sí', skipped ? 'no' : 'sí',
+      );
+      return {
+        ...state,
+        epics: state.epics.map((e) =>
+          e.id === epicId ? { ...e, designSkipped: skipped, updatedAt: new Date().toISOString() } : e
         ),
         changelog: [changelogEntry, ...state.changelog],
       };

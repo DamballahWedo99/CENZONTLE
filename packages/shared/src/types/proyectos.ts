@@ -550,6 +550,18 @@ export interface EpicDocument {
   format?: DocumentFormat;
 }
 
+// === DESIGN TYPE ===
+
+export interface EpicDesign {
+  id: string;
+  name: string;
+  description: string;
+  handoff: string;
+  createdAt: string; // ISO date
+  updatedAt: string; // ISO date
+  createdBy?: string;
+}
+
 // === INTERFACES ===
 
 export interface Initiative {
@@ -590,6 +602,8 @@ export interface Epic {
   documents: EpicDocument[];
   diagrams: EpicDiagram[];
   dependencies: EpicDependency[];
+  designs: EpicDesign[];
+  designSkipped: boolean;
   poApproval: {
     status: 'pending' | 'approved' | 'rejected';
     approvedBy: string | null; // PO id
@@ -613,7 +627,7 @@ export interface Epic {
 export type ProposedEpic = Omit<
   Epic,
   | 'id' | 'createdAt' | 'updatedAt'
-  | 'documents' | 'diagrams' | 'dependencies'
+  | 'documents' | 'diagrams' | 'dependencies' | 'designs' | 'designSkipped'
   | 'poApproval' | 'tlApproval' | 'qaMatrix' | 'qaApproval' | 'epicQAMatrix'
   | 'tracker'
 > & {

@@ -42,6 +42,7 @@ import { EpicDiagrams } from './EpicDiagrams';
 import { EpicQAMatrix } from './EpicQAMatrix';
 import { EpicDocuments } from './EpicDocuments';
 import { EpicDependencies } from './EpicDependencies';
+import { EpicDesigns } from './EpicDesigns';
 import { IntegrationSettingsDialog } from '../settings/IntegrationSettingsDialog';
 import { EpicStoryList } from './EpicStoryList';
 import { StoryAgentPromptBar } from './StoryAgentPromptBar';
@@ -79,6 +80,7 @@ import {
   ClipboardCheck,
   GitBranch,
   Upload,
+  Palette,
 } from 'lucide-react';
 
 // --- Changelog helpers ---
@@ -103,6 +105,7 @@ const fieldLabels: Record<string, string> = {
   impactedChannels: 'canales impactados', impactedFlows: 'flujos impactados',
   impactSabreLevel: 'nivel de impacto Sabre', thirdPartyDependencies: 'dependencias de terceros',
   historias: 'historias de usuario', documento: 'documento', 'aprobación PO': 'aprobación PO', 'aprobación TL (diagrama)': 'aprobación TL (diagrama)', 'aprobación QA': 'aprobación QA',
+  diseño: 'diseño', 'requiere diseño': 'requiere diseño',
 };
 
 const statusLabels: Record<string, string> = {
@@ -1115,6 +1118,13 @@ function EpicFullPageInner({ epicId }: { epicId: string }) {
                   Diagrama
                 </TabsTrigger>
                 <TabsTrigger
+                  value="disenos"
+                  className="gap-1.5 rounded-none border-b-2 border-transparent data-[state=active]:border-foreground data-[state=active]:shadow-none"
+                >
+                  <Palette className="h-3.5 w-3.5" />
+                  Diseño {rawEpic?.designSkipped ? '(N/A)' : (rawEpic?.designs?.length ? `(${rawEpic.designs.length})` : '')}
+                </TabsTrigger>
+                <TabsTrigger
                   value="historias"
                   className="gap-1.5 rounded-none border-b-2 border-transparent data-[state=active]:border-foreground data-[state=active]:shadow-none"
                 >
@@ -1241,6 +1251,41 @@ function EpicFullPageInner({ epicId }: { epicId: string }) {
                     }).catch(() => {
                       // Fallo silencioso: el usuario puede ir a Documentos y verá
                       // los cambios al refrescar la página.
+                    });
+                  }}
+                />
+              </TabsContent>
+
+              {/* ── Diseños ── */}
+              <TabsContent value="disenos" className="mt-8">
+                <EpicDesigns
+                  designs={rawEpic!.designs ?? []}
+                  designSkipped={rawEpic!.designSkipped ?? false}
+                  onAddDesign={(design) => {
+                    dispatch({ type: 'ADD_EPIC_DESIGN', payload: { epicId: rawEpic!.id, design } });
+                    const nextDesigns = [...(rawEpic!.designs ?? []), design];
+                    void apiUpdateEpic(rawEpic!.id, { designs: nextDesigns }).catch((err) => {
+                      toast.error(`Diseño agregado localmente, pero falló al guardar: ${err?.message ?? 'error desconocido'}`);
+                    });
+                  }}
+                  onUpdateDesign={(design) => {
+                    dispatch({ type: 'UPDATE_EPIC_DESIGN', payload: { epicId: rawEpic!.id, design } });
+                    const nextDesigns = (rawEpic!.designs ?? []).map((d) => d.id === design.id ? design : d);
+                    void apiUpdateEpic(rawEpic!.id, { designs: nextDesigns }).catch((err) => {
+                      toast.error(`Diseño editado localmente, pero falló al guardar: ${err?.message ?? 'error desconocido'}`);
+                    });
+                  }}
+                  onDeleteDesign={(designId) => {
+                    dispatch({ type: 'DELETE_EPIC_DESIGN', payload: { epicId: rawEpic!.id, designId } });
+                    const nextDesigns = (rawEpic!.designs ?? []).filter((d) => d.id !== designId);
+                    void apiUpdateEpic(rawEpic!.id, { designs: nextDesigns }).catch((err) => {
+                      toast.error(`Diseño eliminado localmente, pero falló al guardar: ${err?.message ?? 'error desconocido'}`);
+                    });
+                  }}
+                  onToggleSkip={(skipped) => {
+                    dispatch({ type: 'TOGGLE_EPIC_DESIGN_SKIP', payload: { epicId: rawEpic!.id, skipped } });
+                    void apiUpdateEpic(rawEpic!.id, { designSkipped: skipped }).catch((err) => {
+                      toast.error(`Toggle actualizado localmente, pero falló al guardar: ${err?.message ?? 'error desconocido'}`);
                     });
                   }}
                 />

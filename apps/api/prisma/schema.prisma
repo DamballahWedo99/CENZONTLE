@@ -83,6 +83,8 @@ model Epic {
   documents                 Json       @default("[]")
   diagrams                  Json       @default("[]")
   dependencies              Json       @default("[]")
+  designs                   Json       @default("[]")
+  designSkipped             Boolean    @default(false)
   poApproval                Json?
   tlApproval                Json?
   qaApproval                Json?

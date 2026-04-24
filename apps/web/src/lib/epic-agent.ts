@@ -325,6 +325,8 @@ export async function generateEpics(
       documents: [],
       diagrams: [],
       dependencies: [],
+      designs: [],
+      designSkipped: false,
       poApproval: null,
       tlApproval: null,
       qaMatrix: null,

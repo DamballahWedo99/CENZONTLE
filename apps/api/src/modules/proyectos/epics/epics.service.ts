@@ -14,6 +14,7 @@ import {
   epicDefinitionPath,
   epicDiagramPath,
   epicDependencyPath,
+  epicDesignPath,
   epicMatrixPath,
   isLegacyVaultPath,
   isNewFormatVaultPath,
@@ -24,6 +25,7 @@ import {
 import {
   buildDiagramMarkdown,
   buildDependencyMarkdown,
+  buildDesignMarkdown,
   buildQAMatrixMarkdown,
   buildEpicQAMatrixMarkdown,
   parseDiscoveredDependencyMarkdown,
@@ -219,11 +221,11 @@ export class EpicsService {
 
     // 2. Create PG row (rollback ambos archivos on failure).
     try {
-      const { podIds, startDate, targetDate, diagrams, ...data } = dto;
-      // `diagrams` se extrae del spread y se reasigna como JSON. El DTO
-      // valida solo `id` de cada diagrama (critico para seguridad path
-      // traversal en epicDiagramPath); el resto del shape es free-form y
-      // se persiste as-is en el campo JSONB. Prisma requiere
+      const { podIds, startDate, targetDate, diagrams, designs, ...data } = dto;
+      // `diagrams` y `designs` se extraen del spread y se reasignan como JSON.
+      // El DTO valida solo `id` de cada item (critico para seguridad path
+      // traversal en epicDiagramPath / epicDesignPath); el resto del shape
+      // es free-form y se persiste as-is en el campo JSONB. Prisma requiere
       // `InputJsonValue` — cast via `unknown` porque un class-validator
       // DTO no declara la index signature de InputJsonObject.
       const epic = await this.prisma.$transaction(async (tx) => {
@@ -233,6 +235,9 @@ export class EpicsService {
             ...data,
             ...(diagrams !== undefined
               ? { diagrams: diagrams as unknown as Prisma.InputJsonValue }
+              : {}),
+            ...(designs !== undefined
+              ? { designs: designs as unknown as Prisma.InputJsonValue }
               : {}),
             startDate: new Date(startDate),
             targetDate: new Date(targetDate),
@@ -790,6 +795,7 @@ export class EpicsService {
     oldEpic: {
       diagrams: Prisma.JsonValue;
       dependencies: Prisma.JsonValue;
+      designs: Prisma.JsonValue;
       qaMatrix: Prisma.JsonValue | null;
       epicQAMatrix: Prisma.JsonValue | null;
     },
@@ -844,6 +850,34 @@ export class EpicsService {
             `docs(epic): record dependency ${dep.title} [${epicId}]`,
           );
           this.logger.log(`[writeEpicArtifacts] dependencia "${dep.title}" escrita → ${path}`);
+        }
+      }
+    }
+
+    // ── Diseños ──
+    // El DTO trae la lista completa de diseños. Cada uno se escribe como
+    // .md independiente en `disenos/<slug>-<id6>.md` para que el agente IA
+    // pueda leerlos via vault_read cuando necesite el handoff completo.
+    // El suffix de id garantiza unicidad incluso si dos diseños tienen el
+    // mismo name (sin suffix, el segundo sobrescribiría silenciosamente).
+    if (dto.designs !== undefined) {
+      const oldDesigns = JSON.stringify(oldEpic.designs ?? []);
+      const newDesigns = JSON.stringify(dto.designs);
+      if (oldDesigns !== newDesigns) {
+        const designs = dto.designs as Array<{ id: string; name: string }>;
+        for (const design of designs) {
+          if (!design?.id || !design?.name) {
+            this.logger.warn(`[writeEpicArtifacts] diseño sin id/name — skip`);
+            continue;
+          }
+          const path = epicDesignPath(iniRef, epicRef, { id: design.id, name: design.name });
+          const md = buildDesignMarkdown(design as Parameters<typeof buildDesignMarkdown>[0]);
+          await this.vault.writeNote(
+            path,
+            md,
+            `docs(epic): record design ${design.name} [${epicId}]`,
+          );
+          this.logger.log(`[writeEpicArtifacts] diseño "${design.name}" escrito → ${path}`);
         }
       }
     }

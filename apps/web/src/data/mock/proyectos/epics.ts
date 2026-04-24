@@ -94,6 +94,8 @@ export const mockEpics: Epic[] = [
     qaMatrix: null,
     qaApproval: null,
     epicQAMatrix: null,
+    designs: [],
+    designSkipped: false,
 
   },
   {
@@ -166,6 +168,8 @@ export const mockEpics: Epic[] = [
     qaMatrix: null,
     qaApproval: null,
     epicQAMatrix: null,
+    designs: [],
+    designSkipped: false,
 
   },
   {
@@ -201,6 +205,8 @@ export const mockEpics: Epic[] = [
     qaMatrix: null,
     qaApproval: null,
     epicQAMatrix: null,
+    designs: [],
+    designSkipped: false,
 
   },
   {
@@ -236,6 +242,8 @@ export const mockEpics: Epic[] = [
     qaMatrix: null,
     qaApproval: null,
     epicQAMatrix: null,
+    designs: [],
+    designSkipped: false,
 
   },
   // === Initiative 2: Integración de Pagos Multi-procesador ===
@@ -291,6 +299,8 @@ export const mockEpics: Epic[] = [
     qaMatrix: null,
     qaApproval: null,
     epicQAMatrix: null,
+    designs: [],
+    designSkipped: false,
 
   },
   {
@@ -326,6 +336,8 @@ export const mockEpics: Epic[] = [
     qaMatrix: null,
     qaApproval: null,
     epicQAMatrix: null,
+    designs: [],
+    designSkipped: false,
 
   },
   {
@@ -361,6 +373,8 @@ export const mockEpics: Epic[] = [
     qaMatrix: null,
     qaApproval: null,
     epicQAMatrix: null,
+    designs: [],
+    designSkipped: false,
 
   },
   {
@@ -396,6 +410,8 @@ export const mockEpics: Epic[] = [
     qaMatrix: null,
     qaApproval: null,
     epicQAMatrix: null,
+    designs: [],
+    designSkipped: false,
 
   },
   // === Initiative 3: Programa de Lealtad v2.0 ===
@@ -432,6 +448,8 @@ export const mockEpics: Epic[] = [
     qaMatrix: null,
     qaApproval: null,
     epicQAMatrix: null,
+    designs: [],
+    designSkipped: false,
 
   },
   {
@@ -467,6 +485,8 @@ export const mockEpics: Epic[] = [
     qaMatrix: null,
     qaApproval: null,
     epicQAMatrix: null,
+    designs: [],
+    designSkipped: false,
 
   },
   {
@@ -502,6 +522,8 @@ export const mockEpics: Epic[] = [
     qaMatrix: null,
     qaApproval: null,
     epicQAMatrix: null,
+    designs: [],
+    designSkipped: false,
 
   },
 ];
