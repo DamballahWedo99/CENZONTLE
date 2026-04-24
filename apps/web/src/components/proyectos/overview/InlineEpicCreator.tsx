@@ -214,6 +214,8 @@ export function InlineEpicCreator({
         documents: [],
         diagrams: [],
         dependencies: [],
+        designs: [],
+        designSkipped: false,
         poApproval: null,
         tlApproval: null,
         qaMatrix: null,

@@ -1,4 +1,4 @@
-import { IsString, IsNotEmpty, IsEnum, IsOptional, IsDateString, IsArray, IsUUID, IsObject, MaxLength, Matches, ValidateNested } from 'class-validator';
+import { IsString, IsNotEmpty, IsEnum, IsOptional, IsDateString, IsArray, IsBoolean, IsUUID, IsObject, MaxLength, Matches, ValidateNested, ArrayMaxSize } from 'class-validator';
 import { Type } from 'class-transformer';
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
 import { EpicStatus, Priority } from '@prisma/client';
@@ -8,6 +8,10 @@ import { EpicStatus, Priority } from '@prisma/client';
 const MAX_TITLE = 200;
 const MAX_DESCRIPTION = 5_000;
 const MAX_NARRATIVE = 20_000;
+// El handoff de Claude Design es una instrucción corta + URL al HTML exportado
+// (~250 chars típicos). 2 KB deja margen para handoffs con varios archivos o
+// instrucciones extendidas, y mantiene un cap razonable contra DoS al vault.
+const MAX_HANDOFF = 2_000;
 
 /**
  * Sub-DTO de un diagrama asociado a una epica.
@@ -30,6 +34,59 @@ export class EpicDiagramItemDto {
   // `forbidNonWhitelisted: true`, los campos extra sobreviven al pipe y
   // se persisten como JSONB. class-validator solo valida `id`, que es el
   // unico campo con impacto security (va a `epicDiagramPath`).
+}
+
+/**
+ * Sub-DTO de un diseño UX/UI asociado a una epica.
+ *
+ * **Seguridad crítica**:
+ * 1. El `id` se usa en `epicDesignPath` como componente del path en el vault.
+ *    Charset restringido a UUID-safe `[a-fA-F0-9-]` previene path traversal.
+ * 2. `name`/`description`/`handoff` DEBEN validarse aquí. Con ValidationPipe
+ *    `whitelist: true`, cualquier campo no declarado es strippeado — si los
+ *    omitiéramos, el payload HTTP llegaría al JSONB sin esos campos (bug
+ *    funcional de integridad).
+ * 3. `MaxLength` previene DoS por payloads gigantes al vault GitHub.
+ *    `MAX_HANDOFF = 20_000` iguala el máximo histórico de campos narrativos.
+ */
+export class EpicDesignItemDto {
+  @ApiProperty({ example: '9b1deb4d-3b7d-4bad-9bdd-2b0d7b3dcb6d' })
+  @IsString()
+  @Matches(/^[a-fA-F0-9-]+$/, { message: 'design.id debe contener solo [a-fA-F0-9-]' })
+  id!: string;
+
+  @ApiProperty({ example: 'Checkout Mobile' })
+  @IsString()
+  @IsNotEmpty()
+  @MaxLength(MAX_TITLE)
+  name!: string;
+
+  @ApiPropertyOptional()
+  @IsOptional()
+  @IsString()
+  @MaxLength(MAX_DESCRIPTION)
+  description?: string;
+
+  @ApiProperty({ example: 'Fetch this design file, read its readme, and implement the relevant aspects of the design. https://api.anthropic.com/v1/design/h/…' })
+  @IsString()
+  @MaxLength(MAX_HANDOFF)
+  handoff!: string;
+
+  @ApiPropertyOptional()
+  @IsOptional()
+  @IsString()
+  @MaxLength(MAX_TITLE)
+  createdBy?: string;
+
+  @ApiPropertyOptional({ example: '2026-04-24T12:00:00Z' })
+  @IsOptional()
+  @IsDateString()
+  createdAt?: string;
+
+  @ApiPropertyOptional({ example: '2026-04-24T12:00:00Z' })
+  @IsOptional()
+  @IsDateString()
+  updatedAt?: string;
 }
 
 export class CreateEpicDto {
@@ -96,5 +153,16 @@ export class CreateEpicDto {
   @Type(() => EpicDiagramItemDto)
   diagrams?: EpicDiagramItemDto[];
   @ApiPropertyOptional() @IsOptional() @IsArray() dependencies?: any[];
+  // `ArrayMaxSize(20)` previene DoS por payloads masivos al vault GitHub:
+  // cada diseño dispara un commit secuencial, 1000 diseños podrían exhaurir
+  // el rate limit de la API de GitHub (5000 req/h autenticado).
+  @ApiPropertyOptional({ type: [EpicDesignItemDto] })
+  @IsOptional()
+  @IsArray()
+  @ArrayMaxSize(20)
+  @ValidateNested({ each: true })
+  @Type(() => EpicDesignItemDto)
+  designs?: EpicDesignItemDto[];
+  @ApiPropertyOptional() @IsOptional() @IsBoolean() designSkipped?: boolean;
   @ApiPropertyOptional() @IsOptional() @IsObject() tracker?: Record<string, any>;
 }

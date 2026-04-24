@@ -12,6 +12,7 @@
 import type {
   EpicDiagram,
   EpicDependency,
+  EpicDesign,
   QAMatrix,
   EpicQAMatrix,
   DiagramNodeGroup,
@@ -307,6 +308,48 @@ export function buildDependencyMarkdown(dep: EpicDependency): string {
     '## Resolución',
     '',
     dep.resolutionNotes ? scrubSecrets(dep.resolutionNotes) : '_Sin notas de resolución aún._',
+  ].join('\n');
+}
+
+// ─────────────────────────────────────────────────────────────────────
+//   buildDesignMarkdown
+// ─────────────────────────────────────────────────────────────────────
+
+/**
+ * Serializa un `EpicDesign` a markdown con:
+ *  - Frontmatter YAML (id, createdAt, updatedAt, createdBy)
+ *  - Título H1 con el nombre del diseño
+ *  - Sección `## Descripción` con el resumen
+ *  - Sección `## Handoff de Claude Design` — contiene la instrucción +
+ *    URL al HTML standalone exportado de Claude Design. Cuando un developer
+ *    (o Claude Code) implemente la historia, debe seguir la URL para ver
+ *    el prototipo real.
+ *
+ * Campos de texto libre se pasan por `scrubSecrets` porque el vault se
+ * sincroniza a un repo de GitHub que puede ser publico — cualquier API key
+ * o credencial que un usuario pegue en el handoff se filtraria sin scrub.
+ */
+export function buildDesignMarkdown(design: EpicDesign): string {
+  const fm = buildFrontmatter({
+    id: design.id,
+    type: 'design',
+    createdAt: design.createdAt,
+    updatedAt: design.updatedAt,
+    createdBy: design.createdBy ?? null,
+  });
+
+  return [
+    fm,
+    '',
+    `# ${scrubSecrets(design.name)}`,
+    '',
+    '## Descripción',
+    '',
+    design.description ? scrubSecrets(design.description) : '_Sin descripción._',
+    '',
+    '## Handoff de Claude Design',
+    '',
+    design.handoff ? scrubSecrets(design.handoff) : '_Sin handoff aún._',
   ].join('\n');
 }
 
