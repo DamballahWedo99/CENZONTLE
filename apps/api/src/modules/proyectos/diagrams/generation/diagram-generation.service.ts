@@ -226,17 +226,12 @@ function computeNodeDepths(
 type EpicContext = {
   id: string;
   title: string;
-  description: string;
-  qualitativeBenefits: string;
-  quantitativeBenefits: string;
-  scopeDescription: string;
-  acceptanceCriteria: string;
-  technologicalImprovements: string;
-  teamsInvolved: string;
-  impactedChannels: string;
-  impactedFlows: string;
-  impactSabreLevel: string;
-  thirdPartyDependencies: string;
+  /**
+   * Markdown único de la épica con los 9 headings obligatorios. El agente IA
+   * de diagramas extrae secciones puntuales con `splitMarkdownByH2()` o las
+   * pasa enteras al prompt — ya no consume sub-campos discretos.
+   */
+  markdown: string;
   initiative: { id: string; name: string; description: string };
 };
 
@@ -664,17 +659,7 @@ export class DiagramGenerationService {
     const epicContext: EpicContext = {
       id: epic.id,
       title: epic.title,
-      description: epic.description,
-      qualitativeBenefits: epic.qualitativeBenefits,
-      quantitativeBenefits: epic.quantitativeBenefits,
-      scopeDescription: epic.scopeDescription,
-      acceptanceCriteria: epic.acceptanceCriteria,
-      technologicalImprovements: epic.technologicalImprovements,
-      teamsInvolved: epic.teamsInvolved,
-      impactedChannels: epic.impactedChannels,
-      impactedFlows: epic.impactedFlows,
-      impactSabreLevel: epic.impactSabreLevel,
-      thirdPartyDependencies: epic.thirdPartyDependencies,
+      markdown: epic.markdown,
       initiative: {
         id: epic.initiative.id,
         name: epic.initiative.name,
@@ -1375,17 +1360,7 @@ export class DiagramGenerationService {
     const epicContext: EpicContext = {
       id: epic.id,
       title: epic.title,
-      description: epic.description,
-      qualitativeBenefits: epic.qualitativeBenefits,
-      quantitativeBenefits: epic.quantitativeBenefits,
-      scopeDescription: epic.scopeDescription,
-      acceptanceCriteria: epic.acceptanceCriteria,
-      technologicalImprovements: epic.technologicalImprovements,
-      teamsInvolved: epic.teamsInvolved,
-      impactedChannels: epic.impactedChannels,
-      impactedFlows: epic.impactedFlows,
-      impactSabreLevel: epic.impactSabreLevel,
-      thirdPartyDependencies: epic.thirdPartyDependencies,
+      markdown: epic.markdown,
       initiative: {
         id: epic.initiative.id,
         name: epic.initiative.name,
@@ -2104,38 +2079,7 @@ Por: ${diagram.generatedBy === 'ai' ? 'IA' : 'usuario'}
 título: ${epic.title}
 iniciativa: ${epic.initiative.name}
 
-descripción:
-${epic.description}
-
-alcance:
-${epic.scopeDescription || '(sin alcance detallado)'}
-
-criterios de aceptación:
-${epic.acceptanceCriteria || '(sin criterios detallados)'}
-
-mejoras tecnológicas:
-${epic.technologicalImprovements || '(sin mejoras tecnológicas detalladas)'}
-
-equipos involucrados:
-${epic.teamsInvolved || '(sin equipos detallados)'}
-
-canales impactados:
-${epic.impactedChannels || '(sin canales detallados)'}
-
-flujos impactados:
-${epic.impactedFlows || '(sin flujos detallados)'}
-
-impacto en Sabre:
-${epic.impactSabreLevel || '(sin impacto Sabre detallado)'}
-
-dependencias de terceros:
-${epic.thirdPartyDependencies || '(sin dependencias de terceros detalladas)'}
-
-beneficios cualitativos:
-${epic.qualitativeBenefits || '(sin beneficios cualitativos detallados)'}
-
-beneficios cuantitativos:
-${epic.quantitativeBenefits || '(sin beneficios cuantitativos detallados)'}
+${epic.markdown || '(épica sin markdown — usa la información del initiative)'}
 </epic>`);
 
     parts.push(`<initiative>
@@ -3424,38 +3368,7 @@ Idioma: español. Campos concisos.`;
 título: ${epic.title}
 iniciativa: ${epic.initiative.name}
 
-descripción:
-${epic.description}
-
-alcance:
-${epic.scopeDescription || '(sin alcance detallado)'}
-
-criterios de aceptación:
-${epic.acceptanceCriteria || '(sin criterios detallados)'}
-
-mejoras tecnológicas:
-${epic.technologicalImprovements || '(sin mejoras tecnológicas detalladas)'}
-
-equipos involucrados:
-${epic.teamsInvolved || '(sin equipos detallados)'}
-
-canales impactados:
-${epic.impactedChannels || '(sin canales detallados)'}
-
-flujos impactados:
-${epic.impactedFlows || '(sin flujos detallados)'}
-
-impacto en Sabre:
-${epic.impactSabreLevel || '(sin impacto Sabre detallado)'}
-
-dependencias de terceros:
-${epic.thirdPartyDependencies || '(sin dependencias de terceros detalladas)'}
-
-beneficios cualitativos:
-${epic.qualitativeBenefits || '(sin beneficios cualitativos detallados)'}
-
-beneficios cuantitativos:
-${epic.quantitativeBenefits || '(sin beneficios cuantitativos detallados)'}
+${epic.markdown || '(épica sin markdown — usa la información del initiative)'}
 </epic>`);
 
     parts.push(`<initiative>

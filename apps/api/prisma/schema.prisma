@@ -42,10 +42,14 @@ model Initiative {
   name        String
   description String
   status      InitiativeStatus @default(planning)
-  startDate   DateTime
-  targetDate  DateTime
+  // startDate y targetDate son opcionales para permitir crear iniciativas en
+  // borrador/planning sin compromiso temporal todavía. El frontend las pide
+  // cuando se transiciona el status fuera de 'planning'.
+  startDate   DateTime?
+  targetDate  DateTime?
   owner       String
   documents   Json             @default("[]")
+  tracker     Json?            // TrackerReference apuntando al Linear Initiative (o futuros providers)
 
   // Path to the markdown file in the vault (GitHub repo)
   vaultPath   String?
@@ -61,24 +65,17 @@ model Initiative {
 model Epic {
   id                        String     @id @default(uuid())
   title                     String
-  description               String
+  // Markdown único reemplaza los 12 campos discretos del shape v1.
+  // Estructura mínima dictada por el prompt al agente IA y por el placeholder
+  // del editor humano (9 headings level-2: Descripción, Beneficios cualitativos,
+  // Beneficios cuantitativos, Medición de beneficios, Alcance, Criterios de
+  // aceptación, Mejoras tecnológicas, Canales y flujos impactados,
+  // Dependencias de terceros). Migration drop fue destructiva (Opción B).
+  markdown                  String     @default("")
   status                    EpicStatus @default(draft)
   priority                  Priority   @default(medium)
   startDate                 DateTime
   targetDate                DateTime
-
-  qualitativeBenefits       String     @default("")
-  quantitativeBenefits      String     @default("")
-  benefitsMeasurement       String     @default("")
-  scopeDescription          String     @default("")
-  acceptanceCriteria        String     @default("")
-  technologicalImprovements String     @default("")
-  businessPriority          String     @default("")
-  teamsInvolved             String     @default("")
-  impactedChannels          String     @default("")
-  impactedFlows             String     @default("")
-  impactSabreLevel          String     @default("")
-  thirdPartyDependencies    String     @default("")
 
   documents                 Json       @default("[]")
   diagrams                  Json       @default("[]")
@@ -163,6 +160,10 @@ model Story {
   blockedBy      StoryDependency[] @relation("BlockedStory")
   blocks         StoryDependency[] @relation("BlockerStory")
 
+  // Dependencias técnicas (APIs, secrets, fixtures, etc.) ligadas a la historia.
+  // Reemplazan el modelo viejo Epic.dependencies + DiscoveredDependency-en-vault.
+  technicalDependencies StoryTechnicalDependency[]
+
   @@index([epicId])
   @@index([podId])
   @@index([sprintId])
@@ -192,6 +193,54 @@ model StoryDependency {
   @@index([storyId])
   @@index([blockedById])
   @@map("story_dependencies")
+}
+
+/// Dependencias técnicas a nivel historia: APIs, secrets, fixtures, servicios,
+/// equipos, etc. Reemplaza el modelo legacy de Epic.dependencies (JSONB) y de
+/// DiscoveredDependency persistida en vault. Cada dep pertenece a UNA story
+/// específica (FK con CASCADE) — las épicas agregan vía roll-up read-only.
+///
+/// Categoría unificada coherente con la categorización del frontend
+/// (EpicDependencies.tsx CATEGORY_CONFIG): secrets, apis, testing, services,
+/// teams, knowledge, other.
+///
+/// `source` preserva trazabilidad del origen (manual del user vs descubierta
+/// por agente IA durante generación de stories) sin separar tablas.
+model StoryTechnicalDependency {
+  id                String   @id @default(uuid())
+  storyId           String
+  story             Story    @relation(fields: [storyId], references: [id], onDelete: Cascade)
+
+  title             String
+  description       String   @default("")
+  category          String   // 'secrets' | 'apis' | 'testing' | 'services' | 'teams' | 'knowledge' | 'other'
+  severity          String   @default("medium") // 'critical' | 'high' | 'medium' | 'low'
+  source            String   @default("manual") // 'manual' | 'discovered'
+
+  vendor             String?
+  requiresCredential Boolean @default(false)
+  linkedSecretId     String?
+  isBlocking         Boolean @default(false)
+
+  // Para deps tipo "external" manual: nombre del ente externo (vendor/team).
+  targetExternalName String?
+  // Para deps tipo "cross-team" o "technical" manual: referencia a otro epic.
+  targetEpicId       String?
+
+  status            String    @default("identified") // 'identified' | 'in_progress' | 'resolved' | 'blocked' | 'mitigated'
+  owner             String    @default("")
+  dueDate           DateTime?
+  resolutionNotes   String    @default("")
+
+  // Markdown extenso (heredado del .md del vault para deps discovered).
+  mdContent         String?
+
+  createdAt         DateTime  @default(now())
+  updatedAt         DateTime  @updatedAt
+
+  @@index([storyId])
+  @@index([category])
+  @@map("story_technical_dependencies")
 }
 
 /// Configuración de un vault de GitHub respaldando el knowledge base de CENZONTLE.
@@ -313,6 +362,37 @@ model ExternalSecret {
   updatedAt       DateTime @updatedAt
 
   @@map("external_secrets")
+}
+
+// Configuración persistente por proveedor de tracker (Linear, Jira). Singleton
+// por `provider` a nivel de organización. La API key viaja cifrada con AES-256-GCM
+// vía CryptoService (mismo esquema que ExternalSecret/VaultConfig). El campo
+// `metadata` JSONB contiene `LinearConfig`/`JiraConfig` SIN la credencial.
+model IntegrationConfig {
+  id               String    @id @default(uuid())
+  provider         String    @unique   // 'linear' | 'jira'
+
+  apiKeyCiphertext String
+  apiKeyIv         String
+  apiKeyAuthTag    String
+  // Mask precomputado al save — evita decrypt en GET hot path. Sin esto, cada
+  // read decifra el plaintext en memoria solo para enmascararlo (CWE-316).
+  apiKeyMasked     String?
+
+  metadata         Json      // LinearConfig|JiraConfig sin apiKey/apiToken
+  fieldMapping     Json      // IntegrationFieldMapping
+
+  status           String    @default("disconnected")  // 'connected' | 'disconnected' | 'error'
+  lastTestedAt     DateTime?
+  lastSyncedAt     DateTime?
+  lastError        String?
+
+  createdBy        String?
+  lastModifiedBy   String?
+  createdAt        DateTime  @default(now())
+  updatedAt        DateTime  @updatedAt
+
+  @@map("integration_configs")
 }
 
 model ChangelogEntry {

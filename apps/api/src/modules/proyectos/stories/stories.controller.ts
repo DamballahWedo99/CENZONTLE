@@ -3,12 +3,13 @@ import {
   HttpCode, HttpStatus,
 } from '@nestjs/common';
 import { ApiTags, ApiOperation } from '@nestjs/swagger';
-import { Permission } from '@cenzontle/shared';
-import { Permissions } from '../../auth/decorators';
+import { Permission, type AuthenticatedUser } from '@cenzontle/shared';
+import { CurrentUser, Permissions } from '../../auth/decorators';
 import { StoriesService } from './stories.service';
 import { CreateStoryDto } from './dto/create-story.dto';
 import { UpdateStoryDto } from './dto/update-story.dto';
 import { StoryQueryDto } from './dto/story-query.dto';
+import { PublishToTrackerDto } from '../epics/dto/publish-to-tracker.dto';
 
 @ApiTags('Historias')
 @Controller('proyectos/historias')
@@ -50,5 +51,20 @@ export class StoriesController {
   @ApiOperation({ summary: 'Eliminar una historia' })
   remove(@Param('id') id: string) {
     return this.storiesService.remove(id);
+  }
+
+  @Post(':id/publish-to-tracker')
+  @Permissions(Permission.MANAGE_INTEGRATIONS)
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({
+    summary:
+      'Publica la historia como issue en el tracker externo. Si la épica padre tiene tracker, se cuelga como sub-issue. Requiere ser AltaGerencia o miembro de un pod asignado.',
+  })
+  publishToTracker(
+    @Param('id') id: string,
+    @Body() dto: PublishToTrackerDto,
+    @CurrentUser() user: AuthenticatedUser,
+  ) {
+    return this.storiesService.publishToTracker(id, dto.provider, user);
   }
 }

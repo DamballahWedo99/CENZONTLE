@@ -1,11 +1,12 @@
 import { Controller, Get, Post, Patch, Delete, Param, Body, Query, HttpCode, HttpStatus } from '@nestjs/common';
 import { ApiTags, ApiOperation } from '@nestjs/swagger';
-import { Permission } from '@cenzontle/shared';
-import { Permissions } from '../../auth/decorators';
+import { Permission, type AuthenticatedUser } from '@cenzontle/shared';
+import { CurrentUser, Permissions } from '../../auth/decorators';
 import { InitiativesService } from './initiatives.service';
 import { CreateInitiativeDto } from './dto/create-initiative.dto';
 import { UpdateInitiativeDto } from './dto/update-initiative.dto';
 import { InitiativeQueryDto } from './dto/initiative-query.dto';
+import { PublishToTrackerDto } from '../epics/dto/publish-to-tracker.dto';
 
 @ApiTags('Iniciativas')
 @Controller('proyectos/iniciativas')
@@ -44,5 +45,20 @@ export class InitiativesController {
   @ApiOperation({ summary: 'Eliminar una iniciativa y sus épicas' })
   remove(@Param('id') id: string) {
     return this.initiativesService.remove(id);
+  }
+
+  @Post(':id/publish-to-tracker')
+  @Permissions(Permission.MANAGE_INTEGRATIONS)
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({
+    summary:
+      'Publica la iniciativa como Linear Initiative (entidad cross-team de alto nivel). Idempotente.',
+  })
+  publishToTracker(
+    @Param('id') id: string,
+    @Body() dto: PublishToTrackerDto,
+    @CurrentUser() user: AuthenticatedUser,
+  ) {
+    return this.initiativesService.publishToTracker(id, dto.provider, user);
   }
 }

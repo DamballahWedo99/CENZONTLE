@@ -217,12 +217,9 @@ const defaultStories = [
 ];
 
 function extractText(epic: Epic): string {
-  return [
-    epic.title, epic.description, epic.scopeDescription,
-    epic.teamsInvolved, epic.impactedChannels, epic.impactedFlows,
-    epic.thirdPartyDependencies, epic.technologicalImprovements,
-    epic.impactSabreLevel, epic.acceptanceCriteria,
-  ].join(' ').toLowerCase();
+  // Post-refactor v2: el contenido narrativo vive entero en epic.markdown.
+  // Concatenamos title + markdown para el matching de keywords del template.
+  return [epic.title, epic.markdown ?? ''].join(' ').toLowerCase();
 }
 
 /** Simulates an AI agent generating user stories from an epic's definition. */
@@ -255,24 +252,14 @@ export async function generateStories(epic: Epic, podIds: string[]): Promise<Use
           sprintId: null,
           labels: story.labels,
           po: {
-            background: '',
-            objective: story.titleTemplate,
-            userStory: story.descriptionTemplate,
-            whatHowWhen: { what: '', how: '', when: '' },
-            acceptanceCriteria: story.acceptanceCriteria,
-            additionalNotes: '',
+            markdown: buildMockPOMarkdown(
+              story.titleTemplate,
+              story.descriptionTemplate,
+              story.acceptanceCriteria,
+            ),
           },
-          technical: {
-            architecture: '',
-            integrationFlow: '',
-            validations: [],
-            errorHandling: [],
-            implementationChecklist: [],
-          },
-          qa: {
-            testingStrategy: '',
-            linkedQAMatrixId: null,
-          },
+          technical: { markdown: '' },
+          qa: { markdown: '' },
           createdAt: now,
           updatedAt: now,
         });
@@ -299,24 +286,14 @@ export async function generateStories(epic: Epic, podIds: string[]): Promise<Use
         sprintId: null,
         labels: story.labels,
         po: {
-          background: '',
-          objective: story.titleTemplate,
-          userStory: story.descriptionTemplate,
-          whatHowWhen: { what: '', how: '', when: '' },
-          acceptanceCriteria: story.acceptanceCriteria,
-          additionalNotes: '',
+          markdown: buildMockPOMarkdown(
+            story.titleTemplate,
+            story.descriptionTemplate,
+            story.acceptanceCriteria,
+          ),
         },
-        technical: {
-          architecture: '',
-          integrationFlow: '',
-          validations: [],
-          errorHandling: [],
-          implementationChecklist: [],
-        },
-        qa: {
-          testingStrategy: '',
-          linkedQAMatrixId: null,
-        },
+        technical: { markdown: '' },
+        qa: { markdown: '' },
         createdAt: now,
         updatedAt: now,
       });
@@ -324,6 +301,44 @@ export async function generateStories(epic: Epic, podIds: string[]): Promise<Use
   }
 
   return matched;
+}
+
+/**
+ * Construye el markdown de la sección PO del mock con la estructura mínima
+ * canónica (mismos headings que `StoryPOTab` placeholder + el prompt al
+ * agente IA real). Aceptado como contenido de demo — el agente real lo
+ * regenera al re-correr.
+ */
+function buildMockPOMarkdown(title: string, description: string, criteria: string[]): string {
+  const ac = criteria.length > 0
+    ? criteria.map((c, i) => `${i + 1}. ${c}`).join('\n')
+    : '1.';
+  return [
+    '## Antecedentes',
+    '',
+    '## Objetivo',
+    '',
+    title,
+    '',
+    '## Historia de usuario',
+    '',
+    description,
+    '',
+    '## What/How/When',
+    '',
+    '**What:**',
+    '',
+    '**How:**',
+    '',
+    '**When:**',
+    '',
+    '## Criterios de aceptación',
+    '',
+    ac,
+    '',
+    '## Notas adicionales',
+    '',
+  ].join('\n');
 }
 
 /* ------------------------------------------------------------------ */

@@ -66,6 +66,12 @@ import { PodsSection } from './PodsSection';
 import { ExternalSecretsSection } from './ExternalSecretsSection';
 import { UserRole, AccessLevel, USER_ROLE_LABELS, DEFAULT_ROLE_ACCESS, USER_ROLE_COLORS } from '@cenzontle/shared';
 import { useAuthContext } from '@/context/AuthContext';
+import {
+  getLinearConfig,
+  saveLinearConfig,
+  testLinearConnection,
+  deleteIntegrationConfig,
+} from '@/lib/api/integrations';
 
 // ---------------------------------------------------------------------------
 // Types
@@ -398,23 +404,144 @@ function LinearSection() {
   const [teamName, setTeamName] = useState('');
   const [teamId, setTeamId] = useState('');
   const [workspaceSlug, setWorkspaceSlug] = useState('');
+  const [projectId, setProjectId] = useState('');
   const [projectName, setProjectName] = useState('');
   const [status, setStatus] = useState<ConnectionStatus>('disconnected');
   const [saving, setSaving] = useState(false);
   const [testing, setTesting] = useState(false);
+  const [loading, setLoading] = useState(true);
+  const [maskedKey, setMaskedKey] = useState<string | null>(null);
+  const [lastTestedAt, setLastTestedAt] = useState<string | null>(null);
+  // Two-step delete: primer click marca `confirmingDelete=true`, segundo
+  // ejecuta. Mismo patrón que HistoriasList.tsx — evita un dialog modal.
+  const [confirmingDelete, setConfirmingDelete] = useState(false);
+  const [disconnecting, setDisconnecting] = useState(false);
 
-  const handleTest = () => {
+  // Hidrata campos al montar — si no hay config (404), deja todo vacío.
+  useEffect(() => {
+    let cancelled = false;
+    void (async () => {
+      try {
+        const config = await getLinearConfig();
+        if (cancelled || !config) return;
+        // El endpoint /integrations/linear siempre retorna metadata como LinearConfig.
+        const linear = config.metadata as LinearConfig;
+        setTeamId(linear.teamId ?? '');
+        setTeamName(linear.teamName ?? '');
+        setWorkspaceSlug(linear.workspaceSlug ?? '');
+        setProjectId(linear.projectId ?? '');
+        setProjectName(linear.projectName ?? '');
+        setStatus(config.status);
+        setMaskedKey(config.maskedKey);
+        setLastTestedAt(config.lastTestedAt);
+      } catch (err) {
+        toast.error('No se pudo cargar la configuración Linear', {
+          description: err instanceof Error ? err.message : 'Error desconocido',
+        });
+      } finally {
+        if (!cancelled) setLoading(false);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  const handleTest = async () => {
+    if (!teamId || !workspaceSlug || !teamName) {
+      toast.error('Completa Team Name, Team ID y Workspace Slug antes de probar');
+      return;
+    }
     setTesting(true);
-    setStatus('disconnected');
-    setTimeout(() => {
-      setStatus(apiKey && teamId ? 'connected' : 'error');
+    try {
+      const result = await testLinearConnection({
+        ...(apiKey ? { apiKey } : {}),
+        teamId,
+        teamName,
+        workspaceSlug,
+        ...(projectId ? { projectId } : {}),
+        ...(projectName ? { projectName } : {}),
+      });
+      if (result.ok) {
+        setStatus('connected');
+        const detail = result.details
+          ? `${result.details.user ?? ''}${result.details.workspace ? ' @ ' + result.details.workspace : ''}`
+          : 'Conexión exitosa';
+        toast.success('Conexión Linear OK', { description: detail });
+        if (result.updatedAt) setLastTestedAt(new Date().toISOString());
+      } else {
+        setStatus('error');
+        toast.error('Falló la conexión Linear', {
+          description: result.error ?? 'Sin detalles',
+        });
+      }
+    } catch (err) {
+      setStatus('error');
+      toast.error('Error al probar conexión', {
+        description: err instanceof Error ? err.message : 'Error desconocido',
+      });
+    } finally {
       setTesting(false);
-    }, 1500);
+    }
   };
 
-  const handleSave = () => {
+  const handleSave = async () => {
+    if (!teamId || !workspaceSlug || !teamName) {
+      toast.error('Completa Team Name, Team ID y Workspace Slug');
+      return;
+    }
+    if (!maskedKey && !apiKey) {
+      toast.error('Ingresa una API Key — es obligatoria la primera vez');
+      return;
+    }
     setSaving(true);
-    setTimeout(() => setSaving(false), 1000);
+    try {
+      const saved = await saveLinearConfig({
+        ...(apiKey ? { apiKey } : {}),
+        teamId,
+        teamName,
+        workspaceSlug,
+        ...(projectId ? { projectId } : {}),
+        ...(projectName ? { projectName } : {}),
+      });
+      setMaskedKey(saved.maskedKey);
+      setStatus(saved.status);
+      setApiKey(''); // limpiar input — el plaintext ya quedó cifrado en BD
+      toast.success('Configuración Linear guardada');
+    } catch (err) {
+      toast.error('No se pudo guardar la configuración', {
+        description: err instanceof Error ? err.message : 'Error desconocido',
+      });
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const handleDisconnect = async () => {
+    setDisconnecting(true);
+    try {
+      await deleteIntegrationConfig('linear');
+      // Reset completo del form — la config ya no existe en BD.
+      setApiKey('');
+      setTeamName('');
+      setTeamId('');
+      setWorkspaceSlug('');
+      setProjectId('');
+      setProjectName('');
+      setMaskedKey(null);
+      setStatus('disconnected');
+      setLastTestedAt(null);
+      setConfirmingDelete(false);
+      toast.success('Integración Linear desconectada', {
+        description: 'La API key y la configuración fueron eliminadas.',
+      });
+    } catch (err) {
+      toast.error('No se pudo desconectar Linear', {
+        description: err instanceof Error ? err.message : 'Error desconocido',
+      });
+    } finally {
+      setDisconnecting(false);
+    }
   };
 
   return (
@@ -427,8 +554,14 @@ function LinearSection() {
           <PasswordField
             value={apiKey}
             onChange={setApiKey}
-            placeholder="lin_api_..."
+            placeholder={maskedKey ?? 'lin_api_...'}
           />
+          {maskedKey && (
+            <p className="mt-1 text-xs text-muted-foreground/70">
+              API key actual: <span className="font-mono">{maskedKey}</span>. Deja en
+              blanco para conservarla.
+            </p>
+          )}
         </LabeledInput>
 
         <div className="grid gap-4 sm:grid-cols-2">
@@ -460,24 +593,35 @@ function LinearSection() {
           />
         </LabeledInput>
 
-        <LabeledInput label="Project Name (optional)">
-          <Input
-            value={projectName}
-            onChange={(e) => setProjectName(e.target.value)}
-            placeholder="Q1 Sprint"
-            className={inputClasses}
-          />
-        </LabeledInput>
+        <div className="grid gap-4 sm:grid-cols-2">
+          <LabeledInput label="Project ID (optional)">
+            <Input
+              value={projectId}
+              onChange={(e) => setProjectId(e.target.value)}
+              placeholder="UUID"
+              className={inputClasses}
+            />
+          </LabeledInput>
+
+          <LabeledInput label="Project Name (optional)">
+            <Input
+              value={projectName}
+              onChange={(e) => setProjectName(e.target.value)}
+              placeholder="Q1 Sprint"
+              className={inputClasses}
+            />
+          </LabeledInput>
+        </div>
       </div>
 
-      <div className="mt-5 flex items-center justify-between">
-        <div className="flex items-center gap-3">
+      <div className="mt-5 flex items-center justify-between gap-3 flex-wrap">
+        <div className="flex items-center gap-3 flex-wrap">
           <StatusDot status={status} />
           <Button
             variant="ghost"
             size="sm"
             onClick={handleTest}
-            disabled={testing || !apiKey}
+            disabled={testing || loading || (!apiKey && !maskedKey)}
             className="text-muted-foreground hover:text-foreground gap-2"
           >
             {testing ? (
@@ -487,8 +631,61 @@ function LinearSection() {
             )}
             Probar conexión
           </Button>
+          {lastTestedAt && (
+            <span className="text-xs text-muted-foreground/70">
+              Validado {new Date(lastTestedAt).toLocaleString()}
+            </span>
+          )}
         </div>
-        <SaveButton saving={saving} onClick={handleSave} />
+        <div className="flex items-center gap-2">
+          {/* Desconectar — solo si hay config persistida (maskedKey existe).
+              Two-step: primer click pide confirmación inline, segundo ejecuta. */}
+          {maskedKey && (
+            confirmingDelete ? (
+              <div className="flex items-center gap-2">
+                <span className="text-xs text-destructive font-medium">
+                  ¿Eliminar configuración?
+                </span>
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  onClick={() => setConfirmingDelete(false)}
+                  disabled={disconnecting}
+                  className="text-muted-foreground hover:text-foreground"
+                >
+                  Cancelar
+                </Button>
+                <Button
+                  variant="destructive"
+                  size="sm"
+                  onClick={handleDisconnect}
+                  disabled={disconnecting}
+                  className="gap-1.5"
+                >
+                  {disconnecting ? (
+                    <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                  ) : (
+                    <Trash2 className="h-3.5 w-3.5" />
+                  )}
+                  Confirmar
+                </Button>
+              </div>
+            ) : (
+              <Button
+                variant="ghost"
+                size="sm"
+                onClick={() => setConfirmingDelete(true)}
+                disabled={loading || saving || testing}
+                className="text-muted-foreground hover:text-destructive gap-1.5"
+                title="Eliminar la API key y la configuración persistida"
+              >
+                <Trash2 className="h-3.5 w-3.5" />
+                Desconectar
+              </Button>
+            )
+          )}
+          <SaveButton saving={saving} onClick={handleSave} />
+        </div>
       </div>
     </SettingsCard>
   );
@@ -1058,7 +1255,26 @@ function VaultSection() {
         open={deleteTarget !== null}
         onOpenChange={(next) => !next && setDeleteTarget(null)}
         title={`Eliminar vault "${deleteTarget?.name ?? ''}"`}
-        description="Esta acción no se puede deshacer. El repositorio de GitHub NO será eliminado — solo se borra la referencia en CENZONTLE. El token encriptado se elimina permanentemente."
+        description={
+          // Advertencia escalada según contexto:
+          //  - Si es el último vault: las features de proyectos quedarán
+          //    deshabilitadas hasta agregar un vault nuevo.
+          //  - Si es el activo (pero hay otros): otro se activará automático.
+          //  - Si no es activo: solo se borra la referencia.
+          (() => {
+            const target = vaults.find((v) => v.id === deleteTarget?.id);
+            const isLast = vaults.length === 1;
+            const isActive = target?.isActive ?? false;
+            const base = 'Esta acción no se puede deshacer. El repositorio de GitHub NO será eliminado — solo se borra la referencia en CENZONTLE. El token encriptado se elimina permanentemente.';
+            if (isLast) {
+              return `${base}\n\n⚠️ ATENCIÓN: este es el ÚLTIMO vault configurado. Tras borrarlo, las funciones de proyectos (crear/editar iniciativas, épicas e historias) fallarán hasta que agregues un vault nuevo.`;
+            }
+            if (isActive) {
+              return `${base}\n\nEste vault está vinculado como activo. Al borrarlo, el sistema activará automáticamente otro de los vaults configurados.`;
+            }
+            return base;
+          })()
+        }
         confirmText="Eliminar vault"
         cancelText="Cancelar"
         onConfirm={confirmDelete}

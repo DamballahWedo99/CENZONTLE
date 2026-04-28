@@ -7,10 +7,14 @@ import { EpicsController } from './epics/epics.controller';
 import { EpicsService } from './epics/epics.service';
 import { StoriesController } from './stories/stories.controller';
 import { StoriesService } from './stories/stories.service';
+import { StoryDependenciesController } from './stories/dependencies/story-dependencies.controller';
+import { StoryDependenciesRollupController } from './stories/dependencies/story-dependencies-rollup.controller';
+import { StoryDependenciesService } from './stories/dependencies/story-dependencies.service';
 import { ChangelogController } from './changelog/changelog.controller';
 import { ChangelogService } from './changelog/changelog.service';
 import { AgentToolsModule } from '../factory/agent-tools/agent-tools.module';
 import { CodeRepositoriesModule } from '../code-repositories/code-repositories.module';
+import { IntegrationsModule } from '../integrations/integrations.module';
 import { EpicGenerationController } from './epics/generation/epic-generation.controller';
 import { EpicGenerationService } from './epics/generation/epic-generation.service';
 import { ProposalCacheService } from './epics/generation/proposal-cache.service';
@@ -24,7 +28,7 @@ import { VaultMigrationController } from './migration/vault-migration.controller
 import { VaultMigrationService } from './migration/vault-migration.service';
 
 @Module({
-  imports: [AgentToolsModule, CodeRepositoriesModule],
+  imports: [AgentToolsModule, CodeRepositoriesModule, IntegrationsModule],
   controllers: [
     PodsController,
     EpicGenerationController, // Must register before InitiativesController (same prefix, more specific route)
@@ -32,8 +36,10 @@ import { VaultMigrationService } from './migration/vault-migration.service';
     DiagramGenerationController, // Must register before EpicsController (prefix /proyectos/diagrams-generation vs /proyectos/epicas)
     VaultMigrationController, // Admin endpoint: POST /admin/vault/migration/run
     InitiativesController,
+    StoryDependenciesRollupController, // Must register before EpicsController (prefix /proyectos/epicas/:epicId/story-dependencies vs /proyectos/epicas/:id)
     EpicsController,
     StoriesController,
+    StoryDependenciesController,
     ChangelogController,
   ],
   providers: [
@@ -45,11 +51,12 @@ import { VaultMigrationService } from './migration/vault-migration.service';
     DiagramGenerationService,
     DiagramCacheService,
     StoriesService,
+    StoryDependenciesService,
     StoryGenerationService,
     StoryProposalCacheService,
     VaultMigrationService,
     ChangelogService,
   ],
-  exports: [PodsService, InitiativesService, EpicsService, StoriesService, ChangelogService],
+  exports: [PodsService, InitiativesService, EpicsService, StoriesService, StoryDependenciesService, ChangelogService],
 })
 export class ProyectosModule {}

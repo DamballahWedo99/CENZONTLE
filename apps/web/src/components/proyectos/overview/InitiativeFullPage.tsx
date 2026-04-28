@@ -48,7 +48,6 @@ import { PodBadge } from '../shared/PodBadge';
 import { ProgressBar } from '../shared/ProgressBar';
 import { StoryPointsBadge } from '../shared/StoryPointsBadge';
 import { DownloadMenu } from '../shared/DownloadMenu';
-import { InitiativeEconomicAnalysis } from './InitiativeEconomicAnalysis';
 import { InitiativeDocuments } from './InitiativeDocuments';
 import { streamEpicProposals } from '@/lib/epic-agent';
 import { InlineEpicCreator } from './InlineEpicCreator';
@@ -58,6 +57,9 @@ import { EpicProposalList } from './EpicProposalList';
 import type { ProposedEpic, EpicGenerationEvent, Epic } from '@cenzontle/shared';
 import { createEpic as apiCreateEpic } from '@/lib/api/epics';
 import { getCachedSession, invalidateCache, removeCachedProposal } from '@/lib/api/epic-generation';
+import { publishInitiativeToTracker } from '@/lib/api/integrations';
+import { ApiError } from '@/lib/api/client';
+import type { TrackerReference } from '@cenzontle/shared';
 import {
   Calendar,
   Pencil,
@@ -77,6 +79,7 @@ import {
   Trash2,
   Download,
   ExternalLink,
+  Upload,
   FileType,
   FileSpreadsheet,
   FileCode,
@@ -157,6 +160,48 @@ function InitiativeFullPageInner({ initiativeId }: InitiativeFullPageProps) {
   // Edit + delete state
   const [isEditing, setIsEditing] = useState(false);
   const [deleteOpen, setDeleteOpen] = useState(false);
+  const [publishingTracker, setPublishingTracker] = useState(false);
+
+  const handlePublishToLinear = async () => {
+    if (!initiative) return;
+    setPublishingTracker(true);
+    try {
+      const result = await publishInitiativeToTracker(initiative.id, 'linear');
+      dispatch({
+        type: 'UPDATE_INITIATIVE',
+        payload: { id: initiative.id, changes: { tracker: result.tracker } },
+      });
+      if (result.alreadyPublished) {
+        toast.info('La iniciativa ya estaba publicada en Linear', {
+          description: 'Initiative existente — abrir',
+          action: {
+            label: 'Abrir',
+            onClick: () => window.open(result.tracker.externalUrl, '_blank'),
+          },
+        });
+      } else {
+        toast.success('Iniciativa publicada como Linear Initiative', {
+          action: {
+            label: 'Abrir Linear',
+            onClick: () => window.open(result.tracker.externalUrl, '_blank'),
+          },
+        });
+      }
+    } catch (err: unknown) {
+      const message = err instanceof Error ? err.message : 'Error desconocido';
+      if (err instanceof ApiError && err.status === 409) {
+        toast.info('Otra publicación en curso', {
+          description: 'Espera unos segundos y reintenta.',
+        });
+      } else {
+        toast.error('No se pudo publicar la iniciativa en Linear', {
+          description: message,
+        });
+      }
+    } finally {
+      setPublishingTracker(false);
+    }
+  };
   const [editName, setEditName] = useState('');
   const [editDescription, setEditDescription] = useState('');
   const [editStatus, setEditStatus] = useState<InitiativeStatus>(InitiativeStatus.Planning);
@@ -244,20 +289,11 @@ function InitiativeFullPageInner({ initiativeId }: InitiativeFullPageProps) {
     setExportingEpicFormat(format);
     try {
       const api = await getEpic(epicId, true);
+      // Post-refactor v2: el contenido entero vive en `markdown`. El backend
+      // hace el merge vault-vs-PG en `findOne(includeContent=true)`.
       const epic: Epic = {
         ...baseEpic,
-        qualitativeBenefits: api.qualitativeBenefits ?? baseEpic.qualitativeBenefits,
-        quantitativeBenefits: api.quantitativeBenefits ?? baseEpic.quantitativeBenefits,
-        benefitsMeasurement: api.benefitsMeasurement ?? baseEpic.benefitsMeasurement,
-        scopeDescription: api.scopeDescription ?? baseEpic.scopeDescription,
-        acceptanceCriteria: api.acceptanceCriteria ?? baseEpic.acceptanceCriteria,
-        technologicalImprovements: api.technologicalImprovements ?? baseEpic.technologicalImprovements,
-        businessPriority: api.businessPriority ?? baseEpic.businessPriority,
-        teamsInvolved: api.teamsInvolved ?? baseEpic.teamsInvolved,
-        impactedChannels: api.impactedChannels ?? baseEpic.impactedChannels,
-        impactedFlows: api.impactedFlows ?? baseEpic.impactedFlows,
-        impactSabreLevel: api.impactSabreLevel ?? baseEpic.impactSabreLevel,
-        thirdPartyDependencies: api.thirdPartyDependencies ?? baseEpic.thirdPartyDependencies,
+        markdown: api.markdown ?? baseEpic.markdown,
       };
       const initiativeForEpic = state.initiatives.find((i) => i.id === epic.initiativeId) ?? null;
       const filename = buildFilename({ kind: 'epic', epic }, format);
@@ -301,8 +337,10 @@ function InitiativeFullPageInner({ initiativeId }: InitiativeFullPageProps) {
     setEditDescription(initiative.description);
     setEditStatus(initiative.status);
     setEditOwner(initiative.owner);
-    setEditStartDate(initiative.startDate);
-    setEditTargetDate(initiative.targetDate);
+    // Fechas opcionales — fallback a string vacío si la iniciativa está en
+    // planning sin compromiso temporal todavía.
+    setEditStartDate(initiative.startDate ?? '');
+    setEditTargetDate(initiative.targetDate ?? '');
     setIsEditing(true);
   };
 
@@ -388,25 +426,13 @@ function InitiativeFullPageInner({ initiativeId }: InitiativeFullPageProps) {
     try {
       const created = await apiCreateEpic({
         title: proposal.title,
-        description: proposal.description,
+        markdown: proposal.markdown,
         status: proposal.status,
         priority: proposal.priority,
         initiativeId: proposal.initiativeId,
         podIds: proposal.podIds,
         startDate: proposal.startDate,
         targetDate: proposal.targetDate,
-        qualitativeBenefits: proposal.qualitativeBenefits,
-        quantitativeBenefits: proposal.quantitativeBenefits,
-        benefitsMeasurement: proposal.benefitsMeasurement,
-        scopeDescription: proposal.scopeDescription,
-        acceptanceCriteria: proposal.acceptanceCriteria,
-        technologicalImprovements: proposal.technologicalImprovements,
-        businessPriority: proposal.businessPriority,
-        teamsInvolved: proposal.teamsInvolved,
-        impactedChannels: proposal.impactedChannels,
-        impactedFlows: proposal.impactedFlows,
-        impactSabreLevel: proposal.impactSabreLevel,
-        thirdPartyDependencies: proposal.thirdPartyDependencies,
       });
 
       dispatch({
@@ -505,7 +531,7 @@ function InitiativeFullPageInner({ initiativeId }: InitiativeFullPageProps) {
   return (
     <div className="h-full min-h-0">
       <div className="h-full min-h-0 overflow-y-auto">
-        <div className="mx-auto px-6 py-8 max-w-6xl">
+        <div className="mx-auto px-6 py-8 max-w-7xl">
           {/* ── Header ── */}
           <div className="mb-8">
             <div className="flex items-start gap-2">
@@ -523,6 +549,34 @@ function InitiativeFullPageInner({ initiativeId }: InitiativeFullPageProps) {
                 {!isEditing ? (
                   <>
                     <DownloadMenu entity={{ kind: 'initiative', initiative }} />
+                    {(initiative.tracker as TrackerReference | undefined)?.externalUrl ? (
+                      <a
+                        href={(initiative.tracker as TrackerReference).externalUrl}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="inline-flex items-center gap-1.5 h-9 px-3 rounded-md text-xs font-medium border border-border text-muted-foreground hover:text-foreground hover:bg-accent dark:hover:bg-accent/50 transition-colors"
+                        title="Abrir Initiative en Linear"
+                      >
+                        <ExternalLink className="h-3.5 w-3.5" />
+                        Linear
+                      </a>
+                    ) : (
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        onClick={handlePublishToLinear}
+                        disabled={publishingTracker}
+                        className="text-muted-foreground hover:text-foreground gap-1.5"
+                        title="Publicar como Linear Initiative"
+                      >
+                        {publishingTracker ? (
+                          <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                        ) : (
+                          <Upload className="h-3.5 w-3.5" />
+                        )}
+                        Subir a Linear
+                      </Button>
+                    )}
                     <Button variant="ghost" size="icon" onClick={handleStartEdit} className="text-muted-foreground hover:text-foreground">
                       <Pencil className="h-4 w-4" />
                     </Button>
@@ -580,7 +634,9 @@ function InitiativeFullPageInner({ initiativeId }: InitiativeFullPageProps) {
                   </span>
                   <span className="text-sm text-muted-foreground flex items-center gap-1.5">
                     <Calendar className="h-3.5 w-3.5" />
-                    {formatShortDate(initiative.startDate)} — {formatShortDate(initiative.targetDate)}
+                    {initiative.startDate && initiative.targetDate
+                      ? `${formatShortDate(initiative.startDate)} — ${formatShortDate(initiative.targetDate)}`
+                      : 'Sin fechas (borrador)'}
                   </span>
                   <span className="text-sm text-muted-foreground flex items-center gap-1.5">
                     <User className="h-3.5 w-3.5" />
@@ -618,10 +674,6 @@ function InitiativeFullPageInner({ initiativeId }: InitiativeFullPageProps) {
               <TabsTrigger value="resumen" className="gap-1.5 rounded-none border-b-2 border-transparent data-[state=active]:border-foreground data-[state=active]:shadow-none">
                 <BarChart3 className="h-3.5 w-3.5" />
                 Resumen
-              </TabsTrigger>
-              <TabsTrigger value="economico" className="gap-1.5 rounded-none border-b-2 border-transparent data-[state=active]:border-foreground data-[state=active]:shadow-none">
-                <BriefcaseBusiness className="h-3.5 w-3.5" />
-                Análisis Ejecutivo
               </TabsTrigger>
               <TabsTrigger value="documentos" className="gap-1.5 rounded-none border-b-2 border-transparent data-[state=active]:border-foreground data-[state=active]:shadow-none">
                 <Paperclip className="h-3.5 w-3.5" />
@@ -669,11 +721,15 @@ function InitiativeFullPageInner({ initiativeId }: InitiativeFullPageProps) {
                   </div>
                   <div>
                     <p className="text-xs text-muted-foreground mb-1">Fecha Inicio</p>
-                    <p className="text-sm font-medium">{formatShortDate(initiative.startDate)}</p>
+                    <p className="text-sm font-medium">
+                      {initiative.startDate ? formatShortDate(initiative.startDate) : '—'}
+                    </p>
                   </div>
                   <div>
                     <p className="text-xs text-muted-foreground mb-1">Fecha Objetivo</p>
-                    <p className="text-sm font-medium">{formatShortDate(initiative.targetDate)}</p>
+                    <p className="text-sm font-medium">
+                      {initiative.targetDate ? formatShortDate(initiative.targetDate) : '—'}
+                    </p>
                   </div>
                 </div>
               </section>
@@ -843,24 +899,12 @@ function InitiativeFullPageInner({ initiativeId }: InitiativeFullPageProps) {
                   existingEpicCount={state.epics.length}
                   initialData={editingProposal ? {
                     title: editingProposal.title,
-                    description: editingProposal.description,
+                    markdown: editingProposal.markdown,
                     priority: editingProposal.priority,
                     status: editingProposal.status,
                     selectedPodIds: editingProposal.podIds,
                     startDate: editingProposal.startDate,
                     targetDate: editingProposal.targetDate,
-                    qualitativeBenefits: editingProposal.qualitativeBenefits,
-                    quantitativeBenefits: editingProposal.quantitativeBenefits,
-                    benefitsMeasurement: editingProposal.benefitsMeasurement,
-                    scopeDescription: editingProposal.scopeDescription,
-                    acceptanceCriteria: editingProposal.acceptanceCriteria,
-                    technologicalImprovements: editingProposal.technologicalImprovements,
-                    businessPriority: editingProposal.businessPriority,
-                    teamsInvolved: editingProposal.teamsInvolved,
-                    impactedChannels: editingProposal.impactedChannels,
-                    impactedFlows: editingProposal.impactedFlows,
-                    impactSabreLevel: editingProposal.impactSabreLevel,
-                    thirdPartyDependencies: editingProposal.thirdPartyDependencies,
                   } : undefined}
                   onCreateEpic={(epic) => {
                     dispatch({ type: 'CREATE_EPIC', payload: epic });
@@ -983,18 +1027,6 @@ function InitiativeFullPageInner({ initiativeId }: InitiativeFullPageProps) {
                   <p className="text-sm text-muted-foreground">Sin épicas</p>
                 )}
               </section>
-            </TabsContent>
-
-            {/* ── Tab: Análisis Económico ── */}
-            <TabsContent value="economico" className="mt-8">
-              <InitiativeEconomicAnalysis
-                initiative={initiative}
-                epics={epics}
-                stories={stories}
-                doneStories={doneStories}
-                totalPoints={totalPoints}
-                donePoints={donePoints}
-              />
             </TabsContent>
 
             {/* ── Tab: Documentos ── */}

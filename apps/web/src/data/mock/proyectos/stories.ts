@@ -1,32 +1,73 @@
-import { UserStory, StoryStatus, StoryPOFields, StoryTechnicalFields, StoryQAFields } from '@cenzontle/shared';
+import { UserStory, StoryStatus } from '@cenzontle/shared';
 
 type LegacyStory = Omit<UserStory, 'po' | 'technical' | 'qa'> & {
   acceptanceCriteria?: string[];
 };
 
+/**
+ * Convierte el shape legacy del mock (acceptanceCriteria flat + description)
+ * al shape v2 actual: 3 strings markdown por sección con headings obligatorios.
+ *
+ * El criterio de aceptación se preserva como lista numerada bajo
+ * `## Criterios de aceptación`. Las demás secciones quedan con sus headings
+ * canónicos vacíos para que el user/IA las complete después.
+ */
 function migrateStory(story: LegacyStory): UserStory {
   const { acceptanceCriteria = [], ...rest } = story;
+  const ac = acceptanceCriteria.map((c, i) => `${i + 1}. ${c}`).join('\n');
+  const poMarkdown = [
+    '## Antecedentes',
+    '',
+    '## Objetivo',
+    '',
+    '## Historia de usuario',
+    '',
+    story.description,
+    '',
+    '## What/How/When',
+    '',
+    '**What:**',
+    '',
+    '**How:**',
+    '',
+    '**When:**',
+    '',
+    '## Criterios de aceptación',
+    '',
+    ac || '1.',
+    '',
+    '## Notas adicionales',
+    '',
+  ].join('\n');
+  const technicalMarkdown = [
+    '## Arquitectura y componentes',
+    '',
+    '## Flujo de integración',
+    '',
+    '## Validaciones',
+    '',
+    '## Manejo de errores',
+    '',
+    '## Contrato',
+    '',
+  ].join('\n');
+  const qaMarkdown = [
+    '## Pruebas unitarias',
+    '',
+    '## Happy path',
+    '',
+    '## Edge cases',
+    '',
+    '## Mocks',
+    '',
+    '## Herramientas',
+    '',
+  ].join('\n');
   return {
     ...rest,
-    po: {
-      background: '',
-      objective: '',
-      userStory: story.description,
-      whatHowWhen: { what: '', how: '', when: '' },
-      acceptanceCriteria,
-      additionalNotes: '',
-    },
-    technical: {
-      architecture: '',
-      integrationFlow: '',
-      validations: [],
-      errorHandling: [],
-      implementationChecklist: [],
-    },
-    qa: {
-      testingStrategy: '',
-      linkedQAMatrixId: null,
-    },
+    po: { markdown: poMarkdown },
+    technical: { markdown: technicalMarkdown },
+    qa: { markdown: qaMarkdown },
   };
 }
 

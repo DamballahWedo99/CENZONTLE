@@ -1,11 +1,12 @@
 import { Controller, Get, Post, Patch, Delete, Param, Body, Query, HttpCode, HttpStatus } from '@nestjs/common';
 import { ApiTags, ApiOperation } from '@nestjs/swagger';
-import { Permission } from '@cenzontle/shared';
-import { Permissions } from '../../auth/decorators';
+import { Permission, type AuthenticatedUser } from '@cenzontle/shared';
+import { CurrentUser, Permissions } from '../../auth/decorators';
 import { EpicsService } from './epics.service';
 import { CreateEpicDto } from './dto/create-epic.dto';
 import { UpdateEpicDto } from './dto/update-epic.dto';
 import { EpicQueryDto } from './dto/epic-query.dto';
+import { PublishToTrackerDto } from './dto/publish-to-tracker.dto';
 
 @ApiTags('Épicas')
 @Controller('proyectos/epicas')
@@ -62,5 +63,20 @@ export class EpicsController {
   @ApiOperation({ summary: 'Eliminar una épica' })
   remove(@Param('id') id: string) {
     return this.epicsService.remove(id);
+  }
+
+  @Post(':id/publish-to-tracker')
+  @Permissions(Permission.MANAGE_INTEGRATIONS)
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({
+    summary:
+      'Publica la épica + sus historias como issues en el tracker externo (Linear). Idempotente. Requiere ser AltaGerencia o miembro de un pod asignado.',
+  })
+  publishToTracker(
+    @Param('id') id: string,
+    @Body() dto: PublishToTrackerDto,
+    @CurrentUser() user: AuthenticatedUser,
+  ) {
+    return this.epicsService.publishToTracker(id, dto.provider, user);
   }
 }

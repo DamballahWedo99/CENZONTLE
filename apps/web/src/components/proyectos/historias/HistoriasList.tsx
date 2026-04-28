@@ -1,10 +1,10 @@
 'use client';
 
-import { useState, useMemo, useCallback } from 'react';
+import { useState, useMemo, useCallback, useRef, useEffect } from 'react';
 import { useRouter } from 'next/navigation';
 import { toast } from 'sonner';
 import { useProyectos } from '@/context/ProyectosContext';
-import { updateStory as apiUpdateStory, deleteStory as apiDeleteStory } from '@/lib/api/stories';
+import { updateStory as apiUpdateStory, deleteStory as apiDeleteStory, getStory as apiGetStory } from '@/lib/api/stories';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import {
@@ -18,7 +18,6 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { StatusBadge } from '../shared/StatusBadge';
 import { StoryPointsBadge } from '../shared/StoryPointsBadge';
 import { PodBadge } from '../shared/PodBadge';
-import { DownloadMenu } from '../shared/DownloadMenu';
 import {
   ArrowUpDown,
   ChevronRight,
@@ -40,6 +39,10 @@ import type {
   StoryQAFields,
 } from '@cenzontle/shared';
 import { StoryStatus as StoryStatusEnum } from '@cenzontle/shared';
+import { StoryPOTab } from './editor/StoryPOTab';
+import { StoryTechnicalTab } from './editor/StoryTechnicalTab';
+import { StoryQATab } from './editor/StoryQATab';
+import { ReadOnlyMarkdown } from '@/components/shared/tiptap/ReadOnlyMarkdown';
 
 // --- Labels ---
 
@@ -71,106 +74,9 @@ interface StoryFormData {
   qa: StoryQAFields;
 }
 
-const emptyPO: StoryPOFields = {
-  background: '',
-  objective: '',
-  userStory: '',
-  whatHowWhen: { what: '', how: '', when: '' },
-  acceptanceCriteria: [''],
-  additionalNotes: '',
-};
-
-const emptyTechnical: StoryTechnicalFields = {
-  architecture: '',
-  integrationFlow: '',
-  validations: [''],
-  errorHandling: [''],
-  implementationChecklist: [''],
-};
-
-const emptyQA: StoryQAFields = {
-  testingStrategy: '',
-  linkedQAMatrixId: null,
-};
-
-const inputCls =
-  'w-full rounded-lg border border-input bg-transparent px-3 py-2 text-sm shadow-xs focus-visible:border-ring focus-visible:ring-ring/50 focus-visible:ring-[3px] outline-none resize-none dark:bg-input/30';
-
-// --- Helpers ---
-
-function ListEditor({
-  items,
-  onChange,
-  placeholder,
-  label,
-}: {
-  items: string[];
-  onChange: (items: string[]) => void;
-  placeholder: string;
-  label: string;
-}) {
-  return (
-    <div className="space-y-1.5">
-      {items.map((item, idx) => (
-        <div key={idx} className="flex items-center gap-1.5 group">
-          <span className="text-[10px] text-muted-foreground font-mono w-5 text-right shrink-0">
-            {idx + 1}.
-          </span>
-          <Input
-            value={item}
-            onChange={(e) => {
-              const next = [...items];
-              next[idx] = e.target.value;
-              onChange(next);
-            }}
-            placeholder={placeholder}
-            className="text-sm flex-1"
-          />
-          {items.length > 1 && (
-            <Button
-              type="button"
-              size="sm"
-              variant="ghost"
-              onClick={() => onChange(items.filter((_, i) => i !== idx))}
-              className="h-7 w-7 p-0 text-muted-foreground hover:text-red-500 opacity-0 group-hover:opacity-100 transition-opacity"
-            >
-              <X className="h-3 w-3" />
-            </Button>
-          )}
-        </div>
-      ))}
-      <Button
-        type="button"
-        size="sm"
-        variant="ghost"
-        onClick={() => onChange([...items, ''])}
-        className="h-7 gap-1 text-xs text-muted-foreground hover:text-foreground"
-      >
-        <Plus className="h-3 w-3" />
-        {label}
-      </Button>
-    </div>
-  );
-}
-
-function ReadOnlyList({ items, emptyText }: { items: string[]; emptyText?: string }) {
-  const filtered = items.filter((i) => i.trim());
-  if (filtered.length === 0) {
-    return <p className="text-xs text-muted-foreground italic">{emptyText ?? 'Sin definir'}</p>;
-  }
-  return (
-    <div className="space-y-0.5">
-      {filtered.map((item, i) => (
-        <div key={i} className="flex items-start gap-1.5 text-xs">
-          <span className="text-muted-foreground font-mono w-4 text-right shrink-0 mt-0.5">
-            {i + 1}.
-          </span>
-          <span className="text-foreground/80">{item}</span>
-        </div>
-      ))}
-    </div>
-  );
-}
+const emptyPO: StoryPOFields = { markdown: '' };
+const emptyTechnical: StoryTechnicalFields = { markdown: '' };
+const emptyQA: StoryQAFields = { markdown: '' };
 
 // --- Component ---
 
@@ -196,6 +102,14 @@ export function HistoriasList() {
   const [viewTab, setViewTab] = useState<string>('po');
   const [newLabel, setNewLabel] = useState('');
   const [deleteConfirmId, setDeleteConfirmId] = useState<string | null>(null);
+  // ID de la story cuyo vault content está cargando — bloquea Save mientras
+  // tanto y muestra estado loading. Null = nada cargando.
+  const [loadingVault, setLoadingVault] = useState<string | null>(null);
+  // Ref espejo de editingStoryId para usar en async callbacks sin stale closure.
+  const editingStoryIdRef = useRef<string | null>(null);
+  useEffect(() => {
+    editingStoryIdRef.current = editingStoryId;
+  }, [editingStoryId]);
 
   // All users can edit/delete stories (permissions enforced server-side via Auth0 roles)
   const canEditStory = useCallback(
@@ -233,49 +147,48 @@ export function HistoriasList() {
     });
   }, [filteredStories, sortField, sortDir]);
 
-  // --- Form updaters ---
-
-  const updatePO = useCallback((changes: Partial<StoryPOFields>) => {
-    setFormData((prev) => ({ ...prev, po: { ...prev.po, ...changes } }));
-  }, []);
-
-  const updateTechnical = useCallback((changes: Partial<StoryTechnicalFields>) => {
-    setFormData((prev) => ({ ...prev, technical: { ...prev.technical, ...changes } }));
-  }, []);
-
-  const updateQA = useCallback((changes: Partial<StoryQAFields>) => {
-    setFormData((prev) => ({ ...prev, qa: { ...prev.qa, ...changes } }));
-  }, []);
-
   // --- Edit ---
 
-  const startEditing = useCallback((story: UserStory) => {
+  // Guard para race conditions: si el user abre story A, espera fetch, abre
+  // story B antes de que termine A, el callback tardío de A NO debe pisar
+  // el formData de B. Comparamos contra `editingStoryId` actual al resolver.
+  const startEditing = useCallback(async (story: UserStory) => {
     setEditingStoryId(story.id);
     setExpandedStoryId(story.id);
     setFormTab('po');
+    // Setea metadata inmediatamente con markdown vacío (placeholder hasta el
+    // fetch). El editor inline está deshabilitado hasta que cargue.
     setFormData({
       title: story.title,
       storyPoints: story.storyPoints,
       status: story.status,
       podId: story.podId,
       labels: [...story.labels],
-      po: {
-        ...story.po,
-        acceptanceCriteria:
-          story.po.acceptanceCriteria.length > 0 ? [...story.po.acceptanceCriteria] : [''],
-      },
-      technical: {
-        ...story.technical,
-        validations: story.technical.validations.length > 0 ? [...story.technical.validations] : [''],
-        errorHandling:
-          story.technical.errorHandling.length > 0 ? [...story.technical.errorHandling] : [''],
-        implementationChecklist:
-          story.technical.implementationChecklist.length > 0
-            ? [...story.technical.implementationChecklist]
-            : [''],
-      },
-      qa: { ...story.qa },
+      po: { markdown: '' },
+      technical: { markdown: '' },
+      qa: { markdown: '' },
     });
+    setLoadingVault(story.id);
+    try {
+      // CRÍTICO: el list endpoint NO retorna contenido vault. Sin este fetch
+      // saveEditing sobreescribiría el vault con strings vacíos.
+      const data = await apiGetStory(story.id, true);
+      // Race-condition guard: si el user cambió de story mientras cargaba.
+      if (editingStoryIdRef.current !== story.id) return;
+      if (data.content) {
+        setFormData((prev) => ({
+          ...prev,
+          po: { markdown: data.content?.po?.markdown ?? '' },
+          technical: { markdown: data.content?.technical?.markdown ?? '' },
+          qa: { markdown: data.content?.qa?.markdown ?? '' },
+        }));
+      }
+    } catch (err) {
+      console.error('[HistoriasList] failed to load vault content', err);
+      toast.error('No se pudo cargar el contenido completo de la historia');
+    } finally {
+      if (editingStoryIdRef.current === story.id) setLoadingVault(null);
+    }
   }, []);
 
   const cancelEditing = useCallback(() => {
@@ -285,32 +198,6 @@ export function HistoriasList() {
   const saveEditing = useCallback(async () => {
     if (!editingStoryId || !formData.title.trim()) return;
 
-    const cleanedPO = {
-      ...formData.po,
-      acceptanceCriteria: formData.po.acceptanceCriteria.filter((c: string) => c.trim()),
-    };
-    const cleanedTechnical = {
-      ...formData.technical,
-      validations: formData.technical.validations.filter((v: string) => v.trim()),
-      errorHandling: formData.technical.errorHandling.filter((e: string) => e.trim()),
-      implementationChecklist: formData.technical.implementationChecklist.filter((c: string) => c.trim()),
-    };
-
-    const poForApi = {
-      background: cleanedPO.background,
-      objective: cleanedPO.objective,
-      userStory: cleanedPO.userStory,
-      whatHowWhen: typeof (cleanedPO as any).whatHowWhen === 'string'
-        ? (cleanedPO as any).whatHowWhen
-        : [
-            (cleanedPO as any).whatHowWhen?.what,
-            (cleanedPO as any).whatHowWhen?.how,
-            (cleanedPO as any).whatHowWhen?.when,
-          ].filter(Boolean).join(' / '),
-      acceptanceCriteria: cleanedPO.acceptanceCriteria.join('\n'),
-      additionalNotes: cleanedPO.additionalNotes,
-    };
-
     try {
       await apiUpdateStory(editingStoryId, {
         title: formData.title.trim(),
@@ -318,12 +205,9 @@ export function HistoriasList() {
         storyPoints: formData.storyPoints,
         podId: formData.podId,
         labels: formData.labels,
-        po: poForApi,
-        technical: cleanedTechnical,
-        qa: {
-          testingStrategy: formData.qa.testingStrategy,
-          linkedQAMatrixId: formData.qa.linkedQAMatrixId ?? undefined,
-        },
+        po: { markdown: formData.po.markdown ?? '' },
+        technical: { markdown: formData.technical.markdown ?? '' },
+        qa: { markdown: formData.qa.markdown ?? '' },
       });
 
       dispatch({
@@ -332,13 +216,12 @@ export function HistoriasList() {
           id: editingStoryId,
           changes: {
             title: formData.title.trim(),
-            description: formData.po.userStory.trim(),
             storyPoints: formData.storyPoints,
             status: formData.status,
             podId: formData.podId,
             labels: formData.labels,
-            po: cleanedPO,
-            technical: cleanedTechnical,
+            po: formData.po,
+            technical: formData.technical,
             qa: formData.qa,
           },
         },
@@ -449,170 +332,6 @@ export function HistoriasList() {
     </div>
   );
 
-  const renderPOTab = () => (
-    <div className="space-y-4">
-      <div className="space-y-1.5">
-        <label className="text-xs font-medium text-muted-foreground">Antecedentes</label>
-        <textarea
-          value={formData.po.background}
-          onChange={(e) => updatePO({ background: e.target.value })}
-          placeholder="Contexto e información previa relevante para esta historia..."
-          rows={2}
-          className={inputCls}
-        />
-      </div>
-      <div className="space-y-1.5">
-        <label className="text-xs font-medium text-muted-foreground">Objetivo</label>
-        <textarea
-          value={formData.po.objective}
-          onChange={(e) => updatePO({ objective: e.target.value })}
-          placeholder="¿Qué se busca lograr con esta historia?"
-          rows={2}
-          className={inputCls}
-        />
-      </div>
-      <div className="space-y-1.5">
-        <label className="text-xs font-medium text-muted-foreground">Historia de Usuario</label>
-        <textarea
-          value={formData.po.userStory}
-          onChange={(e) => updatePO({ userStory: e.target.value })}
-          placeholder="Como [tipo de usuario], quiero [acción] para [beneficio]..."
-          rows={2}
-          className={inputCls}
-        />
-      </div>
-      <div className="space-y-1.5">
-        <label className="text-xs font-medium text-muted-foreground">What / How / When</label>
-        <div className="grid grid-cols-3 gap-2">
-          <Input
-            value={formData.po.whatHowWhen.what}
-            onChange={(e) =>
-              updatePO({ whatHowWhen: { ...formData.po.whatHowWhen, what: e.target.value } })
-            }
-            placeholder="What — ¿Qué?"
-            className="text-sm"
-          />
-          <Input
-            value={formData.po.whatHowWhen.how}
-            onChange={(e) =>
-              updatePO({ whatHowWhen: { ...formData.po.whatHowWhen, how: e.target.value } })
-            }
-            placeholder="How — ¿Cómo?"
-            className="text-sm"
-          />
-          <Input
-            value={formData.po.whatHowWhen.when}
-            onChange={(e) =>
-              updatePO({ whatHowWhen: { ...formData.po.whatHowWhen, when: e.target.value } })
-            }
-            placeholder="When — ¿Cuándo?"
-            className="text-sm"
-          />
-        </div>
-      </div>
-      <div className="space-y-1.5">
-        <label className="text-xs font-medium text-muted-foreground">Criterios de Aceptación</label>
-        <ListEditor
-          items={formData.po.acceptanceCriteria}
-          onChange={(items) => updatePO({ acceptanceCriteria: items })}
-          placeholder="Dado que... Cuando... Entonces..."
-          label="Agregar criterio"
-        />
-      </div>
-      <div className="space-y-1.5">
-        <label className="text-xs font-medium text-muted-foreground">
-          Notas Adicionales <span className="font-normal">(opcional)</span>
-        </label>
-        <textarea
-          value={formData.po.additionalNotes}
-          onChange={(e) => updatePO({ additionalNotes: e.target.value })}
-          placeholder="Dependencias, restricciones, consideraciones extra..."
-          rows={2}
-          className={inputCls}
-        />
-      </div>
-    </div>
-  );
-
-  const renderTechnicalTab = () => (
-    <div className="space-y-4">
-      <div className="space-y-1.5">
-        <label className="text-xs font-medium text-muted-foreground">Arquitectura y Componentes</label>
-        <textarea
-          value={formData.technical.architecture}
-          onChange={(e) => updateTechnical({ architecture: e.target.value })}
-          placeholder="Componentes involucrados, servicios, bases de datos..."
-          rows={3}
-          className={inputCls}
-        />
-      </div>
-      <div className="space-y-1.5">
-        <label className="text-xs font-medium text-muted-foreground">
-          Flujo de Integración Propuesto
-        </label>
-        <textarea
-          value={formData.technical.integrationFlow}
-          onChange={(e) => updateTechnical({ integrationFlow: e.target.value })}
-          placeholder="Secuencia de llamadas, APIs involucradas, flujo de datos..."
-          rows={3}
-          className={inputCls}
-        />
-      </div>
-      <div className="space-y-1.5">
-        <label className="text-xs font-medium text-muted-foreground">Validaciones Requeridas</label>
-        <ListEditor
-          items={formData.technical.validations}
-          onChange={(items) => updateTechnical({ validations: items })}
-          placeholder="Validación de entrada, reglas de negocio..."
-          label="Agregar validación"
-        />
-      </div>
-      <div className="space-y-1.5">
-        <label className="text-xs font-medium text-muted-foreground">Manejo de Errores</label>
-        <ListEditor
-          items={formData.technical.errorHandling}
-          onChange={(items) => updateTechnical({ errorHandling: items })}
-          placeholder="Escenario de error y estrategia de manejo..."
-          label="Agregar escenario"
-        />
-      </div>
-      <div className="space-y-1.5">
-        <label className="text-xs font-medium text-muted-foreground">
-          Checklist de Implementación
-        </label>
-        <ListEditor
-          items={formData.technical.implementationChecklist}
-          onChange={(items) => updateTechnical({ implementationChecklist: items })}
-          placeholder="Paso de implementación..."
-          label="Agregar paso"
-        />
-      </div>
-    </div>
-  );
-
-  const renderQATab = () => (
-    <div className="space-y-4">
-      <div className="space-y-1.5">
-        <label className="text-xs font-medium text-muted-foreground">Testing Strategy</label>
-        <textarea
-          value={formData.qa.testingStrategy}
-          onChange={(e) => updateQA({ testingStrategy: e.target.value })}
-          placeholder="Estrategia de pruebas: unitarias, integración, E2E, performance..."
-          rows={4}
-          className={inputCls}
-        />
-      </div>
-      <div className="space-y-1.5">
-        <label className="text-xs font-medium text-muted-foreground">Matriz de Pruebas (QA)</label>
-        <div className="rounded-lg border border-dashed p-3 text-center">
-          <p className="text-xs text-muted-foreground">
-            Las matrices de pruebas se gestionan desde la vista de la épica.
-          </p>
-        </div>
-      </div>
-    </div>
-  );
-
   const renderStoryForm = () => (
     <div className="px-4 py-4 bg-muted/20 rounded-lg border">
       <div className="space-y-1.5 mb-4">
@@ -673,7 +392,7 @@ export function HistoriasList() {
         </div>
       </div>
 
-      {/* Section tabs */}
+      {/* Section tabs — markdown único por sección */}
       <Tabs value={formTab} onValueChange={setFormTab}>
         <TabsList className="w-full grid grid-cols-3">
           <TabsTrigger value="po" className="gap-1.5 text-xs">
@@ -690,113 +409,51 @@ export function HistoriasList() {
           </TabsTrigger>
         </TabsList>
         <TabsContent value="po" className="mt-4">
-          {renderPOTab()}
+          <StoryPOTab
+            value={formData.po.markdown ?? ''}
+            onChange={(md) => setFormData((prev) => ({ ...prev, po: { markdown: md } }))}
+          />
         </TabsContent>
         <TabsContent value="technical" className="mt-4">
-          {renderTechnicalTab()}
+          <StoryTechnicalTab
+            value={formData.technical.markdown ?? ''}
+            onChange={(md) => setFormData((prev) => ({ ...prev, technical: { markdown: md } }))}
+          />
         </TabsContent>
         <TabsContent value="qa" className="mt-4">
-          {renderQATab()}
+          <StoryQATab
+            value={formData.qa.markdown ?? ''}
+            onChange={(md) => setFormData((prev) => ({ ...prev, qa: { markdown: md } }))}
+          />
         </TabsContent>
       </Tabs>
     </div>
   );
 
-  // --- Read-only views ---
+  // --- Read-only views — render markdown unificado ---
 
-  const renderPOView = (story: UserStory) => (
-    <div className="space-y-3">
-      {story.po.background && (
-        <div>
-          <p className="text-xs font-medium text-muted-foreground mb-1">Antecedentes</p>
-          <p className="text-sm text-foreground/80">{story.po.background}</p>
-        </div>
-      )}
-      {story.po.objective && (
-        <div>
-          <p className="text-xs font-medium text-muted-foreground mb-1">Objetivo</p>
-          <p className="text-sm text-foreground/80">{story.po.objective}</p>
-        </div>
-      )}
-      {story.po.userStory && (
-        <div>
-          <p className="text-xs font-medium text-muted-foreground mb-1">Historia de Usuario</p>
-          <p className="text-sm text-foreground/80">{story.po.userStory}</p>
-        </div>
-      )}
-      {(story.po.whatHowWhen.what || story.po.whatHowWhen.how || story.po.whatHowWhen.when) && (
-        <div>
-          <p className="text-xs font-medium text-muted-foreground mb-1">What / How / When</p>
-          <div className="grid grid-cols-3 gap-2 text-xs">
-            <div className="rounded-lg bg-muted/30 p-2">
-              <span className="text-muted-foreground">What: </span>
-              <span className="text-foreground/80">{story.po.whatHowWhen.what || '—'}</span>
-            </div>
-            <div className="rounded-lg bg-muted/30 p-2">
-              <span className="text-muted-foreground">How: </span>
-              <span className="text-foreground/80">{story.po.whatHowWhen.how || '—'}</span>
-            </div>
-            <div className="rounded-lg bg-muted/30 p-2">
-              <span className="text-muted-foreground">When: </span>
-              <span className="text-foreground/80">{story.po.whatHowWhen.when || '—'}</span>
-            </div>
-          </div>
-        </div>
-      )}
-      <div>
-        <p className="text-xs font-medium text-muted-foreground mb-1">Criterios de Aceptación</p>
-        <ReadOnlyList items={story.po.acceptanceCriteria} emptyText="Sin criterios definidos" />
-      </div>
-      {story.po.additionalNotes && (
-        <div>
-          <p className="text-xs font-medium text-muted-foreground mb-1">Notas Adicionales</p>
-          <p className="text-sm text-foreground/80">{story.po.additionalNotes}</p>
-        </div>
-      )}
-    </div>
-  );
+  const renderPOView = (story: UserStory) => {
+    const md = (story.po.markdown ?? '').trim();
+    if (!md) return <p className="text-xs text-muted-foreground italic">Sin contenido de PO</p>;
+    return <ReadOnlyMarkdown content={md} />;
+  };
 
-  const renderTechnicalView = (story: UserStory) => (
-    <div className="space-y-3">
-      {story.technical.architecture && (
-        <div>
-          <p className="text-xs font-medium text-muted-foreground mb-1">Arquitectura y Componentes</p>
-          <p className="text-sm text-foreground/80 whitespace-pre-wrap">{story.technical.architecture}</p>
-        </div>
-      )}
-      {story.technical.integrationFlow && (
-        <div>
-          <p className="text-xs font-medium text-muted-foreground mb-1">Flujo de Integración</p>
-          <p className="text-sm text-foreground/80 whitespace-pre-wrap">{story.technical.integrationFlow}</p>
-        </div>
-      )}
-      <div>
-        <p className="text-xs font-medium text-muted-foreground mb-1">Validaciones Requeridas</p>
-        <ReadOnlyList items={story.technical.validations} emptyText="Sin validaciones definidas" />
-      </div>
-      <div>
-        <p className="text-xs font-medium text-muted-foreground mb-1">Manejo de Errores</p>
-        <ReadOnlyList items={story.technical.errorHandling} emptyText="Sin escenarios definidos" />
-      </div>
-      <div>
-        <p className="text-xs font-medium text-muted-foreground mb-1">Checklist de Implementación</p>
-        <ReadOnlyList items={story.technical.implementationChecklist} emptyText="Sin checklist definido" />
-      </div>
-    </div>
-  );
+  const renderTechnicalView = (story: UserStory) => {
+    const md = (story.technical.markdown ?? '').trim();
+    if (!md) return <p className="text-xs text-muted-foreground italic">Sin contenido técnico</p>;
+    return <ReadOnlyMarkdown content={md} />;
+  };
 
   const renderQAView = (story: UserStory) => {
     const epic = state.epics.find((e) => e.id === story.epicId);
     const qaRow = epic?.qaMatrix?.rows.find((r) => r.storyId === story.id);
+    const md = (story.qa.markdown ?? '').trim();
     return (
       <div className="space-y-3">
-        {story.qa.testingStrategy ? (
-          <div>
-            <p className="text-xs font-medium text-muted-foreground mb-1">Testing Strategy</p>
-            <p className="text-sm text-foreground/80 whitespace-pre-wrap">{story.qa.testingStrategy}</p>
-          </div>
+        {md ? (
+          <ReadOnlyMarkdown content={md} />
         ) : (
-          <p className="text-xs text-muted-foreground italic">Sin estrategia de testing definida</p>
+          <p className="text-xs text-muted-foreground italic">Sin contenido de QA</p>
         )}
         <div>
           <p className="text-xs font-medium text-muted-foreground mb-1">Matriz de Pruebas</p>
@@ -823,14 +480,10 @@ export function HistoriasList() {
 
   return (
     <div className="space-y-3">
-      <div className="flex items-center justify-between">
+      <div>
         <span className="text-xs text-muted-foreground">
           {sorted.length} {sorted.length === 1 ? 'historia' : 'historias'}
         </span>
-        <DownloadMenu
-          entity={{ kind: 'stories-list', stories: sorted }}
-          variant="button"
-        />
       </div>
       {/* Header row */}
       <div className="grid grid-cols-[60px_1fr_180px_160px_90px_32px_100px_60px_28px] gap-2 items-center px-4 py-2 text-xs font-medium text-muted-foreground border-b">
@@ -883,7 +536,7 @@ export function HistoriasList() {
                     {story.tracker?.externalKey ? (
                       <span className="font-mono text-xs text-muted-foreground">{story.tracker.externalKey}</span>
                     ) : (
-                      <span className="text-xs text-muted-foreground/50">{'\u2014'}</span>
+                      <span className="text-xs text-muted-foreground/50">{'—'}</span>
                     )}
                   </div>
                   <span className="truncate font-medium">{story.title}</span>
@@ -891,7 +544,7 @@ export function HistoriasList() {
                   <div>{pod && <PodBadge name={pod.name} color={pod.color} />}</div>
                   <div><StatusBadge status={story.status} /></div>
                   <div><StoryPointsBadge points={story.storyPoints} /></div>
-                  <span className="text-xs text-muted-foreground">{sprint?.name ?? '\u2014'}</span>
+                  <span className="text-xs text-muted-foreground">{sprint?.name ?? '—'}</span>
                   <div className="flex items-center gap-0.5 justify-end" onClick={(e) => e.stopPropagation()}>
                     {userCanEdit && (
                       <Button
@@ -1036,11 +689,11 @@ export function HistoriasList() {
                       <Button
                         size="sm"
                         onClick={saveEditing}
-                        disabled={!formData.title.trim()}
+                        disabled={!formData.title.trim() || loadingVault === story.id}
                         className="gap-1.5"
                       >
                         <Check className="h-3.5 w-3.5" />
-                        Guardar cambios
+                        {loadingVault === story.id ? 'Cargando contenido...' : 'Guardar cambios'}
                       </Button>
                     </div>
                   </div>

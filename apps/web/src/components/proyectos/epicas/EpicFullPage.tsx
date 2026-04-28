@@ -39,10 +39,11 @@ import { ProgressBar } from '../shared/ProgressBar';
 import { StoryPointsBadge } from '../shared/StoryPointsBadge';
 import { DownloadMenu } from '../shared/DownloadMenu';
 import { EpicDiagrams } from './EpicDiagrams';
-import { EpicQAMatrix } from './EpicQAMatrix';
 import { EpicDocuments } from './EpicDocuments';
 import { EpicDependencies } from './EpicDependencies';
 import { EpicDesigns } from './EpicDesigns';
+import { SectionTiptapEditor } from '../historias/editor/SectionTiptapEditor';
+import { ReadOnlyMarkdown } from '@/components/shared/tiptap/ReadOnlyMarkdown';
 import { IntegrationSettingsDialog } from '../settings/IntegrationSettingsDialog';
 import { EpicStoryList } from './EpicStoryList';
 import { StoryAgentPromptBar } from './StoryAgentPromptBar';
@@ -77,11 +78,15 @@ import {
   XCircle,
   MessageSquare,
   ListChecks,
-  ClipboardCheck,
   GitBranch,
   Upload,
   Palette,
+  ExternalLink,
+  Loader2,
 } from 'lucide-react';
+import { publishEpicToTracker } from '@/lib/api/integrations';
+import { ApiError } from '@/lib/api/client';
+import type { TrackerReference } from '@cenzontle/shared';
 
 // --- Changelog helpers ---
 
@@ -96,14 +101,8 @@ const actionVerbs: Record<ChangelogAction, string> = {
 };
 
 const fieldLabels: Record<string, string> = {
-  status: 'estado', priority: 'prioridad', title: 'título', description: 'descripción',
+  status: 'estado', priority: 'prioridad', title: 'título', markdown: 'definición',
   startDate: 'fecha de inicio', targetDate: 'fecha objetivo', storyPoints: 'story points',
-  qualitativeBenefits: 'beneficios cualitativos', quantitativeBenefits: 'beneficios cuantitativos',
-  benefitsMeasurement: 'medición de beneficios', scopeDescription: 'descripción del alcance',
-  acceptanceCriteria: 'criterios de aceptación', technologicalImprovements: 'mejoras tecnológicas',
-  businessPriority: 'prioridad de negocio', teamsInvolved: 'equipos involucrados',
-  impactedChannels: 'canales impactados', impactedFlows: 'flujos impactados',
-  impactSabreLevel: 'nivel de impacto Sabre', thirdPartyDependencies: 'dependencias de terceros',
   historias: 'historias de usuario', documento: 'documento', 'aprobación PO': 'aprobación PO', 'aprobación TL (diagrama)': 'aprobación TL (diagrama)', 'aprobación QA': 'aprobación QA',
   diseño: 'diseño', 'requiere diseño': 'requiere diseño',
 };
@@ -164,46 +163,51 @@ function ValueChip({ field, value, variant }: { field: string | null; value: str
   return <span className={`text-[11px] font-medium ${baseClass}`}>{humanized}</span>;
 }
 
-// --- Business field sections ---
+// --- Markdown placeholder ---
+// Estructura mínima sugerida para épicas — placeholder del editor cuando el
+// markdown está vacío. El user lo ve y empieza a escribir; el agente IA emite
+// el mismo set vía `validateTerminal` (ver epic-generation.service).
+// "Prioridad de negocio" y "Equipos involucrados" se omiten porque ya viven
+// como metadata estructurada (`priority` enum + `podIds` cells).
+const EPIC_MARKDOWN_PLACEHOLDER = `## Descripción
 
-const businessFieldSections = [
-  {
-    title: 'Beneficios',
-    fields: [
-      { key: 'qualitativeBenefits' as const, label: 'Beneficios Cualitativos' },
-      { key: 'quantitativeBenefits' as const, label: 'Beneficios Cuantitativos' },
-      { key: 'benefitsMeasurement' as const, label: '¿Cómo se medirán los beneficios?' },
-    ],
-  },
-  {
-    title: 'Alcance y Criterios',
-    fields: [
-      { key: 'scopeDescription' as const, label: 'Descripción del Alcance' },
-      { key: 'acceptanceCriteria' as const, label: 'Criterios de Aceptación' },
-    ],
-  },
-  {
-    title: 'Aspectos Técnicos',
-    fields: [
-      { key: 'technologicalImprovements' as const, label: 'Mejoras Tecnológicas' },
-      { key: 'businessPriority' as const, label: 'Prioridad de Negocio' },
-      { key: 'teamsInvolved' as const, label: 'Equipos Involucrados' },
-    ],
-  },
-  {
-    title: 'Impacto',
-    fields: [
-      { key: 'impactedChannels' as const, label: 'Canales Impactados' },
-      { key: 'impactedFlows' as const, label: 'Flujos Impactados' },
-      { key: 'impactSabreLevel' as const, label: 'Nivel de Impacto en Sabre' },
-      { key: 'thirdPartyDependencies' as const, label: 'Dependencias de Terceros' },
-    ],
-  },
-];
+(Qué se construye y por qué surge.)
 
-type BusinessFieldKey = typeof businessFieldSections[number]['fields'][number]['key'];
+## Beneficios cualitativos
 
-const allBusinessFieldKeys: BusinessFieldKey[] = businessFieldSections.flatMap((s) => s.fields.map((f) => f.key));
+-
+
+## Beneficios cuantitativos
+
+-
+
+## Medición de beneficios
+
+(Cómo se mide cada beneficio: dashboard, métrica, KPI.)
+
+## Alcance
+
+EN alcance:
+-
+
+NO en alcance:
+-
+
+## Criterios de aceptación
+
+1.
+
+## Mejoras tecnológicas
+
+(Refactor, deuda técnica, capacidades de plataforma.)
+
+## Canales y flujos impactados
+
+-
+
+## Dependencias de terceros
+
+-`;
 
 // --- Protocol Checklist Component ---
 
@@ -291,6 +295,72 @@ function EpicFullPageInner({ epicId }: { epicId: string }) {
 
   const [isEditing, setIsEditing] = useState(false);
   const [deleteOpen, setDeleteOpen] = useState(false);
+  const [publishingTracker, setPublishingTracker] = useState(false);
+
+  const handlePublishToLinear = async () => {
+    if (!rawEpic) return;
+    setPublishingTracker(true);
+    try {
+      const result = await publishEpicToTracker(rawEpic.id, 'linear');
+      // Cascade hacia arriba: si la iniciativa también se publicó/reusó,
+      // sincronizamos su tracker en el Context.
+      if (result.initiativeTracker) {
+        dispatch({
+          type: 'UPDATE_INITIATIVE',
+          payload: {
+            id: rawEpic.initiativeId,
+            changes: { tracker: result.initiativeTracker },
+          },
+        });
+      }
+      dispatch({
+        type: 'UPDATE_EPIC',
+        payload: { id: rawEpic.id, changes: { tracker: result.epicTracker } },
+      });
+      for (const { storyId, tracker } of result.storyTrackers) {
+        dispatch({ type: 'UPDATE_STORY', payload: { id: storyId, changes: { tracker } } });
+      }
+      if (result.alreadyPublished) {
+        toast.info('La épica ya estaba publicada en Linear', {
+          description: `Project ${result.epicTracker.externalKey} → abrir`,
+          action: {
+            label: 'Abrir',
+            onClick: () => window.open(result.epicTracker.externalUrl, '_blank'),
+          },
+        });
+      } else {
+        const failCount = result.partialFailures.length;
+        const okCount = result.storyTrackers.length;
+        const initiativeNote = result.initiativeTracker
+          ? result.initiativeAlreadyPublished
+            ? 'Initiative reusada · '
+            : 'Initiative creada · '
+          : '';
+        const storiesNote =
+          failCount > 0
+            ? `${okCount} historias OK, ${failCount} fallaron`
+            : `${okCount} historias publicadas`;
+        toast.success(`Project creado en Linear`, {
+          description: `${initiativeNote}${storiesNote}`,
+          action: {
+            label: 'Abrir Linear',
+            onClick: () => window.open(result.epicTracker.externalUrl, '_blank'),
+          },
+        });
+      }
+    } catch (err: unknown) {
+      const message = err instanceof Error ? err.message : 'Error desconocido';
+      if (err instanceof ApiError && err.status === 409) {
+        toast.info('Otra publicación en curso', {
+          description: 'Espera unos segundos y reintenta.',
+        });
+      } else {
+        toast.error('No se pudo publicar la épica en Linear', { description: message });
+      }
+    } finally {
+      setPublishingTracker(false);
+    }
+  };
 
   const handleDelete = async () => {
     if (!rawEpic) return;
@@ -306,12 +376,12 @@ function EpicFullPageInner({ epicId }: { epicId: string }) {
   };
   const [showIntegrationDialog, setShowIntegrationDialog] = useState(false);
   const [editTitle, setEditTitle] = useState('');
-  const [editDescription, setEditDescription] = useState('');
+  /** Markdown único de la épica — reemplaza description + 11 sub-campos del shape v1. */
+  const [editMarkdown, setEditMarkdown] = useState('');
   const [editStatus, setEditStatus] = useState<EpicStatus>(EpicStatus.Draft);
   const [editPriority, setEditPriority] = useState<Priority>(Priority.Medium);
   const [editStartDate, setEditStartDate] = useState('');
   const [editTargetDate, setEditTargetDate] = useState('');
-  const [editBusinessFields, setEditBusinessFields] = useState<Record<BusinessFieldKey, string>>({} as Record<BusinessFieldKey, string>);
   const [editPodIds, setEditPodIds] = useState<string[]>([]);
   const [editInitiativeId, setEditInitiativeId] = useState('');
   const [storyAgentMode, setStoryAgentMode] = useState<'idle' | 'prompting' | 'streaming' | 'staging'>('idle');
@@ -320,6 +390,11 @@ function EpicFullPageInner({ epicId }: { epicId: string }) {
   const [acceptingStoryId, setAcceptingStoryId] = useState<string | null>(null);
   const storyAbortRef = useRef<AbortController | null>(null);
   const [rejectComment, setRejectComment] = useState('');
+  // Counter del tab "Dependencias" — se sincroniza con el rollup que carga
+  // <EpicDependencies/> via callback. Inicializado con el cálculo legacy
+  // (epic.dependencies + discovered + storyDeps) para evitar flicker antes
+  // del primer fetch del rollup.
+  const [rollupCount, setRollupCount] = useState<number | null>(null);
   const [showRejectForm, setShowRejectForm] = useState(false);
   const [activeTab, setActiveTab] = useState(() => searchParams.get('tab') ?? 'definicion');
   const [showChecklist, setShowChecklist] = useState(false);
@@ -413,11 +488,26 @@ function EpicFullPageInner({ epicId }: { epicId: string }) {
   }, [state.changelog, epic]);
 
   // --- Protocol checklist state ---
+  // Definición considerada completa si el markdown contiene los 9 headings
+  // obligatorios. Si no, la épica está parcialmente definida y el checklist
+  // del protocolo lo refleja.
+  const REQUIRED_EPIC_HEADINGS = useMemo(() => [
+    '## descripción',
+    '## beneficios cualitativos',
+    '## beneficios cuantitativos',
+    '## medición de beneficios',
+    '## alcance',
+    '## criterios de aceptación',
+    '## mejoras tecnológicas',
+    '## canales y flujos impactados',
+    '## dependencias de terceros',
+  ], []);
   const definitionComplete = useMemo(() => {
     if (!rawEpic) return false;
-    return allBusinessFieldKeys.every((key) => (rawEpic[key] ?? '').trim().length > 0)
-      && rawEpic.description.trim().length > 0;
-  }, [rawEpic]);
+    const md = (rawEpic.markdown ?? '').toLowerCase();
+    if (md.trim().length === 0) return false;
+    return REQUIRED_EPIC_HEADINGS.every((h) => md.includes(h));
+  }, [rawEpic, REQUIRED_EPIC_HEADINGS]);
 
   const hasBusinessDiagram = useMemo(() => {
     if (!rawEpic) return false;
@@ -439,20 +529,16 @@ function EpicFullPageInner({ epicId }: { epicId: string }) {
   const tlApproval = rawEpic?.tlApproval ?? null;
   const isTlApproved = tlApproval?.status === 'approved';
 
-  const hasQAMatrix = rawEpic?.qaMatrix != null || rawEpic?.epicQAMatrix != null;
-  const qaApproval = rawEpic?.qaApproval ?? null;
-  const isQaApproved = qaApproval?.status === 'approved';
 
   const poApproval = rawEpic?.poApproval ?? null;
   const isApproved = poApproval?.status === 'approved';
 
   const filledFieldsCount = useMemo(() => {
     if (!rawEpic) return 0;
-    let count = rawEpic.description.trim().length > 0 ? 1 : 0;
-    count += allBusinessFieldKeys.filter((key) => (rawEpic[key] ?? '').trim().length > 0).length;
-    return count;
-  }, [rawEpic]);
-  const totalFields = allBusinessFieldKeys.length + 1; // +1 for description
+    const md = (rawEpic.markdown ?? '').toLowerCase();
+    return REQUIRED_EPIC_HEADINGS.filter((h) => md.includes(h)).length;
+  }, [rawEpic, REQUIRED_EPIC_HEADINGS]);
+  const totalFields = REQUIRED_EPIC_HEADINGS.length;
 
   const checklistSteps: ChecklistStep[] = [
     {
@@ -505,28 +591,6 @@ function EpicFullPageInner({ epicId }: { epicId: string }) {
       active: false,
       locked: false,
     },
-    {
-      id: 'qa-matrix',
-      label: 'Matriz de QA',
-      description: hasQAMatrix
-        ? `${(rawEpic!.epicQAMatrix?.tests.length ?? 0)} tests sistémicos · ${(rawEpic!.qaMatrix?.rows.reduce((s, r) => s + r.testCases.length, 0) ?? 0)} funcionales`
-        : 'Genera las matrices de QA sistémico y funcional con IA',
-      completed: hasQAMatrix,
-      active: activeTab === 'matrices-qa',
-      locked: false,
-    },
-    {
-      id: 'qa-approval',
-      label: 'Visto bueno de QA',
-      description: isQaApproved
-        ? 'QA aprobado'
-        : qaApproval?.status === 'rejected'
-          ? 'QA rechazado — edita y solicita nueva revisión'
-          : 'Pendiente de aprobación de QA',
-      completed: isQaApproved,
-      active: activeTab === 'matrices-qa',
-      locked: false,
-    },
   ];
 
   const completedStepsCount = checklistSteps.filter((s) => s.completed).length;
@@ -538,8 +602,6 @@ function EpicFullPageInner({ epicId }: { epicId: string }) {
       'tl-approval': 'diagramas',
       stories: 'historias',
       approval: 'historias',
-      'qa-matrix': 'matrices-qa',
-      'qa-approval': 'matrices-qa',
     };
     setActiveTab(tabMap[stepId] ?? 'definicion');
   };
@@ -635,12 +697,6 @@ function EpicFullPageInner({ epicId }: { epicId: string }) {
       `[StoryAccept] ▶ "${proposal.title}" SP=${proposal.storyPoints} pod=${proposal.podId} docs=${proposal.relatedDocuments?.length ?? 0} deps=${proposal.discoveredDependencies?.length ?? 0}`,
     );
     try {
-      const whatHowWhenStr = [
-        proposal.po.whatHowWhen.what,
-        proposal.po.whatHowWhen.how,
-        proposal.po.whatHowWhen.when,
-      ].filter(Boolean).join(' / ');
-
       const created = await apiCreateStory({
         title: proposal.title,
         epicId: proposal.epicId,
@@ -649,19 +705,9 @@ function EpicFullPageInner({ epicId }: { epicId: string }) {
         storyPoints: proposal.storyPoints,
         sprintId: proposal.sprintId ?? undefined,
         labels: proposal.labels,
-        po: {
-          background: proposal.po.background,
-          objective: proposal.po.objective,
-          userStory: proposal.po.userStory,
-          whatHowWhen: whatHowWhenStr,
-          acceptanceCriteria: proposal.po.acceptanceCriteria.join('\n'),
-          additionalNotes: proposal.po.additionalNotes,
-        },
-        technical: proposal.technical,
-        qa: {
-          testingStrategy: proposal.qa.testingStrategy,
-          linkedQAMatrixId: proposal.qa.linkedQAMatrixId ?? undefined,
-        },
+        po: { markdown: proposal.po.markdown ?? '' },
+        technical: { markdown: proposal.technical.markdown ?? '' },
+        qa: { markdown: proposal.qa.markdown ?? '' },
         relatedDocuments: proposal.relatedDocuments,
         discoveredDependencies: proposal.discoveredDependencies,
         // `sourceClientId` sirve como ancla para que edges del DAG (blockedBy)
@@ -819,18 +865,11 @@ function EpicFullPageInner({ epicId }: { epicId: string }) {
 
   const handleStartEdit = () => {
     setEditTitle(epic.title);
-    setEditDescription(epic.description);
+    setEditMarkdown(epic.markdown ?? '');
     setEditStatus(epic.status);
     setEditPriority(epic.priority);
     setEditStartDate(epic.startDate);
     setEditTargetDate(epic.targetDate);
-    const bf = {} as Record<BusinessFieldKey, string>;
-    for (const section of businessFieldSections) {
-      for (const field of section.fields) {
-        bf[field.key] = epic[field.key];
-      }
-    }
-    setEditBusinessFields(bf);
     setEditPodIds([...epic.podIds]);
     setEditInitiativeId(epic.initiativeId);
     setIsEditing(true);
@@ -839,7 +878,7 @@ function EpicFullPageInner({ epicId }: { epicId: string }) {
   const handleSave = async () => {
     const changes: Record<string, unknown> = {};
     if (editTitle !== epic.title) changes.title = editTitle;
-    if (editDescription !== epic.description) changes.description = editDescription;
+    if (editMarkdown !== (epic.markdown ?? '')) changes.markdown = editMarkdown;
     if (editStatus !== epic.status) changes.status = editStatus;
     if (editPriority !== epic.priority) changes.priority = editPriority;
     if (editStartDate !== epic.startDate) changes.startDate = editStartDate;
@@ -848,13 +887,6 @@ function EpicFullPageInner({ epicId }: { epicId: string }) {
     const podsSorted = [...editPodIds].sort();
     const origPodsSorted = [...epic.podIds].sort();
     if (JSON.stringify(podsSorted) !== JSON.stringify(origPodsSorted)) changes.podIds = editPodIds;
-    for (const section of businessFieldSections) {
-      for (const field of section.fields) {
-        if (editBusinessFields[field.key] !== epic[field.key]) {
-          changes[field.key] = editBusinessFields[field.key];
-        }
-      }
-    }
 
     if (Object.keys(changes).length === 0) {
       setIsEditing(false);
@@ -880,10 +912,6 @@ function EpicFullPageInner({ epicId }: { epicId: string }) {
     }
   };
 
-  const updateBusinessField = (key: BusinessFieldKey, value: string) => {
-    setEditBusinessFields((prev) => ({ ...prev, [key]: value }));
-  };
-
   const handleApprove = () => {
     dispatch({
       type: 'APPROVE_EPIC_STORIES',
@@ -905,7 +933,7 @@ function EpicFullPageInner({ epicId }: { epicId: string }) {
     <div className="h-full min-h-0">
       {/* Scrollable content */}
       <div className="h-full min-h-0 overflow-y-auto">
-        <div className="mx-auto px-6 py-8 max-w-6xl">
+        <div className="mx-auto px-6 py-8 max-w-7xl">
         {/* Title + metadata header */}
         <div className="mb-8">
           <div className="flex items-start gap-2">
@@ -923,6 +951,34 @@ function EpicFullPageInner({ epicId }: { epicId: string }) {
               {!isEditing ? (
                 <>
                   <DownloadMenu entity={{ kind: 'epic', epic }} fetchFullContent />
+                  {(epic.tracker as TrackerReference | undefined)?.externalKey ? (
+                    <a
+                      href={(epic.tracker as TrackerReference).externalUrl}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="inline-flex items-center gap-1.5 h-9 px-3 rounded-md text-xs font-medium border border-border text-muted-foreground hover:text-foreground hover:bg-accent dark:hover:bg-accent/50 transition-colors"
+                      title={`Abrir ${(epic.tracker as TrackerReference).externalKey} en Linear`}
+                    >
+                      <ExternalLink className="h-3.5 w-3.5" />
+                      {(epic.tracker as TrackerReference).externalKey}
+                    </a>
+                  ) : (
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      onClick={handlePublishToLinear}
+                      disabled={publishingTracker}
+                      className="text-muted-foreground hover:text-foreground gap-1.5"
+                      title="Publicar épica + historias en Linear"
+                    >
+                      {publishingTracker ? (
+                        <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                      ) : (
+                        <Upload className="h-3.5 w-3.5" />
+                      )}
+                      Subir a Linear
+                    </Button>
+                  )}
                   <Button
                     variant="ghost"
                     size="icon"
@@ -1111,13 +1167,6 @@ function EpicFullPageInner({ epicId }: { epicId: string }) {
                   Definición
                 </TabsTrigger>
                 <TabsTrigger
-                  value="diagramas"
-                  className="gap-1.5 rounded-none border-b-2 border-transparent data-[state=active]:border-foreground data-[state=active]:shadow-none"
-                >
-                  <Network className="h-3.5 w-3.5" />
-                  Diagrama
-                </TabsTrigger>
-                <TabsTrigger
                   value="disenos"
                   className="gap-1.5 rounded-none border-b-2 border-transparent data-[state=active]:border-foreground data-[state=active]:shadow-none"
                 >
@@ -1125,28 +1174,31 @@ function EpicFullPageInner({ epicId }: { epicId: string }) {
                   Diseño {rawEpic?.designSkipped ? '(N/A)' : (rawEpic?.designs?.length ? `(${rawEpic.designs.length})` : '')}
                 </TabsTrigger>
                 <TabsTrigger
+                  value="diagramas"
+                  className="gap-1.5 rounded-none border-b-2 border-transparent data-[state=active]:border-foreground data-[state=active]:shadow-none"
+                >
+                  <Network className="h-3.5 w-3.5" />
+                  Diagrama
+                </TabsTrigger>
+                <TabsTrigger
                   value="historias"
                   className="gap-1.5 rounded-none border-b-2 border-transparent data-[state=active]:border-foreground data-[state=active]:shadow-none"
                 >
                   <BookOpen className="h-3.5 w-3.5" />
-                  Historias ({epic.stories.length})
+                  Historias de Usuario ({epic.stories.length})
                 </TabsTrigger>
-                <TabsTrigger
-                  value="matrices-qa"
-                  className="gap-1.5 rounded-none border-b-2 border-transparent data-[state=active]:border-foreground data-[state=active]:shadow-none"
-                >
-                  <ClipboardCheck className="h-3.5 w-3.5" />
-                  Matrices QA
+                <TabsTrigger value="dependencias" className="gap-1.5 rounded-none border-b-2 border-transparent data-[state=active]:border-foreground data-[state=active]:shadow-none">
+                  <GitBranch className="h-3.5 w-3.5" />
+                  {/* Counter — usa el rollup como fuente única (que ya une nuevas
+                      + legacy + discovered del vault). Mientras el rollup carga,
+                      mostramos el cálculo legacy local para evitar flicker.
+                      Suma el DAG de orden entre historias (storyDeps) que no es
+                      parte del rollup técnico. */}
+                  Dependencias ({(rollupCount ?? ((epic.dependencies ?? []).filter((d) => !d.id?.startsWith('ai-dep-')).length + effectiveDiscoveredDeps.length)) + effectiveStoryDeps.length})
                 </TabsTrigger>
                 <TabsTrigger value="documentos" className="gap-1.5 rounded-none border-b-2 border-transparent data-[state=active]:border-foreground data-[state=active]:shadow-none">
                   <Paperclip className="h-3.5 w-3.5" />
                   Documentos ({epic.documents.length})
-                </TabsTrigger>
-                <TabsTrigger value="dependencias" className="gap-1.5 rounded-none border-b-2 border-transparent data-[state=active]:border-foreground data-[state=active]:shadow-none">
-                  <GitBranch className="h-3.5 w-3.5" />
-                  {/* Contamos solo las manuales del JSONB (no las IA persistidas con id="ai-dep-*"
-                      que también viven ahí) para evitar double-count con effectiveDiscoveredDeps. */}
-                  Dependencias ({(epic.dependencies ?? []).filter((d) => !d.id?.startsWith('ai-dep-')).length + effectiveDiscoveredDeps.length + effectiveStoryDeps.length})
                 </TabsTrigger>
                 <TabsTrigger value="changelog" className="gap-1.5 rounded-none border-b-2 border-transparent data-[state=active]:border-foreground data-[state=active]:shadow-none">
                   <History className="h-3.5 w-3.5" />
@@ -1155,60 +1207,24 @@ function EpicFullPageInner({ epicId }: { epicId: string }) {
               </TabsList>
 
               {/* ── Definición ── */}
-              <TabsContent value="definicion" className="mt-8 space-y-8">
-                <section>
-                  <h3 className="text-sm font-semibold uppercase tracking-wider text-muted-foreground mb-3">Descripción</h3>
-                  {isEditing ? (
-                    <textarea
-                      value={editDescription}
-                      onChange={(e) => setEditDescription(e.target.value)}
-                      rows={4}
-                      className="w-full rounded-lg border border-input bg-transparent px-4 py-3 text-sm leading-relaxed shadow-xs focus-visible:border-ring focus-visible:ring-ring/50 focus-visible:ring-[3px] outline-none resize-none dark:bg-input/30"
-                    />
-                  ) : (
-                    <p className="text-sm leading-relaxed text-foreground/80 whitespace-pre-line">{epic.description}</p>
-                  )}
-                </section>
-
-
-                {businessFieldSections.map((section) => (
-                  <section key={section.title}>
-                    <h3 className="text-sm font-semibold uppercase tracking-wider text-muted-foreground mb-4">{section.title}</h3>
-                    {isEditing ? (
-                      <div className="space-y-4">
-                        {section.fields.map((field) => (
-                          <div key={field.key}>
-                            <label className="text-xs font-medium text-muted-foreground mb-1.5 block">{field.label}</label>
-                            <textarea
-                              value={editBusinessFields[field.key] ?? ''}
-                              onChange={(e) => updateBusinessField(field.key, e.target.value)}
-                              rows={2}
-                              className="w-full rounded-lg border border-input bg-transparent px-3 py-2 text-sm leading-relaxed shadow-xs focus-visible:border-ring focus-visible:ring-ring/50 focus-visible:ring-[3px] outline-none resize-none dark:bg-input/30"
-                            />
-                          </div>
-                        ))}
-                      </div>
-                    ) : (
-                      <div className="space-y-5">
-                        {section.fields.map((field) => {
-                          const value = epic[field.key];
-                          if (!value) return (
-                            <div key={field.key} className="flex items-center gap-2">
-                              <Circle className="h-3 w-3 text-amber-500/60" />
-                              <span className="text-xs text-amber-600 dark:text-amber-400">{field.label} — sin completar</span>
-                            </div>
-                          );
-                          return (
-                            <div key={field.key}>
-                              <span className="text-xs text-muted-foreground block mb-1">{field.label}</span>
-                              <p className="text-sm leading-relaxed text-foreground/80 whitespace-pre-line">{value}</p>
-                            </div>
-                          );
-                        })}
-                      </div>
-                    )}
-                  </section>
-                ))}
+              <TabsContent value="definicion" className="mt-8 space-y-6">
+                {/* Markdown único de la épica con los 9 headings obligatorios.
+                    En modo edit, SectionTiptapEditor full-feature; en read,
+                    ReadOnlyMarkdown. Mismo patrón que StoryFullPage. */}
+                {isEditing ? (
+                  <SectionTiptapEditor
+                    initialMarkdown={editMarkdown && editMarkdown.trim().length > 0 ? editMarkdown : EPIC_MARKDOWN_PLACEHOLDER}
+                    onChange={setEditMarkdown}
+                    variant="paragraph"
+                    placeholder="Escribe la definición de la épica en markdown..."
+                  />
+                ) : epic.markdown && epic.markdown.trim().length > 0 ? (
+                  <ReadOnlyMarkdown content={epic.markdown} />
+                ) : (
+                  <p className="text-sm text-muted-foreground italic">
+                    Sin contenido. Click en el lápiz para empezar a editar.
+                  </p>
+                )}
               </TabsContent>
 
               {/* ── Diagramas ── */}
@@ -1362,11 +1378,12 @@ function EpicFullPageInner({ epicId }: { epicId: string }) {
                   stories={epic.stories}
                   epicId={rawEpic!.id}
                   pods={state.pods}
-                  qaMatrix={rawEpic!.qaMatrix}
                   onGenerateWithAI={storyAgentMode === 'idle' ? handleOpenStoryPrompt : undefined}
                   onCreateStory={async (story) => {
                     try {
-                      const po: any = story.po ?? {};
+                      const po = story.po ?? { markdown: '' };
+                      const technical = story.technical ?? { markdown: '' };
+                      const qa = story.qa ?? { markdown: '' };
                       const created = await apiCreateStory({
                         title: story.title,
                         epicId: story.epicId,
@@ -1375,14 +1392,9 @@ function EpicFullPageInner({ epicId }: { epicId: string }) {
                         storyPoints: story.storyPoints,
                         sprintId: story.sprintId ?? undefined,
                         labels: story.labels ?? [],
-                        po: {
-                          background: po.background ?? '',
-                          objective: po.objective ?? '',
-                          userStory: po.userStory ?? '',
-                          whatHowWhen: typeof po.whatHowWhen === 'string' ? po.whatHowWhen : '',
-                          acceptanceCriteria: Array.isArray(po.acceptanceCriteria) ? po.acceptanceCriteria.join('\n') : (po.acceptanceCriteria ?? ''),
-                          additionalNotes: po.additionalNotes ?? '',
-                        },
+                        po: { markdown: po.markdown ?? '' },
+                        technical: { markdown: technical.markdown ?? '' },
+                        qa: { markdown: qa.markdown ?? '' },
                       });
                       dispatch({ type: 'CREATE_STORY', payload: { ...story, id: created.id } });
                       toast.success('Historia creada');
@@ -1392,9 +1404,9 @@ function EpicFullPageInner({ epicId }: { epicId: string }) {
                   }}
                   onUpdateStory={async (id, changes) => {
                     try {
-                      const po: any = (changes as any).po ?? {};
-                      const technical: any = (changes as any).technical ?? {};
-                      const qa: any = (changes as any).qa ?? {};
+                      const po = changes.po;
+                      const technical = changes.technical;
+                      const qa = changes.qa;
                       await apiUpdateStory(id, {
                         title: changes.title,
                         status: changes.status as string | undefined,
@@ -1402,16 +1414,9 @@ function EpicFullPageInner({ epicId }: { epicId: string }) {
                         podId: changes.podId,
                         sprintId: changes.sprintId ?? undefined,
                         labels: changes.labels,
-                        po: Object.keys(po).length ? {
-                          background: po.background,
-                          objective: po.objective,
-                          userStory: po.userStory,
-                          whatHowWhen: typeof po.whatHowWhen === 'string' ? po.whatHowWhen : '',
-                          acceptanceCriteria: Array.isArray(po.acceptanceCriteria) ? po.acceptanceCriteria.join('\n') : po.acceptanceCriteria,
-                          additionalNotes: po.additionalNotes,
-                        } : undefined,
-                        technical: Object.keys(technical).length ? technical : undefined,
-                        qa: Object.keys(qa).length ? qa : undefined,
+                        po: po ? { markdown: po.markdown ?? '' } : undefined,
+                        technical: technical ? { markdown: technical.markdown ?? '' } : undefined,
+                        qa: qa ? { markdown: qa.markdown ?? '' } : undefined,
                       });
                       dispatch({ type: 'UPDATE_STORY', payload: { id, changes } });
                       toast.success('Historia actualizada');
@@ -1542,35 +1547,6 @@ function EpicFullPageInner({ epicId }: { epicId: string }) {
                 )}
               </TabsContent>
 
-              {/* ── Matrices QA ── */}
-              <TabsContent value="matrices-qa" className="mt-8">
-                <EpicQAMatrix
-                  epic={rawEpic!}
-                  stories={epic.stories}
-                  qaMatrix={rawEpic!.qaMatrix}
-                  onMatrixGenerated={(matrix) =>
-                    dispatch({ type: 'SAVE_QA_MATRIX', payload: { epicId: rawEpic!.id, matrix } })
-                  }
-                  onMatrixEdited={(matrix) =>
-                    dispatch({ type: 'UPDATE_QA_MATRIX', payload: { epicId: rawEpic!.id, matrix } })
-                  }
-                  qaApproval={rawEpic!.qaApproval}
-                  onQaApprove={() =>
-                    dispatch({ type: 'APPROVE_EPIC_QA', payload: { epicId: rawEpic!.id, qaName: 'QA Lead' } })
-                  }
-                  onQaReject={(comment) =>
-                    dispatch({ type: 'REJECT_EPIC_QA', payload: { epicId: rawEpic!.id, qaName: 'QA Lead', comment } })
-                  }
-                  epicQAMatrix={rawEpic!.epicQAMatrix}
-                  onEpicMatrixGenerated={(matrix) =>
-                    dispatch({ type: 'SAVE_EPIC_QA_MATRIX', payload: { epicId: rawEpic!.id, matrix } })
-                  }
-                  onEpicMatrixEdited={(matrix) =>
-                    dispatch({ type: 'UPDATE_EPIC_QA_MATRIX', payload: { epicId: rawEpic!.id, matrix } })
-                  }
-                />
-              </TabsContent>
-
               {/* ── Documentos ── */}
               <TabsContent value="documentos" className="mt-8">
                 <EpicDocuments
@@ -1602,13 +1578,9 @@ function EpicFullPageInner({ epicId }: { epicId: string }) {
               {/* ── Dependencias ── */}
               <TabsContent value="dependencias" className="mt-8">
                 <EpicDependencies
-                  epic={epic}
-                  discoveredDependencies={effectiveDiscoveredDeps}
+                  epicId={rawEpic!.id}
                   storyOrderDependencies={effectiveStoryDeps}
-                  onDiscoveredDepsRefresh={refreshDiscoveredDeps}
-                  onAddDependency={(dep) => dispatch({ type: 'ADD_EPIC_DEPENDENCY', payload: { epicId: rawEpic!.id, dependency: dep } })}
-                  onUpdateDependency={(dep) => dispatch({ type: 'UPDATE_EPIC_DEPENDENCY', payload: { epicId: rawEpic!.id, dependency: dep } })}
-                  onDeleteDependency={(depId) => dispatch({ type: 'DELETE_EPIC_DEPENDENCY', payload: { epicId: rawEpic!.id, dependencyId: depId } })}
+                  onRollupCountChange={setRollupCount}
                 />
               </TabsContent>
 

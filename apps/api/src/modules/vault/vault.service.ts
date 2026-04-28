@@ -1,5 +1,5 @@
 import 'dotenv/config';
-import { Inject, Injectable, InternalServerErrorException, Logger, forwardRef } from '@nestjs/common';
+import { Inject, Injectable, InternalServerErrorException, Logger, NotFoundException, forwardRef } from '@nestjs/common';
 import { Octokit } from '@octokit/rest';
 import { VaultConfigService } from './vault-config.service';
 import { VaultCloneService } from './vault-clone.service';
@@ -108,17 +108,61 @@ export class VaultService {
   }
 
   /**
+   * Resuelve el context de UN vault específico por id, SIN tocar el cache del
+   * activo. Usado por reads de browsing (tree/file/changelog) cuando el user
+   * está navegando por el dropdown un vault distinto al vinculado — quieres
+   * leer del vault elegido pero NO cambiar a dónde se escribe.
+   *
+   * No cachea: cada llamada hace 1 query a PG + 1 desencripción del token.
+   * El uso típico es esporádico (browse manual del user), así que el costo
+   * es aceptable. Si crece, agregamos un cache LRU keyed por vaultId.
+   */
+  private async getContextById(vaultId: string): Promise<ActiveContext> {
+    const result = await this.vaultConfigs.getByIdWithToken(vaultId);
+    if (!result) {
+      throw new NotFoundException(
+        `Vault ${vaultId} no existe o no tiene token configurado.`,
+      );
+    }
+    return {
+      configId: result.config.id,
+      owner: result.config.owner,
+      repo: result.config.repo,
+      branch: result.config.branch,
+      octokit: new Octokit({ auth: result.token }),
+      expiresAt: 0, // sin caché, no nos importa
+    };
+  }
+
+  /**
+   * Resuelve el context: si `vaultId` viene, usa ese vault específico
+   * (`getContextById`); sino, usa el activo (`getContext`). Helper interno
+   * usado por todos los métodos de read parametrizables.
+   */
+  private async resolveContext(vaultId?: string): Promise<ActiveContext> {
+    if (vaultId) return this.getContextById(vaultId);
+    return this.getContext();
+  }
+
+  /**
    * Read a note from the vault. Returns null if the file does not exist.
    * Uses a short-lived in-memory cache.
+   *
+   * Si `vaultId` viene, lee de ese vault específico SIN tocar el cache del
+   * activo (browse-mode). El cache de notas se skipea cuando se especifica
+   * vaultId — el cache global está keyed solo por path, no por (path,vaultId).
    */
-  async readNote(path: string): Promise<VaultNote | null> {
-    const cached = this.cache.get(path);
-    if (cached && cached.expiresAt > Date.now()) {
-      return cached.note;
+  async readNote(path: string, vaultId?: string): Promise<VaultNote | null> {
+    // Skip cache cuando se browse otro vault — el cache no distingue entre vaults.
+    if (!vaultId) {
+      const cached = this.cache.get(path);
+      if (cached && cached.expiresAt > Date.now()) {
+        return cached.note;
+      }
     }
 
     try {
-      const ctx = await this.getContext();
+      const ctx = await this.resolveContext(vaultId);
       const res = await ctx.octokit.repos.getContent({
         owner: ctx.owner,
         repo: ctx.repo,
@@ -151,7 +195,11 @@ export class VaultService {
 
       const note: VaultNote = { path, content, sha: res.data.sha, updatedAt };
 
-      this.cache.set(path, { note, expiresAt: Date.now() + this.cacheTtlMs });
+      // Solo cachear lecturas del activo (sin vaultId). Browse-mode con
+      // vaultId no debe contaminar el cache global con notas de otros vaults.
+      if (!vaultId) {
+        this.cache.set(path, { note, expiresAt: Date.now() + this.cacheTtlMs });
+      }
       return note;
     } catch (err: any) {
       if (err.status === 404) return null;
@@ -196,21 +244,22 @@ export class VaultService {
    * Retry con backoff (max 3, 200/400/800ms) se mantiene para resiliencia
    * ante writes concurrentes desde OTROS procesos/clones de la app.
    */
-  async writeNote(path: string, content: string, commitMessage: string): Promise<VaultNote> {
-    return this.enqueueGithubWrite(() => this.writeNoteImpl(path, content, commitMessage));
+  async writeNote(path: string, content: string, commitMessage: string, vaultId?: string): Promise<VaultNote> {
+    return this.enqueueGithubWrite(() => this.writeNoteImpl(path, content, commitMessage, vaultId));
   }
 
-  private async writeNoteImpl(path: string, content: string, commitMessage: string): Promise<VaultNote> {
-    this.logger.log(`[writeNote] path=${path} contentLen=${content.length} msg="${commitMessage}"`);
+  private async writeNoteImpl(path: string, content: string, commitMessage: string, vaultId?: string): Promise<VaultNote> {
+    this.logger.log(`[writeNote] path=${path} contentLen=${content.length} vaultId=${vaultId ?? 'active'} msg="${commitMessage}"`);
     const MAX_RETRIES = 3;
 
     for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
       try {
-        const ctx = await this.getContext();
+        const ctx = await this.resolveContext(vaultId);
         // IMPORTANTE: invalidar cache antes de re-leer en retries para forzar
         // fetch fresco del SHA (el cache puede tener el SHA viejo pre-conflict).
-        if (attempt > 0) this.cache.delete(path);
-        const existing = await this.readNote(path);
+        // Solo cache management cuando escribimos al activo (sin vaultId).
+        if (attempt > 0 && !vaultId) this.cache.delete(path);
+        const existing = await this.readNote(path, vaultId);
         if (attempt === 0) {
           this.logger.log(`[writeNote] existing=${existing ? `sha=${existing.sha.slice(0, 8)}` : 'NEW'}`);
         }
@@ -231,8 +280,14 @@ export class VaultService {
         );
         const note: VaultNote = { path, content, sha: newSha, updatedAt: new Date().toISOString() };
 
-        this.cache.set(path, { note, expiresAt: Date.now() + this.cacheTtlMs });
-        this.vaultClone.scheduleClone(ctx.configId);
+        // Solo cachear y schedule clone para writes al activo (sin vaultId).
+        // Writes a otros vaults son escasos (manual browse-mode CRUD) y no
+        // deben contaminar el cache del active. El clone local se sincroniza
+        // explícitamente cuando el user vincule ese vault.
+        if (!vaultId) {
+          this.cache.set(path, { note, expiresAt: Date.now() + this.cacheTtlMs });
+          this.vaultClone.scheduleClone(ctx.configId);
+        }
 
         return note;
       } catch (err: any) {
@@ -268,18 +323,18 @@ export class VaultService {
    * Delete a note from the vault. Fails silently if the note doesn't exist.
    * Serializado via mutex queue (ver writeNote) + retry con backoff ante 409.
    */
-  async deleteNote(path: string, commitMessage: string): Promise<void> {
-    return this.enqueueGithubWrite(() => this.deleteNoteImpl(path, commitMessage));
+  async deleteNote(path: string, commitMessage: string, vaultId?: string): Promise<void> {
+    return this.enqueueGithubWrite(() => this.deleteNoteImpl(path, commitMessage, vaultId));
   }
 
-  private async deleteNoteImpl(path: string, commitMessage: string): Promise<void> {
+  private async deleteNoteImpl(path: string, commitMessage: string, vaultId?: string): Promise<void> {
     const MAX_RETRIES = 3;
 
     for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
       try {
-        const ctx = await this.getContext();
-        if (attempt > 0) this.cache.delete(path);
-        const existing = await this.readNote(path);
+        const ctx = await this.resolveContext(vaultId);
+        if (attempt > 0 && !vaultId) this.cache.delete(path);
+        const existing = await this.readNote(path, vaultId);
         if (!existing) {
           this.logger.warn(`Attempted to delete non-existent note: ${path}`);
           return;
@@ -295,10 +350,13 @@ export class VaultService {
         });
 
         if (attempt > 0) {
-          this.logger.log(`[deleteNote] OK ${path} (after ${attempt} retry)`);
+          this.logger.log(`[deleteNote] OK ${path} (after ${attempt} retry) vaultId=${vaultId ?? 'active'}`);
         }
-        this.cache.delete(path);
-        this.vaultClone.scheduleClone(ctx.configId);
+        // Solo invalidar cache + schedule clone para writes al activo.
+        if (!vaultId) {
+          this.cache.delete(path);
+          this.vaultClone.scheduleClone(ctx.configId);
+        }
         return;
       } catch (err: any) {
         if (err.status === 404) return;
@@ -323,10 +381,11 @@ export class VaultService {
 
   /**
    * List notes in a folder (non-recursive).
+   * Si `vaultId` viene, lee de ese vault específico (browse-mode).
    */
-  async listNotes(folder: string): Promise<string[]> {
+  async listNotes(folder: string, vaultId?: string): Promise<string[]> {
     try {
-      const ctx = await this.getContext();
+      const ctx = await this.resolveContext(vaultId);
       const res = await ctx.octokit.repos.getContent({
         owner: ctx.owner,
         repo: ctx.repo,
@@ -363,10 +422,12 @@ export class VaultService {
    * the entire repo tree in a single request, then filters to the subpath.
    *
    * This is O(1) requests regardless of tree size, vs O(N) with getContent.
+   *
+   * Si `vaultId` viene, lee de ese vault específico (browse-mode sin tocar el activo).
    */
-  async listTree(folder: string): Promise<VaultTreeNode[]> {
+  async listTree(folder: string, vaultId?: string): Promise<VaultTreeNode[]> {
     try {
-      const ctx = await this.getContext();
+      const ctx = await this.resolveContext(vaultId);
       // 1. Get the SHA of the branch head
       const branchRes = await ctx.octokit.repos.getBranch({
         owner: ctx.owner,
@@ -489,7 +550,7 @@ export class VaultService {
    * (create, update, delete) que se hizo al vault. Es el changelog natural del vault
    * porque cada writeNote/deleteNote genera un commit con un mensaje descriptivo.
    */
-  async listCommits(limit = 30, path?: string): Promise<Array<{
+  async listCommits(limit = 30, path?: string, vaultId?: string): Promise<Array<{
     sha: string;
     message: string;
     authorName: string;
@@ -497,7 +558,7 @@ export class VaultService {
     files: Array<{ filename: string; status: string }>;
   }>> {
     try {
-      const ctx = await this.getContext();
+      const ctx = await this.resolveContext(vaultId);
       const res = await ctx.octokit.repos.listCommits({
         owner: ctx.owner,
         repo: ctx.repo,
@@ -526,7 +587,7 @@ export class VaultService {
    * Obtiene el detalle de un commit individual, incluyendo el patch (diff) de cada archivo.
    * Se usa para cargar el "antes/después" de un changelog entry lazily al seleccionarlo.
    */
-  async getCommitDetail(sha: string): Promise<{
+  async getCommitDetail(sha: string, vaultId?: string): Promise<{
     sha: string;
     message: string;
     authorName: string;
@@ -536,7 +597,7 @@ export class VaultService {
     filename: string | null;
   } | null> {
     try {
-      const ctx = await this.getContext();
+      const ctx = await this.resolveContext(vaultId);
       const res = await ctx.octokit.repos.getCommit({
         owner: ctx.owner,
         repo: ctx.repo,

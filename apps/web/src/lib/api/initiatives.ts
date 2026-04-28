@@ -6,10 +6,13 @@ export interface InitiativeResponse {
   name: string;
   description: string;
   status: string;
-  startDate: string;
-  targetDate: string;
+  /** ISO date. Null si la iniciativa está en planning sin fechas comprometidas. */
+  startDate: string | null;
+  /** ISO date. Null si la iniciativa está en planning sin fechas comprometidas. */
+  targetDate: string | null;
   owner: string;
   documents: any[];
+  tracker: any;
   epics: {
     id: string;
     title: string;
@@ -33,11 +36,11 @@ export function getInitiative(id: string) {
   return apiFetch<InitiativeResponse>(`/proyectos/iniciativas/${id}`);
 }
 
-export function createInitiative(data: { name: string; description: string; status?: string; startDate: string; targetDate: string; owner: string }) {
+export function createInitiative(data: { name: string; description: string; status?: string; startDate?: string; targetDate?: string; owner: string }) {
   return apiFetch<InitiativeResponse>('/proyectos/iniciativas', { method: 'POST', body: JSON.stringify(data) });
 }
 
-export function updateInitiative(id: string, data: Partial<{ name: string; description: string; status: string; startDate: string; targetDate: string; owner: string }>) {
+export function updateInitiative(id: string, data: Partial<{ name: string; description: string; status: string; startDate: string | null; targetDate: string | null; owner: string }>) {
   return apiFetch<InitiativeResponse>(`/proyectos/iniciativas/${id}`, { method: 'PATCH', body: JSON.stringify(data) });
 }
 

@@ -1,23 +1,40 @@
-import { Injectable, NotFoundException, Logger } from '@nestjs/common';
+import {
+  BadRequestException,
+  ConflictException,
+  ForbiddenException,
+  Injectable,
+  Logger,
+  NotFoundException,
+} from '@nestjs/common';
 import { Prisma } from '@prisma/client';
+import type { AuthenticatedUser, TrackerReference } from '@cenzontle/shared';
+import { UserRole } from '@cenzontle/shared';
 import { PrismaService } from '../../prisma/prisma.service';
 import { VaultService } from '../../vault/vault.service';
 import { VaultFolderService } from '../../vault/vault-folder.service';
+import { IntegrationsService } from '../../integrations/integrations.service';
+
+const PENDING_TRACKER_SENTINEL = '__pending__';
 import { CreateStoryDto, RelatedDocumentDto, DiscoveredDependencyDto } from './dto/create-story.dto';
 import { UpdateStoryDto } from './dto/update-story.dto';
 import { StoryQueryDto } from './dto/story-query.dto';
-import { StoryPoFieldsDto, StoryTechnicalFieldsDto, StoryQaFieldsDto } from './dto/story-content.dto';
+import {
+  StoryPoFieldsDto,
+  StoryTechnicalFieldsDto,
+  StoryQaFieldsDto,
+  StoryPoFieldsLegacy,
+  StoryTechnicalFieldsLegacy,
+  StoryQaFieldsLegacy,
+} from './dto/story-content.dto';
 import { randomUUID } from 'crypto';
 import {
   storyFolderPath,
   storyIndexPath,
   initiativeDocumentPath,
-  epicDependencyPath,
   type InitiativeRef,
   type EpicRef,
   type StoryRef,
 } from '../vault-paths';
-import { buildDiscoveredDependencyMarkdown } from '../epics/epic-markdown-builders';
 import { buildFrontmatter } from '../vault-frontmatter';
 
 export interface StoryMarkdownData {
@@ -55,7 +72,191 @@ export class StoriesService {
     private prisma: PrismaService,
     private vault: VaultService,
     private vaultFolder: VaultFolderService,
+    private integrationsService: IntegrationsService,
   ) {}
+
+  /**
+   * Publica una historia individual como Linear Issue dentro del Project de
+   * su épica padre. La épica DEBE tener tracker — si no, se requiere publicar
+   * primero la épica (que cascade hacia arriba a la iniciativa).
+   *
+   * Sin sub-issues: el Issue se crea suelto en el Project. Los sub-issues
+   * los crearán los agentes en una iteración posterior.
+   */
+  async publishToTracker(
+    storyId: string,
+    provider: 'linear' | 'jira',
+    user: AuthenticatedUser,
+  ): Promise<{ alreadyPublished: boolean; tracker: TrackerReference }> {
+    const story = await this.prisma.story.findUnique({
+      where: { id: storyId },
+      include: {
+        epic: {
+          select: {
+            id: true,
+            tracker: true,
+            title: true,
+            pods: { select: { podId: true } },
+          },
+        },
+      },
+    });
+    if (!story) throw new NotFoundException('Historia no encontrada');
+    if (!story.epic) {
+      throw new BadRequestException('Historia sin épica padre — no se puede publicar.');
+    }
+
+    // Resource-scoped authz: AltaGerencia bypass, otros deben compartir pod.
+    const isAdmin = user.role === UserRole.AltaGerencia;
+    const epicPodIds = story.epic.pods.map((p) => p.podId);
+    const allowedPods = new Set([...epicPodIds, story.podId]);
+    const sharesPod = (user.podIds ?? []).some((p) => allowedPods.has(p));
+    if (!isAdmin && !sharesPod) {
+      throw new ForbiddenException(
+        'No autorizado: solo AltaGerencia o miembros de un pod asignado pueden publicar esta historia.',
+      );
+    }
+
+    const existingTracker = story.tracker as unknown as TrackerReference | null;
+    if (
+      existingTracker?.externalId &&
+      existingTracker.externalId !== PENDING_TRACKER_SENTINEL
+    ) {
+      this.logger.log(
+        `[publishToTracker] story=${storyId} already published → ${existingTracker.externalKey}`,
+      );
+      return { alreadyPublished: true, tracker: existingTracker };
+    }
+
+    if (existingTracker?.externalId === PENDING_TRACKER_SENTINEL) {
+      const waited = await this.waitForStoryTrackerOrFreed(storyId);
+      if (waited.kind === 'ready') {
+        return { alreadyPublished: true, tracker: waited.tracker };
+      }
+      if (waited.kind === 'timeout') {
+        throw new ConflictException(
+          'Otra publicación de esta historia lleva mucho tiempo. Reintenta en unos segundos.',
+        );
+      }
+      // 'freed' → continuar al CAS abajo.
+    }
+
+    // La épica DEBE tener tracker — el Issue de Linear necesita projectId.
+    const parentTracker = story.epic.tracker as unknown as TrackerReference | null;
+    const projectExternalId =
+      parentTracker?.externalId &&
+      parentTracker.externalId !== PENDING_TRACKER_SENTINEL
+        ? parentTracker.externalId
+        : null;
+    if (!projectExternalId) {
+      throw new BadRequestException(
+        'La épica padre aún no tiene Project en el tracker. Publica primero la épica para que su Linear Project exista.',
+      );
+    }
+
+    // Atomic CAS lock: solo procede si tracker es NULL.
+    const placeholder = {
+      provider,
+      externalId: PENDING_TRACKER_SENTINEL,
+      externalKey: PENDING_TRACKER_SENTINEL,
+      externalUrl: '',
+    };
+    const claimed = await this.prisma.story.updateMany({
+      where: { id: storyId, tracker: { equals: Prisma.DbNull } },
+      data: { tracker: placeholder as unknown as Prisma.InputJsonValue },
+    });
+    if (claimed.count === 0) {
+      const waited = await this.waitForStoryTrackerOrFreed(storyId);
+      if (waited.kind === 'ready') {
+        return { alreadyPublished: true, tracker: waited.tracker };
+      }
+      if (waited.kind === 'freed') {
+        return this.publishToTracker(storyId, provider, user);
+      }
+      throw new ConflictException(
+        'Otra publicación de esta historia lleva mucho tiempo. Reintenta en unos segundos.',
+      );
+    }
+
+    // Cargar el contenido del vault (PO + Technical + QA) para incluirlo
+    // en el body del Linear Issue. Failure individual no aborta — caemos
+    // a publicar sin contexto, mejor que no publicar.
+    let storyContent = null;
+    if (story.vaultPath) {
+      try {
+        storyContent = await this.readStoryContent(story.vaultPath);
+      } catch (err) {
+        this.logger.warn(
+          `[publishToTracker] failed to read vault content for story=${storyId}: ${(err as Error)?.message ?? err}`,
+        );
+      }
+    }
+
+    let tracker: TrackerReference;
+    try {
+      const trackerProvider = await this.integrationsService.getProvider(provider);
+      tracker = await trackerProvider.publishStory(
+        {
+          id: story.id,
+          title: story.title,
+          storyPoints: story.storyPoints,
+          labels: story.labels,
+          content: storyContent,
+        },
+        { projectExternalId },
+      );
+    } catch (err) {
+      await this.prisma.story.update({
+        where: { id: storyId },
+        data: { tracker: Prisma.DbNull },
+      });
+      throw err;
+    }
+
+    await this.prisma.story.update({
+      where: { id: storyId },
+      data: { tracker: tracker as unknown as Prisma.InputJsonValue },
+    });
+
+    await this.integrationsService.markSyncedAt(provider);
+
+    this.logger.log(
+      `[publishToTracker] actor=${user.sub} story=${storyId} → ${tracker.externalKey} ` +
+        `(project=${parentTracker?.externalKey ?? '∅'})`,
+    );
+
+    return { alreadyPublished: false, tracker };
+  }
+
+  /**
+   * Polling corto sobre `story.tracker` (mismo patrón que initiatives/epics).
+   * Convierte la race condition transitoria en una espera transparente para
+   * el usuario en vez de un 409 confuso.
+   */
+  private async waitForStoryTrackerOrFreed(
+    storyId: string,
+  ): Promise<
+    | { kind: 'ready'; tracker: TrackerReference }
+    | { kind: 'freed' }
+    | { kind: 'timeout' }
+  > {
+    const POLL_INTERVAL_MS = 250;
+    const WAIT_BUDGET_MS = 15_000;
+    const start = Date.now();
+    while (Date.now() - start < WAIT_BUDGET_MS) {
+      await new Promise((r) => setTimeout(r, POLL_INTERVAL_MS));
+      const row = await this.prisma.story.findUnique({
+        where: { id: storyId },
+        select: { tracker: true },
+      });
+      const t = row?.tracker as unknown as TrackerReference | null;
+      if (!t) return { kind: 'freed' };
+      if (t.externalId !== PENDING_TRACKER_SENTINEL) {
+        return { kind: 'ready', tracker: t };
+      }
+    }
+    return { kind: 'timeout' };
+  }
 
   async findAll(query: StoryQueryDto) {
     const where: Prisma.StoryWhereInput = {};
@@ -168,6 +369,16 @@ export class StoriesService {
       // mismo mecanismo — ver bloque abajo).
       if (dto.blockedBy && dto.blockedBy.length > 0) {
         await this.persistBlockedByEdges(result.id, dto.epicId, dto.blockedBy);
+      }
+
+      // 3.b. Persistir las discovered deps emitidas por el agente QA a la
+      // nueva tabla con `source='discovered'`. Reemplaza el path legacy
+      // que escribía `.md` al vault.
+      if (dto.discoveredDependencies && dto.discoveredDependencies.length > 0) {
+        await this.persistDiscoveredDepsToStoryTable(
+          result.id,
+          dto.discoveredDependencies,
+        );
       }
 
       // 4. Lookup inverso: si otras historias YA aceptadas del mismo epic
@@ -468,34 +679,31 @@ export class StoriesService {
    */
   private async writeEpicLevelArtifacts(
     iniRef: InitiativeRef,
-    epicRef: EpicRef,
+    _epicRef: EpicRef,
     storyId: string,
     relatedDocuments?: RelatedDocumentDto[],
     discoveredDependencies?: DiscoveredDependencyDto[],
     epicId?: string,
   ): Promise<void> {
-    // Persist discoveredDependencies AL JSONB `epic.dependencies[]` con dedup
-    // por `id`. Sin esto las deps vivirían solo en el vault y el auto-resolve
-    // con `sourceDependencyId` (ExternalSecretsService) no las encontraría —
-    // el resolve busca en `epic.dependencies @> [{id}]`.
+    // El persist al JSONB legacy `epic.dependencies` se eliminó en el refactor
+    // a story-level. Las deps nuevas viven SOLO en `StoryTechnicalDependency`
+    // (FK story) — `persistDiscoveredDepsToStoryTable` se llama desde el
+    // create() de la story. Mantener el JSONB causaba duplicación: la misma
+    // dep aparecía en el rollup como FK story (📖) Y como legacy a nivel
+    // épica (📦), porque `getLegacyDependenciesForRollup` lee el JSONB sin
+    // filtrar overlap con la tabla nueva.
     //
-    // Semántica: cada dep descubierta se guarda con `status: 'identified'` +
-    // `isBlocking` + `vendor` + `requiresCredential` desde el DTO. Al resolver
-    // con secret, el service actualiza `status: 'resolved'` + `linkedSecretId`.
-    if (epicId && discoveredDependencies && discoveredDependencies.length > 0) {
-      try {
-        await this.persistDiscoveredDependenciesToEpicJsonb(
-          epicId,
-          discoveredDependencies,
-        );
-      } catch (err: unknown) {
-        // Best-effort: el vault ya tiene la doc, y la próxima vez que el
-        // agente corra se reintentará. No abortar la historia.
-        this.logger.warn(
-          `[StoryVault:epic-artifacts] persist to epic.dependencies JSONB failed (non-fatal): ${(err as Error)?.message ?? err}`,
-        );
-      }
-    }
+    // El path por `sourceDependencyId` (ExternalSecretsService) que motivaba
+    // el JSONB original quedó obsoleto — `resolveAllStoryDependenciesByVendor`
+    // ahora hace bulk update sobre `StoryTechnicalDependency` matching por
+    // vendor (case-insensitive), que es el flujo activo.
+    //
+    // El método `persistDiscoveredDependenciesToEpicJsonb` (líneas ~1590-1644)
+    // queda como dead code para no romper otros callers en el futuro pero
+    // ya no se invoca desde aquí. Las épicas con JSONB legacy preexistente
+    // siguen funcionando vía el filtro post-query en getLegacyDependenciesForRollup.
+    void epicId; // intencionalmente sin uso aquí (lo usa el JSONB persist que se removió)
+    void discoveredDependencies; // ídem
     const docPromises = (relatedDocuments ?? []).map(async (doc) => {
       const path = initiativeDocumentPath(iniRef, doc.docName);
       try {
@@ -519,30 +727,63 @@ export class StoriesService {
       }
     });
 
-    const depPromises = (discoveredDependencies ?? []).map(async (dep) => {
-      const path = epicDependencyPath(iniRef, epicRef, dep.title);
-      try {
-        const existing = await this.vault.readNote(path).catch(() => null);
-        const newContent = buildDiscoveredDependencyMarkdown(dep as unknown as Parameters<typeof buildDiscoveredDependencyMarkdown>[0]);
-        if (existing && existing.content === newContent) {
-          this.logger.log(`[StoryVault:epic-artifacts] dep ${path} already exists with same content — skip`);
-          return;
-        }
-        const commitMsg = existing
-          ? `docs(epic): update dependency "${dep.title}" [from story ${storyId}]`
-          : `docs(epic): record dependency "${dep.title}" [from story ${storyId}]`;
-        await this.vault.writeNote(path, newContent, commitMsg);
-        this.logger.log(
-          `[StoryVault:epic-artifacts] ✓ dep ${existing ? 'updated' : 'created'} at ${path}`,
-        );
-      } catch (err: any) {
-        this.logger.warn(
-          `[StoryVault:epic-artifacts] ✗ dep ${path} failed (best-effort, story creation continues): ${err?.message}`,
-        );
-      }
-    });
+    // NOTA: las discovered deps NO se escriben más como .md en el vault
+    // (`epics/<folder>/dependencias/*.md`) NI al JSONB legacy `epic.dependencies`.
+    // El persist a BD se hace en `persistDiscoveredDepsToStoryTable` después
+    // de crear la fila de la story (FK requiere story existente). El JSONB
+    // legacy queda inerte para épicas nuevas — las épicas pre-refactor que
+    // ya tienen data en JSONB siguen visibles vía getLegacyDependenciesForRollup
+    // con dedup contra la tabla nueva.
+    await Promise.allSettled([...docPromises]);
+  }
 
-    await Promise.allSettled([...docPromises, ...depPromises]);
+  /**
+   * Persiste las discovered deps emitidas por el agente QA a la nueva tabla
+   * `StoryTechnicalDependency` con `source='discovered'` y `storyId` apuntando
+   * a la story recién creada. Reemplaza el path legacy que escribía `.md`
+   * en `epics/<folder>/dependencias/<slug>.md`.
+   *
+   * Mapeo `DiscoveredDependencyDto.type` → `StoryTechnicalDependency.category`:
+   *   api → apis, service → services, data → testing, team → teams, other → other.
+   *
+   * Best-effort: failures se loguean pero no abortan el flow de creación de
+   * la story (los archivos core ya están en vault y la fila en BD).
+   */
+  private async persistDiscoveredDepsToStoryTable(
+    storyId: string,
+    deps: DiscoveredDependencyDto[],
+  ): Promise<void> {
+    if (deps.length === 0) return;
+    const TYPE_TO_CATEGORY: Record<string, string> = {
+      api: 'apis',
+      service: 'services',
+      data: 'testing',
+      team: 'teams',
+      other: 'other',
+    };
+    const rows = deps.map((d) => ({
+      storyId,
+      title: d.title,
+      description: d.description ?? '',
+      category: TYPE_TO_CATEGORY[d.type] ?? 'other',
+      severity: d.severity ?? 'medium',
+      source: 'discovered',
+      vendor: d.vendor ?? null,
+      requiresCredential: d.requiresCredential ?? false,
+      isBlocking: d.isBlocking ?? false,
+      status: 'identified',
+      mdContent: d.mdContent ?? null,
+    }));
+    try {
+      await this.prisma.storyTechnicalDependency.createMany({ data: rows });
+      this.logger.log(
+        `[StoryDeps:persist] ✓ inserted ${rows.length} discovered deps for story=${storyId}`,
+      );
+    } catch (err: unknown) {
+      this.logger.warn(
+        `[StoryDeps:persist] failed (non-fatal): ${(err as Error)?.message ?? err}`,
+      );
+    }
   }
 
   private async writeFileSet(fileSet: Map<string, StoryFileEntry>): Promise<string[]> {
@@ -716,6 +957,7 @@ export class StoriesService {
   private buildSectionFrontmatter(
     meta: { id: string; title: string; epicId: string; created?: string },
     sectionType: 'story-po' | 'story-technical' | 'story-qa',
+    extra?: Record<string, string>,
   ): string {
     const fm = buildFrontmatter({
       id: meta.id,
@@ -723,26 +965,28 @@ export class StoriesService {
       storyTitle: meta.title,
       epicId: meta.epicId,
       created: meta.created ?? new Date().toISOString().slice(0, 10),
+      ...(extra ?? {}),
     });
     return `${fm}\n\n`;
   }
+
+  // ─────────────────────────────────────────────────────────────────────
+  //   Builders v2: passthrough markdown único + frontmatter `format: v2`
+  // ─────────────────────────────────────────────────────────────────────
+  //
+  // En v2 las 3 secciones (PO/Technical/QA) son markdown libre con headings
+  // obligatorios dictados por el prompt al agente IA y el placeholder del
+  // editor humano. El backend NO construye sub-secciones — solo persiste el
+  // string como vino. El frontmatter `format: v2` es el flag que el reader
+  // usa para distinguir v1 (sub-campos discretos) vs v2 (markdown único).
 
   private buildPOMarkdown(
     po: Partial<StoryPoFieldsDto>,
     meta: { id: string; title: string; epicId: string; created?: string },
   ): string {
-    const whw = typeof po.whatHowWhen === 'string' ? po.whatHowWhen : '';
-    // Si llego como string (DTO), lo emitimos inline. Si algun dia migra a objeto,
-    // el parser inverso sabe distinguir por la presencia de etiquetas **What:**.
     return (
-      this.buildSectionFrontmatter(meta, 'story-po') +
-      `# Definicion de Negocio\n\n` +
-      `## Background\n${po.background ?? ''}\n\n` +
-      `## Objetivo\n${po.objective ?? ''}\n\n` +
-      `## Historia de usuario\n${po.userStory ?? ''}\n\n` +
-      `## Que / Como / Cuando\n${whw}\n\n` +
-      `## Criterios de aceptacion\n${po.acceptanceCriteria ?? ''}\n\n` +
-      `## Notas adicionales\n${po.additionalNotes ?? ''}\n`
+      this.buildSectionFrontmatter(meta, 'story-po', { format: 'v2' }) +
+      `# Definición de Negocio\n\n${po.markdown ?? ''}\n`
     );
   }
 
@@ -750,19 +994,9 @@ export class StoriesService {
     tech: Partial<StoryTechnicalFieldsDto>,
     meta: { id: string; title: string; epicId: string; created?: string },
   ): string {
-    const list = (items?: string[]) =>
-      (items ?? []).length === 0 ? '' : (items ?? []).map((v) => `- ${v}`).join('\n');
-    const checklist = (items?: string[]) =>
-      (items ?? []).length === 0 ? '' : (items ?? []).map((v) => `- [ ] ${v}`).join('\n');
-
     return (
-      this.buildSectionFrontmatter(meta, 'story-technical') +
-      `# Definicion Tecnica\n\n` +
-      `## Arquitectura\n${tech.architecture ?? ''}\n\n` +
-      `## Flujo de integracion\n${tech.integrationFlow ?? ''}\n\n` +
-      `## Validaciones\n${list(tech.validations)}\n\n` +
-      `## Manejo de errores\n${list(tech.errorHandling)}\n\n` +
-      `## Checklist de implementacion\n${checklist(tech.implementationChecklist)}\n`
+      this.buildSectionFrontmatter(meta, 'story-technical', { format: 'v2' }) +
+      `# Solución Técnica\n\n${tech.markdown ?? ''}\n`
     );
   }
 
@@ -771,11 +1005,72 @@ export class StoriesService {
     meta: { id: string; title: string; epicId: string; created?: string },
   ): string {
     return (
-      this.buildSectionFrontmatter(meta, 'story-qa') +
-      `# Testing Strategy\n\n` +
-      `${qa.testingStrategy ?? ''}\n` +
-      (qa.linkedQAMatrixId ? `\n---\n\n**QA Matrix vinculada:** \`${qa.linkedQAMatrixId}\`\n` : '')
+      this.buildSectionFrontmatter(meta, 'story-qa', { format: 'v2' }) +
+      `# Estrategia QA\n\n${qa.markdown ?? ''}\n`
     );
+  }
+
+  // ─────────────────────────────────────────────────────────────────────
+  //   Helpers legacy*ToMarkdown — concatena shape v1 a markdown v2
+  // ─────────────────────────────────────────────────────────────────────
+  //
+  // Cuando `readStoryContent` detecta un archivo con shape v1 (sub-campos
+  // discretos), estos helpers concatenan los valores en markdown con los
+  // headings obligatorios de v2. Al primer save desde el nuevo editor, el
+  // archivo se reescribe con `format: v2` y los headings persisten.
+
+  private legacyPOToMarkdown(po: StoryPoFieldsLegacy): string {
+    const parts: string[] = [];
+    if (po.background?.trim()) parts.push(`## Antecedentes\n\n${po.background.trim()}`);
+    if (po.objective?.trim()) parts.push(`## Objetivo\n\n${po.objective.trim()}`);
+    if (po.userStory?.trim()) parts.push(`## Historia de usuario\n\n${po.userStory.trim()}`);
+    const whw = po.whatHowWhen;
+    if (whw && typeof whw === 'object' && (whw.what || whw.how || whw.when)) {
+      parts.push(
+        `## What/How/When\n\n` +
+          `**What:** ${whw.what ?? ''}\n\n` +
+          `**How:** ${whw.how ?? ''}\n\n` +
+          `**When:** ${whw.when ?? ''}`,
+      );
+    } else if (typeof whw === 'string' && whw.trim()) {
+      parts.push(`## What/How/When\n\n${whw.trim()}`);
+    }
+    if (po.acceptanceCriteria?.trim()) {
+      parts.push(`## Criterios de aceptación\n\n${po.acceptanceCriteria.trim()}`);
+    }
+    if (po.additionalNotes?.trim()) parts.push(`## Notas adicionales\n\n${po.additionalNotes.trim()}`);
+    return parts.join('\n\n');
+  }
+
+  private legacyTechnicalToMarkdown(t: StoryTechnicalFieldsLegacy): string {
+    const list = (items?: string[]) =>
+      (items ?? []).filter((v) => v.trim()).map((v) => `- ${v.trim()}`).join('\n');
+    const parts: string[] = [];
+    if (t.architecture?.trim()) parts.push(`## Arquitectura y componentes\n\n${t.architecture.trim()}`);
+    if (t.integrationFlow?.trim()) parts.push(`## Flujo de integración\n\n${t.integrationFlow.trim()}`);
+    if (t.validations?.length) parts.push(`## Validaciones\n\n${list(t.validations)}`);
+    if (t.errorHandling?.length) parts.push(`## Manejo de errores\n\n${list(t.errorHandling)}`);
+    if (t.contract?.trim()) parts.push(`## Contrato\n\n${t.contract.trim()}`);
+    return parts.join('\n\n');
+  }
+
+  private legacyQAToMarkdown(qa: StoryQaFieldsLegacy): string {
+    const list = (items?: string[]) =>
+      (items ?? []).filter((v) => v.trim()).map((v) => `- ${v.trim()}`).join('\n');
+    const parts: string[] = [];
+    // Preferimos el shape granular nuevo si existe; si no, caemos al
+    // testingStrategy legacy bajo "Pruebas unitarias".
+    const unitTests = qa.unitTests?.trim() || qa.testingStrategy?.trim() || '';
+    if (unitTests) parts.push(`## Pruebas unitarias\n\n${unitTests}`);
+    if (qa.happyPath?.length) parts.push(`## Happy path\n\n${list(qa.happyPath)}`);
+    if (qa.edgeCases?.length) parts.push(`## Edge cases\n\n${list(qa.edgeCases)}`);
+    if (qa.mocks?.trim()) parts.push(`## Mocks\n\n${qa.mocks.trim()}`);
+    if (qa.tools?.trim()) parts.push(`## Herramientas\n\n${qa.tools.trim()}`);
+    let md = parts.join('\n\n');
+    if (qa.linkedQAMatrixId) {
+      md += `\n\n---\n\n**QA Matrix vinculada:** \`${qa.linkedQAMatrixId}\``;
+    }
+    return md;
   }
 
   /**
@@ -828,16 +1123,29 @@ export class StoriesService {
    * es el formato nuevo (vaultPath termina en `/index.md`) o el legacy flat
    * (vaultPath termina en `.md` sin folder intermedio).
    */
-  private async readStoryContent(vaultPath: string): Promise<StoryMarkdownData> {
+  /**
+   * Lee y parsea el contenido completo de una historia desde el vault
+   * (po, technical, qa). Public para que `EpicsService.publishToTracker`
+   * lo pueda invocar al construir los payloads para Linear.
+   */
+  async readStoryContent(vaultPath: string): Promise<StoryMarkdownData> {
     if (!vaultPath.endsWith('/index.md')) {
-      this.logger.log(`[StoryVault:read] format=LEGACY path=${vaultPath}`);
+      // Legacy flat: archivo único `<story>.md` con shape v1 (sub-campos
+      // bajo headings ## Producto/Tecnico/QA). Parseamos a shape v1 y
+      // concatenamos a markdown v2 con headings nuevos.
+      this.logger.log(`[StoryVault:read] format=LEGACY-FLAT path=${vaultPath}`);
       const note = await this.vault.readNote(vaultPath);
-      if (!note) return { po: {}, technical: {}, qa: {} };
-      return this.parseLegacyMarkdown(note.content);
+      if (!note) return { po: { markdown: '' }, technical: { markdown: '' }, qa: { markdown: '' } };
+      const v1 = this.parseLegacyMarkdown(note.content);
+      return {
+        po: { markdown: this.legacyPOToMarkdown(v1.po ?? {}) },
+        technical: { markdown: this.legacyTechnicalToMarkdown(v1.technical ?? {}) },
+        qa: { markdown: this.legacyQAToMarkdown(v1.qa ?? {}) },
+      };
     }
 
     const folderPath = this.dirname(vaultPath);
-    this.logger.log(`[StoryVault:read] format=NEW folder=${folderPath} (reading 3 section files)`);
+    this.logger.log(`[StoryVault:read] format=FOLDER folder=${folderPath} (reading 3 section files)`);
     const [poNote, tlNote, qaNote] = await Promise.all([
       this.vault.readNote(`${folderPath}/definicion-negocio.md`).catch(() => null),
       this.vault.readNote(`${folderPath}/definicion-tecnica.md`).catch(() => null),
@@ -848,28 +1156,136 @@ export class StoriesService {
     );
 
     return {
-      po: poNote ? this.parsePOMarkdown(poNote.content) : {},
-      technical: tlNote ? this.parseTechnicalMarkdown(tlNote.content) : {},
-      qa: qaNote ? this.parseQAMarkdown(qaNote.content) : {},
+      po: { markdown: poNote ? this.readSectionMarkdown(poNote.content, 'po') : '' },
+      technical: { markdown: tlNote ? this.readSectionMarkdown(tlNote.content, 'technical') : '' },
+      qa: { markdown: qaNote ? this.readSectionMarkdown(qaNote.content, 'qa') : '' },
     };
   }
 
-  /** Parser del nuevo formato: un archivo = una seccion con headings `## X`. */
-  private parsePOMarkdown(md: string): StoryPoFieldsDto {
+  /**
+   * Lee un archivo de sección y retorna el markdown listo para el editor v2.
+   * Detección de formato:
+   *   1. Si el frontmatter tiene `format: v2` → es v2 nuevo, devuelve el body
+   *      tal cual (sin frontmatter ni el `# Heading` top-level).
+   *   2. Heurística fallback: si el body contiene headings legacy v1
+   *      (`## Background`, `## Que / Como / Cuando`, `## Arquitectura`,
+   *      `## Checklist de implementacion`) → es v1, parseamos sub-campos
+   *      y concatenamos con `legacy*ToMarkdown` a markdown v2.
+   *   3. Default → asumimos v2 vacío.
+   */
+  private readSectionMarkdown(content: string, kind: 'po' | 'technical' | 'qa'): string {
+    const fm = this.parseFrontmatterFields(content);
+    if (fm.format === 'v2') {
+      return this.stripFrontmatterAndH1(content);
+    }
+
+    // Heurística: detectar headings v1 únicos por kind.
+    const v1HeadingsByKind: Record<typeof kind, RegExp> = {
+      po: /^##\s+(Background|Que \/ Como \/ Cuando|Criterios de aceptacion)\s*$/im,
+      technical: /^##\s+(Arquitectura|Flujo de integracion|Checklist de implementacion)\s*$/im,
+      qa: /^#\s+Testing Strategy\s*$/im,
+    };
+    if (v1HeadingsByKind[kind].test(content)) {
+      // v1 detectado: parsear sub-campos y concatenar.
+      if (kind === 'po') return this.legacyPOToMarkdown(this.parsePOSectionLegacyV1(content));
+      if (kind === 'technical') return this.legacyTechnicalToMarkdown(this.parseTechnicalSectionLegacyV1(content));
+      return this.legacyQAToMarkdown(this.parseQASectionLegacyV1(content));
+    }
+
+    // Sin flag y sin heurística v1 → tratar como v2 (devuelve body limpio).
+    return this.stripFrontmatterAndH1(content);
+  }
+
+  /**
+   * Quita el frontmatter `---...---` (si existe) y el primer `# Heading` que
+   * aparece al INICIO del body — NO los headings level 1 que el user pueda
+   * escribir más adelante en el contenido. Sin la guarda `^(?=...)`, un
+   * `# Resumen ejecutivo` en línea 5 sería strippeado silenciosamente.
+   */
+  private stripFrontmatterAndH1(content: string): string {
+    const body = content.replace(/^---\s*\n[\s\S]*?\n---\s*\n+/m, '');
+    // Sin flag `m`: `^` solo matchea el inicio del string. Permitimos
+    // whitespace/newlines previos pero solo hasta el primer heading.
+    const stripped = body.replace(/^\s*#\s+[^\n]+\n+/, '');
+    return stripped.trim();
+  }
+
+  /** Parser superficial del frontmatter — extrae `key: value` lines. */
+  private parseFrontmatterFields(content: string): Record<string, string> {
+    const match = content.match(/^---\s*\n([\s\S]*?)\n---/);
+    if (!match) return {};
+    const fm: Record<string, string> = {};
+    for (const line of match[1].split('\n')) {
+      const m = line.match(/^([a-zA-Z][a-zA-Z0-9_]*):\s*(.+?)\s*$/);
+      if (m) fm[m[1]] = m[2].replace(/^['"]|['"]$/g, '');
+    }
+    return fm;
+  }
+
+  /**
+   * Parser legacy v1 (folder-based, archivo `definicion-negocio.md` con
+   * sub-campos bajo headings `## Background`, etc.). Solo se usa cuando
+   * `readSectionMarkdown` detecta v1 por heurística — en v2 se ignora y
+   * el body se devuelve tal cual.
+   */
+  private parsePOSectionLegacyV1(md: string): StoryPoFieldsLegacy {
     const headings = ['Background', 'Objetivo', 'Historia de usuario', 'Que / Como / Cuando', 'Criterios de aceptacion', 'Notas adicionales'];
     const sections = this.parseFlatSections(md, headings);
     return {
       background: sections['Background'] ?? '',
       objective: sections['Objetivo'] ?? '',
       userStory: sections['Historia de usuario'] ?? '',
-      whatHowWhen: sections['Que / Como / Cuando'] ?? '',
+      whatHowWhen: this.parseWhatHowWhenBlock(sections['Que / Como / Cuando'] ?? '', '###'),
       acceptanceCriteria: sections['Criterios de aceptacion'] ?? '',
       additionalNotes: sections['Notas adicionales'] ?? '',
     };
   }
 
-  private parseTechnicalMarkdown(md: string): StoryTechnicalFieldsDto {
-    const headings = ['Arquitectura', 'Flujo de integracion', 'Validaciones', 'Manejo de errores', 'Checklist de implementacion'];
+  /**
+   * Parsea el bloque "Que / Como / Cuando" intentando extraer subsecciones
+   * `### What`, `### How`, `### When`. Si las encuentra, devuelve el objeto
+   * estructurado. Si no (vault legacy con texto plano concatenado), devuelve
+   * `{what: textoCompleto, how: '', when: ''}` para preservar el contenido
+   * en algún campo en lugar de tirarlo a la basura.
+   *
+   * `headingLevel` es '###' o '####' según el contexto del archivo padre
+   * (story-po.md usa ##, integrado usa ###, así que las subsecciones suben
+   * un nivel relativo en cada caso).
+   */
+  private parseWhatHowWhenBlock(
+    block: string,
+    headingLevel: '###' | '####',
+  ): { what: string; how: string; when: string } {
+    if (!block.trim()) return { what: '', how: '', when: '' };
+    const escaped = headingLevel.replace(/#/g, '\\#');
+    const labels = ['What', 'How', 'When'];
+    const result = { what: '', how: '', when: '' };
+    let foundAny = false;
+    for (const label of labels) {
+      // Match `### Label\n<content>` hasta el próximo heading del mismo
+      // nivel o el final del bloque.
+      const re = new RegExp(
+        `${escaped}\\s+${label}\\s*\\n([\\s\\S]*?)(?=\\n${escaped}\\s+(?:What|How|When)\\s*\\n|$)`,
+        'i',
+      );
+      const match = block.match(re);
+      if (match) {
+        foundAny = true;
+        const key = label.toLowerCase() as 'what' | 'how' | 'when';
+        result[key] = match[1].trim();
+      }
+    }
+    if (!foundAny) {
+      // Legacy: el bloque vino como texto plano. Lo guardamos en `what`
+      // para no perder el contenido — el user puede recategorizar editando.
+      return { what: block.trim(), how: '', when: '' };
+    }
+    return result;
+  }
+
+  /** Parser legacy v1 de Technical. Ver doc de `parsePOSectionLegacyV1`. */
+  private parseTechnicalSectionLegacyV1(md: string): StoryTechnicalFieldsLegacy {
+    const headings = ['Arquitectura', 'Flujo de integracion', 'Validaciones', 'Manejo de errores', 'Contrato', 'Checklist de implementacion'];
     const sections = this.parseFlatSections(md, headings);
     const toList = (s: string): string[] =>
       s
@@ -881,22 +1297,53 @@ export class StoriesService {
       integrationFlow: sections['Flujo de integracion'] ?? '',
       validations: toList(sections['Validaciones'] ?? ''),
       errorHandling: toList(sections['Manejo de errores'] ?? ''),
+      contract: sections['Contrato'] ?? '',
       implementationChecklist: toList(sections['Checklist de implementacion'] ?? ''),
     };
   }
 
-  private parseQAMarkdown(md: string): StoryQaFieldsDto {
-    // QA es texto libre bajo `# Testing Strategy`. Solo removemos la etiqueta
-    // y el eventual bloque "QA Matrix vinculada" del final.
-    let content = md.replace(/^#\s+Testing Strategy\s*\n+/im, '').trim();
+  /**
+   * Parser legacy v1 de QA. Detecta dos sub-formatos v1:
+   *   (a) Granular post-split: headings `## Pruebas unitarias`, etc.
+   *   (b) Legacy total: texto libre bajo `# Testing Strategy`.
+   * Ambos se devuelven en el shape `StoryQaFieldsLegacy` para que
+   * `legacyQAToMarkdown` los concatene a markdown v2.
+   */
+  private parseQASectionLegacyV1(md: string): StoryQaFieldsLegacy {
+    let content = md;
     const matrixMatch = content.match(/---\s*\n\s*\*\*QA Matrix vinculada:\*\*\s*`([^`]+)`/);
     let linkedQAMatrixId: string | undefined;
     if (matrixMatch) {
       linkedQAMatrixId = matrixMatch[1];
       content = content.replace(/---\s*\n\s*\*\*QA Matrix vinculada:\*\*\s*`[^`]+`\s*\n?$/, '').trim();
     }
+    content = content.replace(/^#\s+Testing Strategy\s*\n+/im, '').trim();
+
+    const newHeadings = ['Pruebas unitarias', 'Happy path', 'Edge cases', 'Mocks', 'Herramientas'];
+    const sections = this.parseFlatSections(content, newHeadings);
+    const hasGranular = newHeadings.some((h) => (sections[h] ?? '').trim().length > 0);
+
+    const toList = (s: string): string[] =>
+      s
+        .split('\n')
+        .map((line) => line.replace(/^-\s*(\[\s?\]\s*)?/, '').trim())
+        .filter((l) => l.length > 0);
+
+    if (hasGranular) {
+      return {
+        unitTests: sections['Pruebas unitarias'] ?? '',
+        happyPath: toList(sections['Happy path'] ?? ''),
+        edgeCases: toList(sections['Edge cases'] ?? ''),
+        mocks: sections['Mocks'] ?? '',
+        tools: sections['Herramientas'] ?? '',
+        testingStrategy: '',
+        ...(linkedQAMatrixId ? { linkedQAMatrixId } : {}),
+      };
+    }
+    // Total legacy: el archivo tenía `# Testing Strategy` con texto libre.
     return {
       testingStrategy: content,
+      unitTests: content,
       ...(linkedQAMatrixId ? { linkedQAMatrixId } : {}),
     };
   }
@@ -921,8 +1368,17 @@ export class StoriesService {
     return result;
   }
 
-  /** Parser legacy: un archivo unico con `## Producto`, `## Tecnico`, `## QA`. */
-  private parseLegacyMarkdown(markdown: string): StoryMarkdownData {
+  /**
+   * Parser legacy de archivo flat (un único `<story>.md` con todas las
+   * secciones bajo headings `### X`). Retorna shape v1 interno —
+   * `readStoryContent` luego lo convierte a markdown v2 con los headers
+   * nuevos via `legacy*ToMarkdown`.
+   */
+  private parseLegacyMarkdown(markdown: string): {
+    po: StoryPoFieldsLegacy;
+    technical: StoryTechnicalFieldsLegacy;
+    qa: StoryQaFieldsLegacy;
+  } {
     const STORY_HEADINGS = [
       'Background',
       'Objetivo',
@@ -964,7 +1420,7 @@ export class StoriesService {
         background: getSection('Background'),
         objective: getSection('Objetivo'),
         userStory: getSection('Historia de usuario'),
-        whatHowWhen: getSection('Qué / Cómo / Cuándo'),
+        whatHowWhen: this.parseWhatHowWhenBlock(getSection('Qué / Cómo / Cuándo'), '####'),
         acceptanceCriteria: getSection('Criterios de aceptación'),
         additionalNotes: getSection('Notas adicionales'),
       },
@@ -977,6 +1433,7 @@ export class StoriesService {
       },
       qa: {
         testingStrategy: getSection('Estrategia de testing'),
+        linkedQAMatrixId: undefined,
       },
     };
   }
@@ -992,15 +1449,25 @@ export class StoriesService {
     if (!existing.vaultPath) return;
     this.vault.invalidateCache(existing.vaultPath);
     const existingNote = await this.vault.readNote(existing.vaultPath);
-    const existingContent = existingNote
-      ? this.parseLegacyMarkdown(existingNote.content)
-      : { po: {}, technical: {}, qa: {} };
+    // Si la historia legacy estaba en formato v1 (con sub-campos discretos),
+    // la convertimos a v2 (3 markdowns) en memoria. Al persistir, el archivo
+    // flat queda con el shape simplificado nuevo.
+    const existingV1 = existingNote ? this.parseLegacyMarkdown(existingNote.content) : null;
+    const existingMarkdowns = existingV1
+      ? {
+          po: { markdown: this.legacyPOToMarkdown(existingV1.po) },
+          technical: { markdown: this.legacyTechnicalToMarkdown(existingV1.technical) },
+          qa: { markdown: this.legacyQAToMarkdown(existingV1.qa) },
+        }
+      : { po: { markdown: '' }, technical: { markdown: '' }, qa: { markdown: '' } };
     const existingCreated = existingNote ? this.extractCreatedDate(existingNote.content) : undefined;
 
+    // Merge v2: el dto.po.markdown reemplaza el existente si viene; si no,
+    // preservamos el existente. Sin spread sobre sub-campos.
     const merged = {
-      po: { ...existingContent.po, ...(dto.po ?? {}) },
-      technical: { ...existingContent.technical, ...(dto.technical ?? {}) },
-      qa: { ...existingContent.qa, ...(dto.qa ?? {}) },
+      po: { markdown: dto.po?.markdown ?? existingMarkdowns.po.markdown },
+      technical: { markdown: dto.technical?.markdown ?? existingMarkdowns.technical.markdown },
+      qa: { markdown: dto.qa?.markdown ?? existingMarkdowns.qa.markdown },
     };
 
     const legacyMd = this.buildLegacyMarkdown({
@@ -1037,32 +1504,21 @@ export class StoriesService {
       created: data.created ?? new Date().toISOString().slice(0, 10),
     })}\n\n`;
 
-    const po = data.po ?? {};
-    const technical = data.technical ?? {};
-    const qa = data.qa ?? {};
+    // En v2 cada sección es un único string markdown. Para historias legacy
+    // que se actualizan, mantenemos el archivo flat pero ahora concatenamos
+    // los 3 markdowns bajo headings ## Producto/Técnico/QA. El reader detecta
+    // legacy por path (sin /index.md) y convierte vía legacyXToMarkdown si
+    // el contenido viene en formato muy viejo, o pasa el markdown literal si
+    // ya está en este shape simplificado.
+    const po = data.po?.markdown ?? '';
+    const technical = data.technical?.markdown ?? '';
+    const qa = data.qa?.markdown ?? '';
 
     const sections: string[] = [];
     sections.push(`# ${data.title}\n`);
-    sections.push('## Producto\n');
-    sections.push(`### Background\n${po.background ?? ''}\n`);
-    sections.push(`### Objetivo\n${po.objective ?? ''}\n`);
-    sections.push(`### Historia de usuario\n${po.userStory ?? ''}\n`);
-    sections.push(`### Qué / Cómo / Cuándo\n${typeof po.whatHowWhen === 'string' ? po.whatHowWhen : ''}\n`);
-    sections.push(`### Criterios de aceptación\n${po.acceptanceCriteria ?? ''}\n`);
-    sections.push(`### Notas adicionales\n${po.additionalNotes ?? ''}\n`);
-
-    sections.push('## Técnico\n');
-    sections.push(`### Arquitectura\n${technical.architecture ?? ''}\n`);
-    sections.push(`### Flujo de integración\n${technical.integrationFlow ?? ''}\n`);
-    sections.push(`### Validaciones\n${(technical.validations ?? []).map((v) => `- ${v}`).join('\n')}\n`);
-    sections.push(`### Manejo de errores\n${(technical.errorHandling ?? []).map((e) => `- ${e}`).join('\n')}\n`);
-    sections.push(`### Checklist de implementación\n${(technical.implementationChecklist ?? []).map((i) => `- [ ] ${i}`).join('\n')}\n`);
-
-    sections.push('## QA\n');
-    sections.push(`### Estrategia de testing\n${qa.testingStrategy ?? ''}\n`);
-    if (qa.linkedQAMatrixId) {
-      sections.push(`### QA Matrix vinculada\n[[${qa.linkedQAMatrixId}]]\n`);
-    }
+    if (po.trim()) sections.push(`## Producto\n\n${po}\n`);
+    if (technical.trim()) sections.push(`## Técnico\n\n${technical}\n`);
+    if (qa.trim()) sections.push(`## QA\n\n${qa}\n`);
 
     return frontmatter + sections.join('\n');
   }
@@ -1201,18 +1657,16 @@ export class StoriesService {
   }
 
   /**
-   * Inserta las `discoveredDependencies` al JSONB `epic.dependencies[]` con
-   * dedup por `id`. Las deps ya existentes se preservan (no se sobreescriben)
-   * — solo se agregan las nuevas del batch actual.
+   * @deprecated Reemplazado por `persistDiscoveredDepsToStoryTable` con FK
+   * a story específica. Causaba duplicación: las deps emitidas por el agente
+   * IA quedaban tanto en este JSONB como en `StoryTechnicalDependency`, y el
+   * rollup las mostraba dos veces (una con 📖 story, otra con 📦 legacy épica).
+   * Ya no se invoca desde ningún call site activo. Se preserva la firma para
+   * no romper imports si alguien lo referencia desde tests; cualquier llamada
+   * nueva debe usar `persistDiscoveredDepsToStoryTable` en su lugar.
    *
-   * SQL atómico para evitar race conditions si dos historias del mismo batch
-   * se aceptan simultáneamente. El `jsonb_agg + WHERE NOT EXISTS` hace
-   * upsert in-place sin read-modify-write.
-   *
-   * Campos core persistidos: id, title, description, severity, type, vendor,
-   * requiresCredential, isBlocking, + status: 'identified' + createdAt/
-   * updatedAt. Se omite `mdContent` del JSONB (vive en el vault) para evitar
-   * bloatear el campo.
+   * (Doc original) Inserta las `discoveredDependencies` al JSONB
+   * `epic.dependencies[]` con dedup por `id`. SQL atómico con `jsonb_agg`.
    */
   private async persistDiscoveredDependenciesToEpicJsonb(
     epicId: string,

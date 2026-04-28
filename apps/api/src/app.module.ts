@@ -10,6 +10,7 @@ import { VaultModule } from "./modules/vault/vault.module";
 import { CodeRepositoriesModule } from "./modules/code-repositories/code-repositories.module";
 import { DiagramThemeSettingsModule } from "./modules/diagram-theme-settings/diagram-theme-settings.module";
 import { ExternalSecretsModule } from "./modules/external-secrets/external-secrets.module";
+import { IntegrationsModule } from "./modules/integrations/integrations.module";
 import { HealthController } from "./health.controller";
 
 @Module({
@@ -25,6 +26,7 @@ import { HealthController } from "./health.controller";
     DocumentsModule,
     DiagramThemeSettingsModule,
     ExternalSecretsModule,
+    IntegrationsModule,
   ],
   controllers: [HealthController],
 })

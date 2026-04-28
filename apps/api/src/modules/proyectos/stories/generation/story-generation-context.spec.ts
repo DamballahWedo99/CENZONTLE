@@ -21,7 +21,7 @@ jest.mock('@anthropic-ai/sdk', () => ({
   default: jest.fn(),
 }));
 
-import { StoryGenerationService } from './story-generation.service';
+import { StoryGenerationService, type EpicVaultFileKind } from './story-generation.service';
 
 type AnyObj = Record<string, unknown>;
 
@@ -29,7 +29,7 @@ interface TestContext {
   epic: {
     id: string;
     title: string;
-    description: string;
+    markdown: string;
     priority: string;
     startDate: Date;
     targetDate: Date;
@@ -42,7 +42,7 @@ interface TestContext {
   podsForAssignment: Array<{ id: string; name: string; description: string }>;
   existingStoriesSummary: string;
   enabledRepos: Array<{ name: string; branch: string }>;
-  epicVaultFiles: Array<{ path: string; sizeBytes: number; kind: string }>;
+  epicVaultFiles: Array<{ path: string; sizeBytes: number; kind: EpicVaultFileKind }>;
   designs: Array<{ id: string; name: string; description: string; handoff: string }>;
   designSkipped: boolean;
   ctx: { initiativeId: string };
@@ -65,7 +65,7 @@ function baseContext(): TestContext {
     epic: {
       id: 'epic-1',
       title: 'Rediseño Checkout',
-      description: 'Rediseño del checkout web con soporte multi-pago.',
+      markdown: '## Descripción\n\nRediseño del checkout web con soporte multi-pago.',
       priority: 'high',
       startDate: new Date('2026-01-15T00:00:00Z'),
       targetDate: new Date('2026-06-30T00:00:00Z'),
@@ -337,12 +337,17 @@ describe('Integración — handoff llega al request HTTP de Anthropic', () => {
       },
     ];
 
-    // @ts-expect-error — construimos el bloque vía el método privado
-    const commonContextBlock = service.buildCommonContextBlock(common);
+    // Métodos privados — accedemos vía cast a `any` porque TestContext es
+    // estructuralmente compatible con CommonContext pero EpicVaultFile (el
+    // tipo del campo `epicVaultFiles[].kind`) no está exportado del service,
+    // así que tsc en watch mode rechaza la asignación aunque jest la resuelva.
+    // Doble cast (svc + commonAny) para que tsc no infiera el tipo del param.
+    const svc = service as any;
+    const commonAny = common as any;
+    const commonContextBlock = svc.buildCommonContextBlock(commonAny);
 
-    // @ts-expect-error — invocamos el método privado runPOAgent
-    await service.runPOAgent(
-      common,
+    await svc.runPOAgent(
+      commonAny,
       commonContextBlock,
       undefined, // userPrompt
       3, // count
@@ -397,11 +402,13 @@ describe('Integración — handoff llega al request HTTP de Anthropic', () => {
       },
     ];
 
-    // @ts-expect-error — método privado
-    const commonContextBlock = service.buildCommonContextBlock(common);
-    // @ts-expect-error — método privado
-    await service.runPOAgent(
-      common,
+    // Métodos privados — cast a `any` (mismo motivo que el test anterior:
+    // EpicVaultFile no exportado fuerza un mismatch estructural en watch mode).
+    const svc = service as any;
+    const commonAny = common as any;
+    const commonContextBlock = svc.buildCommonContextBlock(commonAny);
+    await svc.runPOAgent(
+      commonAny,
       commonContextBlock,
       undefined,
       3,

@@ -501,6 +501,12 @@ export type DependencyDirection = 'depends_on' | 'depended_on_by';
 export type DependencyStatus = 'identified' | 'in_progress' | 'resolved' | 'blocked' | 'mitigated';
 export type DependencyScheduling = 'finish-to-start' | 'start-to-start' | 'finish-to-finish' | 'start-to-finish';
 
+/**
+ * @deprecated Reemplazado por `StoryTechnicalDependency` (FK a Story).
+ * El campo `Epic.dependencies` queda inerte para retrocompatibilidad con
+ * data legacy en JSONB; las nuevas dependencias se crean a nivel story
+ * y se agregan vía `GET /epicas/:id/dependencies-rollup`.
+ */
 export interface EpicDependency {
   id: string;
   title: string;
@@ -569,29 +575,42 @@ export interface Initiative {
   name: string;
   description: string;
   status: InitiativeStatus;
-  startDate: string; // ISO date
-  targetDate: string; // ISO date
+  /** ISO date. Opcional: una iniciativa en planning puede no tener fechas comprometidas todavía. */
+  startDate: string | null;
+  /** ISO date. Opcional: una iniciativa en planning puede no tener fechas comprometidas todavía. */
+  targetDate: string | null;
   owner: string; // name of the initiative owner
   epicIds: string[];
   documents: EpicDocument[];
+  tracker?: TrackerReference;
 }
 
 export interface Epic {
   id: string;
   title: string;
-  description: string;
-  qualitativeBenefits: string;
-  quantitativeBenefits: string;
-  benefitsMeasurement: string;
-  scopeDescription: string;
-  acceptanceCriteria: string;
-  technologicalImprovements: string;
-  businessPriority: string;
-  teamsInvolved: string;
-  impactedChannels: string;
-  impactedFlows: string;
-  impactSabreLevel: string;
-  thirdPartyDependencies: string;
+  /**
+   * Markdown único de la épica con la estructura mínima dictada por el
+   * prompt al agente IA y por el placeholder del editor humano. Headings
+   * obligatorios:
+   *   ## Descripción
+   *   ## Beneficios cualitativos
+   *   ## Beneficios cuantitativos
+   *   ## Medición de beneficios
+   *   ## Alcance
+   *   ## Criterios de aceptación
+   *   ## Mejoras tecnológicas
+   *   ## Canales y flujos impactados
+   *   ## Dependencias de terceros
+   *
+   * Reemplaza los 12 campos discretos del shape v1 (description,
+   * qualitativeBenefits, quantitativeBenefits, benefitsMeasurement,
+   * scopeDescription, acceptanceCriteria, technologicalImprovements,
+   * businessPriority, teamsInvolved, impactedChannels, impactedFlows,
+   * impactSabreLevel, thirdPartyDependencies). `priority` (enum) y
+   * `podIds` (cells) viven aparte como metadata estructurada — no se
+   * duplican en el markdown.
+   */
+  markdown: string;
   status: EpicStatus;
   priority: Priority;
   initiativeId: string;
@@ -601,6 +620,7 @@ export interface Epic {
   targetDate: string;
   documents: EpicDocument[];
   diagrams: EpicDiagram[];
+  /** @deprecated Inerte. Las dependencias técnicas viven ahora a nivel story (`StoryTechnicalDependency`). */
   dependencies: EpicDependency[];
   designs: EpicDesign[];
   designSkipped: boolean;
@@ -742,26 +762,69 @@ export type DiagramGenerationEvent =
 
 // --- Story section types ---
 
+/**
+ * Sección Product Owner de una historia. Markdown con headings obligatorios
+ * (## Antecedentes, ## Objetivo, ## Historia de usuario, ## What/How/When,
+ * ## Criterios de aceptación, ## Notas adicionales [opcional]). Reemplaza
+ * los 6 sub-campos discretos del shape v1.
+ */
 export interface StoryPOFields {
-  background: string; // Antecedentes
-  objective: string; // Objetivo
-  userStory: string; // Historia de usuario (Como... Quiero... Para...)
+  markdown: string;
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// Legacy shapes — preservados solo como type-only para que los helpers
+// `legacy*ToMarkdown` del backend acepten data v1 al leer del vault.
+// NO se usan en runtime ni en API contracts. Se eliminarán cuando todas
+// las historias del vault estén migradas a v2.
+// ─────────────────────────────────────────────────────────────────────
+
+export interface StoryPOFieldsLegacy {
+  background: string;
+  objective: string;
+  userStory: string;
   whatHowWhen: { what: string; how: string; when: string };
   acceptanceCriteria: string[];
-  additionalNotes: string; // Notas adicionales (opcional)
+  additionalNotes: string;
 }
 
+export interface StoryTechnicalFieldsLegacy {
+  architecture: string;
+  integrationFlow: string;
+  validations: string[];
+  errorHandling: string[];
+  implementationChecklist: string[];
+  contract?: string;
+}
+
+export interface StoryQAFieldsLegacy {
+  testingStrategy: string;
+  linkedQAMatrixId: string | null;
+  unitTests?: string;
+  happyPath?: string[];
+  edgeCases?: string[];
+  mocks?: string;
+  tools?: string;
+}
+
+/**
+ * Sección de Solución Técnica de una historia. A partir del refactor v2 es un
+ * único string markdown con headings obligatorios (## Arquitectura y
+ * componentes, ## Flujo de integración, ## Validaciones, ## Manejo de errores,
+ * ## Contrato). El frontend renderea 1 editor Tiptap full-feature por tab.
+ * El agente IA emite el markdown via prompt; los headings se validan con regex.
+ */
 export interface StoryTechnicalFields {
-  architecture: string; // Arquitectura y componentes
-  integrationFlow: string; // Flujo de integración propuesto
-  validations: string[]; // Validaciones requeridas
-  errorHandling: string[]; // Manejo de errores
-  implementationChecklist: string[]; // Checklist de implementación
+  markdown: string;
 }
 
+/**
+ * Sección QA de una historia. Markdown con headings obligatorios
+ * (## Pruebas unitarias, ## Happy path, ## Edge cases, ## Mocks,
+ * ## Herramientas). Reemplaza los 7 sub-campos discretos del shape v1.
+ */
 export interface StoryQAFields {
-  testingStrategy: string; // Testing Strategy
-  linkedQAMatrixId: string | null; // Reference to epic's QAMatrix row for this story
+  markdown: string;
 }
 
 export interface UserStory {
@@ -896,6 +959,67 @@ export interface StoryOrderDependency {
   reason: StoryOrderDependencyReason;
   /** Descripción humana corta: "B consume /api/users que A crea". */
   description: string;
+}
+
+// === STORY TECHNICAL DEPENDENCIES (nivel historia) ===
+
+/**
+ * Categorías unificadas para dependencias técnicas a nivel historia.
+ * Coherentes con la categorización del frontend (EpicDependencies.tsx
+ * CATEGORY_CONFIG): bloques visuales claros en la UI.
+ */
+export type StoryTechnicalDependencyCategory =
+  | 'secrets'
+  | 'apis'
+  | 'testing'
+  | 'services'
+  | 'teams'
+  | 'knowledge'
+  | 'other';
+
+export type StoryTechnicalDependencySeverity = 'critical' | 'high' | 'medium' | 'low';
+
+export type StoryTechnicalDependencyStatus =
+  | 'identified'
+  | 'in_progress'
+  | 'resolved'
+  | 'blocked'
+  | 'mitigated';
+
+/**
+ * Origen de la dependencia: `manual` la creó un usuario desde la UI;
+ * `discovered` la emitió el agente IA durante generación de historias.
+ * Preservar el origen permite filtrar/badge sin perder trazabilidad.
+ */
+export type StoryTechnicalDependencySource = 'manual' | 'discovered';
+
+/**
+ * Dependencia técnica ligada a una historia específica. Reemplaza el modelo
+ * legacy de `EpicDependency` (JSONB) y `DiscoveredDependency` (vault) en una
+ * sola tabla con FK directa a `Story`. Cada épica obtiene un roll-up read-only
+ * agregando las deps de todas sus historias.
+ */
+export interface StoryTechnicalDependency {
+  id: string;
+  storyId: string;
+  title: string;
+  description: string;
+  category: StoryTechnicalDependencyCategory;
+  severity: StoryTechnicalDependencySeverity;
+  source: StoryTechnicalDependencySource;
+  vendor: string | null;
+  requiresCredential: boolean;
+  linkedSecretId: string | null;
+  isBlocking: boolean;
+  targetExternalName: string | null;
+  targetEpicId: string | null;
+  status: StoryTechnicalDependencyStatus;
+  owner: string;
+  dueDate: string | null;
+  resolutionNotes: string;
+  mdContent: string | null;
+  createdAt: string;
+  updatedAt: string;
 }
 
 export interface Pod {

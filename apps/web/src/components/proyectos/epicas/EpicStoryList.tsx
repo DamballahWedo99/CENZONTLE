@@ -9,7 +9,6 @@ import {
   StoryTechnicalFields,
   StoryQAFields,
   Pod,
-  QAMatrix,
 } from '@cenzontle/shared';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -24,6 +23,10 @@ import {
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { StatusBadge } from '../shared/StatusBadge';
 import { StoryPointsBadge } from '../shared/StoryPointsBadge';
+import { StoryPOTab } from '../historias/editor/StoryPOTab';
+import { StoryTechnicalTab } from '../historias/editor/StoryTechnicalTab';
+import { StoryQATab } from '../historias/editor/StoryQATab';
+import { ReadOnlyMarkdown } from '@/components/shared/tiptap/ReadOnlyMarkdown';
 import {
   Plus,
   Pencil,
@@ -54,27 +57,10 @@ const FIBONACCI_POINTS = [1, 2, 3, 5, 8, 13] as const;
 
 // --- Defaults ---
 
-const emptyPO: StoryPOFields = {
-  background: '',
-  objective: '',
-  userStory: '',
-  whatHowWhen: { what: '', how: '', when: '' },
-  acceptanceCriteria: [''],
-  additionalNotes: '',
-};
-
-const emptyTechnical: StoryTechnicalFields = {
-  architecture: '',
-  integrationFlow: '',
-  validations: [''],
-  errorHandling: [''],
-  implementationChecklist: [''],
-};
-
-const emptyQA: StoryQAFields = {
-  testingStrategy: '',
-  linkedQAMatrixId: null,
-};
+// En v2, cada sección es un único string markdown — se inicializa vacío.
+const emptyPO: StoryPOFields = { markdown: '' };
+const emptyTechnical: StoryTechnicalFields = { markdown: '' };
+const emptyQA: StoryQAFields = { markdown: '' };
 
 // --- Form state ---
 
@@ -185,7 +171,6 @@ interface EpicStoryListProps {
   stories: UserStory[];
   epicId: string;
   pods: Pod[];
-  qaMatrix?: QAMatrix | null;
   onCreateStory: (story: UserStory) => void;
   onUpdateStory: (id: string, changes: Partial<UserStory>) => void;
   onDeleteStory: (id: string) => void;
@@ -201,7 +186,6 @@ export function EpicStoryList({
   stories,
   epicId,
   pods,
-  qaMatrix,
   onCreateStory,
   onUpdateStory,
   onDeleteStory,
@@ -226,9 +210,6 @@ export function EpicStoryList({
   );
 
   // tracker is assigned externally (e.g. via Linear/Jira integration), not at creation time
-
-  // --- QA matrix rows mapped by storyId ---
-  const qaRowsByStoryId = new Map(qaMatrix?.rows.map((r) => [r.storyId, r]) ?? []);
 
   // Auto-scroll to inline creation form & Escape key
   useEffect(() => {
@@ -281,27 +262,24 @@ export function EpicStoryList({
   const handleCreate = useCallback(() => {
     if (!formData.title.trim()) return;
     const now = new Date().toISOString();
+    // Description corto se deriva de la primera línea no-heading del markdown PO.
+    const firstContentLine = formData.po.markdown
+      .split('\n')
+      .map((l) => l.trim())
+      .find((l) => l.length > 0 && !l.startsWith('#'));
     const story: UserStory = {
       id: crypto.randomUUID(),
       title: formData.title.trim(),
-      description: formData.po.userStory.trim(),
+      description: firstContentLine ?? '',
       storyPoints: formData.storyPoints,
       status: formData.status,
       epicId,
       podId: formData.podId,
       sprintId: null,
       labels: formData.labels,
-      po: {
-        ...formData.po,
-        acceptanceCriteria: formData.po.acceptanceCriteria.filter((c) => c.trim()),
-      },
-      technical: {
-        ...formData.technical,
-        validations: formData.technical.validations.filter((v) => v.trim()),
-        errorHandling: formData.technical.errorHandling.filter((e) => e.trim()),
-        implementationChecklist: formData.technical.implementationChecklist.filter((c) => c.trim()),
-      },
-      qa: formData.qa,
+      po: { markdown: formData.po.markdown },
+      technical: { markdown: formData.technical.markdown },
+      qa: { markdown: formData.qa.markdown },
       createdAt: now,
       updatedAt: now,
     };
@@ -323,22 +301,9 @@ export function EpicStoryList({
       status: story.status,
       podId: story.podId,
       labels: [...story.labels],
-      po: {
-        ...story.po,
-        acceptanceCriteria:
-          story.po.acceptanceCriteria.length > 0 ? [...story.po.acceptanceCriteria] : [''],
-      },
-      technical: {
-        ...story.technical,
-        validations: story.technical.validations.length > 0 ? [...story.technical.validations] : [''],
-        errorHandling:
-          story.technical.errorHandling.length > 0 ? [...story.technical.errorHandling] : [''],
-        implementationChecklist:
-          story.technical.implementationChecklist.length > 0
-            ? [...story.technical.implementationChecklist]
-            : [''],
-      },
-      qa: { ...story.qa },
+      po: { markdown: story.po.markdown ?? '' },
+      technical: { markdown: story.technical.markdown ?? '' },
+      qa: { markdown: story.qa.markdown ?? '' },
     });
   }, []);
 
@@ -348,24 +313,20 @@ export function EpicStoryList({
 
   const saveEditing = useCallback(() => {
     if (!editingStoryId || !formData.title.trim()) return;
+    const firstContentLine = formData.po.markdown
+      .split('\n')
+      .map((l) => l.trim())
+      .find((l) => l.length > 0 && !l.startsWith('#'));
     onUpdateStory(editingStoryId, {
       title: formData.title.trim(),
-      description: formData.po.userStory.trim(),
+      description: firstContentLine ?? '',
       storyPoints: formData.storyPoints,
       status: formData.status,
       podId: formData.podId,
       labels: formData.labels,
-      po: {
-        ...formData.po,
-        acceptanceCriteria: formData.po.acceptanceCriteria.filter((c) => c.trim()),
-      },
-      technical: {
-        ...formData.technical,
-        validations: formData.technical.validations.filter((v) => v.trim()),
-        errorHandling: formData.technical.errorHandling.filter((e) => e.trim()),
-        implementationChecklist: formData.technical.implementationChecklist.filter((c) => c.trim()),
-      },
-      qa: formData.qa,
+      po: { markdown: formData.po.markdown },
+      technical: { markdown: formData.technical.markdown },
+      qa: { markdown: formData.qa.markdown },
     });
     setEditingStoryId(null);
   }, [editingStoryId, formData, onUpdateStory]);
@@ -450,187 +411,29 @@ export function EpicStoryList({
     </div>
   );
 
+  // En v2 cada tab es un único editor Tiptap full-feature (StoryPOTab/
+  // StoryTechnicalTab/StoryQATab) con un placeholder de los headings
+  // obligatorios. Reemplaza los N textareas + ListEditor del shape v1.
   const renderPOTab = () => (
-    <div className="space-y-4">
-      <div className="space-y-1.5">
-        <label className="text-xs font-medium text-muted-foreground">Antecedentes</label>
-        <textarea
-          value={formData.po.background}
-          onChange={(e) => updatePO({ background: e.target.value })}
-          placeholder="Contexto e información previa relevante para esta historia..."
-          rows={2}
-          className={inputCls}
-        />
-      </div>
-      <div className="space-y-1.5">
-        <label className="text-xs font-medium text-muted-foreground">Objetivo</label>
-        <textarea
-          value={formData.po.objective}
-          onChange={(e) => updatePO({ objective: e.target.value })}
-          placeholder="¿Qué se busca lograr con esta historia?"
-          rows={2}
-          className={inputCls}
-        />
-      </div>
-      <div className="space-y-1.5">
-        <label className="text-xs font-medium text-muted-foreground">Historia de Usuario</label>
-        <textarea
-          value={formData.po.userStory}
-          onChange={(e) => updatePO({ userStory: e.target.value })}
-          placeholder="Como [tipo de usuario], quiero [acción] para [beneficio]..."
-          rows={2}
-          className={inputCls}
-        />
-      </div>
-      <div className="space-y-1.5">
-        <label className="text-xs font-medium text-muted-foreground">What / How / When</label>
-        <div className="grid grid-cols-3 gap-2">
-          <Input
-            value={formData.po.whatHowWhen.what}
-            onChange={(e) =>
-              updatePO({ whatHowWhen: { ...formData.po.whatHowWhen, what: e.target.value } })
-            }
-            placeholder="What — ¿Qué?"
-            className="text-sm"
-          />
-          <Input
-            value={formData.po.whatHowWhen.how}
-            onChange={(e) =>
-              updatePO({ whatHowWhen: { ...formData.po.whatHowWhen, how: e.target.value } })
-            }
-            placeholder="How — ¿Cómo?"
-            className="text-sm"
-          />
-          <Input
-            value={formData.po.whatHowWhen.when}
-            onChange={(e) =>
-              updatePO({ whatHowWhen: { ...formData.po.whatHowWhen, when: e.target.value } })
-            }
-            placeholder="When — ¿Cuándo?"
-            className="text-sm"
-          />
-        </div>
-      </div>
-      <div className="space-y-1.5">
-        <label className="text-xs font-medium text-muted-foreground">Criterios de Aceptación</label>
-        <ListEditor
-          items={formData.po.acceptanceCriteria}
-          onChange={(items) => updatePO({ acceptanceCriteria: items })}
-          placeholder="Dado que... Cuando... Entonces..."
-          label="Agregar criterio"
-        />
-      </div>
-      <div className="space-y-1.5">
-        <label className="text-xs font-medium text-muted-foreground">
-          Notas Adicionales <span className="font-normal">(opcional)</span>
-        </label>
-        <textarea
-          value={formData.po.additionalNotes}
-          onChange={(e) => updatePO({ additionalNotes: e.target.value })}
-          placeholder="Dependencias, restricciones, consideraciones extra..."
-          rows={2}
-          className={inputCls}
-        />
-      </div>
-    </div>
+    <StoryPOTab
+      value={formData.po.markdown}
+      onChange={(md) => setFormData((prev) => ({ ...prev, po: { markdown: md } }))}
+    />
   );
 
   const renderTechnicalTab = () => (
-    <div className="space-y-4">
-      <div className="space-y-1.5">
-        <label className="text-xs font-medium text-muted-foreground">Arquitectura y Componentes</label>
-        <textarea
-          value={formData.technical.architecture}
-          onChange={(e) => updateTechnical({ architecture: e.target.value })}
-          placeholder="Componentes involucrados, servicios, bases de datos..."
-          rows={3}
-          className={inputCls}
-        />
-      </div>
-      <div className="space-y-1.5">
-        <label className="text-xs font-medium text-muted-foreground">
-          Flujo de Integración Propuesto
-        </label>
-        <textarea
-          value={formData.technical.integrationFlow}
-          onChange={(e) => updateTechnical({ integrationFlow: e.target.value })}
-          placeholder="Secuencia de llamadas, APIs involucradas, flujo de datos..."
-          rows={3}
-          className={inputCls}
-        />
-      </div>
-      <div className="space-y-1.5">
-        <label className="text-xs font-medium text-muted-foreground">Validaciones Requeridas</label>
-        <ListEditor
-          items={formData.technical.validations}
-          onChange={(items) => updateTechnical({ validations: items })}
-          placeholder="Validación de entrada, reglas de negocio..."
-          label="Agregar validación"
-        />
-      </div>
-      <div className="space-y-1.5">
-        <label className="text-xs font-medium text-muted-foreground">Manejo de Errores</label>
-        <ListEditor
-          items={formData.technical.errorHandling}
-          onChange={(items) => updateTechnical({ errorHandling: items })}
-          placeholder="Escenario de error y estrategia de manejo..."
-          label="Agregar escenario"
-        />
-      </div>
-      <div className="space-y-1.5">
-        <label className="text-xs font-medium text-muted-foreground">
-          Checklist de Implementación
-        </label>
-        <ListEditor
-          items={formData.technical.implementationChecklist}
-          onChange={(items) => updateTechnical({ implementationChecklist: items })}
-          placeholder="Paso de implementación..."
-          label="Agregar paso"
-        />
-      </div>
-    </div>
+    <StoryTechnicalTab
+      value={formData.technical.markdown}
+      onChange={(md) => setFormData((prev) => ({ ...prev, technical: { markdown: md } }))}
+    />
   );
 
-  const renderQATab = () => {
-    const qaRow = editingStoryId ? qaRowsByStoryId.get(editingStoryId) : null;
-    return (
-      <div className="space-y-4">
-        <div className="space-y-1.5">
-          <label className="text-xs font-medium text-muted-foreground">Testing Strategy</label>
-          <textarea
-            value={formData.qa.testingStrategy}
-            onChange={(e) => updateQA({ testingStrategy: e.target.value })}
-            placeholder="Estrategia de pruebas: unitarias, integración, E2E, performance..."
-            rows={4}
-            className={inputCls}
-          />
-        </div>
-        <div className="space-y-1.5">
-          <label className="text-xs font-medium text-muted-foreground">
-            Matriz de Pruebas (QA)
-          </label>
-          {qaRow ? (
-            <div className="rounded-lg border p-3 bg-muted/20 space-y-2">
-              <div className="flex items-center gap-2 text-xs">
-                <Link2 className="h-3.5 w-3.5 text-muted-foreground" />
-                <span className="text-muted-foreground">Vinculada desde la Matriz QA de la épica</span>
-                <span className="font-mono text-foreground">{qaRow.storyJiraKey}</span>
-              </div>
-              <p className="text-xs text-muted-foreground">
-                {qaRow.testCases.length} casos de prueba · {qaRow.coverage}% cobertura
-              </p>
-            </div>
-          ) : (
-            <div className="rounded-lg border border-dashed p-3 text-center">
-              <p className="text-xs text-muted-foreground">
-                No hay matriz de pruebas vinculada. Genera una desde la pestaña &quot;Matrices QA&quot; de la épica.
-              </p>
-            </div>
-          )}
-        </div>
-      </div>
-    );
-  };
+  const renderQATab = () => (
+    <StoryQATab
+      value={formData.qa.markdown}
+      onChange={(md) => setFormData((prev) => ({ ...prev, qa: { markdown: md } }))}
+    />
+  );
 
   const renderStoryForm = (autoFocusTitle: boolean) => (
     <div className="space-y-0">
@@ -730,120 +533,40 @@ export function EpicStoryList({
   );
 
   // --- Read-only view sections ---
+  // En v2 cada sección es un único string markdown — renderizamos directo
+  // como markdown via ReadOnlyMarkdown (que parsea y muestra con la misma
+  // tipografía que el editor). Sin reconstruir sub-secciones desde campos
+  // discretos.
 
   const renderPOView = (story: UserStory) => (
-    <div className="space-y-3">
-      {story.po.background && (
-        <div>
-          <p className="text-xs font-medium text-muted-foreground mb-1">Antecedentes</p>
-          <p className="text-sm text-foreground/80">{story.po.background}</p>
-        </div>
-      )}
-      {story.po.objective && (
-        <div>
-          <p className="text-xs font-medium text-muted-foreground mb-1">Objetivo</p>
-          <p className="text-sm text-foreground/80">{story.po.objective}</p>
-        </div>
-      )}
-      {story.po.userStory && (
-        <div>
-          <p className="text-xs font-medium text-muted-foreground mb-1">Historia de Usuario</p>
-          <p className="text-sm text-foreground/80">{story.po.userStory}</p>
-        </div>
-      )}
-      {(story.po.whatHowWhen.what || story.po.whatHowWhen.how || story.po.whatHowWhen.when) && (
-        <div>
-          <p className="text-xs font-medium text-muted-foreground mb-1">What / How / When</p>
-          <div className="grid grid-cols-3 gap-2 text-xs">
-            <div className="rounded-lg bg-muted/30 p-2">
-              <span className="text-muted-foreground">What: </span>
-              <span className="text-foreground/80">{story.po.whatHowWhen.what || '—'}</span>
-            </div>
-            <div className="rounded-lg bg-muted/30 p-2">
-              <span className="text-muted-foreground">How: </span>
-              <span className="text-foreground/80">{story.po.whatHowWhen.how || '—'}</span>
-            </div>
-            <div className="rounded-lg bg-muted/30 p-2">
-              <span className="text-muted-foreground">When: </span>
-              <span className="text-foreground/80">{story.po.whatHowWhen.when || '—'}</span>
-            </div>
-          </div>
-        </div>
-      )}
-      <div>
-        <p className="text-xs font-medium text-muted-foreground mb-1">Criterios de Aceptación</p>
-        <ReadOnlyList items={story.po.acceptanceCriteria} emptyText="Sin criterios definidos" />
-      </div>
-      {story.po.additionalNotes && (
-        <div>
-          <p className="text-xs font-medium text-muted-foreground mb-1">Notas Adicionales</p>
-          <p className="text-sm text-foreground/80">{story.po.additionalNotes}</p>
-        </div>
+    <div className="space-y-2 prose prose-sm dark:prose-invert max-w-none">
+      {story.po.markdown ? (
+        <ReadOnlyMarkdown content={story.po.markdown} />
+      ) : (
+        <p className="text-xs text-muted-foreground italic">Sin definición de Product Owner</p>
       )}
     </div>
   );
 
   const renderTechnicalView = (story: UserStory) => (
-    <div className="space-y-3">
-      {story.technical.architecture && (
-        <div>
-          <p className="text-xs font-medium text-muted-foreground mb-1">Arquitectura y Componentes</p>
-          <p className="text-sm text-foreground/80 whitespace-pre-wrap">{story.technical.architecture}</p>
-        </div>
+    <div className="space-y-2 prose prose-sm dark:prose-invert max-w-none">
+      {story.technical.markdown ? (
+        <ReadOnlyMarkdown content={story.technical.markdown} />
+      ) : (
+        <p className="text-xs text-muted-foreground italic">Sin definición técnica</p>
       )}
-      {story.technical.integrationFlow && (
-        <div>
-          <p className="text-xs font-medium text-muted-foreground mb-1">Flujo de Integración</p>
-          <p className="text-sm text-foreground/80 whitespace-pre-wrap">{story.technical.integrationFlow}</p>
-        </div>
-      )}
-      <div>
-        <p className="text-xs font-medium text-muted-foreground mb-1">Validaciones Requeridas</p>
-        <ReadOnlyList items={story.technical.validations} emptyText="Sin validaciones definidas" />
-      </div>
-      <div>
-        <p className="text-xs font-medium text-muted-foreground mb-1">Manejo de Errores</p>
-        <ReadOnlyList items={story.technical.errorHandling} emptyText="Sin escenarios definidos" />
-      </div>
-      <div>
-        <p className="text-xs font-medium text-muted-foreground mb-1">Checklist de Implementación</p>
-        <ReadOnlyList items={story.technical.implementationChecklist} emptyText="Sin checklist definido" />
-      </div>
     </div>
   );
 
-  const renderQAView = (story: UserStory) => {
-    const qaRow = qaRowsByStoryId.get(story.id);
-    return (
-      <div className="space-y-3">
-        {story.qa.testingStrategy ? (
-          <div>
-            <p className="text-xs font-medium text-muted-foreground mb-1">Testing Strategy</p>
-            <p className="text-sm text-foreground/80 whitespace-pre-wrap">{story.qa.testingStrategy}</p>
-          </div>
-        ) : (
-          <p className="text-xs text-muted-foreground italic">Sin estrategia de testing definida</p>
-        )}
-        <div>
-          <p className="text-xs font-medium text-muted-foreground mb-1">Matriz de Pruebas</p>
-          {qaRow ? (
-            <div className="rounded-lg border p-3 bg-muted/20 space-y-1">
-              <div className="flex items-center gap-2 text-xs">
-                <Link2 className="h-3.5 w-3.5 text-muted-foreground" />
-                <span className="font-mono text-foreground">{qaRow.storyJiraKey}</span>
-                <span className="text-muted-foreground">·</span>
-                <span className="text-muted-foreground">
-                  {qaRow.testCases.length} casos · {qaRow.coverage}% cobertura
-                </span>
-              </div>
-            </div>
-          ) : (
-            <p className="text-xs text-muted-foreground italic">Sin matriz vinculada</p>
-          )}
-        </div>
-      </div>
-    );
-  };
+  const renderQAView = (story: UserStory) => (
+    <div className="space-y-2 prose prose-sm dark:prose-invert max-w-none">
+      {story.qa.markdown ? (
+        <ReadOnlyMarkdown content={story.qa.markdown} />
+      ) : (
+        <p className="text-xs text-muted-foreground italic">Sin estrategia de testing definida</p>
+      )}
+    </div>
+  );
 
   // --- Main render ---
 

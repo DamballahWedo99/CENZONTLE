@@ -23,14 +23,16 @@ import {
   ChangelogAction,
   ChangelogEntityType,
   type UserStory,
-  type StoryPOFields,
-  type StoryTechnicalFields,
-  type StoryQAFields,
 } from '@cenzontle/shared';
 import { StatusBadge } from '../shared/StatusBadge';
 import { PodBadge } from '../shared/PodBadge';
 import { StoryPointsBadge } from '../shared/StoryPointsBadge';
 import { DownloadMenu } from '../shared/DownloadMenu';
+import { StoryDependencies } from './StoryDependencies';
+import { StoryPOTab } from './editor/StoryPOTab';
+import { StoryTechnicalTab } from './editor/StoryTechnicalTab';
+import { StoryQATab } from './editor/StoryQATab';
+import { ReadOnlyMarkdown } from '@/components/shared/tiptap/ReadOnlyMarkdown';
 import {
   Calendar,
 
@@ -47,7 +49,13 @@ import {
   Tag,
   Layers,
   ArrowLeft,
+  Upload,
+  ExternalLink,
+  Loader2,
 } from 'lucide-react';
+import { publishStoryToTracker } from '@/lib/api/integrations';
+import { ApiError } from '@/lib/api/client';
+import type { TrackerReference } from '@cenzontle/shared';
 
 // --- Labels ---
 
@@ -73,84 +81,7 @@ const actionVerbs: Record<ChangelogAction, string> = {
   [ChangelogAction.Rejected]: 'rechazó',
 };
 
-const inputCls =
-  'w-full rounded-lg border border-input bg-transparent px-3 py-2 text-sm shadow-xs focus-visible:border-ring focus-visible:ring-ring/50 focus-visible:ring-[3px] outline-none resize-none dark:bg-input/30';
-
 // --- Helpers ---
-
-function ListEditor({
-  items,
-  onChange,
-  placeholder,
-  label,
-}: {
-  items: string[];
-  onChange: (items: string[]) => void;
-  placeholder: string;
-  label: string;
-}) {
-  return (
-    <div className="space-y-1.5">
-      {items.map((item, idx) => (
-        <div key={idx} className="flex items-center gap-1.5 group">
-          <span className="text-[10px] text-muted-foreground font-mono w-5 text-right shrink-0">
-            {idx + 1}.
-          </span>
-          <Input
-            value={item}
-            onChange={(e) => {
-              const next = [...items];
-              next[idx] = e.target.value;
-              onChange(next);
-            }}
-            placeholder={placeholder}
-            className="text-sm flex-1"
-          />
-          {items.length > 1 && (
-            <Button
-              type="button"
-              size="sm"
-              variant="ghost"
-              onClick={() => onChange(items.filter((_, i) => i !== idx))}
-              className="h-7 w-7 p-0 text-muted-foreground hover:text-red-500 opacity-0 group-hover:opacity-100 transition-opacity"
-            >
-              <X className="h-3 w-3" />
-            </Button>
-          )}
-        </div>
-      ))}
-      <Button
-        type="button"
-        size="sm"
-        variant="ghost"
-        onClick={() => onChange([...items, ''])}
-        className="h-7 gap-1 text-xs text-muted-foreground hover:text-foreground"
-      >
-        <Plus className="h-3 w-3" />
-        {label}
-      </Button>
-    </div>
-  );
-}
-
-function ReadOnlyList({ items, emptyText }: { items: string[]; emptyText?: string }) {
-  const filtered = items.filter((i) => i.trim());
-  if (filtered.length === 0) {
-    return <p className="text-xs text-muted-foreground italic">{emptyText ?? 'Sin definir'}</p>;
-  }
-  return (
-    <div className="space-y-0.5">
-      {filtered.map((item, i) => (
-        <div key={i} className="flex items-start gap-1.5 text-xs">
-          <span className="text-muted-foreground font-mono w-4 text-right shrink-0 mt-0.5">
-            {i + 1}.
-          </span>
-          <span className="text-foreground/80">{item}</span>
-        </div>
-      ))}
-    </div>
-  );
-}
 
 function formatShortDate(dateStr: string): string {
   return new Date(dateStr).toLocaleDateString('es-MX', { day: 'numeric', month: 'short' });
@@ -170,7 +101,11 @@ function StoryFullPageInner({ storyId }: StoryFullPageProps) {
   const baseStory = useMemo(() => state.stories.find((s) => s.id === storyId) ?? null, [storyId, state.stories]);
 
   // Vault content loaded from API (contains the narrative markdown fields)
-  const [vaultContent, setVaultContent] = useState<{ po: any; technical: any; qa: any } | null>(null);
+  const [vaultContent, setVaultContent] = useState<{
+    po?: { markdown?: string };
+    technical?: { markdown?: string };
+    qa?: { markdown?: string };
+  } | null>(null);
 
   useEffect(() => {
     if (!storyId) return;
@@ -186,34 +121,17 @@ function StoryFullPageInner({ storyId }: StoryFullPageProps) {
     return () => { cancelled = true; };
   }, [storyId]);
 
-  // Merge base story (from state) with vault content (from API)
+  // Merge base story (from state) with vault content (from API).
+  // Vault content trae 3 markdowns por sección (post-refactor v2). El backend
+  // se encarga de migrar contenido legacy a markdown estructurado en el read.
   const story = useMemo(() => {
     if (!baseStory) return null;
     if (!vaultContent) return baseStory;
     return {
       ...baseStory,
-      po: {
-        ...baseStory.po,
-        background: vaultContent.po?.background ?? '',
-        objective: vaultContent.po?.objective ?? '',
-        userStory: vaultContent.po?.userStory ?? '',
-        whatHowWhen: baseStory.po.whatHowWhen,
-        acceptanceCriteria: vaultContent.po?.acceptanceCriteria
-          ? String(vaultContent.po.acceptanceCriteria).split('\n').filter((s: string) => s.trim())
-          : [],
-        additionalNotes: vaultContent.po?.additionalNotes ?? '',
-      },
-      technical: {
-        architecture: vaultContent.technical?.architecture ?? '',
-        integrationFlow: vaultContent.technical?.integrationFlow ?? '',
-        validations: vaultContent.technical?.validations ?? [],
-        errorHandling: vaultContent.technical?.errorHandling ?? [],
-        implementationChecklist: vaultContent.technical?.implementationChecklist ?? [],
-      },
-      qa: {
-        testingStrategy: vaultContent.qa?.testingStrategy ?? '',
-        linkedQAMatrixId: baseStory.qa.linkedQAMatrixId,
-      },
+      po: { markdown: vaultContent.po?.markdown ?? baseStory.po.markdown ?? '' },
+      technical: { markdown: vaultContent.technical?.markdown ?? baseStory.technical.markdown ?? '' },
+      qa: { markdown: vaultContent.qa?.markdown ?? baseStory.qa.markdown ?? '' },
     } as UserStory;
   }, [baseStory, vaultContent]);
   const epic = useMemo(() => (story ? state.epics.find((e) => e.id === story.epicId) ?? null : null), [story, state.epics]);
@@ -223,6 +141,46 @@ function StoryFullPageInner({ storyId }: StoryFullPageProps) {
 
   const [isEditing, setIsEditing] = useState(false);
   const [deleteOpen, setDeleteOpen] = useState(false);
+  const [publishingTracker, setPublishingTracker] = useState(false);
+
+  const handlePublishToLinear = async () => {
+    if (!story) return;
+    setPublishingTracker(true);
+    try {
+      const result = await publishStoryToTracker(story.id, 'linear');
+      dispatch({
+        type: 'UPDATE_STORY',
+        payload: { id: story.id, changes: { tracker: result.tracker } },
+      });
+      if (result.alreadyPublished) {
+        toast.info('La historia ya estaba publicada en Linear', {
+          description: `${result.tracker.externalKey} → abrir`,
+          action: {
+            label: 'Abrir',
+            onClick: () => window.open(result.tracker.externalUrl, '_blank'),
+          },
+        });
+      } else {
+        toast.success(`Historia publicada como ${result.tracker.externalKey}`, {
+          action: {
+            label: 'Abrir Linear',
+            onClick: () => window.open(result.tracker.externalUrl, '_blank'),
+          },
+        });
+      }
+    } catch (err: unknown) {
+      const message = err instanceof Error ? err.message : 'Error desconocido';
+      if (err instanceof ApiError && err.status === 409) {
+        toast.info('Otra publicación en curso', {
+          description: 'Espera unos segundos y reintenta.',
+        });
+      } else {
+        toast.error('No se pudo publicar la historia en Linear', { description: message });
+      }
+    } finally {
+      setPublishingTracker(false);
+    }
+  };
 
   const handleDelete = async () => {
     if (!story) return;
@@ -243,25 +201,12 @@ function StoryFullPageInner({ storyId }: StoryFullPageProps) {
   const [editPodId, setEditPodId] = useState('');
   const [editLabels, setEditLabels] = useState<string[]>([]);
   const [newLabel, setNewLabel] = useState('');
-  const [editPO, setEditPO] = useState<StoryPOFields>({
-    background: '',
-    objective: '',
-    userStory: '',
-    whatHowWhen: { what: '', how: '', when: '' },
-    acceptanceCriteria: [''],
-    additionalNotes: '',
-  });
-  const [editTechnical, setEditTechnical] = useState<StoryTechnicalFields>({
-    architecture: '',
-    integrationFlow: '',
-    validations: [''],
-    errorHandling: [''],
-    implementationChecklist: [''],
-  });
-  const [editQA, setEditQA] = useState<StoryQAFields>({
-    testingStrategy: '',
-    linkedQAMatrixId: null,
-  });
+  // En v2 cada sección es un string markdown único. El editor (1 Tiptap por
+  // tab) lo modifica via `onChange` y al guardar enviamos los 3 markdowns
+  // crudos al backend.
+  const [editPO, setEditPO] = useState<string>('');
+  const [editTechnical, setEditTechnical] = useState<string>('');
+  const [editQA, setEditQA] = useState<string>('');
 
   // Changelog for this story
   const storyChangelog = useMemo(() => {
@@ -307,18 +252,22 @@ function StoryFullPageInner({ storyId }: StoryFullPageProps) {
     setEditStoryPoints(story.storyPoints);
     setEditPodId(story.podId);
     setEditLabels([...story.labels]);
-    setEditPO({
-      ...story.po,
-      acceptanceCriteria: story.po.acceptanceCriteria.length > 0 ? [...story.po.acceptanceCriteria] : [''],
-    });
-    setEditTechnical({
-      ...story.technical,
-      validations: story.technical.validations.length > 0 ? [...story.technical.validations] : [''],
-      errorHandling: story.technical.errorHandling.length > 0 ? [...story.technical.errorHandling] : [''],
-      implementationChecklist: story.technical.implementationChecklist.length > 0 ? [...story.technical.implementationChecklist] : [''],
-    });
-    setEditQA({ ...story.qa });
     setIsEditing(true);
+  }, [story]);
+
+  // Sincroniza buffers (header + 3 markdowns) con la story actual cada vez
+  // que cambia. Los tabs leen `editPO/editTechnical/editQA` para renderizar
+  // (ReadOnlyMarkdown en read-mode, SectionTiptapEditor en edit-mode).
+  useEffect(() => {
+    if (!story) return;
+    setEditTitle(story.title);
+    setEditStatus(story.status);
+    setEditStoryPoints(story.storyPoints);
+    setEditPodId(story.podId);
+    setEditLabels([...story.labels]);
+    setEditPO(story.po.markdown ?? '');
+    setEditTechnical(story.technical.markdown ?? '');
+    setEditQA(story.qa.markdown ?? '');
   }, [story]);
 
   const handleSave = useCallback(async () => {
@@ -326,46 +275,16 @@ function StoryFullPageInner({ storyId }: StoryFullPageProps) {
       return;
     }
 
-    const cleanedPO = {
-      ...editPO,
-      acceptanceCriteria: editPO.acceptanceCriteria.filter((c: string) => c.trim()),
-    };
-    const cleanedTechnical = {
-      ...editTechnical,
-      validations: editTechnical.validations.filter((v: string) => v.trim()),
-      errorHandling: editTechnical.errorHandling.filter((e: string) => e.trim()),
-      implementationChecklist: editTechnical.implementationChecklist.filter((c: string) => c.trim()),
-    };
-
-    // Convert PO fields to API shape (acceptanceCriteria joined, whatHowWhen flattened)
-    const poForApi = {
-      background: cleanedPO.background,
-      objective: cleanedPO.objective,
-      userStory: cleanedPO.userStory,
-      whatHowWhen: typeof (cleanedPO as any).whatHowWhen === 'string'
-        ? (cleanedPO as any).whatHowWhen
-        : [
-            (cleanedPO as any).whatHowWhen?.what,
-            (cleanedPO as any).whatHowWhen?.how,
-            (cleanedPO as any).whatHowWhen?.when,
-          ].filter(Boolean).join(' / '),
-      acceptanceCriteria: cleanedPO.acceptanceCriteria.join('\n'),
-      additionalNotes: cleanedPO.additionalNotes,
-    };
-
     try {
-      const result = await apiUpdateStory(story.id, {
+      await apiUpdateStory(story.id, {
         title: editTitle.trim(),
         status: editStatus as string,
         storyPoints: editStoryPoints,
         podId: editPodId,
         labels: editLabels,
-        po: poForApi,
-        technical: cleanedTechnical,
-        qa: {
-          testingStrategy: editQA.testingStrategy,
-          linkedQAMatrixId: editQA.linkedQAMatrixId ?? undefined,
-        },
+        po: { markdown: editPO },
+        technical: { markdown: editTechnical },
+        qa: { markdown: editQA },
       });
       dispatch({
         type: 'UPDATE_STORY',
@@ -373,14 +292,21 @@ function StoryFullPageInner({ storyId }: StoryFullPageProps) {
           id: story.id,
           changes: {
             title: editTitle.trim(),
-            description: editPO.userStory.trim(),
+            // El description corto se deriva de la primera línea de contenido
+            // (no-heading) del PO markdown — match con el comportamiento del
+            // backend (`normalizeOutline`).
+            description:
+              editPO
+                .split('\n')
+                .map((l) => l.trim())
+                .find((l) => l.length > 0 && !l.startsWith('#')) ?? '',
             storyPoints: editStoryPoints,
             status: editStatus,
             podId: editPodId,
             labels: editLabels,
-            po: cleanedPO,
-            technical: cleanedTechnical,
-            qa: editQA,
+            po: { markdown: editPO },
+            technical: { markdown: editTechnical },
+            qa: { markdown: editQA },
           },
         },
       });
@@ -420,7 +346,7 @@ function StoryFullPageInner({ storyId }: StoryFullPageProps) {
   return (
     <div className="h-full min-h-0">
       <div className="h-full min-h-0 overflow-y-auto">
-        <div className="mx-auto max-w-5xl px-6 py-8">
+        <div className="mx-auto max-w-7xl px-6 py-8">
 
           {/* Back button */}
           <Button
@@ -450,6 +376,38 @@ function StoryFullPageInner({ storyId }: StoryFullPageProps) {
                 {!isEditing ? (
                   <>
                     <DownloadMenu entity={{ kind: 'story', story }} fetchFullContent />
+                    {(story.tracker as TrackerReference | undefined)?.externalKey ? (
+                      <a
+                        href={(story.tracker as TrackerReference).externalUrl}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="inline-flex items-center gap-1.5 h-9 px-3 rounded-md text-xs font-medium border border-border text-muted-foreground hover:text-foreground hover:bg-accent dark:hover:bg-accent/50 transition-colors"
+                        title={`Abrir ${(story.tracker as TrackerReference).externalKey} en Linear`}
+                      >
+                        <ExternalLink className="h-3.5 w-3.5" />
+                        {(story.tracker as TrackerReference).externalKey}
+                      </a>
+                    ) : (
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        onClick={handlePublishToLinear}
+                        disabled={publishingTracker}
+                        className="text-muted-foreground hover:text-foreground gap-1.5"
+                        title={
+                          (epic?.tracker as TrackerReference | undefined)?.externalId
+                            ? 'Publicar como sub-issue de la épica'
+                            : 'Publicar historia en Linear'
+                        }
+                      >
+                        {publishingTracker ? (
+                          <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                        ) : (
+                          <Upload className="h-3.5 w-3.5" />
+                        )}
+                        Subir a Linear
+                      </Button>
+                    )}
                     <Button variant="ghost" size="icon" onClick={handleStartEdit} className="text-muted-foreground hover:text-foreground">
                       <Pencil className="h-4 w-4" />
                     </Button>
@@ -612,314 +570,90 @@ function StoryFullPageInner({ storyId }: StoryFullPageProps) {
                 <TestTube2 className="h-3.5 w-3.5" />
                 QA
               </TabsTrigger>
+              <TabsTrigger value="dependencies" className="gap-1.5 rounded-none border-b-2 border-transparent data-[state=active]:border-foreground data-[state=active]:shadow-none">
+                <Link2 className="h-3.5 w-3.5" />
+                Dependencias
+              </TabsTrigger>
               <TabsTrigger value="changelog" className="gap-1.5 rounded-none border-b-2 border-transparent data-[state=active]:border-foreground data-[state=active]:shadow-none">
                 <History className="h-3.5 w-3.5" />
                 Changelog ({storyChangelog.length})
               </TabsTrigger>
             </TabsList>
 
-            {/* ── PO Tab ── */}
+            {/* ── PO Tab ── Editor solo en modo edición; en lectura, ReadOnlyMarkdown.
+                El toggle viene del botón con ícono de lápiz en el header. */}
             <TabsContent value="po" className="mt-8 space-y-6">
               {isEditing ? (
-                <div className="space-y-4">
-                  <div className="space-y-1.5">
-                    <label className="text-xs font-medium text-muted-foreground">Antecedentes</label>
-                    <textarea
-                      value={editPO.background}
-                      onChange={(e) => setEditPO((prev) => ({ ...prev, background: e.target.value }))}
-                      placeholder="Contexto e información previa relevante para esta historia..."
-                      rows={3}
-                      className={inputCls}
-                    />
-                  </div>
-                  <div className="space-y-1.5">
-                    <label className="text-xs font-medium text-muted-foreground">Objetivo</label>
-                    <textarea
-                      value={editPO.objective}
-                      onChange={(e) => setEditPO((prev) => ({ ...prev, objective: e.target.value }))}
-                      placeholder="¿Qué se busca lograr con esta historia?"
-                      rows={3}
-                      className={inputCls}
-                    />
-                  </div>
-                  <div className="space-y-1.5">
-                    <label className="text-xs font-medium text-muted-foreground">Historia de Usuario</label>
-                    <textarea
-                      value={editPO.userStory}
-                      onChange={(e) => setEditPO((prev) => ({ ...prev, userStory: e.target.value }))}
-                      placeholder="Como [tipo de usuario], quiero [acción] para [beneficio]..."
-                      rows={3}
-                      className={inputCls}
-                    />
-                  </div>
-                  <div className="space-y-1.5">
-                    <label className="text-xs font-medium text-muted-foreground">What / How / When</label>
-                    <div className="grid grid-cols-3 gap-2">
-                      <Input
-                        value={editPO.whatHowWhen.what}
-                        onChange={(e) => setEditPO((prev) => ({ ...prev, whatHowWhen: { ...prev.whatHowWhen, what: e.target.value } }))}
-                        placeholder="What — ¿Qué?"
-                        className="text-sm"
-                      />
-                      <Input
-                        value={editPO.whatHowWhen.how}
-                        onChange={(e) => setEditPO((prev) => ({ ...prev, whatHowWhen: { ...prev.whatHowWhen, how: e.target.value } }))}
-                        placeholder="How — ¿Cómo?"
-                        className="text-sm"
-                      />
-                      <Input
-                        value={editPO.whatHowWhen.when}
-                        onChange={(e) => setEditPO((prev) => ({ ...prev, whatHowWhen: { ...prev.whatHowWhen, when: e.target.value } }))}
-                        placeholder="When — ¿Cuándo?"
-                        className="text-sm"
-                      />
-                    </div>
-                  </div>
-                  <div className="space-y-1.5">
-                    <label className="text-xs font-medium text-muted-foreground">Criterios de Aceptación</label>
-                    <ListEditor
-                      items={editPO.acceptanceCriteria}
-                      onChange={(items) => setEditPO((prev) => ({ ...prev, acceptanceCriteria: items }))}
-                      placeholder="Dado que... Cuando... Entonces..."
-                      label="Agregar criterio"
-                    />
-                  </div>
-                  <div className="space-y-1.5">
-                    <label className="text-xs font-medium text-muted-foreground">
-                      Notas Adicionales <span className="font-normal">(opcional)</span>
-                    </label>
-                    <textarea
-                      value={editPO.additionalNotes}
-                      onChange={(e) => setEditPO((prev) => ({ ...prev, additionalNotes: e.target.value }))}
-                      placeholder="Dependencias, restricciones, consideraciones extra..."
-                      rows={2}
-                      className={inputCls}
-                    />
-                  </div>
-                </div>
+                <StoryPOTab value={editPO} onChange={setEditPO} />
+              ) : editPO.trim() ? (
+                <ReadOnlyMarkdown content={editPO} />
               ) : (
-                <div className="space-y-6">
-                  {story.po.background && (
-                    <section>
-                      <h3 className="text-sm font-semibold uppercase tracking-wider text-muted-foreground mb-2">Antecedentes</h3>
-                      <p className="text-sm leading-relaxed text-foreground/80 whitespace-pre-line">{story.po.background}</p>
-                    </section>
-                  )}
-                  {story.po.objective && (
-                    <section>
-                      <h3 className="text-sm font-semibold uppercase tracking-wider text-muted-foreground mb-2">Objetivo</h3>
-                      <p className="text-sm leading-relaxed text-foreground/80 whitespace-pre-line">{story.po.objective}</p>
-                    </section>
-                  )}
-                  {story.po.userStory && (
-                    <section>
-                      <h3 className="text-sm font-semibold uppercase tracking-wider text-muted-foreground mb-2">Historia de Usuario</h3>
-                      <p className="text-sm leading-relaxed text-foreground/80 whitespace-pre-line">{story.po.userStory}</p>
-                    </section>
-                  )}
-                  {(story.po.whatHowWhen.what || story.po.whatHowWhen.how || story.po.whatHowWhen.when) && (
-                    <section>
-                      <h3 className="text-sm font-semibold uppercase tracking-wider text-muted-foreground mb-2">What / How / When</h3>
-                      <div className="grid grid-cols-3 gap-3">
-                        <div className="rounded-lg bg-muted/30 p-3">
-                          <span className="text-xs text-muted-foreground block mb-1">What</span>
-                          <span className="text-sm text-foreground/80">{story.po.whatHowWhen.what || '—'}</span>
-                        </div>
-                        <div className="rounded-lg bg-muted/30 p-3">
-                          <span className="text-xs text-muted-foreground block mb-1">How</span>
-                          <span className="text-sm text-foreground/80">{story.po.whatHowWhen.how || '—'}</span>
-                        </div>
-                        <div className="rounded-lg bg-muted/30 p-3">
-                          <span className="text-xs text-muted-foreground block mb-1">When</span>
-                          <span className="text-sm text-foreground/80">{story.po.whatHowWhen.when || '—'}</span>
-                        </div>
-                      </div>
-                    </section>
-                  )}
-                  <section>
-                    <h3 className="text-sm font-semibold uppercase tracking-wider text-muted-foreground mb-2">Criterios de Aceptación</h3>
-                    <ReadOnlyList items={story.po.acceptanceCriteria} emptyText="Sin criterios definidos" />
-                  </section>
-                  {story.po.additionalNotes && (
-                    <section>
-                      <h3 className="text-sm font-semibold uppercase tracking-wider text-muted-foreground mb-2">Notas Adicionales</h3>
-                      <p className="text-sm leading-relaxed text-foreground/80 whitespace-pre-line">{story.po.additionalNotes}</p>
-                    </section>
-                  )}
-                  {!story.po.background && !story.po.objective && !story.po.userStory && story.po.acceptanceCriteria.length === 0 && (
-                    <div className="flex flex-col items-center justify-center py-12 text-muted-foreground">
-                      <ClipboardList className="h-6 w-6 mb-2 opacity-20" />
-                      <p className="text-sm">Sin definición de PO</p>
-                      <p className="text-xs mt-1">Haz clic en el lápiz para agregar información</p>
-                    </div>
-                  )}
-                </div>
+                <p className="text-sm text-muted-foreground italic">Sin contenido. Click en el lápiz para empezar a editar.</p>
               )}
             </TabsContent>
 
             {/* ── Technical Tab ── */}
             <TabsContent value="technical" className="mt-8 space-y-6">
               {isEditing ? (
-                <div className="space-y-4">
-                  <div className="space-y-1.5">
-                    <label className="text-xs font-medium text-muted-foreground">Arquitectura y Componentes</label>
-                    <textarea
-                      value={editTechnical.architecture}
-                      onChange={(e) => setEditTechnical((prev) => ({ ...prev, architecture: e.target.value }))}
-                      placeholder="Componentes involucrados, servicios, bases de datos..."
-                      rows={4}
-                      className={inputCls}
-                    />
-                  </div>
-                  <div className="space-y-1.5">
-                    <label className="text-xs font-medium text-muted-foreground">Flujo de Integración Propuesto</label>
-                    <textarea
-                      value={editTechnical.integrationFlow}
-                      onChange={(e) => setEditTechnical((prev) => ({ ...prev, integrationFlow: e.target.value }))}
-                      placeholder="Secuencia de llamadas, APIs involucradas, flujo de datos..."
-                      rows={4}
-                      className={inputCls}
-                    />
-                  </div>
-                  <div className="space-y-1.5">
-                    <label className="text-xs font-medium text-muted-foreground">Validaciones Requeridas</label>
-                    <ListEditor
-                      items={editTechnical.validations}
-                      onChange={(items) => setEditTechnical((prev) => ({ ...prev, validations: items }))}
-                      placeholder="Validación de entrada, reglas de negocio..."
-                      label="Agregar validación"
-                    />
-                  </div>
-                  <div className="space-y-1.5">
-                    <label className="text-xs font-medium text-muted-foreground">Manejo de Errores</label>
-                    <ListEditor
-                      items={editTechnical.errorHandling}
-                      onChange={(items) => setEditTechnical((prev) => ({ ...prev, errorHandling: items }))}
-                      placeholder="Escenario de error y estrategia de manejo..."
-                      label="Agregar escenario"
-                    />
-                  </div>
-                  <div className="space-y-1.5">
-                    <label className="text-xs font-medium text-muted-foreground">Checklist de Implementación</label>
-                    <ListEditor
-                      items={editTechnical.implementationChecklist}
-                      onChange={(items) => setEditTechnical((prev) => ({ ...prev, implementationChecklist: items }))}
-                      placeholder="Paso de implementación..."
-                      label="Agregar paso"
-                    />
-                  </div>
-                </div>
+                <StoryTechnicalTab value={editTechnical} onChange={setEditTechnical} />
+              ) : editTechnical.trim() ? (
+                <ReadOnlyMarkdown content={editTechnical} />
               ) : (
-                <div className="space-y-6">
-                  {story.technical.architecture && (
-                    <section>
-                      <h3 className="text-sm font-semibold uppercase tracking-wider text-muted-foreground mb-2">Arquitectura y Componentes</h3>
-                      <p className="text-sm leading-relaxed text-foreground/80 whitespace-pre-wrap">{story.technical.architecture}</p>
-                    </section>
-                  )}
-                  {story.technical.integrationFlow && (
-                    <section>
-                      <h3 className="text-sm font-semibold uppercase tracking-wider text-muted-foreground mb-2">Flujo de Integración</h3>
-                      <p className="text-sm leading-relaxed text-foreground/80 whitespace-pre-wrap">{story.technical.integrationFlow}</p>
-                    </section>
-                  )}
-                  <section>
-                    <h3 className="text-sm font-semibold uppercase tracking-wider text-muted-foreground mb-2">Validaciones Requeridas</h3>
-                    <ReadOnlyList items={story.technical.validations} emptyText="Sin validaciones definidas" />
-                  </section>
-                  <section>
-                    <h3 className="text-sm font-semibold uppercase tracking-wider text-muted-foreground mb-2">Manejo de Errores</h3>
-                    <ReadOnlyList items={story.technical.errorHandling} emptyText="Sin escenarios definidos" />
-                  </section>
-                  <section>
-                    <h3 className="text-sm font-semibold uppercase tracking-wider text-muted-foreground mb-2">Checklist de Implementación</h3>
-                    <ReadOnlyList items={story.technical.implementationChecklist} emptyText="Sin checklist definido" />
-                  </section>
-                  {!story.technical.architecture && !story.technical.integrationFlow && story.technical.validations.length === 0 && story.technical.errorHandling.length === 0 && story.technical.implementationChecklist.length === 0 && (
-                    <div className="flex flex-col items-center justify-center py-12 text-muted-foreground">
-                      <Code2 className="h-6 w-6 mb-2 opacity-20" />
-                      <p className="text-sm">Sin definición técnica</p>
-                      <p className="text-xs mt-1">Haz clic en el lápiz para agregar información</p>
-                    </div>
-                  )}
-                </div>
+                <p className="text-sm text-muted-foreground italic">Sin contenido. Click en el lápiz para empezar a editar.</p>
               )}
             </TabsContent>
 
             {/* ── QA Tab ── */}
             <TabsContent value="qa" className="mt-8 space-y-6">
               {isEditing ? (
-                <div className="space-y-4">
-                  <div className="space-y-1.5">
-                    <label className="text-xs font-medium text-muted-foreground">Testing Strategy</label>
-                    <textarea
-                      value={editQA.testingStrategy}
-                      onChange={(e) => setEditQA((prev) => ({ ...prev, testingStrategy: e.target.value }))}
-                      placeholder="Estrategia de pruebas: unitarias, integración, E2E, performance..."
-                      rows={5}
-                      className={inputCls}
-                    />
-                  </div>
-                  <div className="space-y-1.5">
-                    <label className="text-xs font-medium text-muted-foreground">Matriz de Pruebas (QA)</label>
-                    <div className="rounded-lg border border-dashed p-3 text-center">
-                      <p className="text-xs text-muted-foreground">
-                        Las matrices de pruebas se gestionan desde la vista de la épica.
-                      </p>
-                    </div>
-                  </div>
-                </div>
+                <StoryQATab value={editQA} onChange={setEditQA} />
+              ) : editQA.trim() ? (
+                <ReadOnlyMarkdown content={editQA} />
               ) : (
-                <div className="space-y-6">
-                  {story.qa.testingStrategy ? (
-                    <section>
-                      <h3 className="text-sm font-semibold uppercase tracking-wider text-muted-foreground mb-2">Testing Strategy</h3>
-                      <p className="text-sm leading-relaxed text-foreground/80 whitespace-pre-wrap">{story.qa.testingStrategy}</p>
-                    </section>
-                  ) : (
-                    <div className="flex flex-col items-center justify-center py-8 text-muted-foreground">
-                      <TestTube2 className="h-6 w-6 mb-2 opacity-20" />
-                      <p className="text-sm">Sin estrategia de testing definida</p>
-                    </div>
-                  )}
-                  <section>
-                    <h3 className="text-sm font-semibold uppercase tracking-wider text-muted-foreground mb-2">Matriz de Pruebas</h3>
-                    {qaRow ? (
-                      <div className="rounded-lg border p-4 bg-muted/20 space-y-2">
-                        <div className="flex items-center gap-2 text-sm">
-                          <Link2 className="h-4 w-4 text-muted-foreground" />
-                          <span className="font-mono text-foreground">{qaRow.storyJiraKey}</span>
-                          <span className="text-muted-foreground">·</span>
-                          <span className="text-muted-foreground">
-                            {qaRow.testCases.length} casos · {qaRow.coverage}% cobertura
-                          </span>
-                        </div>
-                        {qaRow.testCases.length > 0 && (
-                          <div className="mt-3 space-y-1.5">
-                            {qaRow.testCases.map((tc) => (
-                              <div key={tc.id} className="flex items-center gap-2 text-xs">
-                                <span className={`h-1.5 w-1.5 rounded-full shrink-0 ${
-                                  tc.status === 'passed' ? 'bg-green-500' :
-                                  tc.status === 'failed' ? 'bg-red-500' :
-                                  tc.status === 'blocked' ? 'bg-amber-500' :
-                                  'bg-gray-400'
-                                }`} />
-                                <span className="text-foreground/80">{tc.title}</span>
-                                <span className="text-muted-foreground ml-auto">{tc.priority}</span>
-                              </div>
-                            ))}
-                          </div>
-                        )}
-                      </div>
-                    ) : (
-                      <p className="text-xs text-muted-foreground italic">Sin matriz vinculada</p>
-                    )}
-                  </section>
-                </div>
+                <p className="text-sm text-muted-foreground italic">Sin contenido. Click en el lápiz para empezar a editar.</p>
               )}
+
+              {/* Sección de matriz de pruebas — read-only, vinculada al epic */}
+              <section className="pt-4 border-t mt-8">
+                <h3 className="text-sm font-semibold uppercase tracking-wider text-muted-foreground mb-2">Matriz de Pruebas</h3>
+                {qaRow ? (
+                  <div className="rounded-lg border p-4 bg-muted/20 space-y-2">
+                    <div className="flex items-center gap-2 text-sm">
+                      <Link2 className="h-4 w-4 text-muted-foreground" />
+                      <span className="font-mono text-foreground">{qaRow.storyJiraKey}</span>
+                      <span className="text-muted-foreground">·</span>
+                      <span className="text-muted-foreground">
+                        {qaRow.testCases.length} casos · {qaRow.coverage}% cobertura
+                      </span>
+                    </div>
+                    {qaRow.testCases.length > 0 && (
+                      <div className="mt-3 space-y-1.5">
+                        {qaRow.testCases.map((tc) => (
+                          <div key={tc.id} className="flex items-center gap-2 text-xs">
+                            <span className={`h-1.5 w-1.5 rounded-full shrink-0 ${
+                              tc.status === 'passed' ? 'bg-green-500' :
+                              tc.status === 'failed' ? 'bg-red-500' :
+                              tc.status === 'blocked' ? 'bg-amber-500' :
+                              'bg-gray-400'
+                            }`} />
+                            <span className="text-foreground/80">{tc.title}</span>
+                            <span className="text-muted-foreground ml-auto">{tc.priority}</span>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                ) : (
+                  <p className="text-xs text-muted-foreground italic">Sin matriz vinculada</p>
+                )}
+              </section>
             </TabsContent>
 
             {/* ── Changelog Tab ── */}
+            <TabsContent value="dependencies" className="mt-8">
+              <StoryDependencies storyId={story.id} />
+            </TabsContent>
+
             <TabsContent value="changelog" className="mt-8">
               {storyChangelog.length === 0 ? (
                 <div className="flex flex-col items-center justify-center py-12 text-muted-foreground">
@@ -961,10 +695,23 @@ function StoryFullPageInner({ storyId }: StoryFullPageProps) {
             </TabsContent>
           </Tabs>
 
-          {/* Save bar when editing */}
+          {/* Save bar — visible solo en modo edición (toggle del lápiz en el
+              header). El user entra explícitamente en edit mode; tabs muestran
+              ReadOnlyMarkdown por default y SectionTiptapEditor cuando edita. */}
           {isEditing && (
             <div className="sticky bottom-0 bg-background/95 backdrop-blur border-t py-3 mt-8 -mx-6 px-6 flex justify-end gap-2">
-              <Button variant="ghost" onClick={() => setIsEditing(false)}>
+              <Button
+                variant="ghost"
+                onClick={() => {
+                  // Revert: restaurar buffers a la story original (3 markdowns).
+                  if (story) {
+                    setEditPO(story.po.markdown ?? '');
+                    setEditTechnical(story.technical.markdown ?? '');
+                    setEditQA(story.qa.markdown ?? '');
+                  }
+                  setIsEditing(false);
+                }}
+              >
                 Cancelar
               </Button>
               <Button onClick={handleSave} disabled={!editTitle.trim()} className="gap-1.5">

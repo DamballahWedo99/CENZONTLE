@@ -1,9 +1,10 @@
-import { Injectable, Logger, NotFoundException, BadRequestException, ConflictException, OnModuleInit } from '@nestjs/common';
+import { Injectable, Logger, NotFoundException, BadRequestException, ConflictException, OnModuleInit, Inject, forwardRef } from '@nestjs/common';
 import { Octokit } from '@octokit/rest';
 import { Prisma, VaultConfig } from '@prisma/client';
 import { AuthenticatedUser, UserRole } from '@cenzontle/shared';
 import { PrismaService } from '../prisma/prisma.service';
 import { CryptoService } from './crypto.service';
+import { VaultService } from './vault.service';
 
 /**
  * Representación pública de un vault config — nunca incluye el token
@@ -66,6 +67,14 @@ export class VaultConfigService implements OnModuleInit {
   constructor(
     private prisma: PrismaService,
     private crypto: CryptoService,
+    // forwardRef: VaultService injecta VaultConfigService → ciclo. Nest lo
+    // resuelve hidratando el provider en el segundo pase del DI graph.
+    // Necesitamos `invalidateActiveConfig()` tras mutaciones que afecten al
+    // active vault (activate/update token/remove activo) — sin esto el cache
+    // de 30s del VaultService sigue retornando el vault viejo y los writes
+    // van al repo equivocado.
+    @Inject(forwardRef(() => VaultService))
+    private readonly vaultService: VaultService,
   ) {}
 
   async onModuleInit() {
@@ -253,27 +262,43 @@ export class VaultConfigService implements OnModuleInit {
 
     const vault = await this.prisma.vaultConfig.update({ where: { id }, data });
     this.logger.log(`[update] id=${id} fields=${Object.keys(data).join(',')}`);
+    // Si se editó algún campo que forma parte del ActiveContext del
+    // VaultService (token/owner/repo/branch) y este vault es el activo,
+    // invalidamos el cache para que el próximo write use los valores nuevos.
+    const affectsActiveContext =
+      existing.isActive &&
+      (data.tokenCiphertext !== undefined ||
+        data.owner !== undefined ||
+        data.repo !== undefined ||
+        data.branch !== undefined);
+    if (affectsActiveContext) {
+      this.vaultService.invalidateActiveConfig();
+    }
     return this.toPublic(vault);
   }
 
   async remove(id: string): Promise<void> {
-    // Wrap count + delete + failover en UNA transacción para evitar la race
-    // donde dos deletes concurrentes ambos ven count===2, ambos eliminan,
-    // y quedamos con cero vaults (estado irrecuperable sin DB surgery).
-    await this.prisma.$transaction(async (tx) => {
+    // Wrap delete + failover en UNA transacción para evitar la race donde
+    // dos deletes concurrentes ven el mismo estado y dejan inconsistente la
+    // flag `isActive` (más de uno o ninguno post-borrado).
+    //
+    // Permitimos eliminar TODOS los vaults — el usuario puede quedar sin
+    // vault configurado intencionalmente (ej: borró el repo en GitHub y
+    // quiere limpiar la config). Las features que requieren vault (creación
+    // de iniciativas/épicas/historias) fallarán hasta que agregue un vault
+    // nuevo, lo que es comportamiento correcto: mejor un error claro al
+    // intentar usar la feature que un estado fantasma con vault que apunta
+    // a un repo inexistente.
+    const wasActive = await this.prisma.$transaction(async (tx) => {
       const existing = await tx.vaultConfig.findUnique({ where: { id } });
       if (!existing) throw new NotFoundException('Vault no encontrado');
-
-      const count = await tx.vaultConfig.count();
-      if (count === 1) {
-        throw new BadRequestException(
-          'No puedes eliminar el único vault configurado. Crea otro primero.',
-        );
-      }
 
       await tx.vaultConfig.delete({ where: { id } });
 
       // Si era el activo, activar otro automáticamente dentro de la misma tx
+      // (si queda alguno). Si era el último, no hay sucesor — quedamos sin
+      // vault activo y el VaultService.resolveContext lanzará error la
+      // próxima vez que algo intente leer/escribir.
       if (existing.isActive) {
         const next = await tx.vaultConfig.findFirst({
           orderBy: { createdAt: 'asc' },
@@ -284,10 +309,20 @@ export class VaultConfigService implements OnModuleInit {
             data: { isActive: true },
           });
           this.logger.log(`[remove] Activated "${next.name}" after removing "${existing.name}"`);
+        } else {
+          this.logger.log(`[remove] Removed last vault "${existing.name}" — system has no active vault now`);
         }
       }
       this.logger.log(`[remove] id=${id} name="${existing.name}"`);
+      return existing.isActive;
     });
+
+    // Invalidar cache fuera de la tx (el cache vive en memoria de VaultService,
+    // no en PG — la tx no lo afecta y queremos invalidar SOLO si el commit
+    // de la tx fue exitoso).
+    if (wasActive) {
+      this.vaultService.invalidateActiveConfig();
+    }
   }
 
   /**
@@ -314,6 +349,10 @@ export class VaultConfigService implements OnModuleInit {
     });
 
     this.logger.log(`[activate] id=${id} name="${activated.name}"`);
+    // CRÍTICO: invalidar el cache del active context en VaultService — sin
+    // esto, los siguientes writes (épicas, historias, etc.) durante 30s
+    // siguen yendo al vault viejo porque el cache no detecta el cambio.
+    this.vaultService.invalidateActiveConfig();
     return this.toPublic(activated);
   }
 

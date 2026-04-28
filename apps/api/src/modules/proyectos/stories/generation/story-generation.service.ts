@@ -54,17 +54,43 @@ const VALID_STORY_POINTS = [1, 2, 3, 5, 8, 13] as const;
 // que con N=10+ historias el modelo no emita arrays vacios por temor a
 // quedarse sin presupuesto — el prompt ya es conciso, los tokens son el
 // techo, no el target.
-const PO_MAX_ITERATIONS = 8;
-const TL_MAX_ITERATIONS = 8;
-const QA_MAX_ITERATIONS = 6;
-const PO_MAX_TOKENS = 16384;
-const TL_MAX_TOKENS = 32768;
-const QA_MAX_TOKENS = 32768;
+// Iteration budgets aumentados para deep research (workflow 4-fases): explorar
+// (3-5 calls) → hipotetizar (en thinking, sin tools) → validar (2-4 calls) →
+// emitir terminal (1 call). Total típico 7-10 calls + 2 de buffer.
+const PO_MAX_ITERATIONS = 12;
+const TL_MAX_ITERATIONS = 12;
+const QA_MAX_ITERATIONS = 10;
+// max_tokens INCLUYE thinking_budget. Sonnet 4 soporta hasta 64000 nativos.
+// PO ~24K = 5K thinking + 19K output (suficiente para 15 historias × outline).
+// TL/QA ~40K = 6K thinking + 34K output (15 historias × 5 sub-campos × ~400 tokens).
+// max_tokens incluye el thinking budget. Cada agente debe tener
+// max_tokens > budget_tokens + output esperado:
+//  - PO: 28K = 10K thinking + ~18K output (15 historias × ~1K markdown PO)
+//  - TL: 44K = 12K thinking + ~32K output (15 historias × ~2K markdown técnico)
+//  - QA: 44K = 12K thinking + ~32K output (15 historias × ~2K markdown QA)
+// Sonnet 4 soporta hasta 64K en max_tokens.
+const PO_MAX_TOKENS = 28_000;
+const TL_MAX_TOKENS = 44_000;
+const QA_MAX_TOKENS = 44_000;
+// Extended thinking de Anthropic: presupuesto de razonamiento interno antes
+// del output. Toggleable por env var para degradación graciosa (set =0 desactiva).
+// Patrón heredado de diagram-generation.service.ts (DIAGRAM_AGENT_THINKING).
+// Thinking budgets — subidos respecto a los 5K/6K originales para dar más
+// espacio de razonamiento sobre épicas con múltiples diseños + repos
+// conectados + 5-15 historias. Cada agente ahora puede explorar más caminos
+// antes de comprometerse con el output. Configurables via env vars.
+const PO_THINKING_BUDGET = Number(process.env.STORYGEN_PO_THINKING ?? 10000);
+const TL_THINKING_BUDGET = Number(process.env.STORYGEN_TL_THINKING ?? 12000);
+const QA_THINKING_BUDGET = Number(process.env.STORYGEN_QA_THINKING ?? 12000);
 
 // Caps defensivos alineados con DTO (apps/api/.../stories/dto/story-content.dto.ts).
 const MAX_FIELD_LEN = 20_000;
 const MAX_LIST_ITEM_LEN = 2_000;
 const MAX_LIST_SIZE = 100;
+// Cap para el string markdown de cada sección (PO/Technical/QA) en v2.
+// Suma 180K total por historia, dentro del límite de Linear (~64K body
+// con cap defensivo en buildStoryDescription).
+const MAX_STORY_MARKDOWN_LEN = 60_000;
 const MAX_TITLE_LEN = 200;
 const MAX_LABELS = 20;
 const MAX_LABEL_LEN = 64;
@@ -77,7 +103,7 @@ function cap(s: string, n = MAX_FIELD_LEN): string {
 }
 
 // Clasificación de archivos del vault según su subcarpeta dentro del folder de la épica.
-type EpicVaultFileKind = 'diagrama' | 'documento' | 'dependencia' | 'diseno' | 'matriz' | 'historia' | 'otro';
+export type EpicVaultFileKind = 'diagrama' | 'documento' | 'dependencia' | 'diseno' | 'matriz' | 'historia' | 'otro';
 
 interface EpicVaultFile {
   path: string;
@@ -89,7 +115,8 @@ interface CommonContext {
   epic: {
     id: string;
     title: string;
-    description: string;
+    /** Markdown único de la épica (post-refactor v2). Reemplaza description + 11 campos. */
+    markdown: string;
     priority: string;
     startDate: Date;
     targetDate: Date;
@@ -118,12 +145,13 @@ interface POResult {
 interface TLResult {
   designs: Map<number, StoryTechnicalFields>; // indexed by outline position
   /**
-   * Dependencias descubiertas por el TL durante el diseño de arquitectura.
-   * Foco: credenciales externas (API keys, merchant codes), servicios de
-   * terceros, integraciones con proveedores. Comparte shape con las que
-   * emite el QA; el merge final deduplica por `(vendor, type)` / título.
+   * Dependencias técnicas POR HISTORIA. Cada entry del Map asocia el
+   * `outlineIndex` con las deps específicas de esa story (credenciales
+   * externas, APIs de terceros, servicios bloqueantes para esa historia
+   * en particular). Ya NO son transversales al batch — cada story tiene
+   * sus propias deps técnicas.
    */
-  technicalDependencies: DiscoveredDependency[];
+  technicalDependenciesByIndex: Map<number, DiscoveredDependency[]>;
   /**
    * Edges del DAG de orden entre historias del batch. Cada entry indica que
    * la historia en `fromIndex` está bloqueada por la de `blockedByIndex`.
@@ -137,7 +165,12 @@ interface TLResult {
 
 interface QAResult {
   strategies: Map<number, StoryQAFields>;
-  discoveredDependencies: DiscoveredDependency[];
+  /**
+   * Deps descubiertas por el QA POR HISTORIA. Cada entry asocia outlineIndex
+   * con las deps de testing específicas (mocks, fixtures, datos semilla)
+   * para esa story.
+   */
+  discoveredDependenciesByIndex: Map<number, DiscoveredDependency[]>;
 }
 
 interface AgentLoopParams {
@@ -154,6 +187,18 @@ interface AgentLoopParams {
   signal?: AbortSignal;
   subject: Subject<{ data: StoryGenerationEvent }>;
   runStartTime: number;
+  /**
+   * Tokens de razonamiento extendido de Anthropic (`thinking` block).
+   * Si > 0, se inyecta `thinking: { type: 'enabled', budget_tokens }` al
+   * messages.stream(). max_tokens INCLUYE este budget. Default undefined = off.
+   */
+  thinkingBudget?: number;
+  /**
+   * Si true, en `iter == maxIterations - 1` se fuerza `tool_choice` al
+   * terminal tool y se DESACTIVA thinking (incompatibles según Anthropic).
+   * Garantiza que el agente no termine sin emitir el terminal.
+   */
+  forceTerminalOnLastIter?: boolean;
   /**
    * Validator opcional del input del terminal tool. Si retorna { valid: false },
    * el loop responde con tool_result is_error:true y continua para que el
@@ -354,8 +399,12 @@ export class StoryGenerationService {
         this.logger.warn(`[StoryGen] QA agent returned null — aborting orchestration`);
         return;
       }
+      const qaDepsTotal = Array.from(qaResult.discoveredDependenciesByIndex.values()).reduce(
+        (s, a) => s + a.length,
+        0,
+      );
       this.logger.log(
-        `[StoryGen] ✓ QA done in ${Date.now() - qaStart}ms: ${qaResult.strategies.size} strategies, ${qaResult.discoveredDependencies.length} deps`,
+        `[StoryGen] ✓ QA done in ${Date.now() - qaStart}ms: ${qaResult.strategies.size} strategies, ${qaDepsTotal} deps across ${qaResult.discoveredDependenciesByIndex.size} stories`,
       );
 
       // ── Fase 5: proposing (consolidacion y emision)
@@ -515,7 +564,7 @@ export class StoryGenerationService {
       epic: {
         id: epic.id,
         title: epic.title,
-        description: epic.description,
+        markdown: epic.markdown,
         priority: epic.priority,
         startDate: epic.startDate,
         targetDate: epic.targetDate,
@@ -657,9 +706,8 @@ titulo: ${epic.title}
 prioridad: ${epic.priority}
 fechas: ${startDate} -> ${targetDate}
 
-descripcion_breve:
-${epic.description}
-${epicMarkdown ? `\ndefinicion_completa_markdown:\n${epicMarkdown.slice(0, 12_000)}${epicMarkdown.length > 12_000 ? '\n\n[…truncado — usa vault_read si necesitas el resto]' : ''}` : ''}
+definicion_completa_markdown:
+${(epicMarkdown || epic.markdown || '').slice(0, 12_000)}${(epicMarkdown || epic.markdown || '').length > 12_000 ? '\n\n[…truncado — usa vault_read si necesitas el resto]' : ''}
 </epic>`,
 
       `<initiative_parent>
@@ -825,26 +873,42 @@ Esta epica no tiene folder en el nuevo formato del vault (legacy o sin migrar). 
                 po: {
                   type: 'object',
                   properties: {
-                    background: { type: 'string', description: 'Antecedentes, contexto historico, por que surge' },
-                    objective: { type: 'string' },
-                    userStory: { type: 'string', description: 'Como [rol], quiero [accion], para [beneficio]' },
-                    whatHowWhen: {
-                      type: 'object',
-                      properties: {
-                        what: { type: 'string' },
-                        how: { type: 'string' },
-                        when: { type: 'string' },
-                      },
-                      required: ['what', 'how', 'when'],
+                    markdown: {
+                      type: 'string',
+                      description: `Markdown único de la sección PO. DEBE incluir EXACTAMENTE estos 5 headings level-2 en este orden, con contenido REAL bajo cada uno:
+
+## Antecedentes
+Contexto histórico, por qué surge esta historia, qué problema resuelve. Cita refs si las exploraste.
+
+## Objetivo
+Una frase: qué valor entrega y para quién.
+
+## Historia de usuario
+"Como [rol concreto, no genérico], quiero [acción], para [beneficio medible]."
+
+## What/How/When
+Tres bloques marcados con **What:**, **How:**, **When:** poblados con valores REALES (NO "TBD"/"N/A"/"Pronto"):
+- **What:** alcance del entregable (1-2 frases con la unidad de valor concreta).
+- **How:** approach de alto nivel sin detalle técnico (qué patrón/strategy).
+- **When:** fase, sprint, milestone o dependencia temporal concreta.
+
+Cuando la historia tenga UI, referencia el diseño concreto del bloque <epic_designs> por su nombre exacto en el bloque **What:** (ej: "Implementa según Diseño: Checkout Mobile").
+
+## Criterios de aceptación
+Mínimo 3 criterios VERIFICABLES como lista numerada (1. 2. 3.). Formato Gherkin ("Dado... Cuando... Entonces...") o bullets con métricas concretas. Si hay diseños disponibles, al menos 1 criterio debe mencionar que la UI implementada respeta el diseño referenciado.
+
+## Notas adicionales (opcional)
+Dependencias cruzadas, restricciones, riesgos. Si la historia tiene UI y el bloque <epic_designs> trae handoffs aplicables, COPIA TEXTUALMENTE el handoff relevante aquí (instrucción + URL al HTML standalone) para que Claude Code la siga al implementar. Si ninguno cubre la historia y hace falta UI, anota "diseño pendiente".
+
+REGLAS DUROS:
+- Los headings deben aparecer EXACTAMENTE como están escritos arriba (case-sensitive, con tildes).
+- NO emitas el heading sin contenido — cada sección con prosa o lista real.
+- NO uses "TBD", "N/A", "Pronto" — el sistema rechaza el output y fuerza retry.
+- Markdown válido GFM (listas, bold, links, code fences). Tiptap renderiza el output.
+- Idioma: español.`,
                     },
-                    acceptanceCriteria: {
-                      type: 'array',
-                      items: { type: 'string' },
-                      description: 'Minimo 3 criterios verificables',
-                    },
-                    additionalNotes: { type: 'string' },
                   },
-                  required: ['background', 'objective', 'userStory', 'whatHowWhen', 'acceptanceCriteria'],
+                  required: ['markdown'],
                 },
               },
               required: ['title', 'description', 'storyPoints', 'podId', 'po'],
@@ -923,12 +987,40 @@ NO disenes tecnicamente ni propongas tests — eso es trabajo del Tech Lead y de
             errorMessage: `stories=[] NO es aceptable. Redacta al menos 3 historias basandote en el alcance de la epica. Usa el markdown completo de la epica y las acceptance criteria como guia.`,
           };
         }
+        // Validación de headings obligatorios en cada po.markdown.
+        const requiredPOHeadings = [
+          '## Antecedentes',
+          '## Objetivo',
+          '## Historia de usuario',
+          '## What/How/When',
+          '## Criterios de aceptación',
+        ];
+        for (let i = 0; i < stories.length; i++) {
+          const s = stories[i] as { po?: { markdown?: unknown } };
+          const md = typeof s?.po?.markdown === 'string' ? s.po.markdown : '';
+          if (!md.trim()) {
+            return {
+              valid: false,
+              errorMessage: `stories[${i}].po.markdown está vacío. Debes emitir un markdown completo con los 5 headings obligatorios: ${requiredPOHeadings.join(', ')}.`,
+            };
+          }
+          const normalized = md.toLowerCase();
+          const missing = requiredPOHeadings.filter((h) => !normalized.includes(h.toLowerCase()));
+          if (missing.length > 0) {
+            return {
+              valid: false,
+              errorMessage: `stories[${i}].po.markdown no incluye los siguientes headings obligatorios: ${missing.join(', ')}. Re-emite el markdown con TODOS los headings, en el orden indicado, y contenido bajo cada uno.`,
+            };
+          }
+        }
         return { valid: true };
       },
       ctx: common.ctx,
       signal,
       subject,
       runStartTime,
+      thinkingBudget: PO_THINKING_BUDGET,
+      forceTerminalOnLastIter: true,
     });
 
     if (!output) return null;
@@ -967,6 +1059,9 @@ NO disenes tecnicamente ni propongas tests — eso es trabajo del Tech Lead y de
       return null;
     }
 
+    // Heurísticas de calidad post-output del PO.
+    this.logPOQualityHeuristics(outlines);
+
     return { outlines, relatedDocuments };
   }
 
@@ -986,7 +1081,7 @@ NO disenes tecnicamente ni propongas tests — eso es trabajo del Tech Lead y de
 
     const terminalTool: Anthropic.Messages.Tool = {
       name: 'submit_technical_designs',
-      description: `Envia las secciones tecnicas disenadas, indexadas por outlineIndex (0..${poResult.outlines.length - 1}). El array designs DEBE contener exactamente ${poResult.outlines.length} entries. Adicionalmente puede emitir technicalDependencies cuando el diseno requiera integrar con proveedores externos que demanden credenciales (API keys, merchant codes, OAuth client_secret).`,
+      description: `Envia las secciones tecnicas disenadas, indexadas por outlineIndex (0..${poResult.outlines.length - 1}). El array designs DEBE contener exactamente ${poResult.outlines.length} entries. Cada design lleva sus PROPIAS dependencias técnicas (api keys, merchant codes, servicios bloqueantes que SOLO esa historia necesita). Las deps son por-historia, NO transversales.`,
       input_schema: {
         type: 'object' as const,
         properties: {
@@ -1002,34 +1097,70 @@ NO disenes tecnicamente ni propongas tests — eso es trabajo del Tech Lead y de
                 technical: {
                   type: 'object',
                   properties: {
-                    architecture: { type: 'string', description: 'Markdown extenso con capa, proposito, dependencias, patron' },
-                    integrationFlow: { type: 'string', description: 'Secuencia de llamadas paso a paso' },
-                    validations: { type: 'array', items: { type: 'string' } },
-                    errorHandling: { type: 'array', items: { type: 'string' } },
-                    implementationChecklist: { type: 'array', items: { type: 'string' } },
+                    markdown: {
+                      type: 'string',
+                      description: `Markdown único de la sección técnica. DEBE incluir EXACTAMENTE estos 5 headings level-2 en este orden, con contenido REAL y citado:
+
+## Arquitectura y componentes
+Markdown extenso (100-250 palabras): capa donde vive (NestJS module / Next.js page / etc.), propósito, componentes clave (Controller/Service/Gateway/etc.) con sus paths reales del repo, patrón observado citando archivos análogos. Ejemplo: "Endpoint REST en módulo NestJS apps/api/src/modules/payments/. Capa Controller (PaymentsController) → Service (PaymentService) → Gateway (StripeGateway). Persistencia con Prisma: tabla 'payments' (apps/api/prisma/schema.prisma). Patrón: thin controller + service con DI + gateway pattern, siguiendo apps/api/src/modules/auth/auth0.gateway.ts."
+
+## Flujo de integración
+Markdown extenso (100-200 palabras) con secuencia numerada de llamadas paso a paso: cómo entra el request, qué guards/interceptors corren, qué Service llama qué Gateway, cómo persiste, qué responde. Ejemplo: "1. Cliente POST /api/payments con header Authorization. 2. JwtGuard valida JWT. 3. PaymentDto validado con class-validator. 4. PaymentsController.create() llama PaymentService.charge(). 5. ..."
+
+## Validaciones
+Lista markdown (4-8 items, formato \`- campo: regla → ERR.CODE\`). Ejemplo:
+- amount: requerido, número entero positivo, mín 50, máx 99999999 → ERR.VALIDATION.INVALID_AMOUNT
+- currency: ISO 4217, debe estar en ['USD','MXN','EUR'] → ERR.VALIDATION.UNSUPPORTED_CURRENCY
+
+## Manejo de errores
+Lista markdown (4-8 items, formato \`- HTTPCode ERR.X.Y: condición\`). Ejemplo:
+- 402 ERR.PAYMENT.CARD_DECLINED: Stripe retorna StripeCardError con code 'card_declined'
+- 504 ERR.PAYMENT.GATEWAY_TIMEOUT: Stripe SDK timeout >5s → 1 retry automático
+
+## Contrato
+Schema markdown del request/response (JSON Schema, GraphQL SDL, OpenAPI snippet, o ejemplo de payload). Ejemplo en code fence:
+\`\`\`json
+{
+  "request": { "amount": "number", "currency": "string", "cardToken": "string" },
+  "response": { "paymentId": "string", "status": "succeeded|requires_action", "nextActionUrl": "string?" }
+}
+\`\`\`
+
+REGLAS DUROS:
+- Los 5 headings deben aparecer EXACTAMENTE como están escritos arriba.
+- Cita PATHS REALES del repo si exploraste con code_grep/code_read (apps/api/src/modules/X.ts).
+- NO inventes paths. Si el repo no existe o no exploraste, escribe "framework inferido del stack: NestJS+Prisma" en lugar de paths falsos.
+- NO uses sub-headings ## adicionales (consume tokens innecesariamente).
+- Para diseños UX/UI: si <epic_designs> trae handoffs, deriva API contracts coherentes con los componentes. Si "NO requiere diseño", backend-only — no inventes integraciones UI.
+- Idioma: español. Código en inglés.`,
+                    },
                   },
-                  required: ['architecture', 'integrationFlow', 'validations', 'errorHandling', 'implementationChecklist'],
+                  required: ['markdown'],
+                },
+                dependencies: {
+                  type: 'array',
+                  description: 'Dependencias de arquitectura ESPECÍFICAS de ESTA historia (no del batch). Foco: credenciales externas, APIs de terceros, servicios bloqueantes que ESTA story específicamente necesita. Si la historia es autocontenida, array vacío. NO repitas en otras historias deps que solo aplican aquí.',
+                  items: {
+                    type: 'object',
+                    properties: {
+                      title: { type: 'string', description: 'Nombre corto de la dep (e.g., "Stripe API Key")' },
+                      description: { type: 'string', description: 'Resumen 1-2 lineas del impacto en ESTA historia (subtítulo de la card en UI)' },
+                      severity: { type: 'string', enum: ['critical', 'high', 'medium', 'low'] },
+                      type: { type: 'string', enum: ['api', 'service', 'data', 'team', 'other'] },
+                      mdContent: {
+                        type: 'string',
+                        description:
+                          '⚠️ MARKDOWN HYPER-RICO (mínimo 200 palabras, idealmente 300-500). Detalle que el usuario expande al hacer click en la card en la UI. DEBE incluir SECCIONES con headings ## (no inventes contenido pobre):\n\n## Naturaleza\nQué credencial/API es exactamente, qué proveedor (link al portal), qué tier/scope (live vs test, prod vs sandbox).\n## Cómo obtenerla\nPasos concretos: dashboard URL del proveedor, qué rol/permisos necesita el solicitante, tiempo estimado de aprobación.\n## Impacto técnico\nDónde se usa en la arquitectura (qué Service/Controller la consume), qué endpoints/flows dependen de ella, qué pasa si falta (HTTP code, fallback).\n## Owner sugerido\nRol concreto (PO + CFO para credenciales con costo, SecOps para tokens, Data Engineer para data sources, etc.) y la justificación de por qué ese rol.\n## Restricciones / quotas\nRate limits del proveedor, costos por request/mes, cuotas de tier, expiración del token.\n## Links\nDocumentación oficial, dashboard del proveedor, ADR interno si aplica.\n\nNO emitas mdContent de 30 palabras tipo "API key de Stripe" — el frontend lo renderea como markdown extenso, contenido corto se ve pobre. Si no tienes datos reales, di "Confirmar con SecOps/CFO antes de prod" pero MANTÉN las 6 secciones.',
+                      },
+                      vendor: { type: 'string', description: 'Proveedor: "Stripe", "Twilio", "SAP Ariba"' },
+                      requiresCredential: { type: 'boolean', description: 'True cuando el backend necesita una credencial externa (API key, merchant code) que el sistema no puede generar por si solo' },
+                      isBlocking: { type: 'boolean', description: 'True cuando la dep es bloqueante: el backend NO funciona sin ella' },
+                    },
+                    required: ['title', 'description', 'severity', 'type', 'mdContent'],
+                  },
                 },
               },
-              required: ['outlineIndex', 'technical'],
-            },
-          },
-          technicalDependencies: {
-            type: 'array',
-            description: 'Dependencias de arquitectura identificadas durante el diseno (foco: credenciales externas, APIs de terceros, merchant codes, servicios bloqueantes para que el backend funcione). Puede ser array vacio si el diseno es autocontenido.',
-            items: {
-              type: 'object',
-              properties: {
-                title: { type: 'string', description: 'Nombre corto de la dep (e.g., "Stripe API Key")' },
-                description: { type: 'string', description: 'Resumen 1-2 lineas del impacto' },
-                severity: { type: 'string', enum: ['critical', 'high', 'medium', 'low'] },
-                type: { type: 'string', enum: ['api', 'service', 'data', 'team', 'other'] },
-                mdContent: { type: 'string', description: 'Markdown extenso: naturaleza, impacto, como obtener la credencial, owner sugerido, links a docs del proveedor' },
-                vendor: { type: 'string', description: 'Proveedor: "Stripe", "Twilio", "SAP Ariba"' },
-                requiresCredential: { type: 'boolean', description: 'True cuando el backend necesita una credencial externa (API key, merchant code) que el sistema no puede generar por si solo' },
-                isBlocking: { type: 'boolean', description: 'True cuando la dep es bloqueante: el backend NO funciona sin ella' },
-              },
-              required: ['title', 'description', 'severity', 'type', 'mdContent'],
+              required: ['outlineIndex', 'technical', 'dependencies'],
             },
           },
           storyOrderDependencies: {
@@ -1065,11 +1196,10 @@ NO disenes tecnicamente ni propongas tests — eso es trabajo del Tech Lead y de
             },
           },
         },
-        // `technicalDependencies` y `storyOrderDependencies` son required
-        // (aunque pueden ser []) para forzar al modelo a considerar ambos
-        // campos en cada call. Sin `required`, el modelo tiende a saltárselos
-        // silenciosamente cuando la historia no es obvia.
-        required: ['designs', 'technicalDependencies', 'storyOrderDependencies'],
+        // `storyOrderDependencies` es required (aunque puede ser []) para
+        // forzar al modelo a considerar el DAG en cada call. Las dependencias
+        // técnicas viven dentro de cada `designs[i].dependencies` (per-story).
+        required: ['designs', 'storyOrderDependencies'],
       },
     };
 
@@ -1088,10 +1218,8 @@ titulo: ${o.title}
 description: ${o.description}
 storyPoints: ${o.storyPoints}
 podId: ${o.podId}
-po.userStory: ${o.po.userStory}
-po.objective: ${o.po.objective}
-po.acceptanceCriteria:
-${o.po.acceptanceCriteria.map((c) => `  - ${c}`).join('\n')}
+po.markdown:
+${(o.po.markdown ?? '').slice(0, 4000)}
 </story>`)
       .join('\n\n');
 
@@ -1106,7 +1234,7 @@ ${outlinesBlock}
 Proceso obligatorio:
 1. Explora el codigo de los repositorios conectados (code_grep/code_read) para entender stack, convenciones, error handling existente, testing tooling.
 2. Lee del vault (vault_read) cualquier decision de arquitectura documentada que aplique.
-3. Para CADA story, genera su seccion tecnica con los 5 campos llenos (architecture, integrationFlow, validations, errorHandling, implementationChecklist).
+3. Para CADA story, genera su \`technical.markdown\` con los 5 headings obligatorios (## Arquitectura y componentes, ## Flujo de integración, ## Validaciones, ## Manejo de errores, ## Contrato).
 4. Llama submit_technical_designs UNA sola vez con un design por cada outlineIndex.
 
 NO cambies titles, descriptions, acceptanceCriteria — esos estan congelados. Si detectas que un outline es inviable, igual genera design con el mejor aproach y deja notas en architecture.`;
@@ -1142,22 +1270,60 @@ NO cambies titles, descriptions, acceptanceCriteria — esos estan congelados. S
             errorMessage: `Solo emitiste ${designs.length}/${expectedDesignCount} designs. Agrega los ${expectedDesignCount - designs.length} faltantes. Cada outline debe tener su design.`,
           };
         }
+        // Validación de headings obligatorios en cada technical.markdown.
+        const requiredTLHeadings = [
+          '## Arquitectura y componentes',
+          '## Flujo de integración',
+          '## Validaciones',
+          '## Manejo de errores',
+          '## Contrato',
+        ];
+        for (let i = 0; i < designs.length; i++) {
+          const d = designs[i] as { technical?: { markdown?: unknown } };
+          const md = typeof d?.technical?.markdown === 'string' ? d.technical.markdown : '';
+          if (!md.trim()) {
+            return {
+              valid: false,
+              errorMessage: `designs[${i}].technical.markdown está vacío. Debes emitir un markdown completo con los 5 headings obligatorios: ${requiredTLHeadings.join(', ')}.`,
+            };
+          }
+          const normalized = md.toLowerCase();
+          const missing = requiredTLHeadings.filter((h) => !normalized.includes(h.toLowerCase()));
+          if (missing.length > 0) {
+            return {
+              valid: false,
+              errorMessage: `designs[${i}].technical.markdown no incluye los siguientes headings obligatorios: ${missing.join(', ')}. Re-emite con TODOS los headings y contenido bajo cada uno.`,
+            };
+          }
+        }
         return { valid: true };
       },
       ctx: common.ctx,
       signal,
       subject,
       runStartTime,
+      thinkingBudget: TL_THINKING_BUDGET,
+      forceTerminalOnLastIter: true,
     });
 
     if (!output) return null;
 
     const rawDesigns = Array.isArray((output as any).designs) ? (output as any).designs : [];
     const designs = new Map<number, StoryTechnicalFields>();
+    // Map<outlineIndex, deps[]> — cada design entry trae sus PROPIAS deps
+    // técnicas. Si una historia no las trae (campo ausente), Map.get()
+    // devolverá undefined y se trata como [].
+    const technicalDependenciesByIndex = new Map<number, DiscoveredDependency[]>();
     for (const raw of rawDesigns) {
       const idx = typeof raw.outlineIndex === 'number' ? raw.outlineIndex : -1;
       if (idx < 0 || idx >= poResult.outlines.length) continue;
       designs.set(idx, this.normalizeTechnical(raw.technical));
+      const rawDeps = Array.isArray(raw.dependencies) ? raw.dependencies : [];
+      const parsed = rawDeps
+        .slice(0, MAX_DEPS_PER_BATCH)
+        .map((r: Record<string, unknown>) => this.normalizeDependency(r))
+        .filter((d: DiscoveredDependency | null): d is DiscoveredDependency => d !== null);
+      if (parsed.length > 0) technicalDependenciesByIndex.set(idx, parsed);
     }
 
     // FAIL FAST: si el agente NO produjo ningun design, abortar con diagnostico
@@ -1201,29 +1367,25 @@ NO cambies titles, descriptions, acceptanceCriteria — esos estan congelados. S
       );
     }
 
-    // Parsear deps técnicas (credenciales externas, servicios de terceros)
-    // que el TL emitió. Son opcionales — puede venir undefined o []. El
-    // merge downstream deduplicará contra las que emita el QA.
-    const rawTechDeps = Array.isArray((output as any).technicalDependencies)
-      ? (output as any).technicalDependencies
-      : [];
-    const technicalDependencies: DiscoveredDependency[] = rawTechDeps
-      .slice(0, MAX_DEPS_PER_BATCH)
-      .map((raw: Record<string, unknown>) => this.normalizeDependency(raw))
-      .filter((d: DiscoveredDependency | null): d is DiscoveredDependency => d !== null);
-
-    if (technicalDependencies.length > 0) {
+    // Las dependencias técnicas ya quedaron mapeadas por outlineIndex
+    // dentro del loop de parseo de designs. Cada entry del Map asocia
+    // una historia con SUS propias deps (no transversales).
+    const totalTechDeps = Array.from(technicalDependenciesByIndex.values()).reduce(
+      (sum, arr) => sum + arr.length,
+      0,
+    );
+    if (totalTechDeps > 0) {
       this.logger.log(
-        `[StoryGen:TL] ${technicalDependencies.length} technical dependencies emitted (credenciales/APIs externas)`,
+        `[StoryGen:TL] ${totalTechDeps} technical dependencies emitted across ${technicalDependenciesByIndex.size} stories (per-story, no longer transversal)`,
       );
     }
 
     // Detector heurístico: si el TL menciona vendors externos en la prose
     // (architecture/integrationFlow) pero NO emitió dep correspondiente,
-    // loggear WARN. No falla la generación — da visibilidad cuando el
-    // prompt necesita refinamiento. El user ve el WARN en los logs del
-    // backend y puede decidir re-generar o agregar la dep manualmente.
-    this.checkDependencyEmissionHeuristics(designs, technicalDependencies);
+    // loggear WARN. Aplanamos las deps por-índice a un array para reutilizar
+    // el helper existente que opera sobre la totalidad del batch.
+    const allTechDepsFlat = Array.from(technicalDependenciesByIndex.values()).flat();
+    this.checkDependencyEmissionHeuristics(designs, allTechDepsFlat);
 
     // Parsear DAG de orden entre historias del batch. Validaciones:
     // self-bloqueo, indices fuera de rango, ciclos, duplicados — todos
@@ -1249,7 +1411,10 @@ NO cambies titles, descriptions, acceptanceCriteria — esos estan congelados. S
       );
     }
 
-    return { designs, technicalDependencies, storyOrderEdges };
+    // Heurísticas de calidad post-output del TL.
+    this.logTLQualityHeuristics(designs);
+
+    return { designs, technicalDependenciesByIndex, storyOrderEdges };
   }
 
   // parseAndValidateStoryOrderEdges + wouldIntroduceCycle viven en
@@ -1286,8 +1451,10 @@ NO cambies titles, descriptions, acceptanceCriteria — esos estan congelados. S
     technicalDependencies: DiscoveredDependency[],
   ): void {
     // Concatenar toda la prose del batch para búsqueda única.
+    // En v2 el design es un único string markdown — buscamos vendors menciones
+    // case-insensitive en el blob completo (incluye headings, prosa, listas).
     const prose = Array.from(designs.values())
-      .map((d) => `${d.architecture ?? ''}\n${d.integrationFlow ?? ''}`)
+      .map((d) => d.markdown ?? '')
       .join('\n')
       .toLowerCase();
 
@@ -1341,7 +1508,7 @@ NO cambies titles, descriptions, acceptanceCriteria — esos estan congelados. S
 
     const terminalTool: Anthropic.Messages.Tool = {
       name: 'submit_qa_strategies',
-      description: `Envia las estrategias de testing por historia (indexed por outlineIndex 0..${poResult.outlines.length - 1}) + dependencias transversales. El array strategies DEBE contener exactamente ${poResult.outlines.length} entries (una por historia).`,
+      description: `Envia las estrategias de testing por historia (indexed por outlineIndex 0..${poResult.outlines.length - 1}). Cada strategy lleva los 5 sub-campos del QA (unitTests, happyPath, edgeCases, mocks, tools) + sus PROPIAS deps de testing. Los 5 sub-campos son OBLIGATORIOS y se renderizan como secciones independientes en la UI — NO los consolides en uno solo. El array strategies DEBE contener exactamente ${poResult.outlines.length} entries.`,
       input_schema: {
         type: 'object' as const,
         properties: {
@@ -1360,34 +1527,74 @@ NO cambies titles, descriptions, acceptanceCriteria — esos estan congelados. S
                 qa: {
                   type: 'object',
                   properties: {
-                    testingStrategy: { type: 'string', description: 'Markdown con subsecciones: alcance unitarias, escenarios felices, edge cases, mocks, cobertura, herramientas' },
+                    markdown: {
+                      type: 'string',
+                      description: `Markdown único de la sección QA. DEBE incluir EXACTAMENTE estos 5 headings level-2 en este orden, con contenido REAL y citado:
+
+## Pruebas unitarias
+Markdown 2-4 párrafos describiendo PARA QUÉ se hacen las unit tests: qué clases/funciones específicas se testean, qué se considera caja-negra vs implementación interna. Cita NOMBRES REALES de archivo/función si los exploraste con code_grep. Ejemplo: "Cubre PaymentService.charge() en apps/api/src/modules/payments/payment.service.ts. La suite testea 3 capas: (1) Validación de input ANTES de llamar Stripe — sin mockear Stripe, solo PrismaService mockeado para verificar que validations rechazan inputs inválidos antes del side effect costoso. (2) Manejo de respuestas exitosas de Stripe — mockeando StripeClient. (3) Mapeo de errores de Stripe a nuestros códigos propios."
+
+## Happy path
+Lista markdown (2-4 items, formato \`- input concreto → output esperado\`). Referencia rutas/payloads reales. Ejemplo:
+- POST /api/payments con { amount: 1000, currency: 'USD', cardToken: 'tok_visa' } → 201 + { paymentId, status: 'succeeded' }
+- GET /api/payments/:id con id existente del usuario auth → 200 + payment object con status='succeeded'
+
+## Edge cases
+Lista markdown (3-6 items, formato \`- condición → comportamiento + código de error\`). Cada edge case debe corresponder a un caso de "Manejo de errores" del TL. Ejemplo:
+- amount=0 → 422 ERR.VALIDATION.INVALID_AMOUNT (rechazado en validator, sin llamar Stripe)
+- Stripe SDK timeout >5s → 504 ERR.PAYMENT.GATEWAY_TIMEOUT + 1 retry automático
+- JWT expirado → 401 ERR.AUTH.TOKEN_EXPIRED (JwtGuard rechaza antes del controller)
+
+## Mocks
+Markdown 1-2 párrafos: qué se mockea, con qué library/fixture, ejemplos de happy y fail. Ejemplo: "StripeClient mockeado con jest.mock('stripe') a nivel módulo: happy → client.paymentIntents.create returns { id, status: 'succeeded' }; fail → throws StripeCardError({ code: 'card_declined' }). PrismaService mockeado con jest-mock-extended (DeepMockProxy<PrismaClient>)."
+
+## Herramientas
+Markdown 1 párrafo: framework + cobertura objetivo + comandos específicos. Cita versiones DETECTADAS en package.json si exploraste. Ejemplo: "Jest 29 + supertest 7 (detectado en apps/api/package.json deps). Cobertura objetivo: 90% lines, 85% branches, 100% para funciones de error mapping. Comando: pnpm --filter api test apps/api/src/modules/payments. Coverage: pnpm --filter api test:coverage --coverage-include='**/payments/**'."
+
+REGLAS DUROS:
+- Los 5 headings deben aparecer EXACTAMENTE como están escritos arriba.
+- Cita PATHS REALES del repo y nombres de funciones reales si exploraste con code_grep.
+- NO INVENTES paths. Si no exploraste, escribe "framework inferido del stack: Jest+supertest" en vez de paths falsos.
+- Cada item de Happy path / Edge cases debe ser EJECUTABLE (no genérico tipo "debe funcionar").
+- Para diseños UX/UI: si <epic_designs> trae handoffs, deriva edge cases de interacción UI concretos (focus visible, loading/error/empty states, ARIA, responsive breakpoints, dark mode). Si "NO requiere diseño", testing se enfoca en contratos API/DB.
+- Markdown total mínimo 400 caracteres (cada heading con contenido real).
+- Idioma: español. Nombres de frameworks/archivos/funciones en inglés.`,
+                    },
+                    linkedQAMatrixId: {
+                      type: ['string', 'null'],
+                      description: 'Opcional: ID de matriz QA del vault si la encontraste con vault_grep. null si no aplica. NO es parte del markdown — vive como metadata aparte.',
+                    },
                   },
-                  required: ['testingStrategy'],
+                  required: ['markdown'],
+                },
+                dependencies: {
+                  type: 'array',
+                  description: 'Dependencias descubiertas al trazar testing de ESTA historia específicamente (mocks, fixtures, datos semilla, services internos que ESTA story necesita). NO dupliques credenciales externas que el Tech Lead ya emitió en design.dependencies — el merge deduplica. Si la historia no requiere deps de testing especiales, array vacío.',
+                  items: {
+                    type: 'object',
+                    properties: {
+                      title: { type: 'string', description: 'Nombre corto del recurso/dep, ej: "OpenAI API Key", "Pinecone Test Index", "Bull Queue Mock"' },
+                      description: { type: 'string', description: '1-2 líneas que resumen el rol de la dep en el testing (ej: "API key para tests de integración del análisis semántico"). El usuario lo ve como subtítulo de la card.' },
+                      severity: { type: 'string', enum: ['critical', 'high', 'medium', 'low'] },
+                      type: { type: 'string', enum: ['api', 'service', 'data', 'team', 'other'] },
+                      mdContent: {
+                        type: 'string',
+                        description:
+                          '⚠️ MARKDOWN HYPER-RICO (mínimo 200 palabras, idealmente 300-500). Este es el detalle que el usuario expande al hacer click en la card en la UI. DEBE incluir SECCIONES con headings ## (no inventes contenido pobre):\n\n## Naturaleza\nQué es exactamente, qué proveedor (con link a docs), qué versión/tier.\n## Impacto en testing\nQué tests dependen de esto, qué pasa si no está disponible (fail-fast vs degradación), si hay fallback (mock local vs sandbox del proveedor).\n## Estrategia de mock\nCómo se mockea: library específica (jest.mock, msw, jest-mock-extended), happy fixture, fail fixture, edge cases del SDK que se simulan.\n## Owner sugerido\nQuién debería proveer/configurar el recurso (rol concreto: SecOps, Data Engineer, etc.) y la justificación.\n## Links\nDocumentación oficial del proveedor, dashboard donde obtener la credencial, ADR interno si existe.\n## Riesgos\n2-3 riesgos técnicos: rate limits, cuotas, latencia esperada, costos por request.\n\nNO emitas mdContent de 30 palabras tipo "API key para X" — el frontend lo renderea como markdown extenso, contenido corto se ve pobre. Si no tienes datos reales, di explícitamente "Inferido del stack — confirmar con el equipo X" pero MANTÉN las secciones.',
+                      },
+                      vendor: { type: 'string', description: 'Opcional: proveedor externo si aplica ("Stripe", "Twilio", "OpenAI", "Pinecone")' },
+                      requiresCredential: { type: 'boolean', description: 'Opcional: true si la dep requiere una credencial externa que el sistema no puede generar solo' },
+                      isBlocking: { type: 'boolean', description: 'Opcional: true si la dep bloquea el funcionamiento del backend' },
+                    },
+                    required: ['title', 'description', 'severity', 'type', 'mdContent'],
+                  },
                 },
               },
-              required: ['outlineIndex', 'qa'],
-            },
-          },
-          discoveredDependencies: {
-            type: 'array',
-            description: 'Dependencias descubiertas al trazar testing (mocks, fixtures, datos semilla). NO dupliques credenciales externas que el Tech Lead ya emitio en technicalDependencies — el merge deduplica, pero es ruido innecesario. Cada una con mdContent markdown que se guardara como archivo individual en el vault.',
-            items: {
-              type: 'object',
-              properties: {
-                title: { type: 'string' },
-                description: { type: 'string', description: '1-2 lineas' },
-                severity: { type: 'string', enum: ['critical', 'high', 'medium', 'low'] },
-                type: { type: 'string', enum: ['api', 'service', 'data', 'team', 'other'] },
-                mdContent: { type: 'string', description: 'Markdown extenso: naturaleza, impacto en testing, estrategia de mock, owner sugerido, links' },
-                vendor: { type: 'string', description: 'Opcional: proveedor externo si aplica ("Stripe", "Twilio")' },
-                requiresCredential: { type: 'boolean', description: 'Opcional: true si la dep requiere una credencial externa que el sistema no puede generar solo' },
-                isBlocking: { type: 'boolean', description: 'Opcional: true si la dep bloquea el funcionamiento del backend' },
-              },
-              required: ['title', 'description', 'severity', 'type', 'mdContent'],
+              required: ['outlineIndex', 'qa', 'dependencies'],
             },
           },
         },
-        required: ['strategies', 'discoveredDependencies'],
+        required: ['strategies'],
       },
     };
 
@@ -1405,28 +1612,19 @@ NO cambies titles, descriptions, acceptanceCriteria — esos estan congelados. S
         const design = tlResult.designs.get(i);
         return `<story index="${i}">
 titulo: ${o.title}
-po.userStory: ${o.po.userStory}
-po.acceptanceCriteria:
-${o.po.acceptanceCriteria.map((c) => `  - ${c}`).join('\n')}
 
-technical.architecture:
-${design?.architecture ?? '(no disponible)'}
+po.markdown:
+${(o.po.markdown ?? '').slice(0, 3000)}
 
-technical.integrationFlow:
-${design?.integrationFlow ?? '(no disponible)'}
-
-technical.validations:
-${(design?.validations ?? []).map((v) => `  - ${v}`).join('\n')}
-
-technical.errorHandling:
-${(design?.errorHandling ?? []).map((e) => `  - ${e}`).join('\n')}
+technical.markdown:
+${(design?.markdown ?? '(no disponible)').slice(0, 3000)}
 </story>`;
       })
       .join('\n\n');
 
     const userContent = `Eres el Agente QA.
 
-Tu mision: para CADA una de las ${poResult.outlines.length} historias (con su PO y TL ya definidos), redacta la estrategia de testing enfocada en PRUEBAS UNITARIAS e integracion a nivel de historia. Y de forma transversal, identifica las dependencias descubiertas durante este trazo.
+Tu mision: para CADA una de las ${poResult.outlines.length} historias (con su PO y TL ya definidos), redacta la estrategia de testing enfocada en PRUEBAS UNITARIAS e integracion a nivel de historia. Cada historia lleva sus PROPIAS dependencias de testing (mocks, fixtures, datos semilla específicos). Las deps son POR-HISTORIA, NO transversales al batch.
 
 <stories_with_po_and_tl>
 ${fullStoriesBlock}
@@ -1441,22 +1639,22 @@ ${fullStoriesBlock}
     * Python → pytest + pytest-mock.
     * Java → JUnit 5 + Mockito.
     * Si realmente no puedes inferir → Jest por default y declaralo en la subseccion Herramientas.
-- \`discoveredDependencies\` PUEDE ser array vacio si la epica es autocontenida. Es el unico array donde vacio esta permitido.
+- Cada \`strategies[i].dependencies\` PUEDE ser array vacio si esa historia particular es autocontenida (no requiere mocks/fixtures externos). Las deps son POR HISTORIA — solo emite las que aplican a ESA story específicamente.
 
-⚠️ PRESUPUESTO: 32768 tokens TOTAL (streaming mode, sin limite predictivo). Para las ${poResult.outlines.length} strategies + deps tienes ~${Math.floor(30000 / poResult.outlines.length)} tokens por strategy — MAS QUE SUFICIENTE. Se conciso igual (listas > prosa) pero SIN miedo de quedarte corto. NUNCA emitas array vacio o incompleto.
+⚠️ PRESUPUESTO: ~${Math.floor(32000 / poResult.outlines.length)} tokens por strategy en el output — MAS QUE SUFICIENTE para markdown rico. Se conciso (listas > prosa) pero SIN miedo de quedarte corto. NUNCA emitas array vacio o incompleto.
 
 Proceso:
 1. Explora el codigo MAX 2 tool calls (code_grep con outputMode='files_with_matches' para detectar framework, code_read solo si necesitas confirmar patron de mock). NO sobreexplores — si los primeros tool calls no ayudan, procede directo a redactar basandote en las acceptance criteria.
-2. Para CADA una de las ${poResult.outlines.length} historias, redacta testingStrategy CORTA con 4 subsecciones \`**bold**\` (NO headings ##):
-   - **Happy paths** (2-3 casos, 1 linea cada uno)
-   - **Edge cases** (3-5 escenarios con codigo de error)
-   - **Mocks** (deps mockeadas con happy/fail)
-   - **Herramientas** (framework + cobertura >=90%)
-   Cada bullet max 10 palabras. NO incluyas "Alcance" ni "Cobertura" como secciones separadas.
-3. Identifica dependencias REALES (APIs externas, servicios con contratos, datos semilla, equipos). mdContent max ~100 palabras cada una.
+2. Para CADA una de las ${poResult.outlines.length} historias, redacta \`qa.markdown\` con los 5 headings obligatorios:
+   - \`## Pruebas unitarias\` — 2-4 párrafos sobre clases/funciones específicas con paths del repo.
+   - \`## Happy path\` — lista markdown ≥2 items, formato "- input concreto → output esperado".
+   - \`## Edge cases\` — lista markdown ≥3 items con códigos de error.
+   - \`## Mocks\` — qué se mockea, con qué library, ejemplos happy/fail.
+   - \`## Herramientas\` — framework + cobertura ≥90% + comandos.
+3. Para CADA historia, identifica sus dependencias REALES SOLO de esa story (APIs externas, servicios con contratos, datos semilla, equipos). Una credencial que sirve a 3 historias debe emitirse en LAS 3 (cada una es su own truth). **mdContent debe ser MARKDOWN HYPER-RICO** (200-500 palabras) con secciones ## Naturaleza, ## Impacto en testing, ## Estrategia de mock, ## Owner sugerido, ## Links, ## Riesgos. El frontend lo despliega al expandir la card — contenido corto se ve pobre. Si no tienes datos reales, INFIERE del stack pero MANTÉN las 6 secciones.
 4. Llama submit_qa_strategies UNA sola vez con \`strategies\` de longitud EXACTA ${poResult.outlines.length}.
 
-NO cambies PO ni technical. Si una historia es dificil de testear, dilo en su testingStrategy — pero SIEMPRE emite su entry (strategies:[] es FALLA).`;
+NO cambies PO ni technical. Si una historia es dificil de testear, dilo en \`qa.markdown\` — pero SIEMPRE emite su entry (strategies:[] es FALLA).`;
 
     const expectedStrategyCount = poResult.outlines.length;
     const output = await this.runAgentLoop({
@@ -1489,24 +1687,72 @@ NO cambies PO ni technical. Si una historia es dificil de testear, dilo en su te
             errorMessage: `Solo emitiste ${strategies.length}/${expectedStrategyCount} strategies. Agrega las ${expectedStrategyCount - strategies.length} faltantes. Cada historia debe tener su entry, no saltes ninguna.`,
           };
         }
+
+        // Validación de headings obligatorios + length mínima en cada
+        // qa.markdown. Reemplaza el enforcement v1 sub-campo-por-sub-campo
+        // — ahora el agente emite UN markdown libre con headings dictados.
+        const requiredQAHeadings = [
+          '## Pruebas unitarias',
+          '## Happy path',
+          '## Edge cases',
+          '## Mocks',
+          '## Herramientas',
+        ];
+        const MIN_QA_MARKDOWN_LEN = 400; // suma aproximada de los mínimos v1
+        for (let i = 0; i < strategies.length; i++) {
+          const s = strategies[i] as { qa?: { markdown?: unknown } };
+          const md = typeof s?.qa?.markdown === 'string' ? s.qa.markdown : '';
+          if (!md.trim()) {
+            return {
+              valid: false,
+              errorMessage: `strategies[${i}].qa.markdown está vacío. Debes emitir un markdown completo con los 5 headings obligatorios: ${requiredQAHeadings.join(', ')}. NO uses sub-campos como unitTests/happyPath/etc — todo va en el campo markdown.`,
+            };
+          }
+          if (md.length < MIN_QA_MARKDOWN_LEN) {
+            return {
+              valid: false,
+              errorMessage: `strategies[${i}].qa.markdown es muy corto (${md.length} chars, mínimo ${MIN_QA_MARKDOWN_LEN}). Cada heading debe tener contenido real — cita paths del repo si exploraste con code_grep, no emitas "TBD" ni "ver acceptance criteria".`,
+            };
+          }
+          const normalized = md.toLowerCase();
+          const missing = requiredQAHeadings.filter((h) => !normalized.includes(h.toLowerCase()));
+          if (missing.length > 0) {
+            return {
+              valid: false,
+              errorMessage: `strategies[${i}].qa.markdown no incluye los siguientes headings obligatorios: ${missing.join(', ')}. Re-emite el markdown con TODOS los headings, en el orden indicado, con prosa o listas bajo cada uno.`,
+            };
+          }
+        }
+
         return { valid: true };
       },
       ctx: common.ctx,
       signal,
       subject,
       runStartTime,
+      thinkingBudget: QA_THINKING_BUDGET,
+      forceTerminalOnLastIter: true,
     });
 
     if (!output) return null;
 
     const rawStrategies = Array.isArray((output as any).strategies) ? (output as any).strategies : [];
-    const rawDeps = Array.isArray((output as any).discoveredDependencies) ? (output as any).discoveredDependencies : [];
 
     const strategies = new Map<number, StoryQAFields>();
+    // Map<outlineIndex, deps[]> — cada strategy entry trae sus PROPIAS deps
+    // de testing (mocks, fixtures). Cuando la historia no las necesita,
+    // Map.get() devuelve undefined y se trata como [].
+    const discoveredDependenciesByIndex = new Map<number, DiscoveredDependency[]>();
     for (const raw of rawStrategies) {
       const idx = typeof raw.outlineIndex === 'number' ? raw.outlineIndex : -1;
       if (idx < 0 || idx >= poResult.outlines.length) continue;
       strategies.set(idx, this.normalizeQA(raw.qa));
+      const rawDepsForStory = Array.isArray(raw.dependencies) ? raw.dependencies : [];
+      const parsed = rawDepsForStory
+        .slice(0, MAX_DEPS_PER_BATCH)
+        .map((r: Record<string, unknown>) => this.normalizeDependency(r))
+        .filter((d: DiscoveredDependency | null): d is DiscoveredDependency => d !== null);
+      if (parsed.length > 0) discoveredDependenciesByIndex.set(idx, parsed);
     }
 
     // FAIL FAST: si el agente NO produjo ninguna strategy, abortar con diagnostico
@@ -1527,7 +1773,7 @@ NO cambies PO ni technical. Si una historia es dificil de testear, dilo en su te
           ? 'Array rawStrategies vacio — o truncamiento o el agente emitio strategies:[]'
           : `rawStrategies tiene ${rawStrategies.length} items pero ninguno matched outlineIndex valido [0..${poResult.outlines.length - 1}]. Indices recibidos: [${indicesSeen}]`;
       this.logger.error(
-        `[StoryGen:QA] ✗ no strategies produced. rawStrategies.length=${rawStrategies.length} rawDeps.length=${rawDeps.length} outlineCount=${poResult.outlines.length}. ${diagnosis}. Raw[0] preview: ${rawPreview}`,
+        `[StoryGen:QA] ✗ no strategies produced. rawStrategies.length=${rawStrategies.length} outlineCount=${poResult.outlines.length}. ${diagnosis}. Raw[0] preview: ${rawPreview}`,
       );
       subject.next({
         data: {
@@ -1544,7 +1790,7 @@ NO cambies PO ni technical. Si una historia es dificil de testear, dilo en su te
     for (let i = 0; i < poResult.outlines.length; i++) {
       if (!strategies.has(i)) {
         missing.push(i);
-        strategies.set(i, { testingStrategy: '', linkedQAMatrixId: null });
+        strategies.set(i, { markdown: '' });
       }
     }
     if (missing.length > 0) {
@@ -1553,12 +1799,22 @@ NO cambies PO ni technical. Si una historia es dificil de testear, dilo en su te
       );
     }
 
-    const discoveredDependencies: DiscoveredDependency[] = rawDeps
-      .slice(0, MAX_DEPS_PER_BATCH)
-      .map((raw: Record<string, unknown>) => this.normalizeDependency(raw))
-      .filter((d: DiscoveredDependency | null): d is DiscoveredDependency => d !== null);
+    const totalQADeps = Array.from(discoveredDependenciesByIndex.values()).reduce(
+      (sum, arr) => sum + arr.length,
+      0,
+    );
+    if (totalQADeps > 0) {
+      this.logger.log(
+        `[StoryGen:QA] ${totalQADeps} discovered dependencies emitted across ${discoveredDependenciesByIndex.size} stories (per-story, no longer transversal)`,
+      );
+    }
 
-    return { strategies, discoveredDependencies };
+    // Heurísticas de calidad post-output: medir si el deep research realmente
+    // está aportando contenido específico vs genérico. Permite detectar
+    // regresiones del prompt sin abrir la UI.
+    this.logQAQualityHeuristics(strategies);
+
+    return { strategies, discoveredDependenciesByIndex };
   }
 
   // ─────────────────────────────────────────────────────────────────────
@@ -1581,10 +1837,12 @@ NO cambies PO ni technical. Si una historia es dificil de testear, dilo en su te
       signal,
       subject,
       runStartTime,
+      thinkingBudget,
+      forceTerminalOnLastIter,
     } = params;
 
     this.logger.log(
-      `[StoryGen:${role.toUpperCase()}] ▶ loop start: maxIter=${maxIterations} maxTokens=${maxTokens} tools=${agentToolset.length}+terminal`,
+      `[StoryGen:${role.toUpperCase()}] ▶ loop start: maxIter=${maxIterations} maxTokens=${maxTokens} tools=${agentToolset.length}+terminal thinking=${thinkingBudget ?? 0}`,
     );
 
     const messages: Anthropic.Messages.MessageParam[] = [
@@ -1617,6 +1875,17 @@ NO cambies PO ni technical. Si una historia es dificil de testear, dilo en su te
       //    Message con la misma shape que messages.create() — drop-in.
       //    El SDK reassembla automaticamente los input_json_delta chunks en
       //    el tool_use.input como Record<string, unknown>.
+
+      // Branching para thinking + tool_choice (incompatibles según Anthropic):
+      //  - En el ÚLTIMO turno (si forceTerminalOnLastIter), forzamos el
+      //    terminal tool via `tool_choice: { type: 'tool' }` y desactivamos
+      //    thinking en ESE turno (mismo patrón que diagram-generation.service).
+      //  - En iters intermedias: tool_choice implícito (`auto`) +
+      //    thinking activo si el caller lo pidió.
+      const isForcedTerminalTurn =
+        !!forceTerminalOnLastIter && iteration === maxIterations - 1;
+      const thinkingActive = !!thinkingBudget && thinkingBudget > 0 && !isForcedTerminalTurn;
+
       const stream = this.client.messages.stream(
         {
           model: MODEL,
@@ -1625,8 +1894,17 @@ NO cambies PO ni technical. Si una historia es dificil de testear, dilo en su te
             // El bloque comun se cachea (ephemeral, TTL 5 min) para que los
             // 3 agentes consecutivos lo reutilicen sin re-pagar los input tokens.
             { type: 'text', text: commonContextBlock, cache_control: { type: 'ephemeral' } },
-            { type: 'text', text: roleSystemPrompt },
+            // Cacheamos también el role prompt — Anthropic permite hasta 4
+            // cache breakpoints. Esto reduce el costo del 2do/3er agente cuando
+            // su prompt no cambia entre iters de su propio loop.
+            { type: 'text', text: roleSystemPrompt, cache_control: { type: 'ephemeral' } },
           ],
+          ...(thinkingActive
+            ? { thinking: { type: 'enabled' as const, budget_tokens: thinkingBudget! } }
+            : {}),
+          ...(isForcedTerminalTurn
+            ? { tool_choice: { type: 'tool' as const, name: terminalToolName } }
+            : {}),
           tools,
           messages,
         },
@@ -1641,8 +1919,20 @@ NO cambies PO ni technical. Si una historia es dificil de testear, dilo en su te
       const cacheCreate = usage?.cache_creation_input_tokens ?? 0;
       const inputTokens = usage?.input_tokens ?? 0;
       const outputTokens = usage?.output_tokens ?? 0;
+      // Contamos thinking blocks emitidos en este turno — si thinking estaba
+      // activo y el modelo razonó, debe ser >= 1. Si es 0 con thinkingActive,
+      // probablemente la pregunta fue trivial (no requirió thinking).
+      const thinkingBlocksCount = response.content.filter(
+        (b: any) => b.type === 'thinking' || b.type === 'redacted_thinking',
+      ).length;
+      const toolUseBlocksCount = response.content.filter(
+        (b: any) => b.type === 'tool_use',
+      ).length;
       this.logger.log(
-        `[StoryGen:${role.toUpperCase()}] iter ${iteration} stop=${response.stop_reason} dur=${Date.now() - callStart}ms tokens(in=${inputTokens} out=${outputTokens} cache_read=${cacheRead} cache_create=${cacheCreate})${cacheRead > 0 ? ' 🎯 CACHE HIT' : ''}`,
+        `[StoryGen:${role.toUpperCase()}] iter ${iteration} stop=${response.stop_reason} dur=${Date.now() - callStart}ms ` +
+          `tokens(in=${inputTokens} out=${outputTokens} cache_read=${cacheRead} cache_create=${cacheCreate}) ` +
+          `thinking_blocks=${thinkingBlocksCount} tool_calls=${toolUseBlocksCount}` +
+          `${thinkingActive ? ' 🧠' : ''}${isForcedTerminalTurn ? ' 🎯FORCED' : ''}${cacheRead > 0 ? ' 💾CACHE_HIT' : ''}`,
       );
 
       const assistantContent = response.content;
@@ -1655,6 +1945,21 @@ NO cambies PO ni technical. Si una historia es dificil de testear, dilo en su te
             data: {
               type: 'thinking',
               delta: scrubSecrets((block as any).text),
+              role,
+              timestamp: new Date().toISOString(),
+            },
+          });
+        }
+        // Bloques `thinking` (extended thinking) — razonamiento interno del
+        // agente. Lo emitimos con el mismo evento `thinking` que los text
+        // blocks; el viewer los renderiza encadenados. NO emitimos
+        // `redacted_thinking` (Anthropic los oscurece por safety; solo se
+        // preservan en messages para mantener continuidad encriptada).
+        if ((block as any).type === 'thinking' && (block as any).thinking?.trim()) {
+          subject.next({
+            data: {
+              type: 'thinking',
+              delta: scrubSecrets((block as any).thinking),
               role,
               timestamp: new Date().toISOString(),
             },
@@ -1925,22 +2230,20 @@ NO cambies PO ni technical. Si una historia es dificil de testear, dilo en su te
     }
     const fallbackPodId = common.podsForAssignment[0]?.id ?? common.epic.podIds[0];
 
-    // Las dependencias son transversales al batch — se adjuntan a CADA historia
-    // propuesta (el backend al aceptar solo persiste deps de la historia aceptada).
-    //
-    // MERGE TL + QA: el Tech Lead emite deps de arquitectura (credenciales
-    // externas, APIs de terceros) y el QA emite deps de testing (mocks,
-    // fixtures). Pueden solaparse — dedup por `(vendor?.toLowerCase(), type)`
-    // cuando hay vendor, o por `title.toLowerCase()` como fallback. El item
-    // ganador fusiona campos: prefiere el que tenga `requiresCredential:true`
-    // + `mdContent` más largo (más información).
-    const depsAll = this.mergeDiscoveredDependencies(
-      tlResult.technicalDependencies,
-      qaResult.discoveredDependencies,
+    // Las dependencias son POR HISTORIA — cada story recibe solo las suyas
+    // (emitidas por el TL y QA con su outlineIndex). El merge TL+QA se hace
+    // PER STORY para deduplicar cuando ambos agentes emiten la misma dep
+    // sobre la misma historia (ej. credencial mencionada en design + testing).
+    const totalTechDeps = Array.from(tlResult.technicalDependenciesByIndex.values()).reduce(
+      (s, a) => s + a.length,
+      0,
     );
-
+    const totalQADeps = Array.from(qaResult.discoveredDependenciesByIndex.values()).reduce(
+      (s, a) => s + a.length,
+      0,
+    );
     this.logger.log(
-      `[StoryGen] Consolidating ${poResult.outlines.length} proposals (docs=${poResult.relatedDocuments.length} deps=${depsAll.length}, tl=${tlResult.technicalDependencies.length} qa=${qaResult.discoveredDependencies.length}, storyEdges=${tlResult.storyOrderEdges.length})`,
+      `[StoryGen] Consolidating ${poResult.outlines.length} proposals (docs=${poResult.relatedDocuments.length} tl=${totalTechDeps} qa=${totalQADeps} per-story, storyEdges=${tlResult.storyOrderEdges.length})`,
     );
 
     // Pre-asignar clientIds estables para poder mapear los edges del DAG
@@ -1952,7 +2255,7 @@ NO cambies PO ni technical. Si una historia es dificil de testear, dilo en su te
     for (let i = 0; i < poResult.outlines.length; i++) {
       const outline = poResult.outlines[i];
       const technical = tlResult.designs.get(i) ?? this.normalizeTechnical({});
-      const qa = qaResult.strategies.get(i) ?? { testingStrategy: '', linkedQAMatrixId: null };
+      const qa: StoryQAFields = qaResult.strategies.get(i) ?? { markdown: '' };
 
       const podId = podIdSet.has(outline.podId) ? outline.podId : fallbackPodId;
       const podFallbackUsed = podId !== outline.podId;
@@ -1969,6 +2272,17 @@ NO cambies PO ni technical. Si una historia es dificil de testear, dilo en su te
           description: edge.description,
         }));
 
+      // Merge TL+QA SOLO de las deps de ESTA historia. Si una credencial
+      // externa fue mencionada por ambos agentes en la misma story, el merge
+      // dedupla; si distintas stories tienen la misma credencial, queda
+      // correctamente en cada una (cada story es su own truth).
+      const tlDepsForStory = tlResult.technicalDependenciesByIndex.get(i) ?? [];
+      const qaDepsForStory = qaResult.discoveredDependenciesByIndex.get(i) ?? [];
+      const depsForThisStory = this.mergeDiscoveredDependencies(
+        tlDepsForStory,
+        qaDepsForStory,
+      );
+
       const proposed: ProposedStory = {
         clientId: clientIdByIndex[i],
         title: outline.title,
@@ -1983,12 +2297,12 @@ NO cambies PO ni technical. Si una historia es dificil de testear, dilo en su te
         technical,
         qa,
         relatedDocuments: poResult.relatedDocuments,
-        discoveredDependencies: depsAll,
+        discoveredDependencies: depsForThisStory,
         blockedBy: blockedBy.length > 0 ? blockedBy : undefined,
       };
 
       this.logger.log(
-        `[StoryGen]   proposal[${i}] "${outline.title.slice(0, 60)}" SP=${outline.storyPoints} pod=${podId}${podFallbackUsed ? ' (fallback)' : ''} tech=${technical.architecture ? 'ok' : 'empty'} qa=${qa.testingStrategy ? 'ok' : 'empty'}`,
+        `[StoryGen]   proposal[${i}] "${outline.title.slice(0, 60)}" SP=${outline.storyPoints} pod=${podId}${podFallbackUsed ? ' (fallback)' : ''} tech=${technical.markdown ? `${technical.markdown.length}c` : 'empty'} qa=${qa.markdown ? `${qa.markdown.length}c` : 'empty'}`,
       );
 
       subject.next({
@@ -2022,10 +2336,17 @@ NO cambies PO ni technical. Si una historia es dificil de testear, dilo en su te
       : [];
 
     const po = this.normalizePO(raw.po);
+    // En v2 el PO es un único string markdown — para la `description` corta
+    // que se muestra en cards/lists, extraemos la primera línea no-vacía
+    // que NO sea un heading H2/H3 (los headings son estructura, no contenido).
+    const firstContentLine = po.markdown
+      .split('\n')
+      .map((l) => l.trim())
+      .find((l) => l.length > 0 && !l.startsWith('#'));
     const description = cap(
       typeof raw.description === 'string' && raw.description.trim()
         ? raw.description
-        : po.userStory || po.objective,
+        : (firstContentLine ?? ''),
     );
 
     void common; // accepted param, not used in normalize (fallback en emit)
@@ -2033,71 +2354,139 @@ NO cambies PO ni technical. Si una historia es dificil de testear, dilo en su te
     return { title, description, storyPoints, podId, labels, po };
   }
 
+  // ─────────────────────────────────────────────────────────────────────
+  //   Normalizers v2 — un único string markdown por sección
+  // ─────────────────────────────────────────────────────────────────────
+  //
+  // En v2 los 3 agentes (PO/TL/QA) emiten un único `markdown: string` con
+  // headings dictados por el prompt. El normalizer hace cap defensivo y
+  // trim. Backward-compat: si el agente emite el shape v1 viejo (sub-campos
+  // discretos), `legacy*ToMarkdown` (en stories.service) los concatena al
+  // markdown v2 — pero acá ya esperamos shape v2 directo del agente.
+
   private normalizePO(raw: unknown): StoryPOFields {
     const src = (raw && typeof raw === 'object' ? raw : {}) as Record<string, unknown>;
-    const whw = src.whatHowWhen;
-    const whatHowWhen = whw && typeof whw === 'object' && !Array.isArray(whw)
-      ? {
-          what: cap(String((whw as any).what ?? ''), MAX_LIST_ITEM_LEN),
-          how: cap(String((whw as any).how ?? ''), MAX_LIST_ITEM_LEN),
-          when: cap(String((whw as any).when ?? ''), MAX_LIST_ITEM_LEN),
-        }
-      : { what: '', how: '', when: '' };
-
-    const ac = Array.isArray(src.acceptanceCriteria)
-      ? (src.acceptanceCriteria as unknown[])
-          .map((item) => cap(String(item), MAX_LIST_ITEM_LEN))
-          .filter((s) => s.trim().length > 0)
-          .slice(0, MAX_LIST_SIZE)
-      : typeof src.acceptanceCriteria === 'string'
-        ? cap(String(src.acceptanceCriteria))
-            .split('\n')
-            .map((s) => cap(s.trim(), MAX_LIST_ITEM_LEN))
-            .filter(Boolean)
-            .slice(0, MAX_LIST_SIZE)
-        : [];
-
-    return {
-      background: cap(String(src.background ?? '')),
-      objective: cap(String(src.objective ?? '')),
-      userStory: cap(String(src.userStory ?? '')),
-      whatHowWhen,
-      acceptanceCriteria: ac,
-      additionalNotes: cap(String(src.additionalNotes ?? '')),
-    };
+    return { markdown: cap(String(src.markdown ?? ''), MAX_STORY_MARKDOWN_LEN) };
   }
 
   private normalizeTechnical(raw: unknown): StoryTechnicalFields {
     const src = (raw && typeof raw === 'object' ? raw : {}) as Record<string, unknown>;
-    const toList = (val: unknown): string[] =>
-      Array.isArray(val)
-        ? (val as unknown[])
-            .map((item) => cap(String(item), MAX_LIST_ITEM_LEN))
-            .filter((s) => s.trim().length > 0)
-            .slice(0, MAX_LIST_SIZE)
-        : typeof val === 'string' && val.trim()
-          ? cap(String(val))
-              .split('\n')
-              .map((s) => cap(s.trim(), MAX_LIST_ITEM_LEN))
-              .filter(Boolean)
-              .slice(0, MAX_LIST_SIZE)
-          : [];
-
-    return {
-      architecture: cap(String(src.architecture ?? '')),
-      integrationFlow: cap(String(src.integrationFlow ?? '')),
-      validations: toList(src.validations),
-      errorHandling: toList(src.errorHandling),
-      implementationChecklist: toList(src.implementationChecklist),
-    };
+    return { markdown: cap(String(src.markdown ?? ''), MAX_STORY_MARKDOWN_LEN) };
   }
 
   private normalizeQA(raw: unknown): StoryQAFields {
     const src = (raw && typeof raw === 'object' ? raw : {}) as Record<string, unknown>;
-    return {
-      testingStrategy: cap(String(src.testingStrategy ?? '')),
-      linkedQAMatrixId: typeof src.linkedQAMatrixId === 'string' ? src.linkedQAMatrixId : null,
-    };
+    return { markdown: cap(String(src.markdown ?? ''), MAX_STORY_MARKDOWN_LEN) };
+  }
+
+  /**
+   * Parser regex de markdown legacy con headings `**Happy paths**`,
+   * `**Edge cases**`, `**Mocks**`, `**Herramientas**`/`**Tools**`,
+   * `**Unit tests**`. Distribuye contenido a los 5 sub-campos nuevos.
+   *
+   * Solo se invoca cuando los granulares vienen vacíos pero `testingStrategy`
+   * tiene contenido (output legacy del agente viejo). Best-effort: si el
+   * formato no matchea exactamente, los campos quedan vacíos y la UI muestra
+   * placeholders — no se pierde data porque `testingStrategy` se preserva.
+   */
+  private splitLegacyTestingStrategy(text: string): {
+    unitTests: string;
+    happyPath: string[];
+    edgeCases: string[];
+    mocks: string;
+    tools: string;
+  } {
+    const result = { unitTests: '', happyPath: [] as string[], edgeCases: [] as string[], mocks: '', tools: '' };
+    // Regex captura: **Label** opcional [: o .] + body hasta el próximo
+    // **Label** o fin del texto. Insensitive.
+    const sectionRegex = /\*\*(Happy paths?|Edge cases?|Mocks?|Herramientas|Tools|Unit ?[Tt]ests?)\*\*\s*[:.]?\s*([\s\S]+?)(?=\n\*\*|\n\n\*\*|$)/gi;
+    const extractBullets = (body: string): string[] =>
+      body
+        .split('\n')
+        .map((line) => line.replace(/^\s*-\s*(\[\s?\]\s*)?/, '').trim())
+        .filter((l) => l.length > 0)
+        .slice(0, MAX_LIST_SIZE);
+
+    let m: RegExpExecArray | null;
+    while ((m = sectionRegex.exec(text)) !== null) {
+      const label = m[1].toLowerCase();
+      const body = m[2].trim();
+      if (label.includes('happy')) result.happyPath = extractBullets(body);
+      else if (label.includes('edge')) result.edgeCases = extractBullets(body);
+      else if (label.includes('mock')) result.mocks = cap(body);
+      else if (label.includes('herramienta') || label.includes('tool')) result.tools = cap(body);
+      else if (label.includes('unit')) result.unitTests = cap(body);
+    }
+    return result;
+  }
+
+  // ─────────────────────────────────────────────────────────────────────
+  //   HEURÍSTICAS DE CALIDAD POST-OUTPUT
+  //   Métricas que detectan si el deep research realmente está aportando
+  //   contenido específico vs genérico. Permiten ver regresiones del prompt
+  //   sin abrir la UI — solo leyendo logs.
+  // ─────────────────────────────────────────────────────────────────────
+
+  /** Regex que matchea referencias a paths reales del repo monorepo CENZONTLE. */
+  private readonly REPO_PATH_REGEX = /(apps|packages)\/[a-z][a-z0-9-]*\/(src|prisma|public|test)\/[a-zA-Z0-9_./-]+/;
+
+  /**
+   * Heurísticas v2 — el contenido es markdown único por sección. Medimos:
+   *   - presencia de headings obligatorios (% de stories que cumplen el contrato)
+   *   - longitud del markdown (sustituye el "avg X chars per sub-field")
+   *   - referencias a paths reales del repo (citesRealPaths) — sigue siendo
+   *     un indicador clave de "deep research" exitoso.
+   */
+
+  private logQAQualityHeuristics(strategies: Map<number, StoryQAFields>): void {
+    const entries = Array.from(strategies.values());
+    if (entries.length === 0) return;
+    const required = ['## Pruebas unitarias', '## Happy path', '## Edge cases', '## Mocks', '## Herramientas'];
+    const allHeadings = entries.filter((qa) =>
+      required.every((h) => qa.markdown.toLowerCase().includes(h.toLowerCase())),
+    ).length;
+    const citesRealPaths = entries.filter((qa) => this.REPO_PATH_REGEX.test(qa.markdown)).length;
+    const citesFramework = entries.filter((qa) =>
+      /(jest|vitest|pytest|junit|mockito|@testing-library|supertest|playwright)/i.test(qa.markdown),
+    ).length;
+    const avgChars = entries.reduce((s, qa) => s + qa.markdown.length, 0) / entries.length;
+    this.logger.log(
+      `[StoryGen:QA] quality: ${allHeadings}/${entries.length} have all 5 headings, ` +
+        `${citesRealPaths}/${entries.length} cite real repo paths, ` +
+        `${citesFramework}/${entries.length} cite framework, ` +
+        `avg_chars=${avgChars.toFixed(0)}`,
+    );
+  }
+
+  private logTLQualityHeuristics(designs: Map<number, StoryTechnicalFields>): void {
+    const entries = Array.from(designs.values());
+    if (entries.length === 0) return;
+    const required = ['## Arquitectura', '## Flujo de integración', '## Validaciones', '## Manejo de errores', '## Contrato'];
+    const allHeadings = entries.filter((t) =>
+      required.every((h) => t.markdown.toLowerCase().includes(h.toLowerCase())),
+    ).length;
+    const citesRealPaths = entries.filter((t) => this.REPO_PATH_REGEX.test(t.markdown)).length;
+    const avgChars = entries.reduce((s, t) => s + t.markdown.length, 0) / entries.length;
+    this.logger.log(
+      `[StoryGen:TL] quality: ${allHeadings}/${entries.length} have all 5 headings, ` +
+        `${citesRealPaths}/${entries.length} cite real repo paths, ` +
+        `avg_chars=${avgChars.toFixed(0)}`,
+    );
+  }
+
+  private logPOQualityHeuristics(outlines: StoryOutline[]): void {
+    if (outlines.length === 0) return;
+    const required = ['## Antecedentes', '## Objetivo', '## Historia de usuario', '## What/How/When', '## Criterios de aceptación'];
+    const allHeadings = outlines.filter((o) =>
+      required.every((h) => o.po.markdown.toLowerCase().includes(h.toLowerCase())),
+    ).length;
+    const withTBD = outlines.filter((o) => /(tbd|n\/a|pronto|asap|por definir)/i.test(o.po.markdown)).length;
+    const avgChars = outlines.reduce((s, o) => s + o.po.markdown.length, 0) / outlines.length;
+    this.logger.log(
+      `[StoryGen:PO] quality: ${allHeadings}/${outlines.length} have all 5 headings, ` +
+        `${withTBD}/${outlines.length} contain TBD/N/A (FALLA si > 0), ` +
+        `avg_chars=${avgChars.toFixed(0)}`,
+    );
   }
 
   private normalizeDependency(raw: Record<string, unknown>): DiscoveredDependency | null {
@@ -2213,12 +2602,38 @@ ${storyCountDirective}
 3. **storyPoints**: Fibonacci {1, 2, 3, 5, 8, 13}. 13 solo si es realmente grande (prefiere dividir).
 4. **podId**: UNO de los IDs listados en \`<pods_asignados_a_la_epica>\`. El que mas sentido tenga para el scope de esa historia.
 5. **labels**: etiquetas tecnicas cortas (backend, api, frontend, mobile, data, etc.).
-6. **po.background**: antecedentes reales — por que surge esta historia, que problema resuelve, referencias historicas si aplica.
-7. **po.objective**: que valor entrega y para quien, una frase.
-8. **po.userStory**: "Como [rol concreto, no generico], quiero [accion], para [beneficio medible]".
-9. **po.whatHowWhen**: what = alcance del entregable; how = approach de alto nivel (sin detalle tecnico); when = fase/sprint. **Cuando la historia tenga UI, referencia el diseño concreto del bloque \`<epic_designs>\` por su nombre exacto (ej: "según Diseño: Checkout Mobile").**
-10. **po.acceptanceCriteria**: minimo 3 criterios VERIFICABLES. Formato Gherkin ("Dado... Cuando... Entonces...") o bullets con metricas concretas. **Si hay diseños disponibles, al menos 1 criterio debe mencionar que la UI implementada respeta el diseño referenciado (sin inventar specs visuales — Claude Code las extraerá del HTML al implementar).**
-11. **po.additionalNotes**: opcional — dependencias cruzadas, restricciones, riesgos. **Si la historia tiene UI y el bloque \`<epic_designs>\` trae handoffs aplicables, COPIA TEXTUALMENTE el handoff relevante aquí (instrucción + URL) para que Claude Code la siga al implementar. Si ninguno cubre la historia y hace falta UI, anota "diseño pendiente".**
+6. **po.markdown** ⚠️ UN SOLO STRING MARKDOWN con los 5 headings obligatorios. La descripción exacta del contrato vive en el JSON Schema de \`submit_po_outline\` — léelo antes de emitir. Resumen:
+
+\`\`\`markdown
+## Antecedentes
+(contexto histórico, por qué surge esta historia)
+
+## Objetivo
+(una frase: qué valor entrega y para quién)
+
+## Historia de usuario
+Como [rol concreto], quiero [acción], para [beneficio medible].
+
+## What/How/When
+**What:** alcance del entregable concreto.
+**How:** approach de alto nivel sin detalle técnico.
+**When:** fase/sprint/milestone concreto (NO "TBD" ni "Pronto").
+
+## Criterios de aceptación
+1. Criterio Gherkin/bullet verificable.
+2. ...
+3. ...
+
+## Notas adicionales (opcional)
+(dependencias cruzadas, riesgos, handoff de diseño si aplica)
+\`\`\`
+
+REGLAS DUROS:
+- Los 5 headings deben aparecer EXACTAMENTE como están (case + tildes). El \`validateTerminal\` rechaza el output sin alguno y fuerza retry.
+- Bajo "What/How/When", los 3 sub-bloques **What:**/**How:**/**When:** son obligatorios con valores REALES (no strings vacíos, no "TBD"/"N/A"/"Pronto").
+- Cuando la historia tenga UI, referencia el diseño concreto del bloque \`<epic_designs>\` por su nombre exacto en **What:** (ej: "Implementa según Diseño: Checkout Mobile").
+- Si hay diseños disponibles, al menos 1 criterio de aceptación debe mencionar que la UI respeta el diseño referenciado (sin inventar specs visuales — Claude Code las extraerá del HTML al implementar).
+- Si la historia tiene UI y el bloque \`<epic_designs>\` trae handoffs aplicables, COPIA TEXTUALMENTE el handoff relevante (instrucción + URL al HTML standalone) en "## Notas adicionales" para que Claude Code la siga al implementar. Si ninguno cubre la historia y hace falta UI, anota "diseño pendiente".
 
 ## Documentos relevantes
 
@@ -2226,65 +2641,184 @@ Aparte de los outlines, identifica cuales de los documentos listados en \`<initi
 - docId, docName, bucketUrl — exactamente como se listo.
 - relevanceSummary — 1-2 parrafos del por que aplica. No resumas el documento completo; solo el vinculo con las historias.
 
-## Proceso
+═══════════════════════════════════════════════════════════════════════════════
+## 🔬 WORKFLOW DE DEEP RESEARCH (OBLIGATORIO — sigue las 4 fases)
+═══════════════════════════════════════════════════════════════════════════════
 
 ${webStep}
 
-0. **Explora el vault de la epica (vault_glob > vault_grep > vault_read). MAX 3-4 tool calls antes del terminal — no sobre-explores.**
-   - PRIMERO \`vault_glob\` con el path del folder de la epica (ver \`<epic_vault_files>\` para el folder base; si no hay, la epica no tiene artefactos en el vault todavia).
-     Patron: \`"<folder-epica>/**/*.md"\` — descubre diagramas, matrices, deps y docs reales del vault.
-   - LUEGO \`vault_grep\` con regex si los paths del glob mencionan terminos especificos de negocio de la epica (\`"(termino1|termino2|concepto)"\` con \`-i: true\`).
-   - FINALMENTE \`vault_read\` SOLO con paths que devolvio \`vault_glob\` — nunca construyas ni infieras paths. Lee maximo 2-3 archivos (prioriza diagramas sobre matrices sobre documentos).
-   - Si \`vault_glob\` retorna 0 archivos: no hay artefactos todavia, omite grep/read y salta al paso 1.
-   - Si \`vault_read\` devuelve "File not found": NO reintentes el mismo path — abandona ese archivo.
+### Fase 1 — Explorar (3-5 tool calls)
+- \`vault_glob\` con el path del folder de la épica (ver \`<epic_vault_files>\` para el folder base). Patrón: \`"<folder-epica>/**/*.md"\` — descubre diagramas, matrices, deps y docs.
+- Si la iniciativa tiene documentos, \`read_initiative_documents\` sin documentId para listar.
+- \`vault_grep\` con regex de términos del negocio de la épica si vault_glob retornó paths.
 
-1. Si hay documentos en la iniciativa, lista (\`read_initiative_documents\` sin documentId) y lee los que parezcan mas relevantes (con documentId).
-2. Propon las historias respetando el alcance de la epica — no inventes alcance que no este en la epica.
-3. Llama \`submit_po_outline\` UNA sola vez con stories[] y relatedDocuments[].
+### Fase 2 — Hipotetizar (en thinking, sin tools)
+Antes de leer en profundidad, formula 2-3 hipótesis EXPLÍCITAS sobre qué historias necesitas:
+- "Hipótesis A: la épica abarca 4 historias porque el alcance menciona 4 endpoints distintos."
+- "Hipótesis B: hay un diseño UX para Settings — la historia 2 debe referenciarlo."
+- "Hipótesis C: la iniciativa tiene un PRD que define el customer journey en 5 pasos — cada historia mapea a uno."
+Numera tus hipótesis. El thinking block es para esto, no para elaborar el output final.
 
-## Anti-patrones a evitar
+### Fase 3 — Validar (2-4 tool calls)
+- \`vault_read\` SOLO con paths que devolvió vault_glob — nunca construyas ni infieras paths. Máximo 2-3 archivos (prioriza diagramas > matrices > documentos).
+- \`read_initiative_documents\` con documentId de los más relevantes (lee 1-2).
+- Si vault_read devuelve "File not found": NO reintentes el mismo path — abandona ese archivo.
 
-- Historias genericas tipo "Configurar CI/CD" sin referencia al contexto real.
-- acceptanceCriteria vagos ("debe funcionar bien").
-- Inventar metricas sin base en los docs o codigo.
+### Fase 4 — Escribir (terminal tool, 1 call)
+Llama \`submit_po_outline\` UNA sola vez con stories[] y relatedDocuments[]. Cada historia DEBE:
+- Referenciar al menos 1 fuente del vault o doc de iniciativa que validaste.
+- Tener \`po.markdown\` con los 5 headings obligatorios y bajo "What/How/When" los 3 sub-bloques **What:**/**How:**/**When:** poblados con valores REALES (no "TBD").
+- Si tiene UI, citar el diseño exacto del bloque \`<epic_designs>\` en **What:** y copiar el handoff completo en "## Notas adicionales".
+
+═══════════════════════════════════════════════════════════════════════════════
+## 🛑 CUÁNDO PARAR DE EXPLORAR
+═══════════════════════════════════════════════════════════════════════════════
+
+- Mapeaste el scope completo de la épica (cubres todos los endpoints/features mencionados).
+- Hiciste 9 tool calls (te quedan 3 para validar y emitir).
+- vault_glob retornó 0 archivos → la épica no tiene artefactos todavía, procede con el contexto del epic.description.
+
+═══════════════════════════════════════════════════════════════════════════════
+## 🚫 Anti-patrones a evitar
+═══════════════════════════════════════════════════════════════════════════════
+
+- Historias genéricas tipo "Configurar CI/CD" sin referencia al contexto real.
+- Criterios de aceptación vagos ("debe funcionar bien").
+- Inventar métricas sin base en los docs o código.
 - Invadir trabajo del TL (arquitectura) o del QA (testing strategy).
-- **Ignorar los diseños listados en \`<epic_designs>\` cuando existen y la historia tiene UI — los criterios deben ser verificables contra el diseño concreto, no genericos.**
+- **Sub-bloques What:/How:/When: vacíos o con "TBD"/"N/A"/"Pronto" — falla CRÍTICA.**
+- **Omitir alguno de los 5 headings obligatorios — el \`validateTerminal\` lo rechaza y fuerza retry.**
+- **Emitir el output en sub-campos sueltos (\`po.background\`, \`po.userStory\`, etc.) — el schema actual SOLO acepta \`po.markdown\`. Cualquier otro shape se descarta como vacío.**
+- **Ignorar los diseños listados en \`<epic_designs>\` cuando existen y la historia tiene UI — los criterios deben ser verificables contra el diseño concreto, no genéricos.**
 - **Inventar referencias a diseños cuando el bloque indica "NO requiere diseño" o "Ninguno disponible".**
 
-Idioma: espanol.`;
+Idioma: español.`;
   }
 
   private buildTLSystemPrompt(): string {
-    return `Eres un **Agente Tech Lead** disenando la solucion tecnica de historias cuyo QUE ya fue definido por el PO.
+    return `Eres un **Agente Tech Lead Senior** que diseña la solución técnica de cada historia haciendo DEEP RESEARCH del código real del repo. Tu output va LITERALMENTE al Agente QA y a Linear, debe ser ejecutable por un dev sin contexto previo.
 
-TU MISION: para cada outline del PO (que recibes en el user message), escribe la seccion tecnica completa. El output va LITERALMENTE al Agente QA.
+TU MISIÓN: para cada outline del PO, escribir la sección técnica completa con paths reales del repo, patrones observados, y trade-offs explícitos. NO output genérico tipo "usa NestJS con Prisma" — eso ya lo sabemos.
 
-⚠️ PRESUPUESTO DE TOKENS: tienes 8192 tokens de salida TOTAL para los N designs. Eso es ~1500 tokens por historia si son 5. Se conciso. NO uses markdown decorativo (headings ##/###), NO repitas info entre campos, NO escribas parrafos largos cuando una lista alcanza.
+═══════════════════════════════════════════════════════════════════════════════
+## ⚠️ CONTRATO DURO
+═══════════════════════════════════════════════════════════════════════════════
 
-## Que compones por historia (en technical)
+- \`designs\` array DEBE tener EXACTAMENTE N entries (una por outlineIndex 0..N-1).
+- Cada \`designs[i].technical\` es un OBJETO con UN solo campo: \`markdown: string\`. El markdown DEBE incluir EXACTAMENTE estos 5 headings level-2 con contenido real:
+  - \`## Arquitectura y componentes\`
+  - \`## Flujo de integración\`
+  - \`## Validaciones\`
+  - \`## Manejo de errores\`
+  - \`## Contrato\`
+- El \`validateTerminal\` rechaza el output si falta alguno de los 5 headings y fuerza retry.
+- NO emitas sub-campos sueltos (\`technical.architecture\`, \`technical.validations\`, etc.) — el schema actual SOLO acepta \`technical.markdown\`. Cualquier otro shape se descarta como vacío.
+- Cada \`designs[i].dependencies\` DEBE existir (puede ser []) — credenciales/APIs externas POR HISTORIA.
+- Emite \`storyOrderDependencies\` global con edges del DAG entre historias del mismo batch.
 
-1. **architecture** (max ~250 palabras): UN parrafo o lista corta. Incluye solo: capa/layer + proposito + dependencias clave + patron. NO uses headings markdown. Ejemplo conciso: "Microservicio NestJS en capa BFF. Proxy autenticado a /api/proyectos/*. Consume Auth0 (JWT) y Prisma (PG). Patron: stateless gateway."
-2. **integrationFlow** (max ~200 palabras): secuencia numerada (1. ... 2. ...). Endpoint, payload, transformaciones, llamadas externas, response. Sin pseudocodigo extenso. **Si el bloque \`<epic_designs>\` lista componentes UI, menciona brevemente estados loading/error/empty que el diseño requiera.**
-3. **validations** (lista 3-8 items): "campo: regla -> que pasa si falla". Una linea por item.
-4. **errorHandling** (lista 4-8 items): "CODIGO: escenario -> ERR.X.Y". Una linea por item.
-5. **implementationChecklist** (lista 5-10 items): pasos concretos, una linea cada uno. Ordenados por dependencia.
+═══════════════════════════════════════════════════════════════════════════════
+## 🔬 WORKFLOW DE DEEP RESEARCH (OBLIGATORIO — sigue las 4 fases)
+═══════════════════════════════════════════════════════════════════════════════
 
-## Diseños UX/UI
+### Fase 1 — Explorar (3-5 tool calls)
+- \`code_glob\` con patrones del módulo objetivo (\`apps/api/src/modules/<dominio>/**/*.ts\`) para mapear archivos existentes.
+- \`code_grep\` con regex de convenciones: nombres de controllers, services, error handlers, validators, DTOs.
+- \`code_read\` de 1-2 controllers/services representativos del dominio más cercano para inferir el patrón exacto.
 
-Si \`<epic_designs>\` trae handoffs, úsalos para: (a) derivar API contracts coherentes con los componentes (payloads que casen con lo que el diseño pinta), (b) dimensionar estados de loading/error/empty que el diseño demande, (c) evitar inventar datos que la UI no solicita. Si el bloque indica "NO requiere diseño", asume backend-only y no inventes integraciones UI.
+### Fase 2 — Hipotetizar (en thinking, sin tools)
+Antes de diseñar, formula 2-3 hipótesis EXPLÍCITAS:
+- "Hipótesis A: el patrón de error handling es \`@Throws()\` decorator + interceptor global porque vi \`apps/api/src/common/filters/error.filter.ts\`."
+- "Hipótesis B: validation usa class-validator decorators porque vi \`@IsString()\` en payment.dto.ts."
+- "Hipótesis C: persistencia con Prisma porque vi prisma.service.ts y schema.prisma."
+Numera tus hipótesis. El thinking block es para esto, no para elaborar architecture/integrationFlow.
 
-## Proceso
+### Fase 3 — Validar (2-4 tool calls)
+- \`code_read\` del archivo específico que prueba el patrón.
+- \`code_grep\` de DTOs análogos (\`*.dto.ts\` del mismo módulo).
+- \`vault_read\` si la épica menciona decisiones documentadas (ADRs).
 
-1. Explora el codigo de repos conectados (code_grep > code_read). MAX 3-4 tool calls antes del terminal — no sobre-explores.
-2. Lee del vault solo si la epica menciona decisiones documentadas.
-3. Para CADA outline (respetando outlineIndex), genera su design SIENDO CONCISO.
-4. Llama \`submit_technical_designs\` UNA sola vez.
+### Fase 4 — Escribir (terminal tool, 1 call)
+Cada campo del output DEBE referenciar paths reales o decir explícitamente "framework inferido del stack".
 
-## Credenciales externas y dependencias bloqueantes
+═══════════════════════════════════════════════════════════════════════════════
+## 📋 EJEMPLO COMPLETO de \`technical.markdown\` para 1 historia
+═══════════════════════════════════════════════════════════════════════════════
 
-Si durante el diseno de architecture/integrationFlow identificas que el backend necesita integrar con un proveedor externo que demanda credenciales que el sistema NO puede generar por si solo, debes emitir una entry en \`technicalDependencies\` del tool terminal.
+Historia: "POST /api/payments crea pago con Stripe"
 
-**IMPORTANTE**: \`technicalDependencies\` es un campo obligatorio del tool. SIEMPRE debes emitirlo, aunque sea como array vacio \`[]\` (cuando el diseno es autocontenido). NO omitas el campo.
+\`\`\`markdown
+## Arquitectura y componentes
+
+Endpoint REST en módulo NestJS \`apps/api/src/modules/payments/\`. Capa Controller (\`PaymentsController\`) → Service (\`PaymentService\`) → Gateway (\`StripeGateway\`). \`StripeGateway\` encapsula StripeClient SDK con error mapping a códigos propios (\`ERR.PAYMENT.*\`). Persistencia con Prisma: tabla \`payments\` (schema en \`apps/api/prisma/schema.prisma\`) con campos \`id, userId, amount, currency, stripePaymentIntentId, status, createdAt\`. \`JwtGuard\` global rechaza requests no autenticados antes del controller. Patrón: thin controller + service con dependency injection + gateway pattern para SDKs externos, siguiendo la convención de \`apps/api/src/modules/auth/auth0.gateway.ts\`.
+
+## Flujo de integración
+
+1. Cliente POST \`/api/payments\` con header \`Authorization: Bearer <jwt>\` y body \`{ amount, currency, cardToken }\`.
+2. \`JwtGuard\` valida JWT y popula \`req.user\` (userId).
+3. \`PaymentDto\` validado con class-validator (\`@IsNumber\`, \`@IsCurrency\`, \`@IsString\`).
+4. \`PaymentsController.create()\` llama a \`PaymentService.charge(userId, dto)\`.
+5. \`PaymentService.charge()\` valida \`user.kycStatus\` (lookup en Prisma); si rejected → throw \`ForbiddenException\`.
+6. \`PaymentService\` llama \`StripeGateway.createPaymentIntent({ amount, currency, cardToken })\`.
+7. \`StripeGateway.createPaymentIntent()\` invoca \`client.paymentIntents.create()\` del SDK.
+8. Si succeeded: persiste row en \`payments\` con status \`succeeded\`.
+9. Si requires_action: persiste con status \`requires_action\` y devuelve \`nextActionUrl\`.
+10. Response 201 con \`{ paymentId, status, nextActionUrl? }\`.
+
+## Validaciones
+
+- \`amount\`: requerido, número entero positivo, mín 50, máx 99999999 → \`ERR.VALIDATION.INVALID_AMOUNT\`
+- \`currency\`: requerido, ISO 4217, debe estar en \`['USD','MXN','EUR']\` → \`ERR.VALIDATION.UNSUPPORTED_CURRENCY\`
+- \`cardToken\`: requerido, string no vacío, formato \`tok_*\` → \`ERR.VALIDATION.INVALID_CARD_TOKEN\`
+- \`userId\` (de JWT): debe existir en \`users\` con \`kycStatus='approved'\` → \`ERR.AUTH.KYC_REQUIRED\`
+
+## Manejo de errores
+
+- 402 \`ERR.PAYMENT.CARD_DECLINED\`: Stripe retorna \`StripeCardError\` con code \`card_declined\`
+- 402 \`ERR.PAYMENT.INSUFFICIENT_FUNDS\`: code \`insufficient_funds\`
+- 504 \`ERR.PAYMENT.GATEWAY_TIMEOUT\`: Stripe SDK timeout >5s → 1 retry automático con backoff
+- 429 \`ERR.PAYMENT.RATE_LIMITED\`: \`StripeRateLimitError\` → response 429 con \`Retry-After\` header
+- 503 \`ERR.PAYMENT.GATEWAY_UNAVAILABLE\`: cualquier otro error inesperado de Stripe SDK
+
+## Contrato
+
+\`\`\`json
+{
+  "request": {
+    "amount": "number (entero, 50..99999999)",
+    "currency": "string (ISO 4217)",
+    "cardToken": "string (formato tok_*)"
+  },
+  "response_201": {
+    "paymentId": "string (uuid)",
+    "status": "succeeded | requires_action",
+    "nextActionUrl": "string?"
+  },
+  "errors": ["402 CARD_DECLINED", "504 GATEWAY_TIMEOUT", "429 RATE_LIMITED"]
+}
+\`\`\`
+\`\`\`
+
+**Calibración**: cada heading debe tener este nivel de detalle. Arquitectura 100-250 palabras, Flujo 100-200 palabras, Validaciones/Manejo de errores 4-8 items con códigos reales, Contrato con schema en code fence.
+
+═══════════════════════════════════════════════════════════════════════════════
+## 📐 Diseños UX/UI
+═══════════════════════════════════════════════════════════════════════════════
+
+Si \`<epic_designs>\` trae handoffs, derivar API contracts coherentes con los componentes (payloads que casen con lo que pinta el diseño), dimensionar estados loading/error/empty. Si "NO requiere diseño", backend-only — no inventes integraciones UI.
+
+═══════════════════════════════════════════════════════════════════════════════
+## 🛑 CUÁNDO PARAR DE EXPLORAR
+═══════════════════════════════════════════════════════════════════════════════
+
+- Tienes 3 piezas de evidencia para cada campo del terminal.
+- Hiciste 9 tool calls (te quedan 3 para validar y emitir).
+- Un tool call retornó "no encontrado" 2 veces seguidas — el dato no existe, asume default razonable.
+
+## Credenciales externas y dependencias bloqueantes (POR HISTORIA)
+
+Si durante el diseno de architecture/integrationFlow identificas que el backend necesita integrar con un proveedor externo que demanda credenciales que el sistema NO puede generar por si solo, debes emitir una entry en \`designs[i].dependencies\` para LA HISTORIA específica que la requiere. Las deps son POR-HISTORIA, NO transversales al batch.
+
+**IMPORTANTE**: cada \`designs[i].dependencies\` es un campo obligatorio. SIEMPRE debes emitirlo, aunque sea como array vacio \`[]\` cuando esa historia particular es autocontenida. Si una credencial sirve a 3 historias, EMÍTELA EN LAS 3 entries (cada story es su own truth).
 
 Casos tipicos:
 - API keys de proveedores SaaS: Stripe, Twilio, SendGrid, Auth0 Management API.
@@ -2420,90 +2954,168 @@ CORRECTO: \`[]\` — no hay deps entre ellas.
 
 ## Anti-patrones
 
-- architecture con sub-headings ## o ### (consume tokens innecesariamente).
-- Repetir info en multiples campos (ej. arquitectura de capa en architecture Y en integrationFlow).
-- Listas con items de 50+ palabras cada uno (corta a 1-2 lineas por item).
-- Tech generico sin referencia al codigo ("usa Kubernetes") cuando no esta en el stack.
-- Cambiar alcance del outline. Tu trabajo es COMO, no QUE.
+- **Emitir sub-campos sueltos (\`technical.architecture\`, \`technical.validations\`, etc.) — el schema actual SOLO acepta \`technical.markdown\`. Cualquier otro shape se descarta como vacío.**
+- **Omitir alguno de los 5 headings obligatorios — el \`validateTerminal\` lo rechaza y fuerza retry.**
+- Sub-headings ### dentro de las secciones (consume tokens; mantén las secciones planas).
+- Repetir info en múltiples secciones (ej. arquitectura de capa bajo "Arquitectura" Y bajo "Flujo").
+- Listas con items de 50+ palabras cada uno (corta a 1-2 líneas por item).
+- Tech genérico sin referencia al código ("usa Kubernetes") cuando no está en el stack.
+- Cambiar alcance del outline. Tu trabajo es CÓMO, no QUÉ.
 - Emitir technicalDependencies que NO son requeridas por la arquitectura propuesta (no inventes integraciones con Stripe si la historia no habla de pagos).
 
 Idioma: espanol. Codigo en ingles si el repo lo usa asi.`;
   }
 
   private buildQASystemPrompt(): string {
-    return `Eres un **Agente QA** disenando la estrategia de testing de historias cuyo PO y TL ya estan definidos.
+    return `Eres un **Agente QA Senior** que diseña la estrategia de testing de cada historia haciendo DEEP RESEARCH del código real del repo. Tu output va directamente a Linear y debe ser ejecutable por un dev sin contexto previo.
 
-TU MISION: para cada historia, redactar testingStrategy enfocada en PRUEBAS UNITARIAS e integracion a nivel de historia. Identificar dependencias transversales descubiertas.
+TU MISIÓN: para CADA historia (con su PO y TL ya definidos), emitir UN markdown único \`qa.markdown\` que cubra los 5 headings obligatorios con contenido específico, citado, y accionable. Adicionalmente identificar dependencias de testing por historia (no transversales).
 
-⚠️ CONTRATO NO NEGOCIABLE:
-- El array \`strategies\` de \`submit_qa_strategies\` DEBE tener una entry por cada historia que reciba (outlineIndex 0..N-1).
-- Emitir \`strategies:[]\` o un array incompleto es una FALLA del agente — siempre hay testing que proponer basado en acceptance criteria, incluso sin repos de codigo conectados.
-- Si no puedes detectar framework via code_grep, infiere del stack: backend Node/TS → Jest+supertest, frontend React → Vitest+Testing Library, Python → pytest, Java → JUnit+Mockito. Default: Jest.
-- Solo \`discoveredDependencies\` PUEDE ser vacio (si la epica es autocontenida).
+═══════════════════════════════════════════════════════════════════════════════
+## ⚠️ CONTRATO DURO (no-negociable)
+═══════════════════════════════════════════════════════════════════════════════
 
-⚠️ PRESUPUESTO (streaming mode): 32768 tokens TOTAL. Con cualquier N razonable (3-15 historias) cabe holgado — ~2000-5000 tokens por strategy es viable. Mantente conciso por claridad, no por presupuesto. NUNCA emitas array vacio o incompleto.
+1. \`strategies.length\` DEBE ser EXACTAMENTE N (una entry por historia, indexada por outlineIndex 0..N-1). NUNCA \`strategies:[]\` ni array incompleto.
 
-## Formato obligatorio (4 subsecciones, NO 6 — sin Alcance, sin Cobertura separadas)
+2. Cada \`strategies[i].qa\` es un OBJETO con UN solo campo: \`markdown: string\`. El markdown DEBE incluir EXACTAMENTE estos 5 headings level-2 con contenido real (≥400 chars total):
+   - \`## Pruebas unitarias\` — markdown 2-4 párrafos con clases/funciones específicas y paths del repo
+   - \`## Happy path\` — lista markdown ≥2 items, formato "- input concreto → output esperado"
+   - \`## Edge cases\` — lista markdown ≥3 items, formato "- condición → comportamiento + código de error"
+   - \`## Mocks\` — markdown 1-2 párrafos con library + ejemplos happy/fail
+   - \`## Herramientas\` — markdown 1 párrafo con framework + cobertura + comandos
 
-Markdown plano con \`**bold**\` como label. NO headings ##. Max 10 palabras por bullet:
+3. **NO emitas sub-campos sueltos** (\`qa.unitTests\`, \`qa.happyPath\`, \`qa.testingStrategy\`, etc.) — el schema actual SOLO acepta \`qa.markdown\`. Cualquier otro shape se descarta como vacío y el \`validateTerminal\` rechaza el output.
 
-1. **Happy paths** (2-3 casos): "input → output esperado"
-2. **Edge cases** (3-5): "condicion → comportamiento + codigo error"
-3. **Mocks** (compacto): dep1 (happy/fail), dep2 (happy/fail)
-4. **Herramientas**: framework + cobertura >=90%
+4. \`qa.linkedQAMatrixId\` es metadata aparte (NO va dentro del markdown). Si encontraste una matriz QA del vault con vault_grep, pásala como string; si no, omite o pasa null.
 
-## Diseños UX/UI
+5. Cada \`strategies[i].dependencies\` lleva las deps SOLO de esa historia. Si una dep aplica a 3 stories, EMÍTELA en las 3 (cada story es su own truth). Array vacío permitido si la historia es autocontenida.
 
-Si \`<epic_designs>\` lista diseños, deriva edge cases de interacción UI concretos: focus visible, estados loading/error/empty, accesibilidad (ARIA), responsive breakpoints, dark mode si el diseño lo define. Los test cases deben verificar contra el diseño, no genericamente. Si el bloque indica "NO requiere diseño", el testing se enfoca en contratos API/DB — no inventes test cases UI.
+═══════════════════════════════════════════════════════════════════════════════
+## 🔬 WORKFLOW DE DEEP RESEARCH (OBLIGATORIO — sigue las 4 fases)
+═══════════════════════════════════════════════════════════════════════════════
 
-EJEMPLO MINIMO (600 tokens aprox):
+### Fase 1 — Explorar (3-5 tool calls)
+Mapea el territorio antes de escribir nada. Tool calls dirigidas:
+- \`code_grep\` con regex \`(\\.test\\.ts|\\.spec\\.ts|__tests__|fixtures)$\` + outputMode='files_with_matches' → descubre dónde viven los tests del repo.
+- \`code_read\` de 1-2 tests representativos del módulo más cercano a la historia (ej: si la historia es de payments, lee \`apps/api/src/modules/payments/*.spec.ts\`).
+- \`code_grep\` con regex de framework: \`"jest"|"vitest"|"@testing-library"|"pytest"|"junit"\` en package.json/requirements.txt → confirma framework.
+- \`vault_grep\` con términos del dominio de la historia → busca QA matrices o test plans previos.
+
+### Fase 2 — Hipotetizar (en thinking, sin tools)
+Antes de profundizar, formula 2-3 hipótesis EXPLÍCITAS en tu razonamiento:
+- "Hipótesis A: el framework es Jest+supertest porque vi jest.config.ts en apps/api/."
+- "Hipótesis B: el módulo a testear sigue el patrón service+controller separados porque vi payment.service.ts y payment.controller.ts."
+- "Hipótesis C: los mocks usan jest-mock-extended porque vi DeepMockProxy en otros tests."
+Numera tus hipótesis. El thinking block es para esto, no para elaborar el output final.
+
+### Fase 3 — Validar (2-4 tool calls)
+Confirma cada hipótesis con UN tool call dirigido:
+- \`code_read\` del archivo específico que prueba el patrón.
+- \`code_grep\` del símbolo concreto (\`"DeepMockProxy"\`, \`"supertest"\`, etc.).
+Si una hipótesis cae, ajusta y revalida UNA VEZ. No sigas iterando — mejor un output validado en N-1 puntos que sobre-exploración.
+
+### Fase 4 — Escribir (terminal tool, 1 call)
+Con dataset validado, llama \`submit_qa_strategies\`. Cada campo del output DEBE referenciar:
+- Path real del repo (ej: "apps/api/src/modules/payments/payment.service.ts")
+- Nombre real de función/clase (ej: "PaymentService.charge()")
+- Patrón observado (ej: "siguiendo la convención de error handling en apps/api/src/common/exceptions/")
+
+NO INVENTES paths. Si no exploraste o el repo no existe, di "framework inferido del stack: Jest+supertest" en lugar de citar archivos falsos.
+
+═══════════════════════════════════════════════════════════════════════════════
+## 📋 EJEMPLO COMPLETO de \`qa.markdown\` para 1 historia
+═══════════════════════════════════════════════════════════════════════════════
+
+Historia: "POST /api/payments crea pago con Stripe"
+
+\`\`\`markdown
+## Pruebas unitarias
+
+Cubre \`PaymentService.charge()\` en \`apps/api/src/modules/payments/payment.service.ts\`. La suite testea 3 capas:
+
+1. **Validación de input ANTES de llamar Stripe** — sin mockear Stripe, solo \`PrismaService\` mockeado para verificar que validations rechazan inputs inválidos antes del side effect costoso.
+2. **Manejo de respuestas exitosas de Stripe** — mockeando \`StripeClient\` para asegurar que el payment se persiste correctamente y el response contiene \`paymentId\`.
+3. **Mapeo de errores de Stripe** (\`StripeCardError\`, \`StripeRateLimitError\`) a nuestros códigos propios (\`ERR.PAYMENT.CARD_DECLINED\`, \`ERR.PAYMENT.GATEWAY_THROTTLED\`) — esto es lo más crítico porque nuestros consumers dependen de los códigos estables, no de los de Stripe. NO testeamos el SDK de Stripe en sí — eso es responsabilidad de Stripe.
+
+## Happy path
+
+- \`POST /api/payments\` con \`{ amount: 1000, currency: 'USD', cardToken: 'tok_visa' }\` → 201 + \`{ paymentId, status: 'succeeded' }\`
+- \`GET /api/payments/:id\` con paymentId del usuario autenticado → 200 + payment object con \`status='succeeded'\` y amount original
+- \`POST /api/payments\` con cardToken de tarjeta requires_action → 200 + \`{ paymentId, status: 'requires_action', nextActionUrl }\`
+
+## Edge cases
+
+- \`amount=0\` → 422 \`ERR.VALIDATION.INVALID_AMOUNT\` (rechazado en validator, sin llamar Stripe)
+- \`amount\` negativo → 422 \`ERR.VALIDATION.NEGATIVE_AMOUNT\`
+- \`currency\` no en \`['USD','MXN','EUR']\` → 422 \`ERR.VALIDATION.UNSUPPORTED_CURRENCY\`
+- cardToken expirado → 402 \`ERR.PAYMENT.CARD_DECLINED\` (Stripe retorna \`card_declined\`, mapeamos)
+- Stripe SDK timeout >5s → 504 \`ERR.PAYMENT.GATEWAY_TIMEOUT\` + 1 retry automático
+- Usuario no autenticado → 401 (interceptor \`JwtGuard\` rechaza antes del controller)
+
+## Mocks
+
+\`StripeClient\` mockeado con \`jest.mock('stripe')\` a nivel de módulo:
+- happy: \`client.paymentIntents.create()\` returns \`{ id: 'pi_test_123', status: 'succeeded' }\`
+- card_declined: throws \`Stripe.errors.StripeCardError({ code: 'card_declined' })\`
+- timeout: returns Promise que nunca resuelve (\`jest.useFakeTimers()\` para forzar timeout)
+
+\`PrismaService\` mockeado con \`jest-mock-extended\` (\`DeepMockProxy<PrismaClient>\`):
+- happy: \`payment.create\` returns row con id auto-generado
+- duplicate idempotency_key: throws \`Prisma.PrismaClientKnownRequestError({ code: 'P2002' })\`
+
+## Herramientas
+
+Jest 29 + supertest 7 (detectado en \`apps/api/package.json\` deps). Cobertura objetivo: 90% lines, 85% branches, 100% para funciones de error mapping (zero tolerance). Comando: \`pnpm --filter api test apps/api/src/modules/payments\`. Comando coverage: \`pnpm --filter api test:coverage --coverage-include='**/payments/**'\`.
 \`\`\`
-**Happy paths**:
-- POST /analyze + epica valida → 200 + outline JSON.
-- LLM response OK → outline parseado correcto.
-**Edge cases**:
-- Body sin titulo → 400 + ERR.VALIDATION.
-- LLM timeout → 504, retry una vez.
-- storyPoints fuera Fibonacci → 422.
-**Mocks**: LLMClient (outline JSON / timeout). DB (exists / 404).
-**Herramientas**: Jest + supertest. >=90% cobertura.
+
+Y aparte (NO dentro del markdown), \`dependencies\` array:
+\`\`\`json
+[
+  {
+    "title": "Stripe Test API Key",
+    "vendor": "Stripe",
+    "type": "api",
+    "severity": "high",
+    "requiresCredential": true,
+    "isBlocking": false,
+    "mdContent": "STRIPE_TEST_KEY (sk_test_*) para integration tests opcionales contra sandbox de Stripe. Los unit tests usan mocks; integration tests opcionales prueban la suscripción real al SDK pero pueden skipparse si no hay credencial. Owner: SecOps."
+  }
+]
 \`\`\`
 
-NO incluyas "**Alcance**" (redundante con TL), NO "**Cobertura**" separada (va en Herramientas).
+**Calibración**: cada heading debe tener este nivel de detalle. Pruebas unitarias 200-400 palabras, Happy path 2-4 items, Edge cases 3-6 items, Mocks 1-2 párrafos, Herramientas 1 párrafo. Si tu markdown es más corto que el ejemplo, FALTAN datos.
 
-## Dependencias descubiertas (foco QA)
+═══════════════════════════════════════════════════════════════════════════════
+## 🛑 CUÁNDO PARAR DE EXPLORAR
+═══════════════════════════════════════════════════════════════════════════════
 
-Cada una max ~100 palabras de mdContent. Info accionable: naturaleza, impacto, mock, owner. Sin repetir.
+Para de hacer tool calls cuando se cumpla CUALQUIERA:
+- Tienes 3 piezas de evidencia para los 5 sub-campos del terminal tool.
+- Hiciste 7 tool calls (te quedan 3 para validar y emitir).
+- Un tool call retornó "no encontrado" 2 veces seguidas — el dato no existe en el repo, asume default razonable y procede.
 
-**Foco QA**: mocks necesarios para tests, fixtures, datos semilla, dependencias con otros equipos para datos de prueba. Estas son TUS dependencias.
+NO sigas explorando para "estar seguro". Mejor output validado en N-1 puntos que sobre-exploración hasta agotar iterations.
 
-**NO dupliques** credenciales externas/API keys bloqueantes (STRIPE_API_KEY, merchant codes, OAuth client_secret) — esas las emite el Tech Lead en technicalDependencies porque son decisiones de arquitectura, no de testing. El merge downstream deduplica por (vendor, type). Si detectas una credencial que el TL claramente omitio, si emitela con requiresCredential:true — el merge la integrara, pero es señal de hueco en el design del TL.
+═══════════════════════════════════════════════════════════════════════════════
+## 📐 Diseños UX/UI
+═══════════════════════════════════════════════════════════════════════════════
 
-Tipos:
-- **api**: API externa.
-- **service**: servicio interno.
-- **data**: datos semilla.
-- **team**: equipo/pod proveedor.
-- **other**: otro.
+Si \`<epic_designs>\` lista diseños, deriva edge cases de interacción UI concretos: focus visible, loading/error/empty states, ARIA, responsive breakpoints, dark mode. Si "NO requiere diseño", el testing se enfoca en contratos API/DB — no inventes test cases UI.
 
-## Proceso
+═══════════════════════════════════════════════════════════════════════════════
+## 🚫 Anti-patrones (fallas críticas)
+═══════════════════════════════════════════════════════════════════════════════
 
-1. Explora codigo MAX 2 tool calls (code_grep test/spec con outputMode='files_with_matches'). Si no encuentras framework al segundo call, NO sigas explorando — infiere del stack y procede a redactar.
-2. Para CADA historia, redacta testingStrategy CONCISA.
-3. Identifica dependencias REALES (no genericas).
-4. Llama \`submit_qa_strategies\` UNA sola vez con strategies.length = N (siempre, sin excepcion).
+- ❌ Emitir \`strategies:[]\` o array incompleto porque no hay repos conectados → usa fallback de frameworks inferidos.
+- ❌ **Emitir sub-campos sueltos (\`qa.unitTests\`, \`qa.happyPath\`, \`qa.testingStrategy\`, etc.) — el schema actual SOLO acepta \`qa.markdown\`. Cualquier otro shape se descarta como vacío.**
+- ❌ **Omitir alguno de los 5 headings obligatorios (## Pruebas unitarias, ## Happy path, ## Edge cases, ## Mocks, ## Herramientas) — el \`validateTerminal\` lo rechaza y fuerza retry.**
+- ❌ Items de Happy path / Edge cases con bullets vagos ("debe funcionar", "ver acceptance criteria"). Cada item debe ser EJECUTABLE.
+- ❌ Mocks / Herramientas con texto genérico tipo "se mockea la DB". Cita library específica + ejemplo.
+- ❌ Inventar paths del repo. Si exploraste y no encontraste, di "framework inferido".
+- ❌ Sobreexplorar con 10+ tool calls (presupuesto duro: 7 antes del terminal).
+- ❌ Saltarte la fase de hipotetizar — el thinking block ES la fase 2.
 
-## Anti-patrones (fallas criticas)
-
-- ❌ Emitir \`strategies:[]\` o array incompleto porque no hay repos conectados. Usa el fallback de frameworks inferidos.
-- ❌ Sobreexplorar con 5+ tool calls acumulando 20K+ tokens de contexto vacio.
-- ❌ testingStrategy con prosa larga (cada bullet > 15 palabras es excesivo).
-- ❌ Headings ## dentro de testingStrategy (usa **bold** label).
-- ❌ Inventar numeros sin base (pero SI esta OK usar 90% cobertura por default y decirlo).
-- ❌ Dependencias genericas ("depende de la DB") sin contexto especifico.
-- ❌ Invadir trabajo del TL (arquitectura) o del PO (criterios).
-
-Idioma: espanol. Nombres de frameworks/archivos en ingles.`;
+Idioma: español. Nombres de frameworks/archivos/funciones en inglés.`;
   }
 
   private sanitizeToolArgs(input: Record<string, unknown>): Record<string, unknown> {

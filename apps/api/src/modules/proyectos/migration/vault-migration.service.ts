@@ -315,7 +315,7 @@ export class VaultMigrationService {
     epic: {
       id: string;
       title: string;
-      description: string;
+      markdown: string;
       vaultPath: string | null;
       diagrams: any;
       dependencies: any;
@@ -642,25 +642,14 @@ export class VaultMigrationService {
     epic: {
       id: string;
       title: string;
-      description: string;
-      qualitativeBenefits?: string;
-      quantitativeBenefits?: string;
-      benefitsMeasurement?: string;
-      scopeDescription?: string;
-      acceptanceCriteria?: string;
-      technologicalImprovements?: string;
-      businessPriority?: string;
-      teamsInvolved?: string;
-      impactedChannels?: string;
-      impactedFlows?: string;
-      impactSabreLevel?: string;
-      thirdPartyDependencies?: string;
+      markdown?: string;
     },
     legacyContent: string | null,
   ): { indexMd: string; definicionMd: string } {
     const now = new Date().toISOString();
 
-    // index.md — siempre construido desde PG (no depende del legacy)
+    // index.md — solo metadata + referencia al folder (post-refactor v2 los
+    // campos narrativos no viven aquí, viven en definicion.md como markdown único).
     const indexFm = buildFrontmatter({
       id: epic.id,
       type: 'epic',
@@ -672,11 +661,11 @@ export class VaultMigrationService {
       ``,
       `# ${epic.title}`,
       ``,
-      epic.description || '_Sin descripción._',
+      `Contenido completo en \`definicion.md\`.`,
     ].join('\n');
 
-    // definicion.md — preferir contenido del legacy si existe;
-    // si no, construir desde los 12 campos narrativos de PG
+    // definicion.md — preferir el legacy si existe (preserva contenido escrito
+    // por el user antes del refactor); si no, usar el markdown de PG.
     let definicionMd: string;
 
     if (legacyContent) {
@@ -686,38 +675,19 @@ export class VaultMigrationService {
         ? legacyContent
         : `# Definición de épica: ${epic.title}\n\n${legacyContent}`;
     } else {
-      // Construir desde campos de PG
-      const campos: Array<[string, string]> = [
-        ['Beneficios cualitativos', epic.qualitativeBenefits ?? ''],
-        ['Beneficios cuantitativos', epic.quantitativeBenefits ?? ''],
-        ['Medición de beneficios', epic.benefitsMeasurement ?? ''],
-        ['Descripción del alcance', epic.scopeDescription ?? ''],
-        ['Criterios de aceptación', epic.acceptanceCriteria ?? ''],
-        ['Mejoras tecnológicas', epic.technologicalImprovements ?? ''],
-        ['Prioridad de negocio', epic.businessPriority ?? ''],
-        ['Equipos involucrados', epic.teamsInvolved ?? ''],
-        ['Canales impactados', epic.impactedChannels ?? ''],
-        ['Flujos impactados', epic.impactedFlows ?? ''],
-        ['Nivel de impacto Sabre', epic.impactSabreLevel ?? ''],
-        ['Dependencias de terceros', epic.thirdPartyDependencies ?? ''],
-      ];
-
-      const sections = campos
-        .map(([label, value]) => `## ${label}\n\n${value || '_Sin definir._'}`)
-        .join('\n\n');
-
       const defFm = buildFrontmatter({
         id: epic.id,
         type: 'epic-definition',
         title: epic.title,
         migratedAt: now,
+        format: 'v2',
       });
       definicionMd = [
         defFm,
         ``,
         `# Definición de épica: ${epic.title}`,
         ``,
-        sections,
+        epic.markdown || '_Sin contenido — el agente IA o el editor humano lo poblará._',
       ].join('\n');
     }
 

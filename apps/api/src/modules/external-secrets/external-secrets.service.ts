@@ -90,6 +90,23 @@ export class ExternalSecretsService {
       );
     }
 
+    // BULK PROPAGATION: el modelo per-story permite que la misma credencial
+    // viva en N rows distintas (una por historia que la requiere). Cuando el
+    // user provee el secret una vez, propagamos el linkedSecretId a TODAS las
+    // `StoryTechnicalDependency` que matcheen por vendor (case-insensitive)
+    // + `requiresCredential=true` + sin link previo. Sin esto, el user vería
+    // 1 historia con badge "Secret provisto" y 2 sin él aunque sean la misma.
+    // Best-effort: un fallo aquí NO invalida el secret recién creado.
+    if (dto.vendor) {
+      await this.resolveAllStoryDependenciesByVendor(dto.vendor, created.id, dto.name).catch(
+        (err) => {
+          this.logger.warn(
+            `[create] bulk-resolve story deps for vendor=${dto.vendor} failed: ${(err as Error)?.message ?? err}`,
+          );
+        },
+      );
+    }
+
     return this.toResponse(created, dto.value);
   }
 
@@ -104,8 +121,24 @@ export class ExternalSecretsService {
   async delete(id: string): Promise<void> {
     const found = await this.prisma.externalSecret.findUnique({ where: { id } });
     if (!found) throw new NotFoundException(`Secret ${id} no encontrado`);
-    await this.prisma.externalSecret.delete({ where: { id } });
-    this.logger.log(`[delete] external secret name=${found.name} id=${id}`);
+
+    // Desvincular las StoryTechnicalDependency que apuntaban a este secret
+    // ANTES de borrarlo. `linkedSecretId` no es FK real (Prisma String, no
+    // relación) — sin esto las deps quedarían con un linkedSecretId huérfano
+    // y la UI mostraría "Secret provisto" para algo que ya no existe.
+    // Tx para que la desvinculación + delete sean atómicos.
+    const unlinkedCount = await this.prisma.$transaction(async (tx) => {
+      const result = await tx.storyTechnicalDependency.updateMany({
+        where: { linkedSecretId: id },
+        data: { linkedSecretId: null, status: 'identified' },
+      });
+      await tx.externalSecret.delete({ where: { id } });
+      return result.count;
+    });
+
+    this.logger.log(
+      `[delete] external secret name=${found.name} id=${id} unlinkedStories=${unlinkedCount}`,
+    );
   }
 
   /**
@@ -207,6 +240,46 @@ export class ExternalSecretsService {
     this.logger.log(
       `[resolveSourceDependency] epic=${epicId} dep=${sourceDependencyId} linkedSecret=${secretId} rowsAffected=${affected}`,
     );
+  }
+
+  /**
+   * Bulk-resolve: vincula el secret recién creado a TODAS las
+   * `StoryTechnicalDependency` que matcheen por vendor (case-insensitive)
+   * + `requiresCredential=true` + sin link previo. Esto refleja el modelo
+   * per-story: la misma credencial puede vivir en N rows distintas (una por
+   * historia que la requiere) y el user solo provee el secret UNA vez.
+   *
+   * Invariante: NO sobreescribe un `linkedSecretId` previo (la guarda
+   * `linkedSecretId: null` en el WHERE). Si una dep ya estaba vinculada a
+   * otro secret, queda intacta — el user debe desvincular manualmente
+   * primero para evitar perder referencias silenciosamente.
+   */
+  private async resolveAllStoryDependenciesByVendor(
+    vendor: string,
+    secretId: string,
+    secretName: string,
+  ): Promise<number> {
+    const today = new Date().toISOString().slice(0, 10);
+    const note = `Secret \`${secretName}\` registrado el ${today}`;
+    // `mode: 'insensitive'` requiere PostgreSQL — el repo usa pg, OK.
+    // No incluimos `requiresCredential: true` en el filtro porque algunas
+    // deps pueden tener vendor pero no requerir credencial (ej: APIs públicas).
+    // El match por vendor + sin link previo cubre ambos casos sin falsos negativos.
+    const result = await this.prisma.storyTechnicalDependency.updateMany({
+      where: {
+        vendor: { equals: vendor, mode: 'insensitive' },
+        linkedSecretId: null,
+      },
+      data: {
+        linkedSecretId: secretId,
+        status: 'resolved',
+        resolutionNotes: note,
+      },
+    });
+    this.logger.log(
+      `[resolveAllStoryDependenciesByVendor] vendor="${vendor}" secret=${secretId} updated=${result.count} stories`,
+    );
+    return result.count;
   }
 
   private toResponse(

@@ -58,34 +58,34 @@ export class VaultController {
   @Get('changelog')
   @UseGuards(VaultAccessGuard)
   @ApiOperation({ summary: 'Historial de commits del vault (changelog natural vía git history)' })
-  async getChangelog(@Query('limit') limit?: string) {
-    return this.vault.listCommits(Math.min(Number(limit) || 30, 100));
+  async getChangelog(@Query('limit') limit?: string, @Query('vaultId') vaultId?: string) {
+    return this.vault.listCommits(Math.min(Number(limit) || 30, 100), undefined, vaultId);
   }
 
   @Get('changelog/:sha')
   @UseGuards(VaultAccessGuard)
   @ApiOperation({ summary: 'Detalle de un commit incluyendo el diff/patch de archivos' })
-  async getCommitDetail(@Param('sha') sha: string) {
-    const detail = await this.vault.getCommitDetail(sha);
+  async getCommitDetail(@Param('sha') sha: string, @Query('vaultId') vaultId?: string) {
+    const detail = await this.vault.getCommitDetail(sha, vaultId);
     if (!detail) throw new NotFoundException('Commit no encontrado');
     return detail;
   }
 
   @Get('tree')
   @UseGuards(VaultAccessGuard)
-  @ApiOperation({ summary: 'Listar el árbol (recursivo) de un folder del vault' })
-  async getTree(@Query('folder') folder = '') {
+  @ApiOperation({ summary: 'Listar el árbol (recursivo) de un folder del vault. Acepta `?vaultId=X` para browse-mode (lee de un vault distinto al activo).' })
+  async getTree(@Query('folder') folder = '', @Query('vaultId') vaultId?: string) {
     assertSafePath(folder || 'root');
-    return this.vault.listTree(folder);
+    return this.vault.listTree(folder, vaultId);
   }
 
   @Get('file')
   @UseGuards(VaultAccessGuard)
-  @ApiOperation({ summary: 'Leer el contenido de un archivo del vault' })
-  async getFile(@Query('path') path: string) {
+  @ApiOperation({ summary: 'Leer el contenido de un archivo del vault. Acepta `?vaultId=X` para browse-mode.' })
+  async getFile(@Query('path') path: string, @Query('vaultId') vaultId?: string) {
     if (!path) throw new NotFoundException('Parámetro path requerido');
     assertSafePath(path);
-    const note = await this.vault.readNote(path);
+    const note = await this.vault.readNote(path, vaultId);
     if (!note) throw new NotFoundException(`Archivo no encontrado: ${path}`);
     return note;
   }
@@ -93,22 +93,31 @@ export class VaultController {
   @Put('file')
   @UseGuards(VaultAccessGuard)
   @Permissions(Permission.MANAGE_DOCUMENTS)
-  @ApiOperation({ summary: 'Crear o actualizar un archivo en el vault' })
-  async writeFile(@Body() dto: WriteFileDto) {
+  @ApiOperation({ summary: 'Crear o actualizar un archivo en el vault. Acepta `?vaultId=X` para escribir a un vault distinto del activo (manual CRUD desde browse-mode).' })
+  async writeFile(@Body() dto: WriteFileDto, @Query('vaultId') vaultId?: string) {
     assertSafePath(dto.path);
-    // Invalidar cache para evitar SHA stale en writes concurrentes
-    this.vault.invalidateCache(dto.path);
-    return this.vault.writeNote(dto.path, dto.content, dto.message ?? `docs(vault): update ${dto.path}`);
+    // Invalidar cache solo cuando se escribe al activo (cache es solo del activo).
+    if (!vaultId) this.vault.invalidateCache(dto.path);
+    return this.vault.writeNote(
+      dto.path,
+      dto.content,
+      dto.message ?? `docs(vault): update ${dto.path}`,
+      vaultId,
+    );
   }
 
   @Delete('file')
   @UseGuards(VaultAccessGuard)
   @Permissions(Permission.MANAGE_DOCUMENTS)
   @HttpCode(HttpStatus.NO_CONTENT)
-  @ApiOperation({ summary: 'Eliminar un archivo del vault' })
-  async deleteFile(@Body() dto: DeleteFileDto) {
+  @ApiOperation({ summary: 'Eliminar un archivo del vault. Acepta `?vaultId=X` para borrar de un vault distinto del activo.' })
+  async deleteFile(@Body() dto: DeleteFileDto, @Query('vaultId') vaultId?: string) {
     assertSafePath(dto.path);
-    this.vault.invalidateCache(dto.path);
-    await this.vault.deleteNote(dto.path, dto.message ?? `chore(vault): delete ${dto.path}`);
+    if (!vaultId) this.vault.invalidateCache(dto.path);
+    await this.vault.deleteNote(
+      dto.path,
+      dto.message ?? `chore(vault): delete ${dto.path}`,
+      vaultId,
+    );
   }
 }

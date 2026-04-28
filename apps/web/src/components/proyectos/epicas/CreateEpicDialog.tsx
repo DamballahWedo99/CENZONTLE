@@ -22,6 +22,48 @@ import { Checkbox } from '@/components/ui/checkbox';
 import { useProyectos, mapEpic } from '@/context/ProyectosContext';
 import { EpicStatus, Priority } from '@cenzontle/shared';
 import { createEpic as apiCreateEpic } from '@/lib/api/epics';
+import { SectionTiptapEditor } from '../historias/editor/SectionTiptapEditor';
+
+// Estructura mínima sugerida — coincide con EpicFullPage y InlineEpicCreator.
+const EPIC_MARKDOWN_PLACEHOLDER = `## Descripción
+
+(Qué se construye y por qué surge.)
+
+## Beneficios cualitativos
+
+-
+
+## Beneficios cuantitativos
+
+-
+
+## Medición de beneficios
+
+(Cómo se mide cada beneficio: dashboard, métrica, KPI.)
+
+## Alcance
+
+EN alcance:
+-
+
+NO en alcance:
+-
+
+## Criterios de aceptación
+
+1.
+
+## Mejoras tecnológicas
+
+(Refactor, deuda técnica, capacidades de plataforma.)
+
+## Canales y flujos impactados
+
+-
+
+## Dependencias de terceros
+
+-`;
 
 interface CreateEpicDialogProps {
   open: boolean;
@@ -32,26 +74,13 @@ export function CreateEpicDialog({ open, onOpenChange }: CreateEpicDialogProps) 
   const { state, dispatch } = useProyectos();
 
   const [title, setTitle] = useState('');
-  const [description, setDescription] = useState('');
+  const [markdown, setMarkdown] = useState('');
   const [initiativeId, setInitiativeId] = useState('');
   const [priority, setPriority] = useState<Priority>(Priority.Medium);
   const [selectedPodIds, setSelectedPodIds] = useState<string[]>([]);
   const [startDate, setStartDate] = useState('');
   const [targetDate, setTargetDate] = useState('');
-
-  // Business fields
-  const [qualitativeBenefits, setQualitativeBenefits] = useState('');
-  const [quantitativeBenefits, setQuantitativeBenefits] = useState('');
-  const [benefitsMeasurement, setBenefitsMeasurement] = useState('');
-  const [scopeDescription, setScopeDescription] = useState('');
-  const [acceptanceCriteria, setAcceptanceCriteria] = useState('');
-  const [technologicalImprovements, setTechnologicalImprovements] = useState('');
-  const [businessPriority, setBusinessPriority] = useState('');
-  const [teamsInvolved, setTeamsInvolved] = useState('');
-  const [impactedChannels, setImpactedChannels] = useState('');
-  const [impactedFlows, setImpactedFlows] = useState('');
-  const [impactSabreLevel, setImpactSabreLevel] = useState('');
-  const [thirdPartyDependencies, setThirdPartyDependencies] = useState('');
+  const [showDefinition, setShowDefinition] = useState(false);
 
   const [isSubmitting, setIsSubmitting] = useState(false);
 
@@ -78,26 +107,13 @@ export function CreateEpicDialog({ open, onOpenChange }: CreateEpicDialogProps) 
       // El backend genera el UUID y el vaultPath — no los mandamos.
       const created = await apiCreateEpic({
         title: title.trim(),
-        description: description.trim(),
+        markdown: markdown.trim(),
         status: EpicStatus.Draft,
         priority,
         startDate,
         targetDate,
         initiativeId,
         podIds: selectedPodIds,
-        // Campos narrativos (van a PG + vault markdown)
-        qualitativeBenefits: qualitativeBenefits.trim(),
-        quantitativeBenefits: quantitativeBenefits.trim(),
-        benefitsMeasurement: benefitsMeasurement.trim(),
-        scopeDescription: scopeDescription.trim(),
-        acceptanceCriteria: acceptanceCriteria.trim(),
-        technologicalImprovements: technologicalImprovements.trim(),
-        businessPriority: businessPriority.trim(),
-        teamsInvolved: teamsInvolved.trim(),
-        impactedChannels: impactedChannels.trim(),
-        impactedFlows: impactedFlows.trim(),
-        impactSabreLevel: impactSabreLevel.trim(),
-        thirdPartyDependencies: thirdPartyDependencies.trim(),
       });
 
       // Sincronizar el state local con el objeto real que devolvió el backend
@@ -115,33 +131,19 @@ export function CreateEpicDialog({ open, onOpenChange }: CreateEpicDialogProps) 
 
   const resetForm = () => {
     setTitle('');
-    setDescription('');
+    setMarkdown('');
     setInitiativeId('');
     setPriority(Priority.Medium);
     setSelectedPodIds([]);
     setStartDate('');
     setTargetDate('');
-    setQualitativeBenefits('');
-    setQuantitativeBenefits('');
-    setBenefitsMeasurement('');
-    setScopeDescription('');
-    setAcceptanceCriteria('');
-    setTechnologicalImprovements('');
-    setBusinessPriority('');
-    setTeamsInvolved('');
-    setImpactedChannels('');
-    setImpactedFlows('');
-    setImpactSabreLevel('');
-    setThirdPartyDependencies('');
+    setShowDefinition(false);
   };
 
   const handleCancel = () => {
     resetForm();
     onOpenChange(false);
   };
-
-  const textareaClass =
-    'w-full rounded-lg border border-input bg-transparent px-3 py-2 text-sm shadow-xs focus-visible:border-ring focus-visible:ring-ring/50 focus-visible:ring-[3px] outline-none resize-none dark:bg-input/30 placeholder:text-muted-foreground';
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
@@ -159,18 +161,6 @@ export function CreateEpicDialog({ open, onOpenChange }: CreateEpicDialogProps) 
               onChange={(e) => setTitle(e.target.value)}
               placeholder="Nombre de la épica"
               autoFocus
-            />
-          </div>
-
-          {/* Description */}
-          <div>
-            <label className="text-sm font-medium mb-1.5 block">Descripción</label>
-            <textarea
-              value={description}
-              onChange={(e) => setDescription(e.target.value)}
-              rows={3}
-              placeholder="Describe el alcance de esta épica..."
-              className={textareaClass}
             />
           </div>
 
@@ -243,148 +233,28 @@ export function CreateEpicDialog({ open, onOpenChange }: CreateEpicDialogProps) 
             </div>
           </div>
 
+          {/* Markdown definition (collapsible, optional) */}
           <div className="border-t pt-4">
-            <h3 className="text-sm font-semibold mb-4">Definición de la Épica</h3>
+            <button
+              type="button"
+              onClick={() => setShowDefinition(!showDefinition)}
+              className="flex items-center gap-2 text-sm font-semibold text-muted-foreground hover:text-foreground transition-colors w-full"
+            >
+              <span>{showDefinition ? '▾' : '▸'}</span>
+              Definición de la Épica
+              <span className="text-xs font-normal">(opcional · markdown)</span>
+            </button>
 
-            {/* Benefits */}
-            <div className="space-y-4 mb-5">
-              <p className="text-xs font-medium uppercase tracking-wider text-muted-foreground">Beneficios</p>
-              <div>
-                <label className="text-sm font-medium mb-1.5 block">Beneficios Cualitativos</label>
-                <textarea
-                  value={qualitativeBenefits}
-                  onChange={(e) => setQualitativeBenefits(e.target.value)}
-                  rows={2}
-                  placeholder="Beneficios cualitativos esperados..."
-                  className={textareaClass}
+            {showDefinition && (
+              <div className="mt-3 animate-in fade-in slide-in-from-top-1 duration-150">
+                <SectionTiptapEditor
+                  initialMarkdown={markdown && markdown.trim().length > 0 ? markdown : EPIC_MARKDOWN_PLACEHOLDER}
+                  onChange={setMarkdown}
+                  variant="paragraph"
+                  placeholder="Escribe la definición de la épica en markdown..."
                 />
               </div>
-              <div>
-                <label className="text-sm font-medium mb-1.5 block">Beneficios Cuantitativos</label>
-                <textarea
-                  value={quantitativeBenefits}
-                  onChange={(e) => setQuantitativeBenefits(e.target.value)}
-                  rows={2}
-                  placeholder="Métricas y beneficios cuantitativos..."
-                  className={textareaClass}
-                />
-              </div>
-              <div>
-                <label className="text-sm font-medium mb-1.5 block">¿Cómo se medirán los beneficios?</label>
-                <textarea
-                  value={benefitsMeasurement}
-                  onChange={(e) => setBenefitsMeasurement(e.target.value)}
-                  rows={2}
-                  placeholder="Método de medición de beneficios..."
-                  className={textareaClass}
-                />
-              </div>
-            </div>
-
-            {/* Scope & Criteria */}
-            <div className="space-y-4 mb-5">
-              <p className="text-xs font-medium uppercase tracking-wider text-muted-foreground">Alcance y Criterios</p>
-              <div>
-                <label className="text-sm font-medium mb-1.5 block">Descripción del Alcance</label>
-                <textarea
-                  value={scopeDescription}
-                  onChange={(e) => setScopeDescription(e.target.value)}
-                  rows={2}
-                  placeholder="Describe el alcance de la épica..."
-                  className={textareaClass}
-                />
-              </div>
-              <div>
-                <label className="text-sm font-medium mb-1.5 block">Criterios de Aceptación</label>
-                <textarea
-                  value={acceptanceCriteria}
-                  onChange={(e) => setAcceptanceCriteria(e.target.value)}
-                  rows={2}
-                  placeholder="Criterios de aceptación de la épica..."
-                  className={textareaClass}
-                />
-              </div>
-            </div>
-
-            {/* Technical */}
-            <div className="space-y-4 mb-5">
-              <p className="text-xs font-medium uppercase tracking-wider text-muted-foreground">Aspectos Técnicos</p>
-              <div>
-                <label className="text-sm font-medium mb-1.5 block">Mejoras Tecnológicas</label>
-                <textarea
-                  value={technologicalImprovements}
-                  onChange={(e) => setTechnologicalImprovements(e.target.value)}
-                  rows={2}
-                  placeholder="Mejoras tecnológicas incluidas..."
-                  className={textareaClass}
-                />
-              </div>
-              <div>
-                <label className="text-sm font-medium mb-1.5 block">Prioridad de Negocio</label>
-                <textarea
-                  value={businessPriority}
-                  onChange={(e) => setBusinessPriority(e.target.value)}
-                  rows={2}
-                  placeholder="Prioridad y justificación de negocio..."
-                  className={textareaClass}
-                />
-              </div>
-              <div>
-                <label className="text-sm font-medium mb-1.5 block">Equipos Involucrados</label>
-                <textarea
-                  value={teamsInvolved}
-                  onChange={(e) => setTeamsInvolved(e.target.value)}
-                  rows={2}
-                  placeholder="Equipos que participarán..."
-                  className={textareaClass}
-                />
-              </div>
-            </div>
-
-            {/* Impact */}
-            <div className="space-y-4">
-              <p className="text-xs font-medium uppercase tracking-wider text-muted-foreground">Impacto</p>
-              <div>
-                <label className="text-sm font-medium mb-1.5 block">Canales Impactados</label>
-                <textarea
-                  value={impactedChannels}
-                  onChange={(e) => setImpactedChannels(e.target.value)}
-                  rows={2}
-                  placeholder="Canales que serán afectados..."
-                  className={textareaClass}
-                />
-              </div>
-              <div>
-                <label className="text-sm font-medium mb-1.5 block">Flujos Impactados</label>
-                <textarea
-                  value={impactedFlows}
-                  onChange={(e) => setImpactedFlows(e.target.value)}
-                  rows={2}
-                  placeholder="Flujos de negocio que serán afectados..."
-                  className={textareaClass}
-                />
-              </div>
-              <div>
-                <label className="text-sm font-medium mb-1.5 block">Nivel de Impacto en Sabre</label>
-                <textarea
-                  value={impactSabreLevel}
-                  onChange={(e) => setImpactSabreLevel(e.target.value)}
-                  rows={2}
-                  placeholder="Impacto a nivel de Sabre..."
-                  className={textareaClass}
-                />
-              </div>
-              <div>
-                <label className="text-sm font-medium mb-1.5 block">Dependencias de Terceros</label>
-                <textarea
-                  value={thirdPartyDependencies}
-                  onChange={(e) => setThirdPartyDependencies(e.target.value)}
-                  rows={2}
-                  placeholder="Dependencias externas o de terceros..."
-                  className={textareaClass}
-                />
-              </div>
-            </div>
+            )}
           </div>
 
           {/* Actions */}

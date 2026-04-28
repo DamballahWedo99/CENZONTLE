@@ -1,123 +1,115 @@
 'use client';
 
-import { useState, useCallback, useMemo } from 'react';
-import ReactMarkdown from 'react-markdown';
-import remarkGfm from 'remark-gfm';
-import { CreateExternalSecretDialog } from '@/components/secrets/CreateExternalSecretDialog';
-import type { StoryDependencyItem } from '@/lib/api/epics';
+import { useState, useEffect, useMemo } from 'react';
+import Link from 'next/link';
 import {
-  Epic,
-  EpicDependency,
-  DependencyType,
-  DependencyDirection,
-  DependencyStatus,
-  DependencyScheduling,
-  Priority,
-  DiscoveredDependency,
-  DiscoveredDependencyType,
-  DependencySeverity,
-} from '@cenzontle/shared';
-import { useProyectos } from '@/context/ProyectosContext';
-import { Button } from '@/components/ui/button';
-import { Input } from '@/components/ui/input';
-import { DatePicker } from '@/components/ui/date-picker';
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from '@/components/ui/select';
-import {
-  Dialog,
-  DialogContent,
-  DialogHeader,
-  DialogTitle,
-  DialogFooter,
-} from '@/components/ui/dialog';
-import {
-  Plus,
-  Pencil,
-  Trash2,
-  GitBranch,
-  ArrowRight,
-  ArrowLeft,
-  AlertTriangle,
-  CheckCircle2,
-  Clock,
-  ShieldAlert,
-  CircleDot,
-  Ban,
-  ExternalLink,
-  Link2,
+  KeyRound,
   Server,
+  Database,
+  Link2,
   Users,
   BookOpen,
-  Zap,
-  Filter,
+  GitBranch,
   Sparkles,
-  Database,
+  ShieldCheck,
+  AlertTriangle,
+  Loader2,
   ChevronDown,
   ChevronRight,
-  KeyRound,
-  ShieldCheck,
 } from 'lucide-react';
+import type { StoryDependencyItem } from '@/lib/api/epics';
+import { useProyectos } from '@/context/ProyectosContext';
+import {
+  getEpicDependenciesRollup,
+  type StoryTechnicalDependency,
+  type StoryTechnicalDependencyCategory,
+  type StoryTechnicalDependencySeverity,
+} from '@/lib/api/story-dependencies';
+import { CreateExternalSecretDialog } from '@/components/secrets/CreateExternalSecretDialog';
+import { ReadOnlyMarkdown } from '@/components/shared/tiptap/ReadOnlyMarkdown';
 
-// ---------------------------------------------------------------------------
-// Labels & config
-// ---------------------------------------------------------------------------
+/**
+ * Convierte un título humano (ej "Stripe API Key") al name UPPER_SNAKE_CASE
+ * que el dialog de secrets requiere (ej "STRIPE_API_KEY"). El user puede
+ * editar el name luego en el dialog si no le gusta el sugerido.
+ */
+function titleToSecretName(title: string): string {
+  return title
+    .normalize('NFD')
+    .replace(/[̀-ͯ]/g, '')
+    .toUpperCase()
+    .replace(/[^A-Z0-9]+/g, '_')
+    .replace(/^_+|_+$/g, '')
+    .replace(/^([0-9])/, 'X_$1');
+}
 
-const TYPE_CONFIG: Record<DependencyType, { label: string; icon: typeof Server; color: string }> = {
-  technical: { label: 'Técnica', icon: Server, color: 'bg-blue-100 text-blue-700 dark:bg-blue-900/30 dark:text-blue-300' },
-  resource: { label: 'Recurso', icon: Users, color: 'bg-amber-100 text-amber-700 dark:bg-amber-900/30 dark:text-amber-300' },
-  knowledge: { label: 'Conocimiento', icon: BookOpen, color: 'bg-cyan-100 text-cyan-700 dark:bg-cyan-900/30 dark:text-cyan-300' },
-  external: { label: 'Externa', icon: ExternalLink, color: 'bg-rose-100 text-rose-700 dark:bg-rose-900/30 dark:text-rose-300' },
-  'cross-team': { label: 'Cross-team', icon: Link2, color: 'bg-teal-100 text-teal-700 dark:bg-teal-900/30 dark:text-teal-300' },
+// ── Categories config (coherente con StoryDependencies + Linear provider) ──
+
+const CATEGORY_CONFIG: Record<
+  StoryTechnicalDependencyCategory,
+  { label: string; icon: typeof Server; description: string; accent: string }
+> = {
+  secrets: {
+    label: 'Secrets y credenciales',
+    icon: KeyRound,
+    description: 'API keys, tokens y credenciales que el sistema no puede generar.',
+    accent: 'text-amber-600 dark:text-amber-400',
+  },
+  apis: {
+    label: 'APIs e integraciones',
+    icon: Server,
+    description: 'APIs de terceros, endpoints externos.',
+    accent: 'text-blue-600 dark:text-blue-400',
+  },
+  testing: {
+    label: 'Testing y datos',
+    icon: Database,
+    description: 'Fixtures, mocks, datasets necesarios para QA.',
+    accent: 'text-cyan-600 dark:text-cyan-400',
+  },
+  services: {
+    label: 'Servicios técnicos',
+    icon: Link2,
+    description: 'Servicios internos, infraestructura, dependencias arquitectónicas.',
+    accent: 'text-teal-600 dark:text-teal-400',
+  },
+  teams: {
+    label: 'Equipos y cross-team',
+    icon: Users,
+    description: 'Coordinación con otros equipos o personas.',
+    accent: 'text-violet-600 dark:text-violet-400',
+  },
+  knowledge: {
+    label: 'Conocimiento',
+    icon: BookOpen,
+    description: 'Documentación, decisiones de arquitectura, contexto.',
+    accent: 'text-fuchsia-600 dark:text-fuchsia-400',
+  },
+  other: {
+    label: 'Otras',
+    icon: GitBranch,
+    description: 'Dependencias sin categoría específica.',
+    accent: 'text-slate-600 dark:text-slate-400',
+  },
 };
 
-const STATUS_CONFIG: Record<DependencyStatus, { label: string; icon: typeof Clock; color: string; dot: string }> = {
-  identified: { label: 'Identificada', icon: CircleDot, color: 'text-blue-600 dark:text-blue-400', dot: 'bg-blue-500' },
-  in_progress: { label: 'En progreso', icon: Clock, color: 'text-amber-600 dark:text-amber-400', dot: 'bg-amber-500' },
-  resolved: { label: 'Resuelta', icon: CheckCircle2, color: 'text-green-600 dark:text-green-400', dot: 'bg-green-500' },
-  blocked: { label: 'Bloqueada', icon: Ban, color: 'text-red-600 dark:text-red-400', dot: 'bg-red-500' },
-  mitigated: { label: 'Mitigada', icon: ShieldAlert, color: 'text-teal-600 dark:text-teal-400', dot: 'bg-teal-500' },
+const CATEGORY_ORDER: StoryTechnicalDependencyCategory[] = [
+  'secrets',
+  'apis',
+  'testing',
+  'services',
+  'teams',
+  'knowledge',
+  'other',
+];
+
+const SEVERITY_BADGE: Record<StoryTechnicalDependencySeverity, string> = {
+  critical: 'bg-red-100 text-red-700 dark:bg-red-900/30 dark:text-red-300',
+  high: 'bg-orange-100 text-orange-700 dark:bg-orange-900/30 dark:text-orange-300',
+  medium: 'bg-yellow-100 text-yellow-700 dark:bg-yellow-900/30 dark:text-yellow-300',
+  low: 'bg-green-100 text-green-700 dark:bg-green-900/30 dark:text-green-300',
 };
 
-const SEVERITY_CONFIG: Record<Priority, { label: string; color: string }> = {
-  [Priority.Critical]: { label: 'Crítica', color: 'bg-red-100 text-red-700 dark:bg-red-900/30 dark:text-red-300' },
-  [Priority.High]: { label: 'Alta', color: 'bg-orange-100 text-orange-700 dark:bg-orange-900/30 dark:text-orange-300' },
-  [Priority.Medium]: { label: 'Media', color: 'bg-yellow-100 text-yellow-700 dark:bg-yellow-900/30 dark:text-yellow-300' },
-  [Priority.Low]: { label: 'Baja', color: 'bg-green-100 text-green-700 dark:bg-green-900/30 dark:text-green-300' },
-};
-
-const DIRECTION_LABELS: Record<DependencyDirection, { label: string; icon: typeof ArrowRight; description: string }> = {
-  depends_on: { label: 'Depende de', icon: ArrowLeft, description: 'Esta épica necesita algo de otro lado' },
-  depended_on_by: { label: 'Requerida por', icon: ArrowRight, description: 'Otra épica necesita algo de esta' },
-};
-
-const SCHEDULING_LABELS: Record<DependencyScheduling, string> = {
-  'finish-to-start': 'Fin → Inicio',
-  'start-to-start': 'Inicio → Inicio',
-  'finish-to-finish': 'Fin → Fin',
-  'start-to-finish': 'Inicio → Fin',
-};
-
-const DISCOVERED_TYPE_CONFIG: Record<DiscoveredDependencyType, { label: string; icon: typeof Server; color: string }> = {
-  api: { label: 'API', icon: Server, color: 'bg-blue-100 text-blue-700 dark:bg-blue-900/30 dark:text-blue-300' },
-  service: { label: 'Servicio', icon: Link2, color: 'bg-teal-100 text-teal-700 dark:bg-teal-900/30 dark:text-teal-300' },
-  data: { label: 'Datos', icon: Database, color: 'bg-cyan-100 text-cyan-700 dark:bg-cyan-900/30 dark:text-cyan-300' },
-  team: { label: 'Equipo', icon: Users, color: 'bg-amber-100 text-amber-700 dark:bg-amber-900/30 dark:text-amber-300' },
-  other: { label: 'Otro', icon: GitBranch, color: 'bg-slate-100 text-slate-700 dark:bg-slate-800/40 dark:text-slate-300' },
-};
-
-const DISCOVERED_SEVERITY_CONFIG: Record<DependencySeverity, { label: string; color: string }> = {
-  critical: { label: 'Crítica', color: 'bg-red-100 text-red-700 dark:bg-red-900/30 dark:text-red-300' },
-  high: { label: 'Alta', color: 'bg-orange-100 text-orange-700 dark:bg-orange-900/30 dark:text-orange-300' },
-  medium: { label: 'Media', color: 'bg-yellow-100 text-yellow-700 dark:bg-yellow-900/30 dark:text-yellow-300' },
-  low: { label: 'Baja', color: 'bg-green-100 text-green-700 dark:bg-green-900/30 dark:text-green-300' },
-};
-
-/** Labels humanos para los `reason` del DAG story-to-story. */
 const STORY_ORDER_REASON_LABELS: Record<string, string> = {
   api_contract: 'API contract',
   migration_order: 'Migration order',
@@ -126,812 +118,394 @@ const STORY_ORDER_REASON_LABELS: Record<string, string> = {
   other: 'Otro',
 };
 
-// ---------------------------------------------------------------------------
-// Empty form
-// ---------------------------------------------------------------------------
-
-function emptyForm(): Omit<EpicDependency, 'id' | 'createdAt' | 'updatedAt'> {
-  return {
-    title: '',
-    description: '',
-    type: 'technical',
-    direction: 'depends_on',
-    scheduling: 'finish-to-start',
-    status: 'identified',
-    severity: Priority.Medium,
-    isBlocking: false,
-    targetEpicId: null,
-    targetExternalName: null,
-    owner: '',
-    dueDate: null,
-    resolutionNotes: '',
-  };
-}
-
-// ---------------------------------------------------------------------------
-// Props
-// ---------------------------------------------------------------------------
-
 interface EpicDependenciesProps {
-  epic: Epic;
-  discoveredDependencies?: DiscoveredDependency[];
+  epicId: string;
   /**
-   * DAG de orden entre historias del epic (emitido por el Tech Lead al
-   * generar el batch). Cada item = historia bloqueada + lista de sus
-   * bloqueantes directos con hardness/reason/description.
+   * DAG de orden entre historias (emitido por el Tech Lead). Cada item es una
+   * historia bloqueada con su lista de bloqueantes directos. Se renderiza
+   * como sección separada al final.
    */
   storyOrderDependencies?: StoryDependencyItem[];
   /**
-   * Callback opcional para refrescar las discovered deps desde el backend.
-   * Usado tras resolver una dep con un secret externo — evita recarga completa.
+   * Callback que se invoca cada vez que el rollup termina de cargar, con el
+   * total de deps del rollup (nuevas + legacy unificadas). El padre lo usa
+   * para mantener el contador del tab consistente con lo que se renderea aquí.
    */
-  onDiscoveredDepsRefresh?: () => void | Promise<void>;
-  onAddDependency: (dep: EpicDependency) => void;
-  onUpdateDependency: (dep: EpicDependency) => void;
-  onDeleteDependency: (depId: string) => void;
+  onRollupCountChange?: (count: number) => void;
 }
 
-// ---------------------------------------------------------------------------
-// Component
-// ---------------------------------------------------------------------------
-
+/**
+ * Tab "Dependencias" del epic — roll-up READ-ONLY de las dependencias técnicas
+ * de TODAS las historias del epic + DAG de orden entre historias.
+ *
+ * Las dependencias técnicas ya NO se crean a nivel epic — se gestionan desde
+ * la vista de cada historia (`StoryDependencies.tsx`). Este componente solo
+ * agrega y muestra; el botón "Agregar" se removió intencionalmente.
+ */
 export function EpicDependencies({
-  epic,
-  discoveredDependencies = [],
+  epicId,
   storyOrderDependencies = [],
-  onDiscoveredDepsRefresh,
-  onAddDependency,
-  onUpdateDependency,
-  onDeleteDependency,
+  onRollupCountChange,
 }: EpicDependenciesProps) {
   const { state } = useProyectos();
-  const allEpics = state.epics.filter((e) => e.id !== epic.id);
-
-  const [dialogOpen, setDialogOpen] = useState(false);
-  const [editingDep, setEditingDep] = useState<EpicDependency | null>(null);
-  const [form, setForm] = useState(emptyForm());
-  const [statusFilter, setStatusFilter] = useState<DependencyStatus | 'all'>('all');
-  const [deleteConfirmId, setDeleteConfirmId] = useState<string | null>(null);
-  const [expandedDiscoveredId, setExpandedDiscoveredId] = useState<string | null>(null);
-  /**
-   * Dep IA que el user está a punto de resolver con un secret. Abre el
-   * `CreateExternalSecretDialog` pre-llenado con vendor/name sugeridos.
-   * `sourceDependencyId` le dice al backend que auto-resuelva la dep.
-   */
-  const [resolvingDep, setResolvingDep] = useState<DiscoveredDependency | null>(null);
-
-  // --- Derived data ---
-  /**
-   * El JSONB `epic.dependencies[]` contiene dos tipos mezclados:
-   *  1. `EpicDependency` creadas manualmente (dialog "Agregar dependencia"):
-   *     type ∈ {technical, resource, knowledge, external, cross-team}, id = crypto.randomUUID() (sin prefijo).
-   *  2. `DiscoveredDependency` persistidas por el agente (stories.service):
-   *     type ∈ {api, service, data, team, other}, id = "ai-dep-<uuid>".
-   *
-   * Esta sección renderiza SOLO las manuales — las IA se muestran abajo en
-   * "Descubiertas por IA" con un TYPE_CONFIG distinto. Filtramos por prefijo
-   * del id para evitar duplicados y evitar que TYPE_CONFIG[dep.type] sea
-   * undefined cuando llega un type IA al render de manuales.
-   */
-  const manualDeps = useMemo(
-    () => (epic.dependencies ?? []).filter((d) => !d.id?.startsWith('ai-dep-')),
-    [epic.dependencies],
-  );
-
-  const filteredDeps = useMemo(() => {
-    if (statusFilter === 'all') return manualDeps;
-    return manualDeps.filter((d) => d.status === statusFilter);
-  }, [manualDeps, statusFilter]);
-
-  const stats = useMemo(() => {
-    const blocking = manualDeps.filter((d) => d.isBlocking && d.status !== 'resolved' && d.status !== 'mitigated');
-    const active = manualDeps.filter((d) => d.status !== 'resolved' && d.status !== 'mitigated');
-    const resolved = manualDeps.filter((d) => d.status === 'resolved' || d.status === 'mitigated');
-    return { total: manualDeps.length, blocking: blocking.length, active: active.length, resolved: resolved.length };
-  }, [manualDeps]);
-
-  // --- Handlers ---
-  const openCreate = useCallback(() => {
-    setEditingDep(null);
-    setForm(emptyForm());
-    setDialogOpen(true);
-  }, []);
-
-  const openEdit = useCallback((dep: EpicDependency) => {
-    setEditingDep(dep);
-    setForm({
-      title: dep.title,
-      description: dep.description,
-      type: dep.type,
-      direction: dep.direction,
-      scheduling: dep.scheduling,
-      status: dep.status,
-      severity: dep.severity,
-      isBlocking: dep.isBlocking,
-      targetEpicId: dep.targetEpicId,
-      targetExternalName: dep.targetExternalName,
-      owner: dep.owner,
-      dueDate: dep.dueDate,
-      resolutionNotes: dep.resolutionNotes,
+  const [rollup, setRollup] = useState<StoryTechnicalDependency[]>([]);
+  const [loading, setLoading] = useState(true);
+  // Cuando el usuario hace click en "Resolver con secret" sobre una dep que
+  // requiere credencial, abrimos el dialog compartido con el contexto pre-
+  // llenado de esa dep (name derivado del title, vendor/description, sourceDependencyId).
+  const [secretDialogContext, setSecretDialogContext] = useState<StoryTechnicalDependency | null>(null);
+  // Trigger para forzar re-fetch del rollup (sube cuando se crea un secret).
+  const [refreshTick, setRefreshTick] = useState(0);
+  // Set de deps expandidas (mostrando mdContent rico al click). Mismo patrón
+  // que en StoryDependencies.tsx — el rollup es read-only así que el detalle
+  // expandido ayuda al user a revisar el contenido sin navegar a la story.
+  const [expandedDeps, setExpandedDeps] = useState<Set<string>>(new Set());
+  const toggleExpanded = (depId: string) => {
+    setExpandedDeps((prev) => {
+      const next = new Set(prev);
+      if (next.has(depId)) next.delete(depId);
+      else next.add(depId);
+      return next;
     });
-    setDialogOpen(true);
-  }, []);
+  };
 
-  const handleSave = useCallback(() => {
-    if (!form.title.trim()) return;
-
-    const now = new Date().toISOString();
-    if (editingDep) {
-      onUpdateDependency({
-        ...editingDep,
-        ...form,
-        updatedAt: now,
+  useEffect(() => {
+    let cancelled = false;
+    setLoading(true);
+    getEpicDependenciesRollup(epicId)
+      .then((deps) => {
+        if (!cancelled) {
+          setRollup(deps);
+          onRollupCountChange?.(deps.length);
+        }
+      })
+      .catch(() => {
+        if (!cancelled) {
+          setRollup([]);
+          onRollupCountChange?.(0);
+        }
+      })
+      .finally(() => {
+        if (!cancelled) setLoading(false);
       });
-    } else {
-      onAddDependency({
-        ...form,
-        id: crypto.randomUUID(),
-        createdAt: now,
-        updatedAt: now,
-      });
-    }
-    setDialogOpen(false);
-    setEditingDep(null);
-    setForm(emptyForm());
-  }, [form, editingDep, onAddDependency, onUpdateDependency]);
+    return () => {
+      cancelled = true;
+    };
+  }, [epicId, onRollupCountChange, refreshTick]);
 
-  const handleDelete = useCallback((id: string) => {
-    onDeleteDependency(id);
-    setDeleteConfirmId(null);
-  }, [onDeleteDependency]);
+  // Map storyId → story title para mostrar de qué historia viene cada dep.
+  const storyTitleById = useMemo(() => {
+    const map = new Map<string, string>();
+    state.stories
+      .filter((s) => s.epicId === epicId)
+      .forEach((s) => map.set(s.id, s.title));
+    return map;
+  }, [state.stories, epicId]);
 
-  const updateField = useCallback(<K extends keyof ReturnType<typeof emptyForm>>(key: K, value: ReturnType<typeof emptyForm>[K]) => {
-    setForm((prev) => ({ ...prev, [key]: value }));
-  }, []);
+  // Agrupar por categoría
+  const grouped: Record<StoryTechnicalDependencyCategory, StoryTechnicalDependency[]> = {
+    secrets: [],
+    apis: [],
+    testing: [],
+    services: [],
+    teams: [],
+    knowledge: [],
+    other: [],
+  };
+  rollup.forEach((d) => {
+    grouped[d.category].push(d);
+  });
+  const visibleCategories = CATEGORY_ORDER.filter((k) => grouped[k].length > 0);
 
-  // --- Resolve epic name ---
-  const getEpicLabel = useCallback((epicId: string | null) => {
-    if (!epicId) return null;
-    const e = state.epics.find((ep) => ep.id === epicId);
-    return e ? (e.tracker?.externalKey ? `${e.tracker.externalKey} · ${e.title}` : e.title) : epicId;
-  }, [state.epics]);
+  // Stats
+  const totalDeps = rollup.length;
+  const blockingCount = rollup.filter((d) => d.isBlocking).length;
+  const credentialsNeeded = rollup.filter(
+    (d) => d.requiresCredential && !d.linkedSecretId,
+  ).length;
 
-  // --- Empty state (solo cuando no hay ni manuales, ni descubiertas, ni DAG) ---
-  if (
-    manualDeps.length === 0 &&
-    discoveredDependencies.length === 0 &&
-    storyOrderDependencies.length === 0
-  ) {
+  if (loading) {
     return (
-      <div className="rounded-xl border-2 border-dashed py-12 flex flex-col items-center gap-4 text-center">
-        <div className="h-12 w-12 rounded-full bg-muted flex items-center justify-center">
-          <GitBranch className="h-6 w-6 text-muted-foreground" />
-        </div>
-        <div>
-          <p className="text-sm font-medium">Sin dependencias registradas</p>
-          <p className="text-xs text-muted-foreground mt-1 max-w-md">
-            Registra las dependencias técnicas, de recursos, externas o cross-team que tiene esta épica
-            para mantener visibilidad sobre bloqueos y riesgos.
-          </p>
-        </div>
-        <Button variant="outline" size="sm" onClick={openCreate} className="gap-2 mt-2">
-          <Plus className="h-3.5 w-3.5" />
-          Agregar dependencia
-        </Button>
+      <div className="flex items-center justify-center py-16">
+        <Loader2 className="h-5 w-5 animate-spin text-muted-foreground" />
       </div>
     );
   }
 
-  const hasManualDeps = manualDeps.length > 0;
+  if (totalDeps === 0 && storyOrderDependencies.length === 0) {
+    return (
+      <div className="rounded-xl border-2 border-dashed py-12 flex flex-col items-center gap-4 text-center">
+        <GitBranch className="h-8 w-8 text-muted-foreground" />
+        <div className="max-w-md space-y-1">
+          <p className="text-sm font-medium">Sin dependencias registradas</p>
+          <p className="text-xs text-muted-foreground">
+            Las dependencias técnicas se crean desde la vista de cada historia. Las
+            relaciones de orden las emite el agente Tech Lead durante la generación.
+          </p>
+        </div>
+      </div>
+    );
+  }
 
   return (
-    <div className="space-y-5">
-      {/* --- Stats bar (solo si hay manuales, sino solo mostrar botón Agregar) --- */}
-      <div className="flex items-center gap-6">
-        <div className="flex items-center gap-4 flex-1">
-          {hasManualDeps ? (
-            <>
-              <div className="flex items-center gap-1.5 text-sm">
-                <span className="font-semibold">{stats.total}</span>
-                <span className="text-muted-foreground">total</span>
-              </div>
-              {stats.blocking > 0 && (
-                <div className="flex items-center gap-1.5 text-sm text-red-600 dark:text-red-400">
-                  <AlertTriangle className="h-3.5 w-3.5" />
-                  <span className="font-semibold">{stats.blocking}</span>
-                  <span>bloqueantes</span>
-                </div>
-              )}
-              <div className="flex items-center gap-1.5 text-sm text-amber-600 dark:text-amber-400">
-                <Clock className="h-3.5 w-3.5" />
-                <span className="font-semibold">{stats.active}</span>
-                <span>activas</span>
-              </div>
-              <div className="flex items-center gap-1.5 text-sm text-green-600 dark:text-green-400">
-                <CheckCircle2 className="h-3.5 w-3.5" />
-                <span className="font-semibold">{stats.resolved}</span>
-                <span>resueltas</span>
-              </div>
-            </>
-          ) : (
-            <p className="text-sm text-muted-foreground">
-              Sin dependencias manuales registradas
-            </p>
-          )}
-        </div>
-
-        {/* Filter + Add */}
-        <div className="flex items-center gap-2">
-          {hasManualDeps && (
-            <Select value={statusFilter} onValueChange={(v) => setStatusFilter(v as DependencyStatus | 'all')}>
-              <SelectTrigger className="h-8 text-xs w-[140px]">
-                <Filter className="h-3 w-3 mr-1" />
-                <SelectValue />
-              </SelectTrigger>
-              <SelectContent>
-                <SelectItem value="all">Todas</SelectItem>
-                {(Object.entries(STATUS_CONFIG) as [DependencyStatus, typeof STATUS_CONFIG[DependencyStatus]][]).map(([key, cfg]) => (
-                  <SelectItem key={key} value={key}>{cfg.label}</SelectItem>
-                ))}
-              </SelectContent>
-            </Select>
-          )}
-          <Button size="sm" onClick={openCreate} className="gap-1.5 h-8 text-xs">
-            <Plus className="h-3.5 w-3.5" />
-            Agregar
-          </Button>
-        </div>
-      </div>
-
-      {/* --- Dependency cards --- */}
-      <div className="space-y-2">
-        {filteredDeps.map((dep) => {
-          // Defensive fallback para cualquier `type` que no esté en el config
-          // (ej: una dep con type desconocido que llega de datos heredados).
-          // Evita TypeError al destructurar `.icon` en el render.
-          const typeCfg = TYPE_CONFIG[dep.type] ?? {
-            label: dep.type ?? 'Desconocida',
-            icon: GitBranch,
-            color: 'bg-muted text-muted-foreground border border-border',
-          };
-          const statusCfg = STATUS_CONFIG[dep.status] ?? STATUS_CONFIG.identified;
-          const sevCfg = SEVERITY_CONFIG[dep.severity] ?? SEVERITY_CONFIG[Priority.Medium];
-          const dirCfg = DIRECTION_LABELS[dep.direction] ?? DIRECTION_LABELS.depends_on;
-          const TypeIcon = typeCfg.icon;
-          const StatusIcon = statusCfg.icon;
-          const DirIcon = dirCfg.icon;
-          const targetLabel = dep.targetEpicId ? getEpicLabel(dep.targetEpicId) : dep.targetExternalName;
-          const isConfirmingDelete = deleteConfirmId === dep.id;
-
-          return (
-            <div
-              key={dep.id}
-              className={`rounded-lg border p-4 transition-colors ${
-                dep.isBlocking && dep.status !== 'resolved' && dep.status !== 'mitigated'
-                  ? 'border-red-200 dark:border-red-800/50 bg-red-50/30 dark:bg-red-950/10'
-                  : ''
-              }`}
-            >
-              {/* Row 1: Title + actions */}
-              <div className="flex items-start justify-between gap-3">
-                <div className="flex items-start gap-3 flex-1 min-w-0">
-                  {/* Status dot */}
-                  <span className={`h-2.5 w-2.5 rounded-full mt-1.5 shrink-0 ${statusCfg.dot}`} />
-                  <div className="flex-1 min-w-0">
-                    <p className="text-sm font-medium leading-tight">{dep.title}</p>
-                    {dep.description && (
-                      <p className="text-xs text-muted-foreground mt-1 line-clamp-2">{dep.description}</p>
-                    )}
-                  </div>
-                </div>
-                <div className="flex items-center gap-1 shrink-0">
-                  <Button variant="ghost" size="sm" className="h-7 w-7 p-0" onClick={() => openEdit(dep)}>
-                    <Pencil className="h-3 w-3" />
-                  </Button>
-                  {isConfirmingDelete ? (
-                    <div className="flex items-center gap-1">
-                      <Button variant="ghost" size="sm" className="h-7 text-xs text-muted-foreground" onClick={() => setDeleteConfirmId(null)}>
-                        Cancelar
-                      </Button>
-                      <Button variant="ghost" size="sm" className="h-7 text-xs text-red-600" onClick={() => handleDelete(dep.id)}>
-                        Eliminar
-                      </Button>
-                    </div>
-                  ) : (
-                    <Button variant="ghost" size="sm" className="h-7 w-7 p-0 text-muted-foreground hover:text-red-600" onClick={() => setDeleteConfirmId(dep.id)}>
-                      <Trash2 className="h-3 w-3" />
-                    </Button>
-                  )}
-                </div>
-              </div>
-
-              {/* Row 2: Badges */}
-              <div className="flex flex-wrap items-center gap-1.5 mt-3">
-                {/* Type */}
-                <span className={`inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[10px] font-medium ${typeCfg.color}`}>
-                  <TypeIcon className="h-2.5 w-2.5" />
-                  {typeCfg.label}
-                </span>
-
-                {/* Status */}
-                <span className={`inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[10px] font-medium bg-muted ${statusCfg.color}`}>
-                  <StatusIcon className="h-2.5 w-2.5" />
-                  {statusCfg.label}
-                </span>
-
-                {/* Severity */}
-                <span className={`inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[10px] font-medium ${sevCfg.color}`}>
-                  {sevCfg.label}
-                </span>
-
-                {/* Blocking badge */}
-                {dep.isBlocking && dep.status !== 'resolved' && dep.status !== 'mitigated' && (
-                  <span className="inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[10px] font-semibold bg-red-100 text-red-700 dark:bg-red-900/30 dark:text-red-300">
-                    <Zap className="h-2.5 w-2.5" />
-                    Bloqueante
-                  </span>
-                )}
-
-                {/* Scheduling */}
-                <span className="text-[10px] text-muted-foreground">
-                  {SCHEDULING_LABELS[dep.scheduling]}
-                </span>
-              </div>
-
-              {/* Row 3: Direction + target */}
-              {targetLabel && (
-                <div className="flex items-center gap-2 mt-2.5 text-xs text-muted-foreground">
-                  <DirIcon className="h-3 w-3 shrink-0" />
-                  <span>{dirCfg.label}:</span>
-                  <span className="font-medium text-foreground truncate">{targetLabel}</span>
-                </div>
-              )}
-
-              {/* Row 4: Meta */}
-              <div className="flex items-center gap-4 mt-2 text-[10px] text-muted-foreground">
-                {dep.owner && <span>Responsable: <span className="text-foreground/70">{dep.owner}</span></span>}
-                {dep.dueDate && <span>Fecha límite: <span className="text-foreground/70">{new Date(dep.dueDate).toLocaleDateString('es-MX', { day: 'numeric', month: 'short' })}</span></span>}
-              </div>
-
-              {/* Resolution notes */}
-              {dep.resolutionNotes && (dep.status === 'resolved' || dep.status === 'mitigated') && (
-                <div className="mt-2 rounded-md bg-green-50 dark:bg-green-950/20 px-3 py-2 text-xs text-green-700 dark:text-green-400">
-                  {dep.resolutionNotes}
-                </div>
-              )}
-            </div>
-          );
-        })}
-      </div>
-
-      {filteredDeps.length === 0 && statusFilter !== 'all' && (
-        <div className="text-center py-8 text-sm text-muted-foreground">
-          No hay dependencias con estado &quot;{STATUS_CONFIG[statusFilter].label}&quot;
+    <div className="space-y-8">
+      {/* Stats header */}
+      {totalDeps > 0 && (
+        <div className="flex items-center gap-6 pb-4 border-b">
+          <div>
+            <p className="text-2xl font-bold">{totalDeps}</p>
+            <p className="text-xs text-muted-foreground">Total deps</p>
+          </div>
+          <div>
+            <p className="text-2xl font-bold text-red-600 dark:text-red-400">{blockingCount}</p>
+            <p className="text-xs text-muted-foreground">Bloqueantes</p>
+          </div>
+          <div>
+            <p className="text-2xl font-bold text-amber-600 dark:text-amber-400">{credentialsNeeded}</p>
+            <p className="text-xs text-muted-foreground">Sin credencial</p>
+          </div>
+          <div className="ml-auto text-xs text-muted-foreground max-w-md text-right">
+            Roll-up read-only. Edita cada dependencia desde la vista de su historia.
+          </div>
         </div>
       )}
 
-      {/* --- Dependencias descubiertas por IA (read-only, leídas del vault) --- */}
-      {discoveredDependencies.length > 0 && (
-        <div className="space-y-2 pt-2">
-          <div className="flex items-center gap-2 border-t pt-5">
-            <Sparkles className="h-3.5 w-3.5 text-primary" />
-            <h4 className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">
-              Descubiertas por IA
-            </h4>
-            <span className="text-xs text-muted-foreground">
-              ({discoveredDependencies.length} en el vault)
-            </span>
-          </div>
-          <p className="text-[11px] text-muted-foreground -mt-1">
-            Identificadas por el agente QA durante la generación de historias. Se almacenan en el vault como documentación.
-          </p>
-
-          {discoveredDependencies.map((dep) => {
-            const typeCfg = DISCOVERED_TYPE_CONFIG[dep.type];
-            const sevCfg = DISCOVERED_SEVERITY_CONFIG[dep.severity];
-            const TypeIcon = typeCfg.icon;
-            const isExpanded = expandedDiscoveredId === dep.id;
-            // Flag bloqueante que el TL/QA emitieron para credenciales
-            // externas (API keys, merchant codes) que el sistema no puede
-            // generar por sí solo. Dispara la UI de "Resolver con secret".
-            const needsSecret = dep.requiresCredential && !dep.linkedSecretId;
-            const isResolved = !!dep.linkedSecretId;
-
-            return (
-              <div
-                key={dep.id}
-                className="rounded-lg border border-primary/20 bg-primary/[0.02] p-4"
-              >
-                <div className="flex items-start justify-between gap-3">
-                  <button
-                    type="button"
-                    onClick={() => setExpandedDiscoveredId(isExpanded ? null : dep.id)}
-                    className="flex items-start gap-3 flex-1 min-w-0 text-left"
-                  >
-                    <Sparkles className="h-3.5 w-3.5 text-primary mt-0.5 shrink-0" />
-                    <div className="flex-1 min-w-0">
-                      <p className="text-sm font-medium leading-tight">{dep.title}</p>
-                      {dep.description && (
-                        <p className="text-xs text-muted-foreground mt-1 line-clamp-2">{dep.description}</p>
+      {/* Categorías */}
+      {visibleCategories.map((cat) => {
+        const cfg = CATEGORY_CONFIG[cat];
+        const Icon = cfg.icon;
+        return (
+          <section key={cat} className="space-y-3">
+            <div className="border-b pb-2">
+              <div className="flex items-center gap-2">
+                <Icon className={`h-4 w-4 ${cfg.accent}`} />
+                <h4 className="text-sm font-semibold">{cfg.label}</h4>
+                <span className="text-xs text-muted-foreground">({grouped[cat].length})</span>
+              </div>
+              <p className="text-[11px] text-muted-foreground mt-1">{cfg.description}</p>
+            </div>
+            <div className="space-y-2">
+              {grouped[cat].map((dep) => {
+                const isLegacy = !dep.storyId;
+                const storyTitle = isLegacy
+                  ? 'Legacy a nivel épica'
+                  : (storyTitleById.get(dep.storyId) ?? '(historia desconocida)');
+                const isExpanded = expandedDeps.has(dep.id);
+                const hasRichContent =
+                  (dep.mdContent && dep.mdContent.trim().length > 0) ||
+                  (dep.description && dep.description.length > 100);
+                // Cards no-legacy son clickables: navegan a la historia con
+                // `?dep=<id>` para que la vista destino haga scroll + focus.
+                const cardClass = `block rounded-lg border p-4 transition-colors ${
+                  dep.isBlocking
+                    ? 'border-red-200 dark:border-red-800/50 bg-red-50/30 dark:bg-red-950/10'
+                    : ''
+                } ${isLegacy ? '' : 'hover:border-foreground/30 hover:bg-muted/30 cursor-pointer'}`;
+                const cardInner = (
+                  <>
+                    <div className="flex items-start justify-between gap-3">
+                      <div className="flex-1 min-w-0 flex items-start gap-1.5">
+                        {hasRichContent && (
+                          <button
+                            type="button"
+                            onClick={(e) => {
+                              // Evitar navegación del Link wrapper.
+                              e.preventDefault();
+                              e.stopPropagation();
+                              toggleExpanded(dep.id);
+                            }}
+                            className="mt-0.5 text-muted-foreground hover:text-foreground shrink-0 transition-colors"
+                            title={isExpanded ? 'Colapsar detalle' : 'Ver detalle completo'}
+                          >
+                            {isExpanded ? <ChevronDown className="h-3.5 w-3.5" /> : <ChevronRight className="h-3.5 w-3.5" />}
+                          </button>
+                        )}
+                        <div className="flex-1 min-w-0">
+                          <p className="text-sm font-medium leading-tight">{dep.title}</p>
+                          {dep.description && (
+                            <p className={`text-xs text-muted-foreground mt-1 ${isExpanded ? '' : 'line-clamp-2'}`}>
+                              {dep.description}
+                            </p>
+                          )}
+                        </div>
+                      </div>
+                      {isLegacy ? (
+                        <span
+                          className="text-[10px] text-muted-foreground shrink-0 max-w-[200px] truncate text-right italic"
+                          title="Dependencia legacy de la épica (no tiene historia owner). Migra creándola en una historia para desligarla del epic."
+                        >
+                          📦 {storyTitle}
+                        </span>
+                      ) : (
+                        <span
+                          className="text-[10px] text-muted-foreground shrink-0 max-w-[200px] truncate text-right"
+                          title={`Ir a historia: ${storyTitle}`}
+                        >
+                          📖 {storyTitle}
+                        </span>
                       )}
                     </div>
-                    {dep.mdContent ? (
-                      isExpanded ? (
-                        <ChevronDown className="h-3.5 w-3.5 text-muted-foreground shrink-0 mt-1" />
-                      ) : (
-                        <ChevronRight className="h-3.5 w-3.5 text-muted-foreground shrink-0 mt-1" />
-                      )
-                    ) : null}
-                  </button>
-                  {needsSecret && (
-                    <Button
-                      size="sm"
-                      variant="outline"
-                      onClick={() => setResolvingDep(dep)}
-                      className="shrink-0 h-7 gap-1 text-[11px] border-primary/30 hover:bg-primary/5"
-                    >
-                      <KeyRound className="h-3 w-3" />
-                      Resolver con secret
-                    </Button>
-                  )}
-                </div>
-
-                <div className="flex flex-wrap items-center gap-1.5 mt-3">
-                  <span className={`inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[10px] font-medium ${typeCfg.color}`}>
-                    <TypeIcon className="h-2.5 w-2.5" />
-                    {typeCfg.label}
-                  </span>
-                  <span className={`inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[10px] font-medium ${sevCfg.color}`}>
-                    {sevCfg.label}
-                  </span>
-                  <span className="inline-flex items-center gap-1 rounded-full border border-primary/20 bg-primary/10 text-primary px-2 py-0.5 text-[10px] font-medium">
-                    <Sparkles className="h-2.5 w-2.5" />
-                    IA
-                  </span>
-                  {dep.vendor && (
-                    <span className="inline-flex items-center rounded-full border border-border bg-muted/50 px-2 py-0.5 text-[10px] font-medium text-foreground/80">
-                      {dep.vendor}
-                    </span>
-                  )}
-                  {needsSecret && (
-                    <span className="inline-flex items-center gap-1 rounded-full border border-destructive/30 bg-destructive/10 text-destructive px-2 py-0.5 text-[10px] font-medium">
-                      <KeyRound className="h-2.5 w-2.5" />
-                      Requiere credencial
-                    </span>
-                  )}
-                  {dep.isBlocking && !isResolved && (
-                    <span className="inline-flex items-center gap-1 rounded-full border border-destructive/30 bg-destructive/15 text-destructive px-2 py-0.5 text-[10px] font-semibold">
-                      Bloqueante
-                    </span>
-                  )}
-                  {isResolved && (
-                    <span className="inline-flex items-center gap-1 rounded-full border border-green-500/30 bg-green-500/10 text-green-600 dark:text-green-400 px-2 py-0.5 text-[10px] font-medium">
-                      <ShieldCheck className="h-2.5 w-2.5" />
-                      Secret provisto
-                    </span>
-                  )}
-                </div>
-
-                {isExpanded && dep.mdContent && (
-                  <div className="mt-3 rounded-md bg-background/60 border border-border px-3 py-2.5">
-                    <p className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground mb-2">Detalle</p>
-                    <div className="prose prose-sm dark:prose-invert max-w-none prose-headings:mt-3 prose-headings:mb-2 prose-p:my-2 prose-p:text-foreground/80 prose-li:my-0.5 prose-code:text-[11px] prose-code:bg-muted prose-code:px-1 prose-code:py-0.5 prose-code:rounded prose-code:before:content-none prose-code:after:content-none prose-strong:text-foreground">
-                      <ReactMarkdown remarkPlugins={[remarkGfm]}>
-                        {dep.mdContent}
-                      </ReactMarkdown>
-                    </div>
-                  </div>
-                )}
-              </div>
-            );
-          })}
-        </div>
-      )}
-
-      {/* --- Create/Edit Dialog --- */}
-      <Dialog open={dialogOpen} onOpenChange={setDialogOpen}>
-        <DialogContent className="max-w-lg max-h-[90vh] overflow-y-auto">
-          <DialogHeader>
-            <DialogTitle>{editingDep ? 'Editar dependencia' : 'Nueva dependencia'}</DialogTitle>
-          </DialogHeader>
-
-          <div className="space-y-4 py-2">
-            {/* Title */}
-            <div>
-              <label className="text-xs font-medium text-muted-foreground">Título *</label>
-              <Input
-                value={form.title}
-                onChange={(e) => updateField('title', e.target.value)}
-                placeholder="Ej: Integración con API de pagos"
-                className="mt-1"
-              />
-            </div>
-
-            {/* Description */}
-            <div>
-              <label className="text-xs font-medium text-muted-foreground">Descripción</label>
-              <textarea
-                value={form.description}
-                onChange={(e) => updateField('description', e.target.value)}
-                placeholder="Describe el impacto y contexto de esta dependencia..."
-                rows={2}
-                className="mt-1 w-full rounded-md border border-input bg-transparent px-3 py-2 text-sm shadow-xs focus-visible:border-ring focus-visible:ring-ring/50 focus-visible:ring-[3px] outline-none resize-none dark:bg-input/30"
-              />
-            </div>
-
-            {/* Type + Direction row */}
-            <div className="grid grid-cols-2 gap-3">
-              <div>
-                <label className="text-xs font-medium text-muted-foreground">Tipo</label>
-                <Select value={form.type} onValueChange={(v) => updateField('type', v as DependencyType)}>
-                  <SelectTrigger className="mt-1"><SelectValue /></SelectTrigger>
-                  <SelectContent>
-                    {(Object.entries(TYPE_CONFIG) as [DependencyType, typeof TYPE_CONFIG[DependencyType]][]).map(([key, cfg]) => (
-                      <SelectItem key={key} value={key}>{cfg.label}</SelectItem>
-                    ))}
-                  </SelectContent>
-                </Select>
-              </div>
-              <div>
-                <label className="text-xs font-medium text-muted-foreground">Dirección</label>
-                <Select value={form.direction} onValueChange={(v) => updateField('direction', v as DependencyDirection)}>
-                  <SelectTrigger className="mt-1"><SelectValue /></SelectTrigger>
-                  <SelectContent>
-                    {(Object.entries(DIRECTION_LABELS) as [DependencyDirection, typeof DIRECTION_LABELS[DependencyDirection]][]).map(([key, cfg]) => (
-                      <SelectItem key={key} value={key}>{cfg.label}</SelectItem>
-                    ))}
-                  </SelectContent>
-                </Select>
-              </div>
-            </div>
-
-            {/* Target epic or external */}
-            {form.type === 'external' ? (
-              <div>
-                <label className="text-xs font-medium text-muted-foreground">Nombre externo</label>
-                <Input
-                  value={form.targetExternalName ?? ''}
-                  onChange={(e) => updateField('targetExternalName', e.target.value || null)}
-                  placeholder="Ej: DEUNA Payments API, Equipo de Infraestructura"
-                  className="mt-1"
-                />
-              </div>
-            ) : (
-              <div>
-                <label className="text-xs font-medium text-muted-foreground">Épica relacionada</label>
-                <Select value={form.targetEpicId ?? '__none__'} onValueChange={(v) => updateField('targetEpicId', v === '__none__' ? null : v)}>
-                  <SelectTrigger className="mt-1"><SelectValue placeholder="Seleccionar épica..." /></SelectTrigger>
-                  <SelectContent>
-                    <SelectItem value="__none__">Ninguna</SelectItem>
-                    {allEpics.map((e) => (
-                      <SelectItem key={e.id} value={e.id}>{e.tracker?.externalKey ? `${e.tracker.externalKey} · ` : ''}{e.title}</SelectItem>
-                    ))}
-                  </SelectContent>
-                </Select>
-              </div>
-            )}
-
-            {/* Status + Severity + Scheduling */}
-            <div className="grid grid-cols-3 gap-3">
-              <div>
-                <label className="text-xs font-medium text-muted-foreground">Estado</label>
-                <Select value={form.status} onValueChange={(v) => updateField('status', v as DependencyStatus)}>
-                  <SelectTrigger className="mt-1"><SelectValue /></SelectTrigger>
-                  <SelectContent>
-                    {(Object.entries(STATUS_CONFIG) as [DependencyStatus, typeof STATUS_CONFIG[DependencyStatus]][]).map(([key, cfg]) => (
-                      <SelectItem key={key} value={key}>{cfg.label}</SelectItem>
-                    ))}
-                  </SelectContent>
-                </Select>
-              </div>
-              <div>
-                <label className="text-xs font-medium text-muted-foreground">Severidad</label>
-                <Select value={form.severity} onValueChange={(v) => updateField('severity', v as Priority)}>
-                  <SelectTrigger className="mt-1"><SelectValue /></SelectTrigger>
-                  <SelectContent>
-                    {(Object.entries(SEVERITY_CONFIG) as [Priority, typeof SEVERITY_CONFIG[Priority]][]).map(([key, cfg]) => (
-                      <SelectItem key={key} value={key}>{cfg.label}</SelectItem>
-                    ))}
-                  </SelectContent>
-                </Select>
-              </div>
-              <div>
-                <label className="text-xs font-medium text-muted-foreground">Secuencia</label>
-                <Select value={form.scheduling} onValueChange={(v) => updateField('scheduling', v as DependencyScheduling)}>
-                  <SelectTrigger className="mt-1"><SelectValue /></SelectTrigger>
-                  <SelectContent>
-                    {(Object.entries(SCHEDULING_LABELS) as [DependencyScheduling, string][]).map(([key, label]) => (
-                      <SelectItem key={key} value={key}>{label}</SelectItem>
-                    ))}
-                  </SelectContent>
-                </Select>
-              </div>
-            </div>
-
-            {/* Blocking toggle */}
-            <label className="flex items-center gap-3 cursor-pointer select-none">
-              <button
-                type="button"
-                role="switch"
-                aria-checked={form.isBlocking}
-                onClick={() => updateField('isBlocking', !form.isBlocking)}
-                className={`relative inline-flex h-[22px] w-[40px] shrink-0 rounded-full border transition-colors duration-200 ${
-                  form.isBlocking
-                    ? 'bg-red-500 border-red-600'
-                    : 'bg-muted border-border'
-                }`}
-              >
-                <span
-                  className={`pointer-events-none absolute top-[2px] inline-block h-[16px] w-[16px] rounded-full bg-white shadow-sm transition-transform duration-200 ${
-                    form.isBlocking ? 'translate-x-[20px]' : 'translate-x-[2px]'
-                  }`}
-                />
-              </button>
-              <div>
-                <span className="text-sm font-medium">Bloqueante</span>
-                <p className="text-[10px] text-muted-foreground">Esta dependencia impide el avance de la épica</p>
-              </div>
-            </label>
-
-            {/* Owner + Due date */}
-            <div className="grid grid-cols-2 gap-3">
-              <div>
-                <label className="text-xs font-medium text-muted-foreground">Responsable</label>
-                <Input
-                  value={form.owner}
-                  onChange={(e) => updateField('owner', e.target.value)}
-                  placeholder="Nombre del responsable"
-                  className="mt-1"
-                />
-              </div>
-              <div>
-                <label className="text-xs font-medium text-muted-foreground">Fecha límite</label>
-                <DatePicker
-                  value={form.dueDate ?? ''}
-                  onChange={(v) => updateField('dueDate', v || null)}
-                  className="mt-1"
-                />
-              </div>
-            </div>
-
-            {/* Resolution notes (only when resolved/mitigated) */}
-            {(form.status === 'resolved' || form.status === 'mitigated') && (
-              <div>
-                <label className="text-xs font-medium text-muted-foreground">Notas de resolución</label>
-                <textarea
-                  value={form.resolutionNotes}
-                  onChange={(e) => updateField('resolutionNotes', e.target.value)}
-                  placeholder="Cómo se resolvió o mitigó esta dependencia..."
-                  rows={2}
-                  className="mt-1 w-full rounded-md border border-input bg-transparent px-3 py-2 text-sm shadow-xs focus-visible:border-ring focus-visible:ring-ring/50 focus-visible:ring-[3px] outline-none resize-none dark:bg-input/30"
-                />
-              </div>
-            )}
-          </div>
-
-          <DialogFooter>
-            <Button variant="ghost" size="sm" onClick={() => setDialogOpen(false)}>
-              Cancelar
-            </Button>
-            <Button size="sm" onClick={handleSave} disabled={!form.title.trim()}>
-              {editingDep ? 'Guardar cambios' : 'Crear dependencia'}
-            </Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
-
-      {/* --- Orden entre historias del epic (DAG emitido por el Tech Lead) --- */}
-      {storyOrderDependencies.length > 0 && (
-        <div className="space-y-2 pt-2">
-          <div className="flex items-center gap-2 border-t pt-5">
-            <GitBranch className="h-3.5 w-3.5 text-primary" />
-            <h4 className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">
-              Orden entre historias
-            </h4>
-            <span className="text-xs text-muted-foreground">
-              ({storyOrderDependencies.length} {storyOrderDependencies.length === 1 ? 'historia bloqueada' : 'historias bloqueadas'})
-            </span>
-          </div>
-          <p className="text-[11px] text-muted-foreground -mt-1">
-            DAG de precedencia emitido por el Tech Lead al generar el batch. <span className="font-semibold">Hard</span> = no puede arrancar hasta que la otra termine. <span className="font-semibold">Soft</span> = arranca con mock y sincroniza al final.
-          </p>
-
-          {storyOrderDependencies.map((item) => (
-            <div
-              key={item.story.id}
-              className="rounded-lg border border-primary/20 bg-primary/[0.02] p-4"
-            >
-              {/* Historia bloqueada */}
-              <div className="flex items-start gap-3">
-                <GitBranch className="h-3.5 w-3.5 text-primary mt-0.5 shrink-0" />
-                <div className="flex-1 min-w-0">
-                  <p className="text-sm font-medium leading-tight">{item.story.title}</p>
-                  <p className="text-[11px] text-muted-foreground mt-0.5">
-                    Bloqueada por {item.blockedBy.length} {item.blockedBy.length === 1 ? 'historia' : 'historias'}
-                  </p>
-                </div>
-              </div>
-
-              {/* Lista de bloqueantes */}
-              <ul className="mt-3 space-y-1.5 pl-6">
-                {item.blockedBy.map((edge, idx) => {
-                  const isHard = edge.hardness === 'hard';
-                  const reasonLabel = STORY_ORDER_REASON_LABELS[edge.reason] ?? edge.reason;
-                  return (
-                    <li
-                      key={`${item.story.id}-${edge.story.id}-${idx}`}
-                      className="flex items-start gap-2 text-xs"
-                    >
-                      <span
-                        className={`inline-flex items-center shrink-0 rounded-full border px-1.5 py-0.5 text-[10px] font-medium uppercase tracking-wide mt-0.5 ${
-                          isHard
-                            ? 'border-destructive/30 bg-destructive/10 text-destructive'
-                            : 'border-border bg-muted text-foreground/80'
-                        }`}
-                      >
-                        {isHard ? 'hard' : 'soft'}
+                    <div className="flex flex-wrap items-center gap-1.5 mt-3">
+                      <span className={`inline-flex items-center rounded-full px-2 py-0.5 text-[10px] font-medium ${SEVERITY_BADGE[dep.severity]}`}>
+                        {dep.severity}
                       </span>
-                      <div className="flex-1 min-w-0">
-                        <div className="flex items-center gap-1.5 flex-wrap">
-                          <span className="font-medium text-foreground">{edge.story.title}</span>
-                          <span className="inline-flex items-center rounded-full border border-border bg-muted/50 px-1.5 py-0.5 text-[9px] font-medium text-muted-foreground uppercase tracking-wide">
-                            {reasonLabel}
-                          </span>
-                        </div>
-                        {edge.description && (
-                          <p className="text-[11px] text-muted-foreground mt-0.5 line-clamp-2">
-                            {edge.description}
-                          </p>
+                      {dep.source === 'discovered' && (
+                        <span className="inline-flex items-center gap-1 rounded-full border border-primary/20 bg-primary/10 text-primary px-2 py-0.5 text-[10px] font-medium">
+                          <Sparkles className="h-2.5 w-2.5" />
+                          IA
+                        </span>
+                      )}
+                      {dep.vendor && (
+                        <span className="inline-flex items-center rounded-full border border-border bg-muted/50 px-2 py-0.5 text-[10px] font-medium text-foreground/80">
+                          {dep.vendor}
+                        </span>
+                      )}
+                      {dep.requiresCredential && !dep.linkedSecretId && (
+                        <button
+                          type="button"
+                          onClick={(e) => {
+                            // Evitar que el click propague al wrapper Link de
+                            // la card (que navegaría a la historia owner).
+                            e.preventDefault();
+                            e.stopPropagation();
+                            setSecretDialogContext(dep);
+                          }}
+                          className="inline-flex items-center gap-1 rounded-full border border-destructive/30 bg-destructive/10 text-destructive px-2 py-0.5 text-[10px] font-medium hover:bg-destructive/20 hover:border-destructive/50 transition-colors cursor-pointer"
+                          title="Click para registrar el secret asociado y resolver esta dependencia"
+                        >
+                          <KeyRound className="h-2.5 w-2.5" />
+                          Requiere credencial
+                          <span className="opacity-70">— resolver</span>
+                        </button>
+                      )}
+                      {dep.linkedSecretId && (
+                        <span className="inline-flex items-center gap-1 rounded-full border border-green-500/30 bg-green-500/10 text-green-600 dark:text-green-400 px-2 py-0.5 text-[10px] font-medium">
+                          <ShieldCheck className="h-2.5 w-2.5" />
+                          Secret provisto
+                        </span>
+                      )}
+                      {dep.isBlocking && (
+                        <span className="inline-flex items-center gap-1 rounded-full bg-red-100 text-red-700 dark:bg-red-900/30 dark:text-red-300 px-2 py-0.5 text-[10px] font-semibold">
+                          <AlertTriangle className="h-2.5 w-2.5" />
+                          Bloqueante
+                        </span>
+                      )}
+                    </div>
+
+                    {/* Bloque expandido: muestra el mdContent rico que el
+                        agente IA generó. Al estar dentro del Link wrapper,
+                        cualquier click adentro propaga al Link. Para que el
+                        contenido sea seleccionable sin navegar accidentalmente,
+                        wrappeamos en un onClick que stopPropagation. */}
+                    {isExpanded && dep.mdContent && dep.mdContent.trim().length > 0 && (
+                      <div
+                        onClick={(e) => {
+                          e.preventDefault();
+                          e.stopPropagation();
+                        }}
+                        className="mt-4 pt-4 border-t border-border/40 cursor-default"
+                      >
+                        <ReadOnlyMarkdown content={dep.mdContent} />
+                      </div>
+                    )}
+                  </>
+                );
+                return isLegacy ? (
+                  <div key={dep.id} className={cardClass}>{cardInner}</div>
+                ) : (
+                  <Link
+                    key={dep.id}
+                    href={`/proyectos/historias/${dep.storyId}?dep=${dep.id}`}
+                    className={cardClass}
+                  >
+                    {cardInner}
+                  </Link>
+                );
+              })}
+            </div>
+          </section>
+        );
+      })}
+
+      {/* Sección DAG: Orden entre historias del epic (sin cambios respecto al original) */}
+      {storyOrderDependencies.length > 0 && (
+        <section className="space-y-3">
+          <div className="border-b pb-2">
+            <div className="flex items-center gap-2">
+              <GitBranch className="h-4 w-4 text-foreground" />
+              <h4 className="text-sm font-semibold">🔄 Orden entre historias del epic</h4>
+              <span className="text-xs text-muted-foreground">
+                ({storyOrderDependencies.length} {storyOrderDependencies.length === 1 ? 'historia bloqueada' : 'historias bloqueadas'})
+              </span>
+            </div>
+            <p className="text-[11px] text-muted-foreground mt-1">
+              DAG emitido por el Tech Lead. Las hard se sincronizan a Linear como Issue Relations
+              tipo &quot;blocks&quot; (visibles en el panel de cada Issue).
+            </p>
+          </div>
+          <div className="space-y-2">
+            {storyOrderDependencies.map((item) => (
+              <div key={item.story.id} className="rounded-lg border p-4 space-y-2">
+                <Link
+                  href={`/proyectos/historias/${item.story.id}`}
+                  className="text-sm font-medium leading-tight hover:underline block"
+                >
+                  {item.story.title}
+                </Link>
+                <p className="text-xs text-muted-foreground">Bloqueada por:</p>
+                <ul className="space-y-1 ml-2">
+                  {item.blockedBy.map((blocker) => (
+                    <li key={blocker.story.id} className="flex items-start gap-2 text-xs">
+                      <span className={`mt-0.5 inline-block px-1.5 py-0 rounded text-[9px] font-semibold ${
+                        blocker.hardness === 'hard'
+                          ? 'bg-red-100 text-red-700 dark:bg-red-900/30 dark:text-red-300'
+                          : 'bg-amber-100 text-amber-700 dark:bg-amber-900/30 dark:text-amber-300'
+                      }`}>
+                        {blocker.hardness.toUpperCase()}
+                      </span>
+                      <div className="flex-1">
+                        <Link
+                          href={`/proyectos/historias/${blocker.story.id}`}
+                          className="font-medium text-foreground hover:underline"
+                        >
+                          {blocker.story.title}
+                        </Link>
+                        <span className="text-muted-foreground ml-2">
+                          [{STORY_ORDER_REASON_LABELS[blocker.reason] ?? blocker.reason}]
+                        </span>
+                        {blocker.description && (
+                          <p className="text-muted-foreground mt-0.5">{blocker.description}</p>
                         )}
                       </div>
                     </li>
-                  );
-                })}
-              </ul>
-            </div>
-          ))}
-        </div>
+                  ))}
+                </ul>
+              </div>
+            ))}
+          </div>
+        </section>
       )}
 
-      {/* --- Dialog para resolver una dep IA con un secret externo --- */}
-      {resolvingDep && (
-        <CreateExternalSecretDialog
-          open={!!resolvingDep}
-          onOpenChange={(open) => !open && setResolvingDep(null)}
-          // Sugerimos un `name` UPPER_SNAKE a partir del vendor si lo hay,
-          // sino del título de la dep — el user puede ajustar en el input.
-          defaultName={suggestSecretName(resolvingDep)}
-          defaultVendor={resolvingDep.vendor ?? ''}
-          defaultDescription={resolvingDep.description}
-          sourceDependencyId={resolvingDep.id}
-          onCreated={() => {
-            setResolvingDep(null);
-            // El backend auto-resolvió la dep con `linkedSecretId`. Pedimos
-            // al parent que re-fetche las discovered deps para reflejar el
-            // nuevo estado sin perder el resto del UI (diagramas, tabs,
-            // scroll, otros dialogs).
-            onDiscoveredDepsRefresh?.();
-          }}
-        />
-      )}
+      {/* Dialog compartido para crear secret externo desde una dep concreta.
+          Se abre cuando el user click en "Requiere credencial — resolver".
+          El backend usa `sourceDependencyId` para auto-resolver la dep
+          (status='resolved' + linkedSecretId) Y bulk-update por vendor sobre
+          todas las stories que comparten la misma credencial. */}
+      <CreateExternalSecretDialog
+        open={secretDialogContext !== null}
+        onOpenChange={(open) => {
+          if (!open) setSecretDialogContext(null);
+        }}
+        defaultName={secretDialogContext ? titleToSecretName(secretDialogContext.title) : ''}
+        defaultVendor={secretDialogContext?.vendor ?? ''}
+        defaultDescription={secretDialogContext?.description ?? ''}
+        sourceDependencyId={secretDialogContext?.id}
+        onCreated={() => {
+          setSecretDialogContext(null);
+          // Forzar re-fetch del rollup → el badge cambia a "Secret provisto".
+          setRefreshTick((t) => t + 1);
+        }}
+      />
     </div>
   );
-}
-
-/**
- * Genera un name sugerido UPPER_SNAKE_CASE para un secret a partir de una
- * `DiscoveredDependency`. Prefiere el vendor si existe; fallback al title.
- * Añade sufijo `_API_KEY` si el nombre no sugiere explícitamente otro tipo.
- */
-function suggestSecretName(dep: DiscoveredDependency): string {
-  const base = dep.vendor || dep.title;
-  const normalized = base
-    .normalize('NFD')
-    .replace(/[\u0300-\u036f]/g, '')
-    .toUpperCase()
-    .replace(/[^A-Z0-9]+/g, '_')
-    .replace(/^_+|_+$/g, '');
-  // Si el título ya contiene "KEY", "SECRET", "TOKEN", no agregamos sufijo.
-  if (/(KEY|SECRET|TOKEN|CODE|ID)$/.test(normalized)) return normalized.slice(0, 100);
-  return `${normalized}_API_KEY`.slice(0, 100);
 }

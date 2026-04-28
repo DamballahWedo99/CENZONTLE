@@ -4,7 +4,12 @@ import { apiFetch } from './client';
 export interface EpicResponse {
   id: string;
   title: string;
-  description: string;
+  /**
+   * Markdown único de la épica (post-refactor v2). Reemplaza description + 11
+   * campos narrativos discretos. Estructura mínima: 9 headings level-2
+   * obligatorios dictados por placeholder UX y prompt al agente IA.
+   */
+  markdown: string;
   status: string;
   priority: string;
   startDate: string;
@@ -13,18 +18,6 @@ export interface EpicResponse {
   initiative: { id: string; name: string; status: string };
   podIds: string[];
   pods: { id: string; name: string; color: string }[];
-  qualitativeBenefits: string;
-  quantitativeBenefits: string;
-  benefitsMeasurement: string;
-  scopeDescription: string;
-  acceptanceCriteria: string;
-  technologicalImprovements: string;
-  businessPriority: string;
-  teamsInvolved: string;
-  impactedChannels: string;
-  impactedFlows: string;
-  impactSabreLevel: string;
-  thirdPartyDependencies: string;
   documents: any[];
   diagrams: any[];
   dependencies: any[];
@@ -57,26 +50,14 @@ export function getEpic(id: string, includeContent = false) {
 
 export interface CreateEpicInput {
   title: string;
-  description: string;
   status?: string;
   priority?: string;
   startDate: string;
   targetDate: string;
   initiativeId: string;
   podIds?: string[];
-  // Campos narrativos (el backend los escribe a PG + markdown en el vault)
-  qualitativeBenefits?: string;
-  quantitativeBenefits?: string;
-  benefitsMeasurement?: string;
-  scopeDescription?: string;
-  acceptanceCriteria?: string;
-  technologicalImprovements?: string;
-  businessPriority?: string;
-  teamsInvolved?: string;
-  impactedChannels?: string;
-  impactedFlows?: string;
-  impactSabreLevel?: string;
-  thirdPartyDependencies?: string;
+  /** Markdown único con los 9 headings obligatorios. Optional al crear — el user puede llenarlo después. */
+  markdown?: string;
 }
 
 export function createEpic(data: CreateEpicInput) {

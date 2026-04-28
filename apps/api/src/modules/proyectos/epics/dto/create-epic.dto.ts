@@ -7,7 +7,10 @@ import { EpicStatus, Priority } from '@prisma/client';
 // CWE-770: unbounded user input → unbounded git history bloat + API rate exhaustion.
 const MAX_TITLE = 200;
 const MAX_DESCRIPTION = 5_000;
-const MAX_NARRATIVE = 20_000;
+// Markdown único de la épica: suma aproximada de los antiguos 12 campos
+// narrativos (~13 × 20K = 260K) capeada conservadoramente. 60K es ~30 páginas
+// de prosa rica, suficiente para la épica más extensa que haya emitido el agente.
+const MAX_EPIC_MARKDOWN = 60_000;
 // El handoff de Claude Design es una instrucción corta + URL al HTML exportado
 // (~250 chars típicos). 2 KB deja margen para handoffs con varios archivos o
 // instrucciones extendidas, y mantiene un cap razonable contra DoS al vault.
@@ -96,11 +99,16 @@ export class CreateEpicDto {
   @MaxLength(MAX_TITLE)
   title!: string;
 
-  @ApiProperty({ example: 'Rediseño completo del flujo de checkout' })
+  /**
+   * Markdown único de la épica. Estructura mínima dictada por placeholder UX
+   * y prompt al agente IA — 9 headings level-2 obligatorios. Reemplaza los 12
+   * campos narrativos discretos del shape v1.
+   */
+  @ApiPropertyOptional({ example: '## Descripción\n\nRediseño completo...' })
+  @IsOptional()
   @IsString()
-  @IsNotEmpty()
-  @MaxLength(MAX_DESCRIPTION)
-  description!: string;
+  @MaxLength(MAX_EPIC_MARKDOWN)
+  markdown?: string;
 
   @ApiPropertyOptional({ enum: EpicStatus, default: 'draft' })
   @IsOptional()
@@ -129,20 +137,6 @@ export class CreateEpicDto {
   @IsArray()
   @IsUUID('4', { each: true })
   podIds?: string[];
-
-  // Rich text fields
-  @ApiPropertyOptional() @IsOptional() @IsString() @MaxLength(MAX_NARRATIVE) qualitativeBenefits?: string;
-  @ApiPropertyOptional() @IsOptional() @IsString() @MaxLength(MAX_NARRATIVE) quantitativeBenefits?: string;
-  @ApiPropertyOptional() @IsOptional() @IsString() @MaxLength(MAX_NARRATIVE) benefitsMeasurement?: string;
-  @ApiPropertyOptional() @IsOptional() @IsString() @MaxLength(MAX_NARRATIVE) scopeDescription?: string;
-  @ApiPropertyOptional() @IsOptional() @IsString() @MaxLength(MAX_NARRATIVE) acceptanceCriteria?: string;
-  @ApiPropertyOptional() @IsOptional() @IsString() @MaxLength(MAX_NARRATIVE) technologicalImprovements?: string;
-  @ApiPropertyOptional() @IsOptional() @IsString() @MaxLength(MAX_NARRATIVE) businessPriority?: string;
-  @ApiPropertyOptional() @IsOptional() @IsString() @MaxLength(MAX_NARRATIVE) teamsInvolved?: string;
-  @ApiPropertyOptional() @IsOptional() @IsString() @MaxLength(MAX_NARRATIVE) impactedChannels?: string;
-  @ApiPropertyOptional() @IsOptional() @IsString() @MaxLength(MAX_NARRATIVE) impactedFlows?: string;
-  @ApiPropertyOptional() @IsOptional() @IsString() @MaxLength(MAX_NARRATIVE) impactSabreLevel?: string;
-  @ApiPropertyOptional() @IsOptional() @IsString() @MaxLength(MAX_NARRATIVE) thirdPartyDependencies?: string;
 
   // JSONB fields
   @ApiPropertyOptional() @IsOptional() @IsArray() documents?: any[];

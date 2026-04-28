@@ -5,6 +5,19 @@ import { Sparkles, Check, Pencil, RefreshCw, X } from 'lucide-react';
 import type { ProposedEpic, Priority } from '@cenzontle/shared';
 import type { Pod } from '@cenzontle/shared';
 
+/**
+ * Extrae un summary corto del markdown de una épica propuesta. Busca el
+ * primer párrafo no-vacío bajo `## Descripción` o el primer heading. Sin
+ * markdown, retorna string vacío y el caller muestra placeholder.
+ */
+function extractEpicSummary(md: string | undefined): string {
+  const text = (md ?? '').trim();
+  if (!text) return '';
+  const descMatch = text.match(/^##\s+Descripción\s*\n+([\s\S]*?)(?=\n##\s|$)/m);
+  const firstParaMatch = text.match(/^##\s+\S[^\n]*\n+([\s\S]*?)(?=\n##\s|$)/m);
+  return (descMatch?.[1] ?? firstParaMatch?.[1] ?? text).trim().replace(/\s+/g, ' ').slice(0, 200);
+}
+
 const priorityColors: Record<Priority, string> = {
   critical: 'text-red-600 bg-red-50 border-red-200 dark:bg-red-950/30 dark:border-red-900/40',
   high: 'text-orange-600 bg-orange-50 border-orange-200 dark:bg-orange-950/30 dark:border-orange-900/40',
@@ -58,8 +71,8 @@ export function EpicProposalCard({
         </div>
       </div>
 
-      {/* Description (truncated) */}
-      <p className="text-xs text-muted-foreground line-clamp-2">{proposal.description}</p>
+      {/* Summary del markdown — extrae párrafo bajo "## Descripción" o el primero. */}
+      <p className="text-xs text-muted-foreground line-clamp-2">{extractEpicSummary(proposal.markdown)}</p>
 
       {/* Pods */}
       {assignedPods.length > 0 && (

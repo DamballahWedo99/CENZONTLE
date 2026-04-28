@@ -114,7 +114,7 @@ export class EpicGenerationService {
 
     const initiative = await this.prisma.initiative.findUnique({
       where: { id: initiativeId },
-      include: { epics: { select: { id: true, title: true, description: true } } },
+      include: { epics: { select: { id: true, title: true, markdown: true } } },
     });
 
     if (!initiative) {
@@ -126,8 +126,18 @@ export class EpicGenerationService {
 
     const allPods = await this.pods.findAll();
 
+    // Para listar épicas existentes al agente, extraemos un summary corto del
+    // markdown (primer párrafo después del primer heading o las primeras 120 chars).
     const existingEpics = initiative.epics
-      .map((e: { title: string; description: string }) => `- ${e.title}: ${e.description.slice(0, 120)}`)
+      .map((e: { title: string; markdown: string }) => {
+        const summary = (e.markdown ?? '')
+          .replace(/^---\s*\n[\s\S]*?\n---\s*\n+/m, '')
+          .replace(/^#+\s+[^\n]*\n+/m, '')
+          .replace(/\s+/g, ' ')
+          .trim()
+          .slice(0, 120);
+        return `- ${e.title}: ${summary}`;
+      })
       .join('\n');
 
     // Carga de repos de código enabled (Opción C: multi-repo).
@@ -181,25 +191,52 @@ export class EpicGenerationService {
                 type: 'object',
                 properties: {
                   title: { type: 'string' },
-                  description: { type: 'string' },
                   priority: { type: 'string', enum: ['critical', 'high', 'medium', 'low'] },
                   podIds: { type: 'array', items: { type: 'string' }, description: 'IDs of pods this epic should be assigned to' },
                   startDate: { type: 'string', description: 'ISO date YYYY-MM-DD' },
                   targetDate: { type: 'string', description: 'ISO date YYYY-MM-DD' },
-                  qualitativeBenefits: { type: 'string' },
-                  quantitativeBenefits: { type: 'string' },
-                  benefitsMeasurement: { type: 'string' },
-                  scopeDescription: { type: 'string' },
-                  acceptanceCriteria: { type: 'string' },
-                  technologicalImprovements: { type: 'string' },
-                  businessPriority: { type: 'string' },
-                  teamsInvolved: { type: 'string' },
-                  impactedChannels: { type: 'string' },
-                  impactedFlows: { type: 'string' },
-                  impactSabreLevel: { type: 'string' },
-                  thirdPartyDependencies: { type: 'string' },
+                  markdown: {
+                    type: 'string',
+                    description: `Markdown único de la épica. DEBE incluir EXACTAMENTE estos 9 headings level-2 en este orden, con contenido REAL bajo cada uno:
+
+## Descripción
+1-3 párrafos explicando qué se construye y por qué surge la épica.
+
+## Beneficios cualitativos
+Mejoras no-cuantificables (UX, retención, eliminación de fricción, riesgo operativo eliminado, etc.).
+
+## Beneficios cuantitativos
+Métricas concretas (revenue $, latencia ms, tasa de conversión %, costo evitado $/mes).
+
+## Medición de beneficios
+Cómo se mide cada beneficio: dashboard, evento de telemetría, query SQL, KPI de producto.
+
+## Alcance
+Lista markdown de lo que ESTÁ y lo que NO está en alcance. Sé explícito con exclusiones.
+
+## Criterios de aceptación
+Lista numerada de criterios verificables (Gherkin o bullets con métricas concretas). Mínimo 3.
+
+## Mejoras tecnológicas
+Mejoras infra/arquitectura que esta épica habilita: refactor, deuda técnica, nueva capacidad de plataforma.
+
+## Canales y flujos impactados
+Lista markdown de canales (web, mobile, kiosko, partner API, contact center) y flujos (checkout, signup, recovery, billing) afectados. Si aplica, incluir nivel de impacto en sistemas externos (Sabre, ERP, etc.).
+
+## Dependencias de terceros
+Lista markdown de proveedores externos involucrados (Stripe, Twilio, Auth0, etc.) y por qué cada uno es relevante para la épica.
+
+REGLAS DUROS:
+- Los 9 headings deben aparecer EXACTAMENTE como están escritos arriba.
+- NO emitas el heading sin contenido — cada sección con prosa o lista real.
+- NO uses "TBD", "N/A", "Pronto" — el sistema rechaza el output y fuerza retry.
+- NO incluyas sub-campos sueltos (description, qualitativeBenefits, scopeDescription, etc.) — el schema actual SOLO acepta \`markdown\`. Cualquier otro shape se descarta como vacío.
+- NO incluyas "## Prioridad de negocio" ni "## Equipos involucrados" — esos viven como metadata estructurada (\`priority\` enum + \`podIds\`) fuera del markdown.
+- Markdown válido GFM (listas, bold, links, code fences).
+- Idioma: español.`,
+                  },
                 },
-                required: ['title', 'description', 'priority'],
+                required: ['title', 'priority', 'markdown'],
               },
             },
           },
@@ -503,12 +540,14 @@ export class EpicGenerationService {
 
   private emitProposals(
     rawEpics: Record<string, unknown>[],
-    initiative: { id: string; name: string; startDate: Date; targetDate: Date },
+    initiative: { id: string; name: string; startDate: Date | null; targetDate: Date | null },
     allPods: { id: string; name: string }[],
     subject: Subject<{ data: EpicGenerationEvent }>,
   ) {
     const podIdSet = new Set(allPods.map((p) => p.id));
-    const baseDate = new Date(initiative.startDate);
+    // Si la iniciativa no tiene fecha de inicio (planning sin compromiso),
+    // usamos `now` como base para escalonar las épicas propuestas.
+    const baseDate = initiative.startDate ? new Date(initiative.startDate) : new Date();
 
     for (let i = 0; i < rawEpics.length; i++) {
       const raw = rawEpics[i];
@@ -523,28 +562,19 @@ export class EpicGenerationService {
       const epicEnd = new Date(epicStart);
       epicEnd.setDate(epicEnd.getDate() + 60);
 
+      // El agente debe emitir un solo `markdown` con los 9 headings obligatorios.
+      // Cap defensivo a 60K (~30 páginas) — coherente con MAX_EPIC_MARKDOWN del DTO.
+      const MAX_EPIC_MARKDOWN_LEN = 60_000;
       const proposed: ProposedEpic = {
         clientId: `ai-${randomUUID()}`,
         title: cap(String(raw.title ?? `Epica ${i + 1}`), MAX_TITLE_LEN),
-        description: cap(String(raw.description ?? '')),
+        markdown: cap(String(raw.markdown ?? ''), MAX_EPIC_MARKDOWN_LEN),
         status: 'draft' as EpicStatus,
         priority: this.validatePriority(raw.priority),
         initiativeId: initiative.id,
         podIds: validPodIds,
         startDate: raw.startDate ? String(raw.startDate).slice(0, 10) : epicStart.toISOString().slice(0, 10),
         targetDate: raw.targetDate ? String(raw.targetDate).slice(0, 10) : epicEnd.toISOString().slice(0, 10),
-        qualitativeBenefits: cap(String(raw.qualitativeBenefits ?? '')),
-        quantitativeBenefits: cap(String(raw.quantitativeBenefits ?? '')),
-        benefitsMeasurement: cap(String(raw.benefitsMeasurement ?? '')),
-        scopeDescription: cap(String(raw.scopeDescription ?? '')),
-        acceptanceCriteria: cap(String(raw.acceptanceCriteria ?? '')),
-        technologicalImprovements: cap(String(raw.technologicalImprovements ?? '')),
-        businessPriority: cap(String(raw.businessPriority ?? '')),
-        teamsInvolved: cap(String(raw.teamsInvolved ?? '')),
-        impactedChannels: cap(String(raw.impactedChannels ?? '')),
-        impactedFlows: cap(String(raw.impactedFlows ?? '')),
-        impactSabreLevel: cap(String(raw.impactSabreLevel ?? '')),
-        thirdPartyDependencies: cap(String(raw.thirdPartyDependencies ?? '')),
       };
 
       subject.next({ data: { type: 'proposal_ready', epic: proposed, timestamp: new Date().toISOString() } });
@@ -687,48 +717,104 @@ Cada epica que propongas DEBE pasar este checklist mental:
 - Listas de tecnologias sin contexto — no digas "Kubernetes, Istio, Datadog" solo por sonar tecnico. Solo menciona tech que la iniciativa REALMENTE necesita.
 - Beneficios inventados con porcentajes falsos — si no tienes datos reales, describe el impacto cualitativamente sin inventar numeros.
 
-## Ejemplo de una epica bien escrita
+## Ejemplo de \`markdown\` bien escrito (1 sola épica)
 
-<example>
-titulo: "Orquestador de routing multi-PSP con failover automatico"
-descripcion: "Implementar un router inteligente que distribuya transacciones entre DEUNA, Adyen y Stripe segun tasa de aprobacion historica por BIN y monto. Incluye failover automatico cuando un PSP reporta degradacion (circuit breaker con threshold de 3 fallos en 30s). Motivacion: hoy el 100% del volumen va a DEUNA y una caida de 20 min el 15-mar costo $180K en ventas perdidas."
-scopeDescription: "Router con 3 estrategias (round-robin, cost-optimized, approval-optimized), circuit breaker por PSP, panel de monitoreo con tasa de aprobacion en tiempo real, y conciliacion cruzada diaria."
-acceptanceCriteria: "Failover ejecuta en <5s. Tasa de aprobacion global sube de 89% a >=93% en los primeros 30 dias. Panel muestra routing decisions en tiempo real con latencia <2s."
-qualitativeBenefits: "Elimina el single point of failure en procesamiento de pagos. El equipo de ops deja de ser pager-duty humano durante caidas de DEUNA."
-</example>
+\`\`\`markdown
+## Descripción
 
-Nota como el ejemplo:
-- Nombra proveedores REALES del contexto (no genericos)
-- Cuantifica el problema ($180K)
-- Los criterios son medibles (<5s, >=93%)
-- El alcance es concreto (3 estrategias, circuit breaker, panel, conciliacion)
+Implementar un router inteligente que distribuya transacciones entre DEUNA, Adyen y Stripe según tasa de aprobación histórica por BIN y monto. Incluye failover automático cuando un PSP reporta degradación (circuit breaker con threshold de 3 fallos en 30s). Motivación: hoy el 100% del volumen va a DEUNA y una caída de 20 min el 15-mar costó $180K en ventas perdidas.
+
+## Beneficios cualitativos
+
+- Elimina el single point of failure en procesamiento de pagos.
+- El equipo de ops deja de ser pager-duty humano durante caídas de DEUNA.
+- Habilita negociación con PSPs alternos al diversificar volumen.
+
+## Beneficios cuantitativos
+
+- Tasa de aprobación global sube de 89% a ≥93% en los primeros 30 días → +$420K mensuales recuperados.
+- Tiempo de mitigación de outage cae de ~20 min (humano) a <5s (automático).
+- Costo por transacción baja ~8% al rutear por PSP más barato cuando aprobación es comparable.
+
+## Medición de beneficios
+
+- Dashboard Datadog con tasa de aprobación global y por PSP (latencia <2s).
+- Evento \`payment.routed\` en BigQuery con \`{psp, decisionReason, approvalRate30d}\`.
+- Reporte semanal automatizado vía Looker.
+
+## Alcance
+
+EN alcance:
+- Router con 3 estrategias (round-robin, cost-optimized, approval-optimized).
+- Circuit breaker por PSP.
+- Panel de monitoreo con tasa de aprobación en tiempo real.
+- Conciliación cruzada diaria.
+
+NO en alcance:
+- Renegociación de contratos con PSPs (lo maneja Finanzas).
+- Soporte para criptopagos (futura iniciativa).
+
+## Criterios de aceptación
+
+1. Failover ejecuta en <5s end-to-end (medido p95).
+2. Tasa de aprobación global sube de 89% a ≥93% en los primeros 30 días post-launch.
+3. Panel muestra routing decisions en tiempo real con latencia <2s.
+4. Cada PSP tiene shadow-mode flag para A/B testing antes de habilitar producción.
+
+## Mejoras tecnológicas
+
+- Refactor del módulo \`payment-gateway\` para inyectar el router como middleware.
+- Capacidad de circuit breakers reutilizable (extraída a \`@cenzontle/resilience\`).
+- Telemetría estructurada estándar para todos los PSPs.
+
+## Canales y flujos impactados
+
+- Web checkout, app móvil, contact center (charge-on-call).
+- Flujos: charge, refund, void, partial-capture.
+- Sin impacto en sistemas externos Sabre/ERP — el routing es transparente downstream.
+
+## Dependencias de terceros
+
+- **DEUNA** (provider actual): API key + merchant ID (existente).
+- **Adyen** (nuevo): credenciales de sandbox + producción, contrato firmado.
+- **Stripe** (nuevo): API keys live + webhook signing secret.
+\`\`\`
+
+Nota cómo el ejemplo:
+- Nombra proveedores REALES del contexto (no genéricos).
+- Cuantifica el problema ($180K) y los beneficios ($420K).
+- Los criterios son medibles (<5s, ≥93%).
+- El alcance es explícito con inclusiones Y exclusiones.
+- NO incluye "Prioridad de negocio" ni "Equipos involucrados" — esos viven en \`priority\` y \`podIds\`.
 
 ## Formato de salida
 
-- Propon entre 3 y ${count} epicas llamando a \`submit_proposals\`.
+- Propón entre 3 y ${count} épicas llamando a \`submit_proposals\`.
 - Prioridad: critical = sin esto la iniciativa no puede avanzar, high = alto impacto directo, medium = importante pero no bloqueante, low = mejora incremental.
-- Pods: usa los IDs exactos de los pods proporcionados. Si no hay match claro, deja el array vacio.
-- Fechas: YYYY-MM-DD, escalonadas ~30 dias entre epicas.
-- Idioma: espanol.
-- Campos narrativos: especificos y concisos. Si no tienes info suficiente para un campo, dejalo vacio en vez de inventar.`;
+- Pods: usa los IDs exactos de los pods proporcionados. Si no hay match claro, deja el array vacío.
+- Fechas: YYYY-MM-DD, escalonadas ~30 días entre épicas.
+- \`markdown\`: UN solo string con los 9 headings level-2 obligatorios. Si no tienes info suficiente para un heading, escribe "Por definir tras descubrimiento adicional" — pero el heading debe existir, no lo omitas.
+- Idioma: español.`;
   }
 
   private buildContextBlock(
-    initiative: { name: string; description: string; startDate: Date; targetDate: Date; documents?: unknown },
+    initiative: { name: string; description: string; startDate: Date | null; targetDate: Date | null; documents?: unknown },
     pods: { id: string; name: string; description: string }[],
     existingEpics: string,
     enabledRepos: Array<{ name: string; branch: string }>,
     userPrompt?: string,
   ): string {
-    const startDate = initiative.startDate.toISOString().slice(0, 10);
-    const targetDate = initiative.targetDate.toISOString().slice(0, 10);
+    // Las fechas son opcionales — una iniciativa en planning puede no tenerlas.
+    // Si faltan, indicamos al agente que estime las fechas escalonadas él mismo.
+    const startDate = initiative.startDate?.toISOString().slice(0, 10) ?? 'sin definir';
+    const targetDate = initiative.targetDate?.toISOString().slice(0, 10) ?? 'sin definir';
     const docs = Array.isArray(initiative.documents) ? initiative.documents : [];
     const hasDocuments = docs.length > 0;
 
     const parts = [
       `<initiative>
 nombre: ${initiative.name}
-fechas: ${startDate} -> ${targetDate}
+fechas: ${startDate} -> ${targetDate}${initiative.startDate && initiative.targetDate ? '' : ' (la iniciativa está en planning sin compromiso temporal — propón fechas razonables escalonadas para las épicas)'}
 documentos_adjuntos: ${hasDocuments ? `${docs.length} documento(s) — USA read_initiative_documents para leerlos` : 'ninguno'}
 
 ${initiative.description}
