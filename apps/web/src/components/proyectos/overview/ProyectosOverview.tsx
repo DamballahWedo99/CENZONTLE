@@ -5,7 +5,6 @@ import { useAuthContext } from '@/context/AuthContext';
 import { Permission } from '@cenzontle/shared';
 import { InitiativeProgress } from './InitiativeProgress';
 import { PodWorkloadSummary } from './PodWorkloadSummary';
-import { DownloadMenu } from '../shared/DownloadMenu';
 import { Rocket } from 'lucide-react';
 
 export function ProyectosOverview() {
@@ -34,13 +33,7 @@ export function ProyectosOverview() {
     <div className="space-y-6">
       {/* Initiatives */}
       <section>
-        <div className="flex items-center justify-between mb-3">
-          <h3 className="text-lg font-semibold">Iniciativas</h3>
-          <DownloadMenu
-            entity={{ kind: 'initiatives-list', initiatives: state.initiatives }}
-            variant="button"
-          />
-        </div>
+        <h3 className="text-lg font-semibold mb-3">Iniciativas</h3>
         <div className="space-y-3">
           {state.initiatives.map((initiative) => (
             <InitiativeProgress key={initiative.id} initiative={initiative} />

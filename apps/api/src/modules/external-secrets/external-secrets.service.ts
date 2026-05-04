@@ -11,6 +11,37 @@ import { CryptoService } from '../vault/crypto.service';
 import { CreateExternalSecretDto } from './dto/create-external-secret.dto';
 
 /**
+ * Normaliza un título de credencial para matcheo. PARITARIO con
+ * `normalizeTitle` de `dedupe-rollup.ts` y `dedup-cross-stories.ts` —
+ * cualquier divergencia produce el bug donde una dep se considera distinta
+ * en un módulo y duplicada en otro. Strippea prefijos comunes ("GitHub
+ * Secret: VERCEL_TOKEN" → "VERCEL_TOKEN") y normaliza case/whitespace.
+ *
+ * Riesgo residual conocido (security-reviewer MEDIUM 2026-05-04): titles
+ * GENÉRICOS pueden colisionar tras el strip + lowercase. Ejemplo:
+ *   - "Secret: TOKEN"        → "token"
+ *   - "TOKEN"                → "token"
+ *   - "GitHub Secret: TOKEN" → "token"
+ * Si dos deps del MISMO vendor usan títulos genéricos que normalizan al
+ * mismo string pero referencian secrets distintos, el bulk-resolve las
+ * uniría. Mitigación práctica: el LLM (en story-generation.service.ts)
+ * está prompted para emitir nombres canónicos UPPER_SNAKE_CASE específicos
+ * del vendor (ej. AMADEUS_CLIENT_ID, no genérico "TOKEN") — los títulos
+ * típicos NO colisionan. Si ves colisiones reales en producción, agregar
+ * el `secretName` denormalizado al schema de la dep en generation time.
+ */
+function normalizeTitle(title: string): string {
+  return title
+    .replace(
+      /^(github\s+secret|secret|credencial|credential|token|api\s+key)\s*:\s*(?=[A-Z_])/i,
+      '',
+    )
+    .replace(/\s+/g, ' ')
+    .trim()
+    .toLowerCase();
+}
+
+/**
  * Gestiona credenciales externas (API keys de Stripe/Twilio, merchant codes,
  * OAuth client_secrets, etc.) que el backend necesita para integrar con
  * proveedores de terceros. El valor se encripta at-rest con AES-256-GCM
@@ -90,6 +121,23 @@ export class ExternalSecretsService {
       );
     }
 
+    // BULK PROPAGATION: el modelo per-story permite que la misma credencial
+    // viva en N rows distintas (una por historia que la requiere). Cuando el
+    // user provee el secret una vez, propagamos el linkedSecretId a TODAS las
+    // `StoryTechnicalDependency` que matcheen por vendor (case-insensitive)
+    // + `requiresCredential=true` + sin link previo. Sin esto, el user vería
+    // 1 historia con badge "Secret provisto" y 2 sin él aunque sean la misma.
+    // Best-effort: un fallo aquí NO invalida el secret recién creado.
+    if (dto.vendor) {
+      await this.resolveAllStoryDependenciesByVendor(dto.vendor, created.id, dto.name).catch(
+        (err) => {
+          this.logger.warn(
+            `[create] bulk-resolve story deps for vendor=${dto.vendor} failed: ${(err as Error)?.message ?? err}`,
+          );
+        },
+      );
+    }
+
     return this.toResponse(created, dto.value);
   }
 
@@ -104,8 +152,24 @@ export class ExternalSecretsService {
   async delete(id: string): Promise<void> {
     const found = await this.prisma.externalSecret.findUnique({ where: { id } });
     if (!found) throw new NotFoundException(`Secret ${id} no encontrado`);
-    await this.prisma.externalSecret.delete({ where: { id } });
-    this.logger.log(`[delete] external secret name=${found.name} id=${id}`);
+
+    // Desvincular las StoryTechnicalDependency que apuntaban a este secret
+    // ANTES de borrarlo. `linkedSecretId` no es FK real (Prisma String, no
+    // relación) — sin esto las deps quedarían con un linkedSecretId huérfano
+    // y la UI mostraría "Secret provisto" para algo que ya no existe.
+    // Tx para que la desvinculación + delete sean atómicos.
+    const unlinkedCount = await this.prisma.$transaction(async (tx) => {
+      const result = await tx.storyTechnicalDependency.updateMany({
+        where: { linkedSecretId: id },
+        data: { linkedSecretId: null, status: 'identified' },
+      });
+      await tx.externalSecret.delete({ where: { id } });
+      return result.count;
+    });
+
+    this.logger.log(
+      `[delete] external secret name=${found.name} id=${id} unlinkedStories=${unlinkedCount}`,
+    );
   }
 
   /**
@@ -207,6 +271,94 @@ export class ExternalSecretsService {
     this.logger.log(
       `[resolveSourceDependency] epic=${epicId} dep=${sourceDependencyId} linkedSecret=${secretId} rowsAffected=${affected}`,
     );
+  }
+
+  /**
+   * Bulk-resolve: vincula el secret recién creado a TODAS las
+   * `StoryTechnicalDependency` que matcheen por `(vendor, normalizedTitle)`
+   * + sin link previo. Esto refleja el modelo per-story: la misma credencial
+   * (ej. AMADEUS_CLIENT_ID) puede vivir en N rows distintas (una por historia
+   * que la requiere) y el user solo provee el secret UNA vez.
+   *
+   * BUG FIX (2026-05-04): antes el filtro era SOLO por vendor, así que crear
+   * un secret de `AMADEUS_CLIENT_ID` también marcaba como resueltas las deps
+   * de `AMADEUS_CLIENT_SECRET` y `AMADEUS_HOSTNAME` por compartir vendor.
+   * Ahora el match exige que el `normalizeTitle(dep.title)` coincida con
+   * `normalizeTitle(secret.name)` — una dep solo se vincula al secret que
+   * realmente la satisface, no a otros del mismo vendor.
+   *
+   * Invariante: NO sobreescribe un `linkedSecretId` previo (la guarda
+   * `linkedSecretId: null` en el WHERE). Si una dep ya estaba vinculada a
+   * otro secret, queda intacta — el user debe desvincular manualmente
+   * primero para evitar perder referencias silenciosamente.
+   *
+   * Implementación 2-step (en lugar de updateMany single-shot): Prisma no
+   * soporta funciones custom dentro del WHERE para normalizar JS regex,
+   * así que primero buscamos candidates por vendor + sin link, filtramos
+   * en JS por título normalizado, y luego hacemos un updateMany por IDs.
+   * Tradeoff: 2 queries en vez de 1, pero el N de candidates es chico
+   * (deps de un vendor en un epic, decenas como mucho).
+   */
+  private async resolveAllStoryDependenciesByVendor(
+    vendor: string,
+    secretId: string,
+    secretName: string,
+  ): Promise<number> {
+    const today = new Date().toISOString().slice(0, 10);
+    const note = `Secret \`${secretName}\` registrado el ${today}`;
+    const normalizedSecretName = normalizeTitle(secretName);
+
+    // Paso 1: candidates por vendor + sin link previo. Traemos solo los
+    // campos que necesitamos para el match (id + title) para no hidratar
+    // toda la fila.
+    const candidates = await this.prisma.storyTechnicalDependency.findMany({
+      where: {
+        vendor: { equals: vendor, mode: 'insensitive' },
+        linkedSecretId: null,
+      },
+      select: { id: true, title: true },
+    });
+
+    // Paso 2: filtrar por título normalizado. Solo las deps cuyo title
+    // matchea el name del secret se vinculan.
+    const matchingIds = candidates
+      .filter((d) => normalizeTitle(d.title) === normalizedSecretName)
+      .map((d) => d.id);
+
+    if (matchingIds.length === 0) {
+      this.logger.log(
+        `[resolveAllStoryDependenciesByVendor] vendor="${vendor}" secret=${secretId} (name="${secretName}") candidates=${candidates.length} matched=0 — no deps share normalizedTitle`,
+      );
+      return 0;
+    }
+
+    // TOCTOU guard (security-reviewer LOW#2): re-asertar `linkedSecretId: null`
+    // en el WHERE del updateMany. Entre el findMany de candidates (arriba) y
+    // este updateMany puede haber transcurrido tiempo en el que otra request
+    // concurrent vinculó algunas de esas deps a OTRO secret. Sin la guarda
+    // aquí, el `id IN (...)` sobreescribiría esos vínculos previos —
+    // violando el invariante documentado "NO sobreescribe un linkedSecretId
+    // previo". `result.count` puede ser < `matchingIds.length` si esto pasa,
+    // y el delta es la cantidad de deps que la request concurrent vinculó
+    // primero (correcto: gana el primero en escribir, pierde el segundo).
+    const result = await this.prisma.storyTechnicalDependency.updateMany({
+      where: { id: { in: matchingIds }, linkedSecretId: null },
+      data: {
+        linkedSecretId: secretId,
+        status: 'resolved',
+        resolutionNotes: note,
+      },
+    });
+    if (result.count < matchingIds.length) {
+      this.logger.warn(
+        `[resolveAllStoryDependenciesByVendor] race detected: candidates=${candidates.length} matched=${matchingIds.length} updated=${result.count} — ${matchingIds.length - result.count} deps fueron vinculadas por una request concurrent. Comportamiento correcto.`,
+      );
+    } else {
+      this.logger.log(
+        `[resolveAllStoryDependenciesByVendor] vendor="${vendor}" secret=${secretId} (name="${secretName}") candidates=${candidates.length} matched=${matchingIds.length} updated=${result.count}`,
+      );
+    }
+    return result.count;
   }
 
   private toResponse(

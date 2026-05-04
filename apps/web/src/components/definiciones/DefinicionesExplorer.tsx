@@ -2,7 +2,7 @@
 
 import React, { useState, useCallback, useEffect, useRef } from 'react';
 import { useSearchParams } from 'next/navigation';
-import { Search, Network, List, BookMarked, SlidersHorizontal, History, Shield, RefreshCw, Loader2, AlertCircle, ChevronDown, Check } from 'lucide-react';
+import { Search, Network, List, BookMarked, SlidersHorizontal, History, Shield, RefreshCw, Loader2, AlertCircle, ChevronDown, Check, Eye, Link2 } from 'lucide-react';
 import { useDefiniciones } from '@/context/DefinicionesContext';
 import { useAuthContext } from '@/context/AuthContext';
 import { DefinicionNode } from '@/types/definiciones';
@@ -20,18 +20,24 @@ import {
   DropdownMenuContent,
   DropdownMenuItem,
   DropdownMenuTrigger,
+  DropdownMenuLabel,
+  DropdownMenuSeparator,
 } from '@/components/ui/dropdown-menu';
 
 type ViewMode = 'tree' | 'graph' | 'changelog' | 'access';
 
 export function DefinicionesExplorer() {
-  const { state, setSearch, selectNode, expandFolder, loading, error, reloadTree, vaults, vaultsLoaded, activeVaultId, switchVault } = useDefiniciones();
+  const { state, setSearch, selectNode, expandFolder, loading, error, reloadTree, vaults, vaultsLoaded, activeVaultId, viewingVaultId, effectiveVaultId, switchVault } = useDefiniciones();
   const { hasPermission, isLoading: authLoading } = useAuthContext();
   // Solo mostrar "Sin acceso" cuando AMBOS (vaults + auth) terminaron de cargar.
   // Sin esto, hay un flash donde el rol es 'viewer' (default) antes de que el
   // Management API fallback resuelva el rol real → el filtro descarta los vaults.
   const fullyLoaded = vaultsLoaded && !authLoading;
   const activeVault = vaults.find((v) => v.id === activeVaultId);
+  // Vault que se está VIENDO (puede diferir del vinculado si el user navegó
+  // desde el dropdown). Se muestra en el header y guía qué tree se carga.
+  const effectiveVault = vaults.find((v) => v.id === effectiveVaultId);
+  const isBrowseMode = !!viewingVaultId && viewingVaultId !== activeVaultId;
 
   const navigateToNode = useCallback((nodeId: string) => {
     // Find and expand all ancestor folders so the node is visible in the tree
@@ -86,37 +92,67 @@ export function DefinicionesExplorer() {
                 : vaults.length === 0
                   ? 'Sin acceso'
                   : `${countDocuments(state.tree)} documentos en el vault`}
-              {activeVault && vaults.length === 1 && (
-                <span className="ml-1.5">· <span className="font-mono text-xs">{activeVault.name}</span></span>
+              {effectiveVault && (
+                <span className="ml-1.5">· <span className="font-mono text-xs">{effectiveVault.name}</span></span>
               )}
             </p>
           </div>
-          {/* Vault selector dropdown: solo visible si hay 2+ vaults configurados */}
-          {vaults.length >= 2 && activeVault && (
+          {/* Dropdown selector — SOLO navega entre vaults para visualizar contenido.
+              NO cambia el "vínculo" (qué vault es destino de escrituras de épicas/historias).
+              Para vincular otro vault, ir a Settings → Vault → botón "Vincular".
+              Mientras se navega un vault distinto al vinculado, badge "Solo navegación"
+              avisa al user que las escrituras siguen yendo al activo. */}
+          {vaults.length >= 2 && effectiveVault && (
             <DropdownMenu>
               <DropdownMenuTrigger asChild>
                 <button className="ml-2 flex items-center gap-1.5 h-8 px-3 text-xs font-medium rounded-md border border-border/50 bg-muted/50 hover:bg-muted transition-colors">
-                  <span className="font-mono">{activeVault.name}</span>
+                  <Eye className="h-3 w-3 text-muted-foreground" />
+                  <span className="font-mono">{effectiveVault.name}</span>
+                  {isBrowseMode && (
+                    <span className="ml-1 text-[10px] px-1.5 py-0.5 rounded bg-amber-500/15 text-amber-700 dark:text-amber-400 border border-amber-500/30 font-normal">
+                      No vinculado
+                    </span>
+                  )}
                   <ChevronDown className="h-3 w-3 text-muted-foreground" />
                 </button>
               </DropdownMenuTrigger>
-              <DropdownMenuContent align="start" className="min-w-[200px]">
-                {vaults.map((v) => (
-                  <DropdownMenuItem
-                    key={v.id}
-                    onSelect={() => void switchVault(v.id)}
-                    disabled={v.id === activeVaultId}
-                    className="flex items-start gap-2 py-2"
-                  >
-                    <Check className={`h-3 w-3 mt-0.5 shrink-0 ${v.id === activeVaultId ? 'opacity-100 text-primary' : 'opacity-0'}`} />
-                    <div className="flex-1 min-w-0">
-                      <div className="text-xs font-medium">{v.name}</div>
-                      <div className="text-[10px] text-muted-foreground font-mono truncate">
-                        {v.owner}/{v.repo}@{v.branch}
+              <DropdownMenuContent align="start" className="min-w-[260px]">
+                <DropdownMenuLabel className="text-[10px] uppercase tracking-wider text-muted-foreground/70 font-normal">
+                  Navegar entre vaults
+                </DropdownMenuLabel>
+                {vaults.map((v) => {
+                  const isActive = v.id === activeVaultId;
+                  const isViewing = v.id === effectiveVaultId;
+                  return (
+                    <DropdownMenuItem
+                      key={v.id}
+                      onSelect={() => void switchVault(v.id)}
+                      disabled={isViewing}
+                      className="flex items-start gap-2 py-2"
+                    >
+                      <Check className={`h-3 w-3 mt-0.5 shrink-0 ${isViewing ? 'opacity-100 text-primary' : 'opacity-0'}`} />
+                      <div className="flex-1 min-w-0">
+                        <div className="flex items-center gap-1.5 flex-wrap">
+                          <span className="text-xs font-medium">{v.name}</span>
+                          {isActive && (
+                            <span className="inline-flex items-center gap-0.5 text-[9px] px-1 py-0.5 rounded bg-primary/10 text-primary border border-primary/20">
+                              <Link2 className="h-2 w-2" />
+                              Vinculado
+                            </span>
+                          )}
+                        </div>
+                        <div className="text-[10px] text-muted-foreground font-mono truncate">
+                          {v.owner}/{v.repo}@{v.branch}
+                        </div>
                       </div>
-                    </div>
-                  </DropdownMenuItem>
-                ))}
+                    </DropdownMenuItem>
+                  );
+                })}
+                <DropdownMenuSeparator />
+                <div className="px-2 py-1.5 text-[10px] text-muted-foreground/80 leading-snug space-y-1">
+                  <p>Las carpetas y documentos manuales se guardan en el vault que estés viendo aquí.</p>
+                  <p>Las épicas/historias creadas desde Proyectos siempre van al vault <strong>vinculado</strong> (cambialo en Settings → Vincular).</p>
+                </div>
               </DropdownMenuContent>
             </DropdownMenu>
           )}

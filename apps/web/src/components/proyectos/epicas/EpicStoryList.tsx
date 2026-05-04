@@ -2,6 +2,7 @@
 
 import { useState, useCallback, useRef, useEffect, useMemo } from 'react';
 import { useRouter } from 'next/navigation';
+import { toast } from 'sonner';
 import {
   UserStory,
   StoryStatus,
@@ -9,10 +10,10 @@ import {
   StoryTechnicalFields,
   StoryQAFields,
   Pod,
-  QAMatrix,
 } from '@cenzontle/shared';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
+import { RoundCheckbox } from '@/components/ui/round-checkbox';
 import { TypeToConfirmDialog } from '@/components/ui/type-to-confirm-dialog';
 import {
   Select,
@@ -24,6 +25,10 @@ import {
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { StatusBadge } from '../shared/StatusBadge';
 import { StoryPointsBadge } from '../shared/StoryPointsBadge';
+import { StoryPOTab } from '../historias/editor/StoryPOTab';
+import { StoryTechnicalTab } from '../historias/editor/StoryTechnicalTab';
+import { StoryQATab } from '../historias/editor/StoryQATab';
+import { ReadOnlyMarkdown } from '@/components/shared/tiptap/ReadOnlyMarkdown';
 import {
   Plus,
   Pencil,
@@ -54,27 +59,10 @@ const FIBONACCI_POINTS = [1, 2, 3, 5, 8, 13] as const;
 
 // --- Defaults ---
 
-const emptyPO: StoryPOFields = {
-  background: '',
-  objective: '',
-  userStory: '',
-  whatHowWhen: { what: '', how: '', when: '' },
-  acceptanceCriteria: [''],
-  additionalNotes: '',
-};
-
-const emptyTechnical: StoryTechnicalFields = {
-  architecture: '',
-  integrationFlow: '',
-  validations: [''],
-  errorHandling: [''],
-  implementationChecklist: [''],
-};
-
-const emptyQA: StoryQAFields = {
-  testingStrategy: '',
-  linkedQAMatrixId: null,
-};
+// En v2, cada sección es un único string markdown — se inicializa vacío.
+const emptyPO: StoryPOFields = { markdown: '' };
+const emptyTechnical: StoryTechnicalFields = { markdown: '' };
+const emptyQA: StoryQAFields = { markdown: '' };
 
 // --- Form state ---
 
@@ -185,10 +173,15 @@ interface EpicStoryListProps {
   stories: UserStory[];
   epicId: string;
   pods: Pod[];
-  qaMatrix?: QAMatrix | null;
   onCreateStory: (story: UserStory) => void;
   onUpdateStory: (id: string, changes: Partial<UserStory>) => void;
   onDeleteStory: (id: string) => void;
+  /**
+   * Callback opcional para bulk delete. Cuando está definido, el bulk delete
+   * lo usa (en lugar de iterar `onDeleteStory`) para que el padre orqueste
+   * UN solo toast loading + success/error en lugar de N toasts individuales.
+   */
+  onBulkDeleteStories?: (ids: string[]) => Promise<void>;
   /**
    * Si se provee, renderiza un boton "Crear con IA" inmediatamente a la izquierda
    * del boton "Agregar historia" en el header. Se oculta cuando esta undefined
@@ -201,10 +194,10 @@ export function EpicStoryList({
   stories,
   epicId,
   pods,
-  qaMatrix,
   onCreateStory,
   onUpdateStory,
   onDeleteStory,
+  onBulkDeleteStories,
   onGenerateWithAI,
 }: EpicStoryListProps) {
   const router = useRouter();
@@ -217,6 +210,75 @@ export function EpicStoryList({
   const [viewTab, setViewTab] = useState<string>('po');
   const [newLabel, setNewLabel] = useState('');
   const [deleteConfirmId, setDeleteConfirmId] = useState<string | null>(null);
+  // Selección múltiple para bulk delete. Usa Set por O(1) lookup y semántica
+  // clara de unicidad. Cuando el set está vacío, la action bar se oculta.
+  const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
+  const [bulkDeleteOpen, setBulkDeleteOpen] = useState(false);
+
+  const toggleSelect = useCallback((storyId: string, checked: boolean) => {
+    setSelectedIds((prev) => {
+      const next = new Set(prev);
+      if (checked) next.add(storyId);
+      else next.delete(storyId);
+      return next;
+    });
+  }, []);
+
+  const clearSelection = useCallback(() => {
+    setSelectedIds(new Set());
+  }, []);
+
+  const allSelected = stories.length > 0 && selectedIds.size === stories.length;
+  const someSelected = selectedIds.size > 0 && selectedIds.size < stories.length;
+
+  const toggleSelectAll = useCallback(() => {
+    if (allSelected) {
+      setSelectedIds(new Set());
+    } else {
+      setSelectedIds(new Set(stories.map((s) => s.id)));
+    }
+  }, [allSelected, stories]);
+
+  const handleBulkDelete = useCallback(async () => {
+    // Snapshot inmutable del set: el callback puede tardar y el set podría
+    // mutar mientras iteramos. Convertimos a array antes de iterar.
+    const idsToDelete = Array.from(selectedIds);
+    setSelectedIds(new Set());
+    setBulkDeleteOpen(false);
+
+    if (onBulkDeleteStories) {
+      // El padre orquesta el toast loading/success/error con un solo toast
+      // unificado (paritario UX al delete individual).
+      await onBulkDeleteStories(idsToDelete);
+      return;
+    }
+
+    // Fallback: iteramos onDeleteStory individualmente y mostramos UN toast
+    // que va de loading → success/error según el resultado agregado. El
+    // padre puede mostrar toasts individuales por cada onDeleteStory; no
+    // podemos suprimirlos desde aquí, pero el toast loading visual sigue
+    // siendo correcto.
+    const toastId = toast.loading(
+      `Eliminando ${idsToDelete.length} ${idsToDelete.length === 1 ? 'historia de usuario' : 'historias de usuario'}…`,
+    );
+    let ok = 0;
+    let fail = 0;
+    for (const id of idsToDelete) {
+      try {
+        await onDeleteStory(id);
+        ok++;
+      } catch {
+        fail++;
+      }
+    }
+    if (ok > 0 && fail === 0) {
+      toast.success(`${ok} ${ok === 1 ? 'historia eliminada' : 'historias eliminadas'}`, { id: toastId });
+    } else if (ok > 0 && fail > 0) {
+      toast.warning(`${ok} eliminadas, ${fail} fallaron`, { id: toastId });
+    } else {
+      toast.error(`No se pudieron eliminar ${fail === 1 ? 'la historia' : 'las historias'}`, { id: toastId });
+    }
+  }, [selectedIds, onBulkDeleteStories, onDeleteStory]);
   // Deriva la story completa para usarla en el modal type-to-confirm (necesita
   // expectedValue=title). Si la story se elimina del array, deleteConfirmId
   // tambien se limpia desde el handler.
@@ -226,9 +288,6 @@ export function EpicStoryList({
   );
 
   // tracker is assigned externally (e.g. via Linear/Jira integration), not at creation time
-
-  // --- QA matrix rows mapped by storyId ---
-  const qaRowsByStoryId = new Map(qaMatrix?.rows.map((r) => [r.storyId, r]) ?? []);
 
   // Auto-scroll to inline creation form & Escape key
   useEffect(() => {
@@ -281,27 +340,24 @@ export function EpicStoryList({
   const handleCreate = useCallback(() => {
     if (!formData.title.trim()) return;
     const now = new Date().toISOString();
+    // Description corto se deriva de la primera línea no-heading del markdown PO.
+    const firstContentLine = formData.po.markdown
+      .split('\n')
+      .map((l) => l.trim())
+      .find((l) => l.length > 0 && !l.startsWith('#'));
     const story: UserStory = {
       id: crypto.randomUUID(),
       title: formData.title.trim(),
-      description: formData.po.userStory.trim(),
+      description: firstContentLine ?? '',
       storyPoints: formData.storyPoints,
       status: formData.status,
       epicId,
       podId: formData.podId,
       sprintId: null,
       labels: formData.labels,
-      po: {
-        ...formData.po,
-        acceptanceCriteria: formData.po.acceptanceCriteria.filter((c) => c.trim()),
-      },
-      technical: {
-        ...formData.technical,
-        validations: formData.technical.validations.filter((v) => v.trim()),
-        errorHandling: formData.technical.errorHandling.filter((e) => e.trim()),
-        implementationChecklist: formData.technical.implementationChecklist.filter((c) => c.trim()),
-      },
-      qa: formData.qa,
+      po: { markdown: formData.po.markdown },
+      technical: { markdown: formData.technical.markdown },
+      qa: { markdown: formData.qa.markdown },
       createdAt: now,
       updatedAt: now,
     };
@@ -323,22 +379,9 @@ export function EpicStoryList({
       status: story.status,
       podId: story.podId,
       labels: [...story.labels],
-      po: {
-        ...story.po,
-        acceptanceCriteria:
-          story.po.acceptanceCriteria.length > 0 ? [...story.po.acceptanceCriteria] : [''],
-      },
-      technical: {
-        ...story.technical,
-        validations: story.technical.validations.length > 0 ? [...story.technical.validations] : [''],
-        errorHandling:
-          story.technical.errorHandling.length > 0 ? [...story.technical.errorHandling] : [''],
-        implementationChecklist:
-          story.technical.implementationChecklist.length > 0
-            ? [...story.technical.implementationChecklist]
-            : [''],
-      },
-      qa: { ...story.qa },
+      po: { markdown: story.po.markdown ?? '' },
+      technical: { markdown: story.technical.markdown ?? '' },
+      qa: { markdown: story.qa.markdown ?? '' },
     });
   }, []);
 
@@ -348,24 +391,20 @@ export function EpicStoryList({
 
   const saveEditing = useCallback(() => {
     if (!editingStoryId || !formData.title.trim()) return;
+    const firstContentLine = formData.po.markdown
+      .split('\n')
+      .map((l) => l.trim())
+      .find((l) => l.length > 0 && !l.startsWith('#'));
     onUpdateStory(editingStoryId, {
       title: formData.title.trim(),
-      description: formData.po.userStory.trim(),
+      description: firstContentLine ?? '',
       storyPoints: formData.storyPoints,
       status: formData.status,
       podId: formData.podId,
       labels: formData.labels,
-      po: {
-        ...formData.po,
-        acceptanceCriteria: formData.po.acceptanceCriteria.filter((c) => c.trim()),
-      },
-      technical: {
-        ...formData.technical,
-        validations: formData.technical.validations.filter((v) => v.trim()),
-        errorHandling: formData.technical.errorHandling.filter((e) => e.trim()),
-        implementationChecklist: formData.technical.implementationChecklist.filter((c) => c.trim()),
-      },
-      qa: formData.qa,
+      po: { markdown: formData.po.markdown },
+      technical: { markdown: formData.technical.markdown },
+      qa: { markdown: formData.qa.markdown },
     });
     setEditingStoryId(null);
   }, [editingStoryId, formData, onUpdateStory]);
@@ -450,187 +489,29 @@ export function EpicStoryList({
     </div>
   );
 
+  // En v2 cada tab es un único editor Tiptap full-feature (StoryPOTab/
+  // StoryTechnicalTab/StoryQATab) con un placeholder de los headings
+  // obligatorios. Reemplaza los N textareas + ListEditor del shape v1.
   const renderPOTab = () => (
-    <div className="space-y-4">
-      <div className="space-y-1.5">
-        <label className="text-xs font-medium text-muted-foreground">Antecedentes</label>
-        <textarea
-          value={formData.po.background}
-          onChange={(e) => updatePO({ background: e.target.value })}
-          placeholder="Contexto e información previa relevante para esta historia..."
-          rows={2}
-          className={inputCls}
-        />
-      </div>
-      <div className="space-y-1.5">
-        <label className="text-xs font-medium text-muted-foreground">Objetivo</label>
-        <textarea
-          value={formData.po.objective}
-          onChange={(e) => updatePO({ objective: e.target.value })}
-          placeholder="¿Qué se busca lograr con esta historia?"
-          rows={2}
-          className={inputCls}
-        />
-      </div>
-      <div className="space-y-1.5">
-        <label className="text-xs font-medium text-muted-foreground">Historia de Usuario</label>
-        <textarea
-          value={formData.po.userStory}
-          onChange={(e) => updatePO({ userStory: e.target.value })}
-          placeholder="Como [tipo de usuario], quiero [acción] para [beneficio]..."
-          rows={2}
-          className={inputCls}
-        />
-      </div>
-      <div className="space-y-1.5">
-        <label className="text-xs font-medium text-muted-foreground">What / How / When</label>
-        <div className="grid grid-cols-3 gap-2">
-          <Input
-            value={formData.po.whatHowWhen.what}
-            onChange={(e) =>
-              updatePO({ whatHowWhen: { ...formData.po.whatHowWhen, what: e.target.value } })
-            }
-            placeholder="What — ¿Qué?"
-            className="text-sm"
-          />
-          <Input
-            value={formData.po.whatHowWhen.how}
-            onChange={(e) =>
-              updatePO({ whatHowWhen: { ...formData.po.whatHowWhen, how: e.target.value } })
-            }
-            placeholder="How — ¿Cómo?"
-            className="text-sm"
-          />
-          <Input
-            value={formData.po.whatHowWhen.when}
-            onChange={(e) =>
-              updatePO({ whatHowWhen: { ...formData.po.whatHowWhen, when: e.target.value } })
-            }
-            placeholder="When — ¿Cuándo?"
-            className="text-sm"
-          />
-        </div>
-      </div>
-      <div className="space-y-1.5">
-        <label className="text-xs font-medium text-muted-foreground">Criterios de Aceptación</label>
-        <ListEditor
-          items={formData.po.acceptanceCriteria}
-          onChange={(items) => updatePO({ acceptanceCriteria: items })}
-          placeholder="Dado que... Cuando... Entonces..."
-          label="Agregar criterio"
-        />
-      </div>
-      <div className="space-y-1.5">
-        <label className="text-xs font-medium text-muted-foreground">
-          Notas Adicionales <span className="font-normal">(opcional)</span>
-        </label>
-        <textarea
-          value={formData.po.additionalNotes}
-          onChange={(e) => updatePO({ additionalNotes: e.target.value })}
-          placeholder="Dependencias, restricciones, consideraciones extra..."
-          rows={2}
-          className={inputCls}
-        />
-      </div>
-    </div>
+    <StoryPOTab
+      value={formData.po.markdown}
+      onChange={(md) => setFormData((prev) => ({ ...prev, po: { markdown: md } }))}
+    />
   );
 
   const renderTechnicalTab = () => (
-    <div className="space-y-4">
-      <div className="space-y-1.5">
-        <label className="text-xs font-medium text-muted-foreground">Arquitectura y Componentes</label>
-        <textarea
-          value={formData.technical.architecture}
-          onChange={(e) => updateTechnical({ architecture: e.target.value })}
-          placeholder="Componentes involucrados, servicios, bases de datos..."
-          rows={3}
-          className={inputCls}
-        />
-      </div>
-      <div className="space-y-1.5">
-        <label className="text-xs font-medium text-muted-foreground">
-          Flujo de Integración Propuesto
-        </label>
-        <textarea
-          value={formData.technical.integrationFlow}
-          onChange={(e) => updateTechnical({ integrationFlow: e.target.value })}
-          placeholder="Secuencia de llamadas, APIs involucradas, flujo de datos..."
-          rows={3}
-          className={inputCls}
-        />
-      </div>
-      <div className="space-y-1.5">
-        <label className="text-xs font-medium text-muted-foreground">Validaciones Requeridas</label>
-        <ListEditor
-          items={formData.technical.validations}
-          onChange={(items) => updateTechnical({ validations: items })}
-          placeholder="Validación de entrada, reglas de negocio..."
-          label="Agregar validación"
-        />
-      </div>
-      <div className="space-y-1.5">
-        <label className="text-xs font-medium text-muted-foreground">Manejo de Errores</label>
-        <ListEditor
-          items={formData.technical.errorHandling}
-          onChange={(items) => updateTechnical({ errorHandling: items })}
-          placeholder="Escenario de error y estrategia de manejo..."
-          label="Agregar escenario"
-        />
-      </div>
-      <div className="space-y-1.5">
-        <label className="text-xs font-medium text-muted-foreground">
-          Checklist de Implementación
-        </label>
-        <ListEditor
-          items={formData.technical.implementationChecklist}
-          onChange={(items) => updateTechnical({ implementationChecklist: items })}
-          placeholder="Paso de implementación..."
-          label="Agregar paso"
-        />
-      </div>
-    </div>
+    <StoryTechnicalTab
+      value={formData.technical.markdown}
+      onChange={(md) => setFormData((prev) => ({ ...prev, technical: { markdown: md } }))}
+    />
   );
 
-  const renderQATab = () => {
-    const qaRow = editingStoryId ? qaRowsByStoryId.get(editingStoryId) : null;
-    return (
-      <div className="space-y-4">
-        <div className="space-y-1.5">
-          <label className="text-xs font-medium text-muted-foreground">Testing Strategy</label>
-          <textarea
-            value={formData.qa.testingStrategy}
-            onChange={(e) => updateQA({ testingStrategy: e.target.value })}
-            placeholder="Estrategia de pruebas: unitarias, integración, E2E, performance..."
-            rows={4}
-            className={inputCls}
-          />
-        </div>
-        <div className="space-y-1.5">
-          <label className="text-xs font-medium text-muted-foreground">
-            Matriz de Pruebas (QA)
-          </label>
-          {qaRow ? (
-            <div className="rounded-lg border p-3 bg-muted/20 space-y-2">
-              <div className="flex items-center gap-2 text-xs">
-                <Link2 className="h-3.5 w-3.5 text-muted-foreground" />
-                <span className="text-muted-foreground">Vinculada desde la Matriz QA de la épica</span>
-                <span className="font-mono text-foreground">{qaRow.storyJiraKey}</span>
-              </div>
-              <p className="text-xs text-muted-foreground">
-                {qaRow.testCases.length} casos de prueba · {qaRow.coverage}% cobertura
-              </p>
-            </div>
-          ) : (
-            <div className="rounded-lg border border-dashed p-3 text-center">
-              <p className="text-xs text-muted-foreground">
-                No hay matriz de pruebas vinculada. Genera una desde la pestaña &quot;Matrices QA&quot; de la épica.
-              </p>
-            </div>
-          )}
-        </div>
-      </div>
-    );
-  };
+  const renderQATab = () => (
+    <StoryQATab
+      value={formData.qa.markdown}
+      onChange={(md) => setFormData((prev) => ({ ...prev, qa: { markdown: md } }))}
+    />
+  );
 
   const renderStoryForm = (autoFocusTitle: boolean) => (
     <div className="space-y-0">
@@ -730,138 +611,107 @@ export function EpicStoryList({
   );
 
   // --- Read-only view sections ---
+  // En v2 cada sección es un único string markdown — renderizamos directo
+  // como markdown via ReadOnlyMarkdown (que parsea y muestra con la misma
+  // tipografía que el editor). Sin reconstruir sub-secciones desde campos
+  // discretos.
 
   const renderPOView = (story: UserStory) => (
-    <div className="space-y-3">
-      {story.po.background && (
-        <div>
-          <p className="text-xs font-medium text-muted-foreground mb-1">Antecedentes</p>
-          <p className="text-sm text-foreground/80">{story.po.background}</p>
-        </div>
-      )}
-      {story.po.objective && (
-        <div>
-          <p className="text-xs font-medium text-muted-foreground mb-1">Objetivo</p>
-          <p className="text-sm text-foreground/80">{story.po.objective}</p>
-        </div>
-      )}
-      {story.po.userStory && (
-        <div>
-          <p className="text-xs font-medium text-muted-foreground mb-1">Historia de Usuario</p>
-          <p className="text-sm text-foreground/80">{story.po.userStory}</p>
-        </div>
-      )}
-      {(story.po.whatHowWhen.what || story.po.whatHowWhen.how || story.po.whatHowWhen.when) && (
-        <div>
-          <p className="text-xs font-medium text-muted-foreground mb-1">What / How / When</p>
-          <div className="grid grid-cols-3 gap-2 text-xs">
-            <div className="rounded-lg bg-muted/30 p-2">
-              <span className="text-muted-foreground">What: </span>
-              <span className="text-foreground/80">{story.po.whatHowWhen.what || '—'}</span>
-            </div>
-            <div className="rounded-lg bg-muted/30 p-2">
-              <span className="text-muted-foreground">How: </span>
-              <span className="text-foreground/80">{story.po.whatHowWhen.how || '—'}</span>
-            </div>
-            <div className="rounded-lg bg-muted/30 p-2">
-              <span className="text-muted-foreground">When: </span>
-              <span className="text-foreground/80">{story.po.whatHowWhen.when || '—'}</span>
-            </div>
-          </div>
-        </div>
-      )}
-      <div>
-        <p className="text-xs font-medium text-muted-foreground mb-1">Criterios de Aceptación</p>
-        <ReadOnlyList items={story.po.acceptanceCriteria} emptyText="Sin criterios definidos" />
-      </div>
-      {story.po.additionalNotes && (
-        <div>
-          <p className="text-xs font-medium text-muted-foreground mb-1">Notas Adicionales</p>
-          <p className="text-sm text-foreground/80">{story.po.additionalNotes}</p>
-        </div>
+    <div className="space-y-2 prose prose-sm dark:prose-invert max-w-none">
+      {story.po.markdown ? (
+        <ReadOnlyMarkdown content={story.po.markdown} />
+      ) : (
+        <p className="text-xs text-muted-foreground italic">Sin definición de negocio</p>
       )}
     </div>
   );
 
   const renderTechnicalView = (story: UserStory) => (
-    <div className="space-y-3">
-      {story.technical.architecture && (
-        <div>
-          <p className="text-xs font-medium text-muted-foreground mb-1">Arquitectura y Componentes</p>
-          <p className="text-sm text-foreground/80 whitespace-pre-wrap">{story.technical.architecture}</p>
-        </div>
+    <div className="space-y-2 prose prose-sm dark:prose-invert max-w-none">
+      {story.technical.markdown ? (
+        <ReadOnlyMarkdown content={story.technical.markdown} />
+      ) : (
+        <p className="text-xs text-muted-foreground italic">Sin definición técnica</p>
       )}
-      {story.technical.integrationFlow && (
-        <div>
-          <p className="text-xs font-medium text-muted-foreground mb-1">Flujo de Integración</p>
-          <p className="text-sm text-foreground/80 whitespace-pre-wrap">{story.technical.integrationFlow}</p>
-        </div>
-      )}
-      <div>
-        <p className="text-xs font-medium text-muted-foreground mb-1">Validaciones Requeridas</p>
-        <ReadOnlyList items={story.technical.validations} emptyText="Sin validaciones definidas" />
-      </div>
-      <div>
-        <p className="text-xs font-medium text-muted-foreground mb-1">Manejo de Errores</p>
-        <ReadOnlyList items={story.technical.errorHandling} emptyText="Sin escenarios definidos" />
-      </div>
-      <div>
-        <p className="text-xs font-medium text-muted-foreground mb-1">Checklist de Implementación</p>
-        <ReadOnlyList items={story.technical.implementationChecklist} emptyText="Sin checklist definido" />
-      </div>
     </div>
   );
 
-  const renderQAView = (story: UserStory) => {
-    const qaRow = qaRowsByStoryId.get(story.id);
-    return (
-      <div className="space-y-3">
-        {story.qa.testingStrategy ? (
-          <div>
-            <p className="text-xs font-medium text-muted-foreground mb-1">Testing Strategy</p>
-            <p className="text-sm text-foreground/80 whitespace-pre-wrap">{story.qa.testingStrategy}</p>
-          </div>
-        ) : (
-          <p className="text-xs text-muted-foreground italic">Sin estrategia de testing definida</p>
-        )}
-        <div>
-          <p className="text-xs font-medium text-muted-foreground mb-1">Matriz de Pruebas</p>
-          {qaRow ? (
-            <div className="rounded-lg border p-3 bg-muted/20 space-y-1">
-              <div className="flex items-center gap-2 text-xs">
-                <Link2 className="h-3.5 w-3.5 text-muted-foreground" />
-                <span className="font-mono text-foreground">{qaRow.storyJiraKey}</span>
-                <span className="text-muted-foreground">·</span>
-                <span className="text-muted-foreground">
-                  {qaRow.testCases.length} casos · {qaRow.coverage}% cobertura
-                </span>
-              </div>
-            </div>
-          ) : (
-            <p className="text-xs text-muted-foreground italic">Sin matriz vinculada</p>
-          )}
-        </div>
-      </div>
-    );
-  };
+  const renderQAView = (story: UserStory) => (
+    <div className="space-y-2 prose prose-sm dark:prose-invert max-w-none">
+      {story.qa.markdown ? (
+        <ReadOnlyMarkdown content={story.qa.markdown} />
+      ) : (
+        <p className="text-xs text-muted-foreground italic">Sin estrategia de testing definida</p>
+      )}
+    </div>
+  );
 
   // --- Main render ---
 
   return (
     <div className="space-y-3">
-      {/* Header */}
-      <div className="flex items-center justify-between">
-        <p className="text-sm text-muted-foreground">
-          {stories.length} {stories.length === 1 ? 'historia' : 'historias'} ·{' '}
-          {stories.reduce((sum, s) => sum + s.storyPoints, 0)} SP
-        </p>
+      {/* Header con counter, action bar de bulk select y CTAs */}
+      <div className="flex items-center justify-between gap-3">
+        {selectedIds.size > 0 ? (
+          // Action bar de bulk select reemplaza el counter cuando hay
+          // selección. Mantenemos los CTAs deshabilitados (no quieres crear
+          // mientras estás eligiendo qué borrar).
+          <div className="flex items-center gap-2 text-sm">
+            <span className="font-medium">
+              {selectedIds.size} {selectedIds.size === 1 ? 'historia seleccionada' : 'historias seleccionadas'}
+            </span>
+            <Button
+              size="sm"
+              variant="ghost"
+              onClick={clearSelection}
+              className="h-7 text-xs text-muted-foreground hover:text-foreground"
+            >
+              Cancelar
+            </Button>
+            <Button
+              size="sm"
+              variant="ghost"
+              onClick={() => setBulkDeleteOpen(true)}
+              className="h-7 gap-1.5 text-xs text-destructive hover:text-destructive hover:bg-destructive/10"
+            >
+              <Trash2 className="h-3.5 w-3.5" />
+              Eliminar {selectedIds.size}
+            </Button>
+          </div>
+        ) : (
+          <div className="flex items-center gap-3 text-sm text-muted-foreground">
+            <span>
+              {stories.length} {stories.length === 1 ? 'historia' : 'historias'} ·{' '}
+              {stories.reduce((sum, s) => sum + s.storyPoints, 0)} SP
+            </span>
+            {stories.length > 0 && !isCreating && (
+              <>
+                <span className="text-muted-foreground/40">·</span>
+                <label className="flex items-center gap-2 cursor-pointer select-none hover:text-foreground transition-colors">
+                  <RoundCheckbox
+                    checked={allSelected ? true : someSelected ? 'indeterminate' : false}
+                    onCheckedChange={toggleSelectAll}
+                    aria-label="Seleccionar todas las historias"
+                  />
+                  <span className="text-xs">
+                    {allSelected
+                      ? 'Todas seleccionadas'
+                      : someSelected
+                        ? 'Selección parcial'
+                        : 'Seleccionar todo'}
+                  </span>
+                </label>
+              </>
+            )}
+          </div>
+        )}
         <div className="flex items-center gap-2">
           {onGenerateWithAI && (
             <Button
               size="sm"
               variant="outline"
               onClick={onGenerateWithAI}
-              disabled={isCreating}
+              disabled={isCreating || selectedIds.size > 0}
               className="gap-1.5 text-xs"
             >
               <Sparkles className="h-3.5 w-3.5" />
@@ -872,7 +722,7 @@ export function EpicStoryList({
             size="sm"
             variant="outline"
             onClick={startCreating}
-            disabled={isCreating}
+            disabled={isCreating || selectedIds.size > 0}
             className="gap-1.5 text-xs"
           >
             <Plus className="h-3.5 w-3.5" />
@@ -886,11 +736,16 @@ export function EpicStoryList({
         {stories.map((story) => {
           const isEditing = editingStoryId === story.id;
           const isExpanded = expandedStoryId === story.id;
+          const isSelected = selectedIds.has(story.id);
           return (
             <div
               key={story.id}
               className={`rounded-lg border transition-colors ${
-                isEditing ? 'border-primary/50 bg-muted/20' : 'hover:bg-muted/30'
+                isEditing
+                  ? 'border-primary/50 bg-muted/20'
+                  : isSelected
+                    ? 'border-primary/40 bg-primary/5'
+                    : 'hover:bg-muted/30'
               }`}
             >
               {/* Row summary */}
@@ -902,6 +757,18 @@ export function EpicStoryList({
                   }
                 }}
               >
+                {/* Checkbox de selección — stopPropagation para que el click
+                    NO navegue al detalle de la story. */}
+                <div
+                  className="shrink-0"
+                  onClick={(e) => e.stopPropagation()}
+                >
+                  <RoundCheckbox
+                    checked={isSelected}
+                    onCheckedChange={(checked) => toggleSelect(story.id, checked === true)}
+                    aria-label={`Seleccionar historia ${story.title}`}
+                  />
+                </div>
                 <span className="font-mono text-xs text-muted-foreground w-20 shrink-0">
                   {story.tracker?.externalKey ?? '—'}
                 </span>
@@ -1118,6 +985,40 @@ export function EpicStoryList({
           }}
         />
       )}
+
+      {/* ── Modal type-to-confirm para borrar múltiples historias ──
+          Reusa el mismo componente que el delete individual con
+          `expectedValue="ELIMINAR"` (palabra constante, no nombres
+          individuales — escribir N nombres es UX absurda). La fricción
+          consciente sigue siendo real: el botón destructive solo se
+          habilita cuando el user escribe "ELIMINAR" exactamente. */}
+      <TypeToConfirmDialog
+        open={bulkDeleteOpen}
+        onOpenChange={setBulkDeleteOpen}
+        title={`Eliminar ${selectedIds.size} ${selectedIds.size === 1 ? 'historia' : 'historias'}`}
+        resourceLabel="historias"
+        expectedValue="ELIMINAR"
+        confirmLabel={
+          <>Para confirmar, escribe <span className="font-mono font-semibold text-foreground">ELIMINAR</span></>
+        }
+        hideExpectedValueBlock
+        description="Cada historia se eliminará junto con su carpeta del vault. La acción es permanente y no se puede deshacer."
+        confirmText="Eliminar"
+        extraContent={
+          <div className="max-h-32 overflow-y-auto rounded-md border border-border/60 bg-muted/40 px-3 py-1.5 text-xs space-y-0.5">
+            {stories
+              .filter((s) => selectedIds.has(s.id))
+              .map((s) => (
+                <div key={s.id} className="truncate text-foreground/80">
+                  <span className="text-muted-foreground/60">·</span> {s.title}
+                </div>
+              ))}
+          </div>
+        }
+        onConfirm={async () => {
+          handleBulkDelete();
+        }}
+      />
     </div>
   );
 }

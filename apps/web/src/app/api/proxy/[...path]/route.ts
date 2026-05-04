@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
+import { Agent, fetch as undiciFetch } from 'undici';
 import { auth0 } from '@/lib/auth0';
 
 /**
@@ -12,6 +13,53 @@ import { auth0 } from '@/lib/auth0';
  * autenticación, incluyendo los de lectura.
  */
 const API_BASE = process.env.API_INTERNAL_URL || 'http://localhost:3001';
+
+/**
+ * Dispatcher de undici para endpoints SSE — desactiva los timeouts del
+ * body porque un stream SSE legítimamente puede tardar minutos entre
+ * eventos significativos (deep research del agente, web search, etc.).
+ *
+ * El default de undici es `bodyTimeout: 300_000` (5min) — lo que causaba
+ * `UND_ERR_BODY_TIMEOUT` cuando el LLM tardaba más de 5min entre eventos.
+ * Con heartbeats SSE en el backend (cada 15s) esto no debería disparar,
+ * pero como defensa en profundidad mantenemos ambos timeouts en 0 para
+ * los SSE.
+ *
+ * `headersTimeout` también a 0 porque el backend puede demorar en
+ * empezar a responder si está cargando contexto pesado (vault scan,
+ * cross-epic queries) antes del primer flushHeaders.
+ *
+ * `keepAliveTimeout` se mantiene generoso (10min) para reciclar
+ * conexiones después del SSE largo. Si no, el next request reusa una
+ * conexión potencialmente medio-cerrada.
+ */
+const sseDispatcher = new Agent({
+  bodyTimeout: 0,
+  headersTimeout: 0,
+  keepAliveTimeout: 10 * 60 * 1000,
+});
+
+/**
+ * Detecta paths SSE conocidos por convención. Mantener sincronizado con
+ * los `@Controller` que retornan `text/event-stream`. Aplicamos el
+ * dispatcher con timeouts desactivados solo aquí — para JSON normal
+ * preferimos los defaults de undici (5min body timeout) como protección
+ * contra hangs accidentales.
+ *
+ * IMPORTANTE: cada controller SSE tiene también endpoints JSON hermanos
+ * bajo el mismo prefijo (ej. `/cache`, `/cache/ttl`, `/session`,
+ * `/session/active`). Solo el GET de `/<prefijo>/<uuid>` SIN sub-segmentos
+ * es el SSE real. Matcheamos ese shape exacto: `prefix/<uuid>` opcionalmente
+ * con query string. UUID v4 charset: hex + guiones, longitud 36.
+ */
+const SSE_PATH_RE = new RegExp(
+  '^proyectos/(?:story-generation|epic-generation|diagram-generation)/' +
+    '[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$',
+  'i',
+);
+function isSseEndpoint(apiPath: string): boolean {
+  return SSE_PATH_RE.test(apiPath);
+}
 
 async function proxyRequest(
   request: NextRequest,
@@ -64,11 +112,34 @@ async function proxyRequest(
     const hasBody = !['GET', 'HEAD'].includes(request.method);
     const body = hasBody ? Buffer.from(await request.arrayBuffer()) : undefined;
 
-    const res = await fetch(url, {
-      method: request.method,
-      headers,
-      body,
-    });
+    // Para SSE usamos `undici.fetch` (importado del package) en vez del
+    // `globalThis.fetch` que Next.js envuelve. El wrapper de Next no
+    // propaga el campo `dispatcher` hacia undici — lo silencia o tira
+    // TypeError. Usar el `fetch` exportado de undici evita el wrapper y
+    // garantiza que el dispatcher con `bodyTimeout: 0` se aplique.
+    //
+    // Para JSON normal mantenemos el `globalThis.fetch` de Next porque
+    // queremos sus features (caching, RSC fetch dedup, etc.) y no
+    // necesitamos un dispatcher custom.
+    let res: Response;
+    if (isSseEndpoint(apiPath)) {
+      const undiciRes = await undiciFetch(url, {
+        method: request.method,
+        headers,
+        body,
+        dispatcher: sseDispatcher,
+      });
+      // El `Response` de undici es estructuralmente compatible con el
+      // global Response (ambos exponen body como ReadableStream); cast
+      // explícito porque los tipos no son nominalmente equivalentes.
+      res = undiciRes as unknown as Response;
+    } else {
+      res = await fetch(url, {
+        method: request.method,
+        headers,
+        body,
+      });
+    }
 
     if (res.status === 204) return new NextResponse(null, { status: 204 });
 
@@ -95,7 +166,22 @@ async function proxyRequest(
         headers: { 'Content-Type': 'application/json' },
       });
     }
-  } catch {
+  } catch (err) {
+    // Log el error original — sin esto, fallos de fetch (ECONNREFUSED,
+    // AbortError por timeout, errores de DNS, etc.) se pierden y solo
+    // vemos "backend unreachable" en el cliente. `TypeError: fetch failed`
+    // SIEMPRE viene con un `cause` interno que tiene la info real
+    // (ECONNREFUSED, ENOTFOUND, AbortError, validation errors del fetch
+    // wrapper de Next, etc.) — sin desempacarlo el log es inútil.
+    let causeStr = err instanceof Error ? `${err.name}: ${err.message}` : String(err);
+    const inner = (err as { cause?: unknown })?.cause;
+    if (inner) {
+      const innerStr = inner instanceof Error ? `${inner.name}: ${inner.message}` : String(inner);
+      causeStr += ` | cause=${innerStr}`;
+      const innerCode = (inner as { code?: string })?.code;
+      if (innerCode) causeStr += ` code=${innerCode}`;
+    }
+    console.error(`[proxy] fetch error path=${apiPath} ${causeStr}`);
     return NextResponse.json(
       { message: 'Proxy error: backend unreachable' },
       { status: 502 },

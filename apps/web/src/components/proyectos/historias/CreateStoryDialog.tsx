@@ -70,6 +70,26 @@ export function CreateStoryDialog({ open, onOpenChange, defaultEpicId }: CreateS
     setErrors({});
     setSaving(true);
     try {
+      // El backend persiste 3 markdowns (po/technical/qa). El user llenará
+      // los detalles en la story page; aquí solo armamos el PO mínimo con la
+      // historia de usuario, los headings canónicos van vacíos para que el
+      // user los complete o el agente IA los regenere.
+      const initialPOMarkdown = [
+        '## Antecedentes',
+        '',
+        '## Objetivo',
+        '',
+        '## Historia de usuario',
+        '',
+        description.trim(),
+        '',
+        '## What/How/When',
+        '',
+        '## Criterios de aceptación',
+        '',
+        '## Notas adicionales',
+        '',
+      ].join('\n');
       const created = await apiCreateStory({
         title: title.trim(),
         epicId,
@@ -78,14 +98,9 @@ export function CreateStoryDialog({ open, onOpenChange, defaultEpicId }: CreateS
         storyPoints: Number(storyPoints),
         sprintId: sprintId || undefined,
         labels: [],
-        po: {
-          background: '',
-          objective: '',
-          userStory: description.trim(),
-          whatHowWhen: '',
-          acceptanceCriteria: '',
-          additionalNotes: '',
-        },
+        po: { markdown: initialPOMarkdown },
+        technical: { markdown: '' },
+        qa: { markdown: '' },
       });
 
       // Add to local state for instant UI feedback
@@ -99,9 +114,9 @@ export function CreateStoryDialog({ open, onOpenChange, defaultEpicId }: CreateS
         podId: created.podId,
         sprintId: created.sprintId,
         labels: [],
-        po: { background: '', objective: '', userStory: description.trim(), whatHowWhen: { what: '', how: '', when: '' }, acceptanceCriteria: [], additionalNotes: '' },
-        technical: { architecture: '', integrationFlow: '', validations: [], errorHandling: [], implementationChecklist: [] },
-        qa: { testingStrategy: '', linkedQAMatrixId: null },
+        po: { markdown: initialPOMarkdown },
+        technical: { markdown: '' },
+        qa: { markdown: '' },
         createdAt: created.createdAt,
         updatedAt: created.updatedAt,
       } as UserStory;

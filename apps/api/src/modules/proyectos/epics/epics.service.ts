@@ -1,10 +1,28 @@
-import { Injectable, Logger, NotFoundException } from '@nestjs/common';
+import {
+  BadRequestException,
+  ConflictException,
+  ForbiddenException,
+  Injectable,
+  Logger,
+  NotFoundException,
+} from '@nestjs/common';
 import { Prisma } from '@prisma/client';
 import { randomUUID } from 'crypto';
-import type { DiscoveredDependency } from '@cenzontle/shared';
+import type {
+  AuthenticatedUser,
+  DiscoveredDependency,
+  EpicDependency,
+  StoryTechnicalDependency,
+  TrackerReference,
+} from '@cenzontle/shared';
+import { UserRole } from '@cenzontle/shared';
 import { PrismaService } from '../../prisma/prisma.service';
 import { VaultService } from '../../vault/vault.service';
 import { VaultFolderService } from '../../vault/vault-folder.service';
+import { IntegrationsService } from '../../integrations/integrations.service';
+import { InitiativesService } from '../initiatives/initiatives.service';
+import { StoriesService } from '../stories/stories.service';
+import { StoryDependenciesService } from '../stories/dependencies/story-dependencies.service';
 import { CreateEpicDto } from './dto/create-epic.dto';
 import { UpdateEpicDto } from './dto/update-epic.dto';
 import { EpicQueryDto } from './dto/epic-query.dto';
@@ -15,6 +33,7 @@ import {
   epicDiagramPath,
   epicDependencyPath,
   epicDesignPath,
+  epicDesignBundleFolderPath,
   epicMatrixPath,
   isLegacyVaultPath,
   isNewFormatVaultPath,
@@ -22,6 +41,10 @@ import {
   type EpicRef,
   type EpicDiagramKind,
 } from '../vault-paths';
+import { DesignBundleService } from './design-bundle.service';
+import {
+  assertUserCanAccessEpicPods,
+} from './epic-access.util';
 import {
   buildDiagramMarkdown,
   buildDependencyMarkdown,
@@ -40,42 +63,25 @@ const EPIC_INCLUDE = {
 } as const;
 
 /**
- * Campos narrativos (rich-text) que viven tanto en PG como en el vault.
- * El vault es la fuente de verdad cuando se carga con includeContent=true.
+ * Headings level-2 obligatorios del markdown único de una épica. Solo
+ * informativos — el agente IA y el placeholder del editor humano los emiten,
+ * y `validateTerminal` (en `epic-generation.service`) verifica su presencia.
+ *
+ * El servicio solo lee/escribe `markdown: string` literal — no parsea ni
+ * reconstruye headings discretos. Si el caller necesita una sección puntual
+ * (export PDF, agente IA derivado), usa `splitMarkdownByH2()` del exporter.
  */
-const NARRATIVE_FIELDS = [
-  'qualitativeBenefits',
-  'quantitativeBenefits',
-  'benefitsMeasurement',
-  'scopeDescription',
-  'acceptanceCriteria',
-  'technologicalImprovements',
-  'businessPriority',
-  'teamsInvolved',
-  'impactedChannels',
-  'impactedFlows',
-  'impactSabreLevel',
-  'thirdPartyDependencies',
+const REQUIRED_EPIC_HEADINGS = [
+  '## Objetivo',
+  '## Beneficios cualitativos',
+  '## Beneficios cuantitativos',
+  '## Medición de beneficios',
+  '## Alcance',
+  '## Criterios de aceptación',
+  '## Mejoras tecnológicas',
+  '## Canales y flujos impactados',
+  '## Dependencias de terceros',
 ] as const;
-
-type NarrativeField = (typeof NARRATIVE_FIELDS)[number];
-type NarrativeContent = Partial<Record<NarrativeField, string>>;
-
-/** Label en español para cada campo narrativo, usado como heading en el markdown */
-const FIELD_LABELS: Record<NarrativeField, string> = {
-  qualitativeBenefits: 'Beneficios cualitativos',
-  quantitativeBenefits: 'Beneficios cuantitativos',
-  benefitsMeasurement: 'Medición de beneficios',
-  scopeDescription: 'Descripción del alcance',
-  acceptanceCriteria: 'Criterios de aceptación',
-  technologicalImprovements: 'Mejoras tecnológicas',
-  businessPriority: 'Prioridad de negocio',
-  teamsInvolved: 'Equipos involucrados',
-  impactedChannels: 'Canales impactados',
-  impactedFlows: 'Flujos impactados',
-  impactSabreLevel: 'Nivel de impacto Sabre',
-  thirdPartyDependencies: 'Dependencias de terceros',
-};
 
 /**
  * Invalida punteros stale a archivos del vault en formato legacy.
@@ -121,6 +127,12 @@ function mapEpic(raw: any) {
   };
 }
 
+// Sentinel placeholder usado para implementar lock atómico vía CAS sobre
+// `epic.tracker`. Si dos requests intentan publicar la misma épica, solo uno
+// gana el `updateMany` con `where: tracker = null`; el otro ve este sentinel
+// y aborta con ConflictException en vez de duplicar el issue en Linear.
+const PENDING_TRACKER_SENTINEL = '__pending__';
+
 @Injectable()
 export class EpicsService {
   private readonly logger = new Logger(EpicsService.name);
@@ -129,14 +141,339 @@ export class EpicsService {
     private prisma: PrismaService,
     private vault: VaultService,
     private vaultFolder: VaultFolderService,
+    private integrationsService: IntegrationsService,
+    private initiativesService: InitiativesService,
+    private storiesService: StoriesService,
+    private storyDependenciesService: StoryDependenciesService,
+    private designBundle: DesignBundleService,
   ) {}
 
-  async findAll(query: EpicQueryDto) {
+  /**
+   * Publica la épica + sus historias en el tracker externo (Linear).
+   *
+   * Cascade hacia arriba: si la iniciativa padre NO tiene tracker en Linear,
+   * primero la publica como Linear Initiative. Después crea el Linear Project
+   * para la épica (asociado a esa Initiative) y los Linear Issues para cada
+   * historia dentro del Project — sin sub-issues, los agentes los harán después.
+   *
+   * Garantías:
+   *  - Idempotente a nivel épica: si `epic.tracker.externalId` ya es real,
+   *    devuelve el actual sin tocar Linear.
+   *  - Lock atómico contra doble-click vía CAS sobre `epic.tracker`.
+   *  - Resource authz: el caller debe ser AltaGerencia O compartir un pod
+   *    con la épica.
+   *  - Errores parciales por story → reportados en `partialFailures`. El
+   *    Project + las stories que sí pasaron se persisten igual.
+   */
+  async publishToTracker(
+    epicId: string,
+    provider: 'linear' | 'jira',
+    user: AuthenticatedUser,
+  ): Promise<{
+    alreadyPublished: boolean;
+    initiativeTracker?: TrackerReference;
+    initiativeAlreadyPublished?: boolean;
+    epicTracker: TrackerReference;
+    storyTrackers: Array<{ storyId: string; tracker: TrackerReference }>;
+    partialFailures: Array<{ storyId: string; error: string }>;
+  }> {
+    const epic = await this.prisma.epic.findUnique({
+      where: { id: epicId },
+      include: {
+        stories: { orderBy: { createdAt: 'asc' } },
+        pods: { select: { podId: true } },
+      },
+    });
+    if (!epic) throw new NotFoundException('Épica no encontrada');
+
+    // Resource-scoped authz: AltaGerencia bypass, otros deben compartir pod.
+    const isAdmin = user.role === UserRole.AltaGerencia;
+    const epicPodIds = epic.pods.map((p) => p.podId);
+    const sharesPod = (user.podIds ?? []).some((p) => epicPodIds.includes(p));
+    if (!isAdmin && !sharesPod) {
+      throw new ForbiddenException(
+        'No autorizado: solo AltaGerencia o miembros de un pod asignado pueden publicar esta épica.',
+      );
+    }
+
+    const existingTracker = epic.tracker as unknown as TrackerReference | null;
+    if (existingTracker?.externalId && existingTracker.externalId !== PENDING_TRACKER_SENTINEL) {
+      this.logger.log(
+        `[publishToTracker] epic=${epicId} already published → ${existingTracker.externalKey}`,
+      );
+      return {
+        alreadyPublished: true,
+        epicTracker: existingTracker,
+        storyTrackers: epic.stories
+          .filter((s) => (s.tracker as unknown as TrackerReference | null)?.externalId)
+          .map((s) => ({
+            storyId: s.id,
+            tracker: s.tracker as unknown as TrackerReference,
+          })),
+        partialFailures: [],
+      };
+    }
+
+    // Si OTRA request ya está publicando la épica, esperamos al ganador.
+    if (existingTracker?.externalId === PENDING_TRACKER_SENTINEL) {
+      const waited = await this.waitForEpicTrackerOrFreed(epicId);
+      if (waited.kind === 'ready') {
+        // Re-cargar el estado completo (con stories actualizadas) para devolver
+        // un payload consistente al cliente que llegó tarde.
+        return this.publishToTracker(epicId, provider, user);
+      }
+      if (waited.kind === 'timeout') {
+        throw new ConflictException(
+          'Otra publicación de esta épica lleva mucho tiempo. Reintenta en unos segundos.',
+        );
+      }
+      // 'freed' → caemos al CAS de abajo y reintentamos el claim.
+    }
+
+    // Cascade hacia arriba: garantizar que la Initiative tenga tracker antes
+    // de crear el Project. Si falla acá, el lock de la épica no se ha tomado
+    // todavía, así que es seguro propagar la excepción.
+    const initiativeResult = await this.initiativesService.ensureTracker(
+      epic.initiativeId,
+      provider,
+      user,
+    );
+
+    // Atomic CAS sobre epic.tracker — previene la race entre requests
+    // concurrentes que ambas pasarían el `if (existingTracker)` check.
+    const placeholder = {
+      provider,
+      externalId: PENDING_TRACKER_SENTINEL,
+      externalKey: PENDING_TRACKER_SENTINEL,
+      externalUrl: '',
+    };
+    const claimed = await this.prisma.epic.updateMany({
+      where: { id: epicId, tracker: { equals: Prisma.DbNull } },
+      data: { tracker: placeholder as unknown as Prisma.InputJsonValue },
+    });
+    if (claimed.count === 0) {
+      // Perdimos la carrera. Esperar al ganador — si termina OK retornamos
+      // recursivamente para entregar el shape completo. Si el ganador falla
+      // y libera el lock (`freed`), reintentar el flujo entero.
+      const waited = await this.waitForEpicTrackerOrFreed(epicId);
+      if (waited.kind === 'ready' || waited.kind === 'freed') {
+        return this.publishToTracker(epicId, provider, user);
+      }
+      throw new ConflictException(
+        'Otra publicación de esta épica lleva mucho tiempo. Reintenta en unos segundos.',
+      );
+    }
+
+    // Cargar el contenido completo (PO + Technical + QA) del vault + las
+    // dependencias técnicas de la story (StoryTechnicalDependency) en paralelo.
+    // Failures individuales NO abortan — caemos al payload mínimo para que la
+    // story se cree en Linear de todos modos, sin contexto.
+    const storyPayloads = await Promise.all(
+      epic.stories.map(async (s) => {
+        const [content, technicalDependencies] = await Promise.all([
+          s.vaultPath
+            ? this.storiesService.readStoryContent(s.vaultPath).catch((err) => {
+                this.logger.warn(
+                  `[publishToTracker] failed to read vault content for story=${s.id}: ${(err as Error)?.message ?? err}`,
+                );
+                return null;
+              })
+            : Promise.resolve(null),
+          this.storyDependenciesService.findByStory(s.id).catch((err) => {
+            this.logger.warn(
+              `[publishToTracker] failed to load tech deps for story=${s.id}: ${(err as Error)?.message ?? err}`,
+            );
+            return [];
+          }),
+        ]);
+        return {
+          id: s.id,
+          title: s.title,
+          storyPoints: s.storyPoints,
+          labels: s.labels,
+          content,
+          technicalDependencies,
+        };
+      }),
+    );
+
+    // Las dependencias técnicas viven a nivel story (StoryTechnicalDependency)
+    // y se incluyen en el body de cada Issue. El payload del Project ya no
+    // lleva el campo `dependencies` — el legado JSONB Epic.dependencies queda
+    // inerte hasta migración manual.
+
+    // Resolver el provider UNA sola vez y reutilizar la instancia para
+    // publishEpic + publishStoryRelations. Cargar el provider dos veces
+    // abriría una ventana donde una rotación de config entre llamadas dejaría
+    // el DAG sin materializar silenciosamente (el primer call ya commiteó).
+    const trackerProvider = await this.integrationsService.getProvider(provider);
+
+    let result;
+    try {
+      result = await trackerProvider.publishEpic(
+        {
+          id: epic.id,
+          title: epic.title,
+          markdown: epic.markdown,
+          priority: epic.priority,
+          startDate: epic.startDate,
+          targetDate: epic.targetDate,
+          stories: storyPayloads,
+        },
+        { initiativeExternalId: initiativeResult.tracker.externalId },
+      );
+    } catch (err) {
+      // Liberar el lock si Linear falló — sin esto la épica quedaría
+      // permanentemente bloqueada en estado "pending".
+      await this.prisma.epic.update({
+        where: { id: epicId },
+        data: { tracker: Prisma.DbNull },
+      });
+      throw err;
+    }
+
+    // Persistir trackers en transacción atómica. CRÍTICO: el update del
+    // epic.tracker va al FINAL — si una story fue eliminada entre la lectura
+    // de payloads (T1) y la transacción (T2), el `story.update` lanza P2025,
+    // toda la transacción hace rollback (incluido epic.tracker), y el lock
+    // queda liberado en su estado "pending" (Prisma.DbNull) sin tracker
+    // huérfano. Catch externo libera el lock para reabrir el flujo.
+    try {
+      await this.prisma.$transaction(async (tx) => {
+        for (const { storyId, tracker } of result.storyTrackers) {
+          await tx.story.update({
+            where: { id: storyId },
+            data: { tracker: tracker as unknown as Prisma.InputJsonValue },
+          });
+        }
+        await tx.epic.update({
+          where: { id: epicId },
+          data: { tracker: result.epicTracker as unknown as Prisma.InputJsonValue },
+        });
+      });
+    } catch (err) {
+      // Cualquier fallo durante persist (story eliminada, conflicto, etc):
+      // el tracker de la épica está aún en estado pending → liberarlo para
+      // permitir reintento. Los Issues en Linear quedan huérfanos pero el
+      // siguiente publish los reusará por idempotencia del provider.
+      await this.prisma.epic.update({
+        where: { id: epicId },
+        data: { tracker: Prisma.DbNull },
+      });
+      throw err;
+    }
+
+    // Después de que TODOS los Issues existen en Linear, materializar el DAG
+    // hard del epic como Linear IssueRelations type='blocks'. Best-effort:
+    // failures parciales se reportan en logs pero no abortan el publish.
+    // Permitimos edges cross-epic: el filtro de pertenencia a `epicId` se hace
+    // post-query mediante `storyTrackerById` (solo procesamos edges donde
+    // AMBAS stories tienen tracker en este publish — el resto se materializará
+    // cuando se publique la otra épica).
+    try {
+      const storyTrackerById = new Map(
+        result.storyTrackers.map((s) => [s.storyId, s.tracker.externalId]),
+      );
+      const dagEdges = await this.prisma.storyDependency.findMany({
+        where: {
+          hardness: 'hard',
+          OR: [
+            { story: { epicId } },
+            { blockedBy: { epicId } },
+          ],
+        },
+        select: { storyId: true, blockedById: true },
+      });
+      const linearEdges = dagEdges
+        .map((e) => {
+          const blocked = storyTrackerById.get(e.storyId);
+          const blocking = storyTrackerById.get(e.blockedById);
+          return blocked && blocking
+            ? { blockedExternalId: blocked, blockingExternalId: blocking }
+            : null;
+        })
+        .filter((e): e is NonNullable<typeof e> => e !== null);
+      if (linearEdges.length > 0) {
+        const relResult = await trackerProvider.publishStoryRelations(linearEdges);
+        this.logger.log(
+          `[publishToTracker] story relations: ok=${relResult.ok} failed=${relResult.failed.length}`,
+        );
+      }
+    } catch (err) {
+      this.logger.warn(
+        `[publishToTracker] failed to publish story relations (non-fatal): ${(err as Error)?.message ?? err}`,
+      );
+    }
+
+    await this.integrationsService.markSyncedAt(provider);
+
+    this.logger.log(
+      `[publishToTracker] actor=${user.sub} epic=${epicId} → ${result.epicTracker.externalKey} ` +
+        `(initiative=${initiativeResult.tracker.externalKey}${initiativeResult.alreadyPublished ? ' [reused]' : ' [new]'} ` +
+        `stories ok=${result.storyTrackers.length} fail=${result.partialFailures.length})`,
+    );
+
+    return {
+      alreadyPublished: false,
+      initiativeTracker: initiativeResult.tracker,
+      initiativeAlreadyPublished: initiativeResult.alreadyPublished,
+      epicTracker: result.epicTracker,
+      storyTrackers: result.storyTrackers,
+      partialFailures: result.partialFailures,
+    };
+  }
+
+  /**
+   * Polling corto sobre `epic.tracker` para esperar a que otra request
+   * concurrente termine antes de fallar con 409. Mismo patrón que en
+   * InitiativesService.waitForTrackerOrFreed.
+   */
+  private async waitForEpicTrackerOrFreed(
+    epicId: string,
+  ): Promise<
+    | { kind: 'ready'; tracker: TrackerReference }
+    | { kind: 'freed' }
+    | { kind: 'timeout' }
+  > {
+    const POLL_INTERVAL_MS = 250;
+    const WAIT_BUDGET_MS = 30_000;
+    const start = Date.now();
+    while (Date.now() - start < WAIT_BUDGET_MS) {
+      await new Promise((r) => setTimeout(r, POLL_INTERVAL_MS));
+      const row = await this.prisma.epic.findUnique({
+        where: { id: epicId },
+        select: { tracker: true },
+      });
+      const t = row?.tracker as unknown as TrackerReference | null;
+      if (!t) return { kind: 'freed' };
+      if (t.externalId !== PENDING_TRACKER_SENTINEL) {
+        return { kind: 'ready', tracker: t };
+      }
+    }
+    return { kind: 'timeout' };
+  }
+
+  async findAll(query: EpicQueryDto, user?: AuthenticatedUser) {
     const where: Prisma.EpicWhereInput = {};
     if (query.initiativeId) where.initiativeId = query.initiativeId;
     if (query.status) where.status = query.status;
     if (query.priority) where.priority = query.priority;
     if (query.podId) where.pods = { some: { podId: query.podId } };
+
+    // CWE-639 — restringir listing a pods del user para no-admins. Sin esto
+    // cualquier autenticado podía enumerar todas las épicas cross-pod, lo que
+    // habilitaba ataques downstream sobre los IDs descubiertos. AltaGerencia
+    // y callers internos (sin user) ven todo. Fix de security-reviewer
+    // MEDIUM 2026-05-04.
+    if (user && user.role !== UserRole.AltaGerencia) {
+      const userPodIds = user.podIds ?? [];
+      // Si el user no pertenece a ningún pod, no ve nada — fail-closed.
+      if (userPodIds.length === 0) return [];
+      where.pods = {
+        ...(where.pods as Prisma.EpicPodListRelationFilter | undefined),
+        some: { podId: { in: userPodIds } },
+      };
+    }
 
     const epics = await this.prisma.epic.findMany({
       where,
@@ -146,7 +483,7 @@ export class EpicsService {
     return epics.map(mapEpic);
   }
 
-  async findOne(id: string, includeContent = false) {
+  async findOne(id: string, includeContent = false, user?: AuthenticatedUser) {
     const epic = await this.prisma.epic.findUnique({
       where: { id },
       include: EPIC_INCLUDE,
@@ -156,12 +493,25 @@ export class EpicsService {
     const mapped = mapEpic(epic);
 
     if (includeContent && epic.vaultPath) {
-      // En formato nuevo, los campos narrativos viven en `definicion.md` dentro
-      // del folder de la epica. En legacy flat, viven en el archivo unico.
+      // CWE-639 — gate del markdown narrativo (que vive en el vault y puede
+      // contener design notes, dependencias, referencias inline a credenciales)
+      // detrás de pod intersection. Metadata básica (id/title/status/...) sigue
+      // accesible cross-pod para flows como dashboards de tracker. Fix de
+      // security-reviewer MEDIUM 2026-05-04.
+      if (user) {
+        assertUserCanAccessEpicPods(
+          user,
+          epic.pods.map((ep) => ep.podId),
+        );
+      }
+      // En formato nuevo, el markdown narrativo vive en `definicion.md` dentro
+      // del folder de la épica. En legacy flat, vive en el archivo único.
+      // El vault es la fuente de verdad — sobreescribe el `markdown` que viene
+      // de PG si está disponible.
       const narrativeNote = await this.readNarrativeNote(epic.vaultPath);
       if (narrativeNote) {
-        const content = this.parseEpicMarkdown(narrativeNote.content);
-        return { ...mapped, ...content };
+        const markdown = this.parseEpicMarkdown(narrativeNote.content);
+        return { ...mapped, markdown };
       }
     }
 
@@ -186,18 +536,17 @@ export class EpicsService {
     const definitionPath = epicDefinitionPath(iniRef, epicRef);
     this.logger.log(`[create] Generated vaultPath=${indexPath}`);
 
-    const narrative = this.extractNarrative(dto);
+    const markdown = dto.markdown ?? '';
     const indexMd = this.buildEpicIndexMarkdown({
       id,
       title: dto.title,
       initiativeId: dto.initiativeId,
-      description: dto.description,
     });
     const definitionMd = this.buildEpicDefinitionMarkdown({
       id,
       title: dto.title,
       initiativeId: dto.initiativeId,
-      narrative,
+      markdown,
     });
 
     // 1. Escribir los 2 archivos al vault. Si el segundo falla, rollback del primero.
@@ -221,13 +570,26 @@ export class EpicsService {
 
     // 2. Create PG row (rollback ambos archivos on failure).
     try {
-      const { podIds, startDate, targetDate, diagrams, designs, ...data } = dto;
+      const { podIds, startDate, targetDate, diagrams, designs: rawDesigns, ...data } = dto;
       // `diagrams` y `designs` se extraen del spread y se reasignan como JSON.
       // El DTO valida solo `id` de cada item (critico para seguridad path
       // traversal en epicDiagramPath / epicDesignPath); el resto del shape
       // es free-form y se persiste as-is en el campo JSONB. Prisma requiere
       // `InputJsonValue` — cast via `unknown` porque un class-validator
       // DTO no declara la index signature de InputJsonObject.
+
+      // SECURITY: bundleVaultPath y bundleKey son server-only — solo
+      // `addDesignBundle` los setea (post-create, tras subir un ZIP). Stripamos
+      // cualquier valor enviado por el cliente en create para prevenir
+      // persistencia de paths atacker-controlled (que `deleteDesign` podría
+      // luego usar como sink de path traversal).
+      const designs = rawDesigns?.map((d) => {
+        const cleaned = { ...d };
+        delete (cleaned as { bundleVaultPath?: string }).bundleVaultPath;
+        delete (cleaned as { bundleKey?: string }).bundleKey;
+        return cleaned;
+      });
+
       const epic = await this.prisma.$transaction(async (tx) => {
         const created = await tx.epic.create({
           data: {
@@ -261,23 +623,32 @@ export class EpicsService {
     }
   }
 
-  async update(id: string, dto: UpdateEpicDto) {
+  async update(id: string, dto: UpdateEpicDto, user: AuthenticatedUser) {
     this.logger.log(`[update] START id=${id} fields=${Object.keys(dto).join(',')}`);
 
     const existing = await this.prisma.epic.findUnique({
       where: { id },
-      include: { initiative: { select: { id: true, name: true } } },
+      include: {
+        initiative: { select: { id: true, name: true } },
+        pods: { select: { podId: true } },
+      },
     });
     if (!existing) throw new NotFoundException('Épica no encontrada');
 
-    const incomingNarrative = this.extractNarrative(dto);
-    const hasNarrativeChanges = Object.keys(incomingNarrative).length > 0;
+    // CWE-639 BOLA — fix de security-reviewer HIGH 2026-05-04. TechLead/PO
+    // tienen EDIT_EPIC global; sin este check podían mutar épicas de otros
+    // pods (overwrite de markdown, rename de folder, reasignación de podIds).
+    assertUserCanAccessEpicPods(
+      user,
+      existing.pods.map((p) => p.podId),
+    );
+
+    const incomingMarkdown = dto.markdown;
+    const hasMarkdownChanges = incomingMarkdown !== undefined && incomingMarkdown !== existing.markdown;
     const titleChanged = dto.title !== undefined && dto.title !== existing.title;
-    const descriptionChanged =
-      dto.description !== undefined && dto.description !== existing.description;
 
     const newTitle = dto.title ?? existing.title;
-    const newDescription = dto.description ?? existing.description;
+    const newMarkdown = dto.markdown ?? existing.markdown;
 
     // ── Vault updates ──
     if (existing.vaultPath) {
@@ -301,8 +672,7 @@ export class EpicsService {
         await this.rewriteEpicFilesBeforeMove(
           existing,
           newTitle,
-          newDescription,
-          incomingNarrative,
+          newMarkdown,
         );
 
         const result = await this.vaultFolder.moveFolder(
@@ -323,13 +693,12 @@ export class EpicsService {
 
         // Cascadear historias hijas.
         await this.cascadeStoryVaultPaths(existing.id, oldFolder, newFolder);
-      } else if ((hasNarrativeChanges || descriptionChanged) && (isNewFormat || isLegacy)) {
-        // Sin rename: solo reescribir index.md y/o definicion.md segun lo que cambio.
+      } else if (hasMarkdownChanges && (isNewFormat || isLegacy)) {
+        // Sin rename: solo reescribir index.md y/o definicion.md según lo que cambió.
         await this.updateEpicVaultContent(
           existing,
           newTitle,
-          newDescription,
-          incomingNarrative,
+          newMarkdown,
         );
       }
     }
@@ -346,8 +715,37 @@ export class EpicsService {
     }
 
     // ── PG update ──
-    const { podIds, startDate, targetDate, ...data } = dto;
-    const updateData: Prisma.EpicUpdateInput = { ...data } as Prisma.EpicUpdateInput;
+    const { podIds, startDate, targetDate, designs: rawDesigns, ...data } = dto;
+
+    // SECURITY: bundleVaultPath y bundleKey son server-only. Para cada design
+    // del input, stripamos los valores user-supplied y RESTAURAMOS los del
+    // existing.designs por `id` (round-trip-safe — los users PATCH la lista
+    // completa pero no deben poder reescribir estos campos). Designs nuevos
+    // (sin id existente) se persisten sin bundle — `addDesignBundle` los
+    // settea legítimamente después.
+    let sanitizedDesigns: typeof rawDesigns | undefined;
+    if (rawDesigns !== undefined) {
+      const existingArr = Array.isArray(existing.designs)
+        ? (existing.designs as Array<{ id: string; bundleVaultPath?: string; bundleKey?: string }>)
+        : [];
+      const existingById = new Map(existingArr.map((d) => [d.id, d]));
+      sanitizedDesigns = rawDesigns.map((d) => {
+        const cleaned = { ...d };
+        delete (cleaned as { bundleVaultPath?: string }).bundleVaultPath;
+        delete (cleaned as { bundleKey?: string }).bundleKey;
+        const prev = existingById.get(d.id);
+        if (prev?.bundleVaultPath) (cleaned as { bundleVaultPath?: string }).bundleVaultPath = prev.bundleVaultPath;
+        if (prev?.bundleKey) (cleaned as { bundleKey?: string }).bundleKey = prev.bundleKey;
+        return cleaned;
+      });
+    }
+
+    const updateData: Prisma.EpicUpdateInput = {
+      ...data,
+      ...(sanitizedDesigns !== undefined
+        ? { designs: sanitizedDesigns as unknown as Prisma.InputJsonValue }
+        : {}),
+    } as Prisma.EpicUpdateInput;
     if (startDate) updateData.startDate = new Date(startDate);
     if (targetDate) updateData.targetDate = new Date(targetDate);
     // Si renombraste y esta en formato nuevo, actualizar vaultPath al nuevo index.md.
@@ -375,15 +773,24 @@ export class EpicsService {
     return mapEpic(epic);
   }
 
-  async remove(id: string) {
+  async remove(id: string, user: AuthenticatedUser) {
     const epic = await this.prisma.epic.findUnique({
       where: { id },
       include: {
         initiative: { select: { id: true, name: true } },
         stories: { select: { id: true, title: true, vaultPath: true } },
+        pods: { select: { podId: true } },
       },
     });
     if (!epic) throw new NotFoundException('Épica no encontrada');
+
+    // CWE-639 BOLA — fix de security-reviewer HIGH 2026-05-04. DELETE_EPIC
+    // está limitado a roles más altos, pero igual aplicamos el check para que
+    // un AltaGerencia ↔ podOwner futuro siga el mismo patrón canónico.
+    assertUserCanAccessEpicPods(
+      user,
+      epic.pods.map((p) => p.podId),
+    );
 
     if (epic.vaultPath && isNewFormatVaultPath(epic.vaultPath)) {
       // Formato nuevo: deleteFolder recursivo limpia TODO el folder del epic
@@ -450,13 +857,12 @@ export class EpicsService {
     existing: {
       id: string;
       title: string;
-      description: string;
+      markdown: string;
       vaultPath: string | null;
       initiativeId: string;
     },
     newTitle: string,
-    newDescription: string,
-    incomingNarrative: NarrativeContent,
+    newMarkdown: string,
   ): Promise<void> {
     if (!existing.vaultPath) return;
     const folder = existing.vaultPath.slice(0, existing.vaultPath.lastIndexOf('/'));
@@ -466,25 +872,21 @@ export class EpicsService {
     this.vault.invalidateCache(definitionPath);
 
     const existingIndexNote = await this.vault.readNote(existing.vaultPath);
-    const existingDefNote = await this.vault.readNote(definitionPath).catch(() => null);
     const existingCreated = existingIndexNote
       ? this.extractCreatedDate(existingIndexNote.content)
       : undefined;
-    const existingNarrative = existingDefNote ? this.parseEpicMarkdown(existingDefNote.content) : {};
-    const mergedNarrative: NarrativeContent = { ...existingNarrative, ...incomingNarrative };
 
     const indexMd = this.buildEpicIndexMarkdown({
       id: existing.id,
       title: newTitle,
       initiativeId: existing.initiativeId,
-      description: newDescription,
       created: existingCreated,
     });
     const definitionMd = this.buildEpicDefinitionMarkdown({
       id: existing.id,
       title: newTitle,
       initiativeId: existing.initiativeId,
-      narrative: mergedNarrative,
+      markdown: newMarkdown,
       created: existingCreated,
     });
 
@@ -501,21 +903,20 @@ export class EpicsService {
   }
 
   /**
-   * Sin rename, actualiza el vault de la epica. Formato nuevo: toca `index.md`
-   * si cambio title/description; `definicion.md` si cambio algun narrative.
-   * Formato legacy: reescribe el archivo unico (patron del service viejo).
+   * Sin rename, actualiza el vault de la épica. Formato nuevo: toca `index.md`
+   * si cambió el title; `definicion.md` si cambió el markdown.
+   * Formato legacy: reescribe el archivo único (patrón del service viejo).
    */
   private async updateEpicVaultContent(
     existing: {
       id: string;
       title: string;
-      description: string;
+      markdown: string;
       vaultPath: string | null;
       initiativeId: string;
     },
     newTitle: string,
-    newDescription: string,
-    incomingNarrative: NarrativeContent,
+    newMarkdown: string,
   ): Promise<void> {
     if (!existing.vaultPath) return;
 
@@ -531,13 +932,12 @@ export class EpicsService {
         ? this.extractCreatedDate(existingIndexNote.content)
         : undefined;
 
-      // Index: solo si cambio title o description.
-      if (newTitle !== existing.title || newDescription !== existing.description) {
+      // Index: solo si cambió title.
+      if (newTitle !== existing.title) {
         const indexMd = this.buildEpicIndexMarkdown({
           id: existing.id,
           title: newTitle,
           initiativeId: existing.initiativeId,
-          description: newDescription,
           created: existingCreated,
         });
         await this.vault.writeNote(
@@ -547,19 +947,14 @@ export class EpicsService {
         );
       }
 
-      // Definicion: solo si cambio algun narrative o title (heading).
-      if (Object.keys(incomingNarrative).length > 0 || newTitle !== existing.title) {
+      // Definicion: si cambió el markdown o el title (porque va en el H1).
+      if (newMarkdown !== existing.markdown || newTitle !== existing.title) {
         this.vault.invalidateCache(definitionPath);
-        const existingDefNote = await this.vault.readNote(definitionPath).catch(() => null);
-        const existingNarrative = existingDefNote
-          ? this.parseEpicMarkdown(existingDefNote.content)
-          : {};
-        const mergedNarrative: NarrativeContent = { ...existingNarrative, ...incomingNarrative };
         const definitionMd = this.buildEpicDefinitionMarkdown({
           id: existing.id,
           title: newTitle,
           initiativeId: existing.initiativeId,
-          narrative: mergedNarrative,
+          markdown: newMarkdown,
           created: existingCreated,
         });
         await this.vault.writeNote(
@@ -569,19 +964,16 @@ export class EpicsService {
         );
       }
     } else {
-      // Legacy: un solo archivo con todo (titulo + narrative juntos).
+      // Legacy: un solo archivo con todo (titulo + markdown juntos).
       this.vault.invalidateCache(existing.vaultPath);
       const existingNote = await this.vault.readNote(existing.vaultPath);
       const existingCreated = existingNote ? this.extractCreatedDate(existingNote.content) : undefined;
-      const existingNarrative = existingNote ? this.parseEpicMarkdown(existingNote.content) : {};
-      const mergedNarrative: NarrativeContent = { ...existingNarrative, ...incomingNarrative };
 
       const legacyMd = this.buildLegacyEpicMarkdown({
         id: existing.id,
         title: newTitle,
         initiativeId: existing.initiativeId,
-        description: newDescription,
-        narrative: mergedNarrative,
+        markdown: newMarkdown,
         created: existingCreated,
       });
 
@@ -629,25 +1021,18 @@ export class EpicsService {
     );
   }
 
-  private extractNarrative(dto: Partial<CreateEpicDto>): NarrativeContent {
-    const out: NarrativeContent = {};
-    for (const field of NARRATIVE_FIELDS) {
-      const value = dto[field];
-      if (value !== undefined) out[field] = value;
-    }
-    return out;
-  }
-
   // ─────────────────────────────────────────────────────────────────────
   //   Markdown builders
   // ─────────────────────────────────────────────────────────────────────
 
-  /** index.md — metadata + descripcion breve + referencia a definicion.md. */
+  /**
+   * index.md — solo metadata + referencia a definicion.md y al resto del folder.
+   * El contenido narrativo entero vive en `definicion.md`.
+   */
   private buildEpicIndexMarkdown(data: {
     id: string;
     title: string;
     initiativeId: string;
-    description: string;
     created?: string;
   }): string {
     const fm = buildFrontmatter({
@@ -661,10 +1046,8 @@ export class EpicsService {
     return (
       `${fm}\n\n` +
       `# ${data.title}\n\n` +
-      `## Descripción\n\n${data.description ?? ''}\n\n` +
-      `---\n\n` +
       `Contenido completo en este folder:\n\n` +
-      `- [\`definicion.md\`](./definicion.md) — campos narrativos (beneficios, alcance, criterios, etc.).\n` +
+      `- [\`definicion.md\`](./definicion.md) — markdown completo (descripción, beneficios, alcance, criterios, etc.).\n` +
       `- [\`diagramas/\`](./diagramas/) — diagramas generados por el agente IA.\n` +
       `- [\`documentos/\`](./documentos/) — documentos adjuntos a la épica.\n` +
       `- [\`dependencias/\`](./dependencias/) — dependencias identificadas.\n` +
@@ -674,15 +1057,15 @@ export class EpicsService {
   }
 
   /**
-   * `definicion.md` — los 12 campos narrativos del epic con frontmatter YAML.
-   * El frontmatter es consistente con `index.md` del epic y con los archivos
-   * de historia (para que el parser del Vault renderice la seccion METADATA).
+   * `definicion.md` — markdown único de la épica con frontmatter YAML.
+   * Estructura mínima dictada por placeholder UX y prompt al agente IA
+   * (9 headings level-2 obligatorios; ver REQUIRED_EPIC_HEADINGS).
    */
   private buildEpicDefinitionMarkdown(data: {
     id: string;
     title: string;
     initiativeId: string;
-    narrative: NarrativeContent;
+    markdown: string;
     created?: string;
   }): string {
     const fm = buildFrontmatter({
@@ -691,27 +1074,22 @@ export class EpicsService {
       initiativeId: data.initiativeId,
       title: data.title,
       created: data.created ?? new Date().toISOString().slice(0, 10),
+      format: 'v2',
     });
 
-    const narrativeSections = NARRATIVE_FIELDS.map((field) => {
-      const value = data.narrative[field] ?? '';
-      const label = FIELD_LABELS[field];
-      return `## ${label}\n\n${value}\n`;
-    }).join('\n');
-
-    return `${fm}\n\n# ${data.title} — Definición\n\n${narrativeSections}`;
+    return `${fm}\n\n# ${data.title} — Definición\n\n${data.markdown ?? ''}\n`;
   }
 
   /**
-   * Mantiene el formato legacy (1 archivo con frontmatter + description + narrative)
-   * para historias que aun no han sido migradas.
+   * Mantiene el formato legacy (1 archivo con frontmatter + markdown) para
+   * épicas pre-migración. Mismo shape que `definicion.md` pero el archivo es
+   * el `vaultPath` directo en vez de un hijo del folder.
    */
   private buildLegacyEpicMarkdown(data: {
     id: string;
     title: string;
     initiativeId: string;
-    description: string;
-    narrative: NarrativeContent;
+    markdown: string;
     created?: string;
   }): string {
     const fm = buildFrontmatter({
@@ -720,43 +1098,24 @@ export class EpicsService {
       initiativeId: data.initiativeId,
       title: data.title,
       created: data.created ?? new Date().toISOString().slice(0, 10),
+      format: 'v2',
     });
 
-    const title = `# ${data.title}\n\n`;
-    const descriptionSection = `## Descripción\n\n${data.description ?? ''}\n\n`;
-    const narrativeSections = NARRATIVE_FIELDS.map((field) => {
-      const value = data.narrative[field] ?? '';
-      const label = FIELD_LABELS[field];
-      return `## ${label}\n\n${value}\n`;
-    }).join('\n');
-
-    return `${fm}\n\n${title}${descriptionSection}${narrativeSections}`;
+    return `${fm}\n\n# ${data.title}\n\n${data.markdown ?? ''}\n`;
   }
 
   /**
-   * Parser de markdown narrative. Funciona para ambos formatos (legacy flat y
-   * nuevo definicion.md) porque la seccion `## <Label>` es identica.
+   * Lee el markdown literal del archivo (definicion.md o legacy flat),
+   * removiendo frontmatter y el primer heading `# title`. El resto se devuelve
+   * tal cual — ya no se parsean sub-secciones.
    */
-  private parseEpicMarkdown(markdown: string): NarrativeContent {
-    const escapeRe = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-    const allHeadings = ['Descripción', ...Object.values(FIELD_LABELS)];
-    const terminatorsPattern = allHeadings.map(escapeRe).join('|');
-
-    const getSection = (heading: string): string => {
-      const escaped = escapeRe(heading);
-      const re = new RegExp(
-        `## ${escaped}\\n+([\\s\\S]*?)(?=\\n## (?:${terminatorsPattern})\\n|$)`,
-        'i',
-      );
-      const match = markdown.match(re);
-      return match ? match[1].trim() : '';
-    };
-
-    const out: NarrativeContent = {};
-    for (const field of NARRATIVE_FIELDS) {
-      out[field] = getSection(FIELD_LABELS[field]);
-    }
-    return out;
+  private parseEpicMarkdown(content: string): string {
+    const withoutFrontmatter = content.replace(/^---\s*\n[\s\S]*?\n---\s*\n+/m, '');
+    // Sin flag `m`: solo strippea el `# Heading` al inicio del body, no
+    // headings que el user pueda escribir en el cuerpo (mismo fix que en
+    // `stripFrontmatterAndH1` de stories.service post QA review).
+    const withoutH1 = withoutFrontmatter.replace(/^\s*#\s+[^\n]+\n+/, '');
+    return withoutH1.trim();
   }
 
   private extractCreatedDate(markdown: string): string | undefined {
@@ -921,6 +1280,141 @@ export class EpicsService {
   }
 
   // ─────────────────────────────────────────────────────────────────────
+  //   Legacy dependencies — bridge para el roll-up
+  // ─────────────────────────────────────────────────────────────────────
+
+  /**
+   * Devuelve las dependencias LEGACY de una épica (las que viven en el JSONB
+   * `epic.dependencies` y los `.md` discovered en el vault) mapeadas al shape
+   * `StoryTechnicalDependency` con `storyId=''` como sentinel para indicar que
+   * son legacy a nivel épica (sin owner story específica).
+   *
+   * El roll-up endpoint las concatena con las nuevas (FK story) para que el
+   * usuario VEA todas las deps existentes sin necesidad de un backfill
+   * destructivo. Cuando el usuario decida migrar manualmente, podrá crear
+   * filas nuevas con FK a stories y borrar el JSONB/vault legacy.
+   */
+  async getLegacyDependenciesForRollup(
+    epicId: string,
+  ): Promise<StoryTechnicalDependency[]> {
+    const epic = await this.prisma.epic.findUnique({
+      where: { id: epicId },
+      select: { dependencies: true, vaultPath: true, initiative: { select: { id: true, name: true } }, title: true },
+    });
+    if (!epic) return [];
+
+    // ── Pre-fetch del set de "deps ya existentes en tabla nueva" ────────
+    // Las usamos para deduplicar AMBAS fuentes legacy (JSONB + vault) contra
+    // la tabla nueva. Matching compuesto:
+    //   - por `id` exacto (cubre vault discovered cuando preserva el id DTO)
+    //   - por `title.trim().toLowerCase()` (cubre el JSONB legacy donde el
+    //     id puede ser `ai-dep-<uuid>` mientras la tabla genera uuid nuevo)
+    // Sin el match por title, las épicas afectadas por el double-write bug
+    // mostrarían el mismo dep dos veces (📖 story + 📦 legacy).
+    const newTableRows = await this.prisma.storyTechnicalDependency.findMany({
+      where: { story: { epicId } },
+      select: { id: true, title: true },
+    });
+    const newTableIds = new Set(newTableRows.map((r) => r.id));
+    const newTableTitles = new Set(
+      newTableRows.map((r) => r.title.trim().toLowerCase()).filter(Boolean),
+    );
+    const isAlreadyInNewTable = (id: string | undefined, title: string | undefined): boolean => {
+      if (id && newTableIds.has(id)) return true;
+      const t = (title ?? '').trim().toLowerCase();
+      return !!t && newTableTitles.has(t);
+    };
+
+    // ── 1. Manuales del JSONB legacy `epic.dependencies` ─────────────
+    const TYPE_TO_CATEGORY: Record<string, StoryTechnicalDependency['category']> = {
+      technical: 'services',
+      resource: 'services',
+      knowledge: 'knowledge',
+      external: 'apis',
+      'cross-team': 'teams',
+    };
+    const SEVERITY_NORMALIZE: Record<string, StoryTechnicalDependency['severity']> = {
+      critical: 'critical',
+      high: 'high',
+      medium: 'medium',
+      low: 'low',
+    };
+    const jsonbRaw = Array.isArray(epic.dependencies)
+      ? (epic.dependencies as unknown as EpicDependency[])
+      : [];
+    const jsonbMapped: StoryTechnicalDependency[] = jsonbRaw
+      .filter((d) => !isAlreadyInNewTable(d.id, d.title))
+      .map((d) => ({
+        id: d.id,
+        storyId: '', // sentinel: legacy a nivel épica
+        title: d.title,
+        description: d.description ?? '',
+        category: TYPE_TO_CATEGORY[d.type] ?? 'other',
+        severity: SEVERITY_NORMALIZE[d.severity as string] ?? 'medium',
+        source: 'manual',
+        vendor: d.vendor ?? null,
+        requiresCredential: d.requiresCredential ?? false,
+        linkedSecretId: d.linkedSecretId ?? null,
+        isBlocking: d.isBlocking ?? false,
+        targetExternalName: d.targetExternalName ?? null,
+        targetEpicId: d.targetEpicId ?? null,
+        status: (d.status as StoryTechnicalDependency['status']) ?? 'identified',
+        owner: d.owner ?? '',
+        dueDate: d.dueDate ?? null,
+        resolutionNotes: d.resolutionNotes ?? '',
+        mdContent: null,
+        createdAt: d.createdAt ?? new Date().toISOString(),
+        updatedAt: d.updatedAt ?? new Date().toISOString(),
+      }));
+
+    // ── 2. Discovered del vault (.md) — reusamos listDiscoveredDependencies
+    // que ya hace el merge con la tabla nueva. Filtramos a las que NO tienen
+    // un row equivalente en la nueva tabla (las nuevas ya las trae el rollup
+    // principal vía findByEpic, así que evitamos duplicados).
+    const CATEGORY_FROM_TYPE: Record<string, StoryTechnicalDependency['category']> = {
+      api: 'apis',
+      service: 'services',
+      data: 'testing',
+      team: 'teams',
+      other: 'other',
+    };
+    let discovered: DiscoveredDependency[] = [];
+    try {
+      discovered = await this.listDiscoveredDependencies(epicId);
+    } catch (err) {
+      this.logger.warn(
+        `[getLegacyDependenciesForRollup] vault discovered failed (non-fatal): ${(err as Error)?.message ?? err}`,
+      );
+    }
+    const discoveredMapped: StoryTechnicalDependency[] = discovered
+      .filter((d) => !isAlreadyInNewTable(d.id, d.title))
+      .map((d) => ({
+        id: d.id,
+        storyId: '',
+        title: d.title,
+        description: d.description ?? '',
+        category: CATEGORY_FROM_TYPE[d.type] ?? 'other',
+        severity: d.severity as StoryTechnicalDependency['severity'],
+        source: 'discovered',
+        vendor: d.vendor ?? null,
+        requiresCredential: d.requiresCredential ?? false,
+        linkedSecretId: d.linkedSecretId ?? null,
+        isBlocking: d.isBlocking ?? false,
+        targetExternalName: null,
+        targetEpicId: null,
+        status: 'identified',
+        owner: '',
+        dueDate: null,
+        resolutionNotes: '',
+        mdContent: d.mdContent ?? null,
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+      }));
+
+    return [...jsonbMapped, ...discoveredMapped];
+  }
+
+  // ─────────────────────────────────────────────────────────────────────
   //   Discovered dependencies (vault-sourced, AI-generated)
   // ─────────────────────────────────────────────────────────────────────
 
@@ -996,10 +1490,43 @@ export class EpicsService {
       };
     });
 
+    // ── Unión con StoryTechnicalDependency (source='discovered') ─────
+    // Después del refactor del agente QA, las nuevas discovered deps se
+    // persisten directamente en la tabla `StoryTechnicalDependency` con
+    // `source='discovered'` (en lugar de .md en vault). Las traemos aquí
+    // y las mapeamos al shape de DiscoveredDependency para que el endpoint
+    // siga devolviendo una sola lista unificada y la UI no tenga que
+    // hacer dos requests durante el periodo de transición.
+    const CATEGORY_TO_TYPE: Record<string, DiscoveredDependency['type']> = {
+      apis: 'api',
+      services: 'service',
+      testing: 'data',
+      teams: 'team',
+      other: 'other',
+      secrets: 'other',
+      knowledge: 'other',
+    };
+    const tableDeps = await this.prisma.storyTechnicalDependency.findMany({
+      where: { source: 'discovered', story: { epicId } },
+    });
+    const tableMapped: DiscoveredDependency[] = tableDeps.map((d) => ({
+      id: d.id,
+      title: d.title,
+      description: d.description,
+      severity: d.severity as DiscoveredDependency['severity'],
+      type: CATEGORY_TO_TYPE[d.category] ?? 'other',
+      mdContent: d.mdContent ?? '',
+      vendor: d.vendor ?? undefined,
+      requiresCredential: d.requiresCredential,
+      isBlocking: d.isBlocking,
+      linkedSecretId: d.linkedSecretId ?? undefined,
+    }));
+    const finalMerged = [...merged, ...tableMapped];
+
     this.logger.log(
-      `[listDiscoveredDependencies] epic=${epicId} paths=${paths.length} parsed=${vaultDeps.length} parseFailures=${parseFailures} enrichedFromJsonb=${merged.filter((d) => jsonbById.has(d.id)).length}`,
+      `[listDiscoveredDependencies] epic=${epicId} paths=${paths.length} parsed=${vaultDeps.length} parseFailures=${parseFailures} enrichedFromJsonb=${merged.filter((d) => jsonbById.has(d.id)).length} tableDeps=${tableMapped.length}`,
     );
-    return merged;
+    return finalMerged;
   }
 
   /**
@@ -1063,5 +1590,321 @@ export class EpicsService {
       `[listStoryDependencies] epic=${epicId} stories-with-deps=${result.length} total-edges=${edges.length}`,
     );
     return result;
+  }
+
+  /**
+   * Borra un diseño de la épica con cleanup completo:
+   *  1. Si tiene `bundleVaultPath` (diseño con ZIP): lista TODOS los archivos
+   *     descomprimidos bajo ese path con `vault.listTree()` y los borra
+   *     uno por uno con `vault.deleteNote()`. GitHub no soporta "rm -rf"
+   *     atómico — cada archivo es un commit, así que los iteramos.
+   *  2. Si tiene `bundleKey` (ZIP de respaldo en disco): borra el archivo.
+   *  3. Si NO tiene bundle (diseño legacy con URL handoff): borra el
+   *     `.md` independiente bajo `disenos/<slug>-<id6>.md`.
+   *  4. Quita el design del array `epic.designs` y persiste.
+   *
+   * Idempotente: si el design ya no existe, retorna sin error.
+   * Tolerante a fallos de cleanup parciales: si un `deleteNote` falla
+   * (network, 404, etc.), loguea y continúa — el design se quita del array
+   * de cualquier manera. Archivos huérfanos en el vault son cosméticos,
+   * no rompen funcionalidad.
+   */
+  async deleteDesign(
+    epicId: string,
+    designId: string,
+    user: AuthenticatedUser,
+  ): Promise<void> {
+    const epic = await this.prisma.epic.findUnique({
+      where: { id: epicId },
+      include: {
+        initiative: { select: { id: true, name: true } },
+        pods: { select: { podId: true } },
+      },
+    });
+    if (!epic) throw new NotFoundException(`Épica ${epicId} no encontrada`);
+
+    // CWE-639 BOLA — fix de security-reviewer HIGH 2026-05-04. Sin esta
+    // validación, cualquier user con EDIT_EPIC podía borrar diseños de
+    // épicas de otros pods (DELETE simétrico al upload).
+    assertUserCanAccessEpicPods(
+      user,
+      epic.pods.map((p) => p.podId),
+    );
+
+    const designs = Array.isArray(epic.designs) ? (epic.designs as unknown as Array<{
+      id: string;
+      name: string;
+      bundleKey?: string;
+      bundleVaultPath?: string;
+    }>) : [];
+    const design = designs.find((d) => d.id === designId);
+    if (!design) {
+      // Idempotente: ya no está, nothing to clean.
+      this.logger.log(`[deleteDesign] design=${designId} ya no existe en epic=${epicId}, no-op`);
+      return;
+    }
+
+    // 1) Cleanup de archivos del vault.
+    if (design.bundleVaultPath) {
+      // Diseño con bundle ZIP. listTree devuelve un árbol NESTED — recorremos
+      // recursivo para colectar TODOS los archivos hoja.
+      const folder = design.bundleVaultPath.replace(/\/+$/, '');
+
+      // SECURITY (CWE-22 / CWE-639): bundleVaultPath se persiste en JSONB y
+      // es nominalmente user-supplied vía CreateEpicDto/UpdateEpicDto. Antes
+      // de listar/borrar archivos, validamos que apunte DENTRO del folder de
+      // disenos de esta épica y que termine con el sufijo `-<id6>` que produce
+      // `slugifyWithId(name, design.id)`. Sin esta validación, un user con
+      // EDIT_EPIC podría plantar bundleVaultPath="iniciativas" y borrar todo
+      // el vault de la org al triggerar este endpoint.
+      //
+      // No comparamos con el path reconstruido porque el slug del nombre puede
+      // haber cambiado tras un rename — el `update()` PRESERVA bundleVaultPath
+      // del valor original (ver línea ~696). El sufijo `-<id6>` sí es estable
+      // y suficiente: el id6 deriva del design.id actual, no del nombre.
+      // Defense-in-depth: rechazar caracteres que permitan path traversal
+      // o ataques downstream (..,  \\, //, control chars). Coste cero — un
+      // path legítimo generado por slugifyWithId nunca contiene estos.
+      if (
+        folder.includes('..') ||
+        folder.includes('\\') ||
+        folder.includes('//') ||
+        // eslint-disable-next-line no-control-regex
+        /[\x00-\x1f]/.test(folder)
+      ) {
+        this.logger.error(
+          `[deleteDesign] bundleVaultPath con caracteres peligrosos: epic=${epicId} design=${designId} folder="${folder}"`,
+        );
+        throw new ForbiddenException(
+          'bundleVaultPath contiene caracteres inválidos',
+        );
+      }
+
+      const iniRef: InitiativeRef = { id: epic.initiative.id, name: epic.initiative.name };
+      const epicRef: EpicRef = { id: epic.id, title: epic.title };
+      const expectedPrefix = `${epicFolderPath(iniRef, epicRef)}/disenos/`;
+      const expectedIdSuffix = `-${design.id.slice(-6)}`;
+      if (!folder.startsWith(expectedPrefix) || !folder.endsWith(expectedIdSuffix)) {
+        this.logger.error(
+          `[deleteDesign] bundleVaultPath inválido (posible tampering): epic=${epicId} design=${designId} folder="${folder}" expected_prefix="${expectedPrefix}" expected_id_suffix="${expectedIdSuffix}"`,
+        );
+        throw new ForbiddenException(
+          'bundleVaultPath inconsistente con el folder esperado del diseño',
+        );
+      }
+
+      try {
+        const tree = await this.vault.listTree(folder);
+        const flatFiles: Array<{ path: string }> = [];
+        const walk = (nodes: typeof tree): void => {
+          for (const node of nodes) {
+            if (node.type === 'file') {
+              flatFiles.push({ path: node.path });
+            } else if (node.children) {
+              walk(node.children);
+            }
+          }
+        };
+        walk(tree);
+        this.logger.log(
+          `[deleteDesign] bundle cleanup epic=${epicId} design=${designId} files=${flatFiles.length} folder=${folder}`,
+        );
+        for (const file of flatFiles) {
+          try {
+            await this.vault.deleteNote(
+              file.path,
+              `chore(design): cleanup ${design.name} [${epicId}]`,
+            );
+          } catch (err: any) {
+            this.logger.warn(
+              `[deleteDesign] no se pudo borrar ${file.path}: ${err?.message ?? err}`,
+            );
+          }
+        }
+      } catch (err: any) {
+        // listTree falló — log y continúa con el resto del cleanup.
+        this.logger.warn(
+          `[deleteDesign] listTree falló para ${folder}: ${err?.message ?? err}`,
+        );
+      }
+    } else if (epic.vaultPath) {
+      // Diseño legacy (URL handoff): un único .md hermano bajo disenos/.
+      try {
+        const iniRef: InitiativeRef = { id: epic.initiative.id, name: epic.initiative.name };
+        const epicRef: EpicRef = { id: epic.id, title: epic.title };
+        const path = epicDesignPath(iniRef, epicRef, { id: design.id, name: design.name });
+        await this.vault.deleteNote(
+          path,
+          `chore(design): remove ${design.name} [${epicId}]`,
+        );
+      } catch (err: any) {
+        this.logger.warn(
+          `[deleteDesign] legacy cleanup falló: ${err?.message ?? err}`,
+        );
+      }
+    }
+
+    // 2) Cleanup del ZIP de respaldo (solo bundles).
+    if (design.bundleKey) {
+      await this.designBundle.deleteBundle(design.bundleKey);
+    }
+
+    // 3) Quitar del array y persistir.
+    const next = designs.filter((d) => d.id !== designId);
+    await this.prisma.epic.update({
+      where: { id: epicId },
+      data: {
+        designs: next as unknown as Prisma.InputJsonValue,
+        updatedAt: new Date(),
+      },
+    });
+    this.logger.log(`[deleteDesign] epic=${epicId} design=${designId} cleanup completo`);
+  }
+
+  /**
+   * Sube un bundle ZIP de Claude Design y lo asocia como diseño de la épica.
+   *
+   * Orquesta:
+   *  1. Carga la épica + iniciativa para construir paths del vault.
+   *  2. Llama a DesignBundleService para validar + descomprimir el ZIP +
+   *     guardarlo a disco como respaldo.
+   *  3. Para cada archivo texto del bundle, hace `vault.writeNote()` bajo
+   *     `<epicFolder>/disenos/<designSlug>-<id6>/<relativePath>`.
+   *  4. Construye el handoff sintético y lo guarda en BD como
+   *     `EpicDesign.handoff`.
+   *  5. Persiste el EpicDesign al array `epic.designs` (JSONB).
+   *
+   * Falla con BadRequestException si el ZIP no es válido (estructura,
+   * tamaño, sin README). El cleanup parcial NO se hace: si falla a mitad
+   * de los `writeNote`, los archivos previos quedan en el vault. Razón:
+   * el agente puede ignorar archivos huérfanos via su listing — y un retry
+   * del user resuelve sin estado intermedio dañino.
+   */
+  async addDesignBundle(
+    epicId: string,
+    params: {
+      name: string;
+      description: string;
+      file: Express.Multer.File;
+      user: AuthenticatedUser;
+    },
+  ): Promise<{ id: string; name: string; description: string; handoff: string; bundleKey: string; bundleVaultPath: string; createdAt: string; updatedAt: string; createdBy?: string }> {
+    const epic = await this.prisma.epic.findUnique({
+      where: { id: epicId },
+      include: {
+        initiative: { select: { id: true, name: true } },
+        pods: { select: { podId: true } },
+      },
+    });
+    if (!epic) throw new NotFoundException(`Épica ${epicId} no encontrada`);
+
+    // CWE-639 BOLA — fix de security-reviewer HIGH 2026-05-04. Sin esta
+    // validación, cualquier user con EDIT_EPIC (TechLead, etc.) podía subir
+    // diseños a épicas de otros pods, plantando contenido en su vault y
+    // material de prompt-injection en sus agent handoffs.
+    assertUserCanAccessEpicPods(
+      params.user,
+      epic.pods.map((p) => p.podId),
+    );
+
+    if (!epic.vaultPath) {
+      throw new ConflictException(
+        'La épica no tiene vaultPath — no se puede asociar diseños sin folder en el vault.',
+      );
+    }
+
+    // 1) Extraer + validar. Dispatch por extensión:
+    //    - `.html` → standalone HTML (sin wrapper folder ni README).
+    //    - `.zip` → bundle de Claude Design (estructura wrapper/README/project/).
+    //    Cualquier otra extensión rechaza con BadRequestException explícita
+    //    para que el user no se confunda con un "estructura inválida" críptico.
+    const lowerName = (params.file.originalname || '').toLowerCase();
+    let extracted;
+    if (lowerName.endsWith('.html') || lowerName.endsWith('.htm')) {
+      extracted = await this.designBundle.extractStandaloneHtml(
+        params.file.buffer,
+        params.file.originalname,
+      );
+    } else if (lowerName.endsWith('.zip')) {
+      extracted = await this.designBundle.extractBundle(
+        params.file.buffer,
+        params.file.originalname,
+      );
+    } else {
+      throw new BadRequestException(
+        'Formato no soportado. Sube un `.zip` (bundle de Claude Design) o un `.html` standalone.',
+      );
+    }
+
+    // 2) Generar el id del nuevo design + paths del vault.
+    const designId = randomUUID();
+    const iniRef: InitiativeRef = { id: epic.initiative.id, name: epic.initiative.name };
+    const epicRef: EpicRef = { id: epic.id, title: epic.title };
+    const folder = epicDesignBundleFolderPath(iniRef, epicRef, {
+      id: designId,
+      name: params.name,
+    });
+    // bundleVaultPath con trailing slash para concatenación trivial.
+    const bundleVaultPath = `${folder}/`;
+
+    // 3) Escribir cada archivo texto del bundle al vault. Hacemos write
+    //    serial para no saturar la API de GitHub (Octokit) — en paralelo
+    //    a 50 archivos hemos visto rate limits 403 esporádicos.
+    for (const file of extracted.textFiles) {
+      // Defense-in-depth CWE-22: extractBundle ya valida `..` segments,
+      // pero re-validamos acá por si un caller futuro pasa un ExtractedBundle
+      // construido fuera del extractor canónico (ej: tests, sync hipotético
+      // desde otro storage). Fail-closed: skip + log, no abort del flow.
+      const segments = file.relativePath.split('/');
+      if (
+        segments.some((seg) => seg === '..' || seg === '') ||
+        file.relativePath.startsWith('/')
+      ) {
+        this.logger.warn(
+          `[addDesignBundle] Skipped entry with path traversal: epic=${epicId} entry="${file.relativePath}"`,
+        );
+        continue;
+      }
+      const path = `${folder}/${file.relativePath}`;
+      await this.vault.writeNote(
+        path,
+        file.content,
+        `docs(design): bundle ${extracted.bundleSlug} → ${file.relativePath} [${epicId}]`,
+      );
+    }
+    this.logger.log(
+      `[addDesignBundle] epic=${epicId} design=${designId} files=${extracted.textFiles.length} ` +
+      `binaries=${extracted.binaryEntries.length} bundleKey=${extracted.bundleKey}`,
+    );
+
+    // 4) Construir handoff sintético — usa el bundleVaultPath para que las
+    //    referencias sean absolutas dentro del vault.
+    const handoff = this.designBundle.buildSyntheticHandoff(extracted, bundleVaultPath);
+
+    // 5) Persistir el EpicDesign al array JSONB.
+    const nowIso = new Date().toISOString();
+    const newDesign = {
+      id: designId,
+      name: params.name,
+      description: params.description,
+      handoff,
+      bundleKey: extracted.bundleKey,
+      bundleVaultPath,
+      createdAt: nowIso,
+      updatedAt: nowIso,
+      createdBy: params.user.sub,
+    };
+
+    const currentDesigns = Array.isArray(epic.designs) ? epic.designs : [];
+    const updated = [...(currentDesigns as Prisma.JsonArray), newDesign as unknown as Prisma.JsonObject];
+    await this.prisma.epic.update({
+      where: { id: epicId },
+      data: {
+        designs: updated as Prisma.InputJsonValue,
+        updatedAt: new Date(),
+      },
+    });
+
+    return newDesign;
   }
 }

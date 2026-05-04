@@ -231,9 +231,8 @@ export function TeamSection() {
       await Promise.all([...selectedIds].map((id) => ctxDeactivate(id)));
       toast.success(`${selectedIds.size} usuario(s) desactivado(s)`);
       setSelectedIds(new Set());
-    } catch (err) {
+    } catch {
       toast.error('Error al desactivar usuarios');
-      console.error(err);
     } finally {
       setBulkAction(false);
     }
@@ -246,9 +245,8 @@ export function TeamSection() {
       await Promise.all([...selectedIds].map((id) => ctxRemove(id)));
       toast.success(`${selectedIds.size} usuario(s) eliminado(s)`);
       setSelectedIds(new Set());
-    } catch (err) {
+    } catch {
       toast.error('Error al eliminar usuarios');
-      console.error(err);
     } finally {
       setBulkAction(false);
     }
@@ -275,9 +273,8 @@ export function TeamSection() {
       setInvitePod('');
       toast.success('Usuario invitado. Se envio un email para establecer contrasena.');
       return true;
-    } catch (err) {
+    } catch {
       toast.error('Error al invitar usuario. Verifica que el email no este registrado.');
-      console.error('Failed to invite member:', err);
       return false;
     } finally {
       setSaving(false);
@@ -288,9 +285,8 @@ export function TeamSection() {
     try {
       await ctxChangeRole(userId, role);
       toast.success(`Rol actualizado a ${USER_ROLE_LABELS[role]}`);
-    } catch (err) {
+    } catch {
       toast.error('Error al cambiar rol');
-      console.error('Failed to change role:', err);
     }
   };
 
@@ -298,9 +294,8 @@ export function TeamSection() {
     try {
       await ctxDeactivate(userId);
       toast.success('Usuario desactivado');
-    } catch (err) {
+    } catch {
       toast.error('Error al desactivar usuario');
-      console.error('Failed to deactivate:', err);
     }
   };
 
@@ -308,9 +303,8 @@ export function TeamSection() {
     try {
       await ctxReactivate(userId);
       toast.success('Usuario reactivado');
-    } catch (err) {
+    } catch {
       toast.error('Error al reactivar usuario');
-      console.error('Failed to reactivate:', err);
     }
   };
 
@@ -318,9 +312,8 @@ export function TeamSection() {
     try {
       await ctxRemove(userId);
       toast.success('Usuario eliminado');
-    } catch (err) {
+    } catch {
       toast.error('Error al eliminar usuario');
-      console.error('Failed to remove:', err);
     }
   };
 

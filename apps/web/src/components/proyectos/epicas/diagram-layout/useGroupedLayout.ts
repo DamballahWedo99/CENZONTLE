@@ -501,15 +501,6 @@ export function useGroupedLayout(
         return p !== undefined && Number.isFinite(p.x) && Number.isFinite(p.y);
       });
 
-    console.debug(
-      `[DIAGRAM-DEBUG][useGroupedLayout] Diagrama ENTRA a layout diagram=${diagram.id} ` +
-        `nodes=${diagram.nodes.length} edges=${diagram.edges.length} ` +
-        `hasManualLayout=${Boolean(diagram.hasManualLayout)} ` +
-        `manualPositions_count=${manualCount} ` +
-        `allManual=${allManual} ` +
-        `pipeline=${allManual ? 'FAST-PATH (bypass ELK, sin waypoints)' : 'ELK con ORTHOGONAL routing'}`,
-    );
-
     if (allManual) {
       const direction =
         directionOverride ?? inferLayoutDirection(diagram.nodes, diagram.edges);
@@ -572,11 +563,6 @@ export function useGroupedLayout(
       }
       const fastClusters = computeClusterBounds(diagram.nodes, fastPositions);
 
-      const fastRefCount = nodesWithRefs.length - rfNodes.length;
-      console.debug(
-        `[useGroupedLayout] fast-path manual activo diagram=${diagram.id} nodes=${diagram.nodes.length} direction=${direction} jumpConnectors=${fastRefCount / 2} (bypass ELK — hasManualLayout=true)`,
-      );
-
       // Fast-path: snap-to-grid + collision resolution. El snap corrige
       // micro-desalineaciones de drags del user; el resolver fix overlaps
       // post-snap. Mismo approach que el ELK-path.
@@ -601,20 +587,10 @@ export function useGroupedLayout(
     }
 
     const run = async (): Promise<void> => {
-      const runStart = performance.now();
       try {
         const direction =
           directionOverride ?? inferLayoutDirection(diagram.nodes, diagram.edges);
         const tuning = pickElkTuning(diagram.nodes.length);
-        console.debug(
-          `[DIAGRAM-DEBUG][useGroupedLayout v3] ELK run INICIADO diagram=${diagram.id} ` +
-            `nodes=${diagram.nodes.length} edges=${diagram.edges.length} ` +
-            `direction=${direction} edgeRouting=ORTHOGONAL ` +
-            `nodePlacement=BRANDES_KOEPF(BALANCED) greedySwitch=TWO_SIDED ` +
-            `thoroughness=15 wrapping=OFF portAlignment=DISTRIBUTED ` +
-            `nodeNode=${tuning.nodesep} ranksep=${tuning.ranksep} edgeNode=40 ` +
-            `aspectRatio=1.6 edgeNodeBetweenLayers=30`,
-        );
 
         // Pre-sort topológico ANTES de pasar a ELK. Esto garantiza que
         // `considerModelOrder=NODES_AND_EDGES` (activo abajo) reciba un input
@@ -767,18 +743,6 @@ export function useGroupedLayout(
           ? diagram.manualPositions ?? {}
           : null;
 
-        if (
-          diagram.hasManualLayout &&
-          manualPositions &&
-          Object.keys(manualPositions).length === 0 &&
-          typeof console !== 'undefined'
-        ) {
-          console.warn(
-            `[useGroupedLayout] diagrama ${diagram.id} tiene hasManualLayout=true pero manualPositions vacío — usando ELK`,
-          );
-        }
-
-        let fallbackCount = 0;
         const rfNodes: Node[] = diagram.nodes.map((n, idx) => {
           const shape = nodeTypeToShape[n.type] ?? 'serviceNode';
           const dim =
@@ -806,7 +770,6 @@ export function useGroupedLayout(
                 y: pos.y - dim.height / 2,
               };
             } else {
-              fallbackCount++;
               positionOffset = { x: idx * (dim.width + 40), y: 0 };
             }
           }
@@ -825,12 +788,6 @@ export function useGroupedLayout(
             draggable: editing,
           };
         });
-
-        if (fallbackCount > 0 && typeof console !== 'undefined') {
-          console.debug(
-            `[useGroupedLayout] ${fallbackCount} nodo(s) sin posición de ELK; usando fallback lineal.`,
-          );
-        }
 
         // Edges: pipeline post-layout — smart handles (determinísticos por
         // posición) + jump connectors para edges que cruzan muchas capas.
@@ -886,48 +843,8 @@ export function useGroupedLayout(
           margin: 50,
         });
         const nodesNoCollisions = collisionResult.nodes;
-        if (collisionResult.nodesMoved > 0) {
-          console.debug(
-            `[DIAGRAM-DEBUG][useGroupedLayout] Resolución de colisiones: ` +
-              `${collisionResult.nodesMoved} nodo(s) empujados en ` +
-              `${collisionResult.iterations} iteración(es).`,
-          );
-        }
 
         if (cancelled) return;
-
-        const durationMs = Math.round(performance.now() - runStart);
-        const refCount = nodesWithRefs.length - rfNodes.length;
-        const jumpEdgeCount = edgesWithRefs.length - edgesWithHandles.length;
-        // Stats de waypoints adoptados por edge final renderizado. Sirve como
-        // single-source-of-truth post-pipeline: si este número es 0 cuando
-        // `edgeRoutings.size > 0`, algo desconectó los waypoints entre
-        // `insertJumpConnectors` y el render.
-        const edgesWithWaypoints = edgesWithRefs.filter(
-          (e) => (e.data as { waypoints?: unknown } | undefined)?.waypoints,
-        ).length;
-        console.debug(
-          `[DIAGRAM-DEBUG][useGroupedLayout] ELK COMPLETADO diagram=${diagram.id} ` +
-            `duration=${durationMs}ms clusters=${clusters.length} ` +
-            `jumpConnectors=${refCount / 2} (agregó ${refCount} nodos ref + ${jumpEdgeCount} edges extra) ` +
-            `edgeRoutings.size=${edgeRoutings.size} ` +
-            `edges_renderizados_con_waypoints=${edgesWithWaypoints}/${edgesWithRefs.length} ` +
-            `skipped_by_manual_positions=${hasAnyManualPositions ? 'SÍ (waypoints omitidos)' : 'no'}`,
-        );
-        if (edgeRoutings.size === 0) {
-          console.warn(
-            '[DIAGRAM-DEBUG][useGroupedLayout] edgeRoutings VACÍO — ELK no devolvió sections. ' +
-              'Posibles causas: (a) elk.edgeRouting no se aplicó, (b) grafo vacío o inválido, ' +
-              '(c) versión de elkjs sin soporte de sections en este algoritmo. ' +
-              'Todos los edges caerán a smoothstep fallback y los cruces NO se reducirán.',
-          );
-        } else if (edgesWithWaypoints === 0 && !hasAnyManualPositions) {
-          console.warn(
-            '[DIAGRAM-DEBUG][useGroupedLayout] edgeRoutings tiene datos pero CERO edges ' +
-              'llegaron al render con data.waypoints. Revisar `insertJumpConnectors` — ' +
-              'el parámetro `edgeRoutings` no se está propagando al edge final.',
-          );
-        }
 
         setResult({
           nodes: nodesNoCollisions,
@@ -940,10 +857,6 @@ export function useGroupedLayout(
       } catch (err) {
         if (cancelled) return;
         const message = err instanceof Error ? err.message : String(err);
-        console.error('[useGroupedLayout][ELK] failed, using grid fallback:', message);
-        if (err instanceof Error && err.stack) {
-          console.error('[useGroupedLayout][stack]', err.stack);
-        }
 
         // Grid fallback lineal — nunca dejamos el canvas vacío. 5 columnas,
         // spacing arbitrario pero consistente. Edges sin smart handles para

@@ -724,10 +724,10 @@ function EpicInfoDrawer({ batch, epic, initiative, open, onClose }: {
                 Epic Info
               </h3>
               <div className="rounded-lg border border-border bg-[#0d1117] p-4 space-y-3">
-                {epic.description && (
+                {epic.markdown && epic.markdown.trim().length > 0 && (
                   <div>
-                    <span className="text-[10px] text-muted-foreground/60 uppercase block mb-1">Description</span>
-                    <p className="text-xs text-foreground/90 leading-relaxed">{epic.description}</p>
+                    <span className="text-[10px] text-muted-foreground/60 uppercase block mb-1">Definición</span>
+                    <p className="text-xs text-foreground/90 leading-relaxed line-clamp-6 whitespace-pre-line">{epic.markdown}</p>
                   </div>
                 )}
                 <div className="flex items-center justify-between">
@@ -747,18 +747,6 @@ function EpicInfoDrawer({ batch, epic, initiative, open, onClose }: {
                     <span className="text-xs text-foreground/90">
                       {new Date(epic.targetDate).toLocaleDateString('es-MX', { day: 'numeric', month: 'short', year: 'numeric' })}
                     </span>
-                  </div>
-                )}
-                {epic.teamsInvolved && (
-                  <div className="flex items-center justify-between">
-                    <span className="text-xs text-muted-foreground/60">Teams</span>
-                    <span className="text-xs text-foreground/90 text-right max-w-[60%] truncate">{epic.teamsInvolved}</span>
-                  </div>
-                )}
-                {epic.scopeDescription && (
-                  <div>
-                    <span className="text-[10px] text-muted-foreground/60 uppercase block mb-1">Scope</span>
-                    <p className="text-xs text-foreground/90 leading-relaxed">{epic.scopeDescription}</p>
                   </div>
                 )}
               </div>

@@ -146,8 +146,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     try {
       const members = await getTeamMembers();
       dispatch({ type: 'SET_MEMBERS', payload: members });
-    } catch (err) {
-      console.error('Failed to fetch team members:', err);
+    } catch {
+      /* fail-soft: state.members queda en el último valor válido */
     }
   }, []);
 

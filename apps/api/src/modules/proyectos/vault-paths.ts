@@ -9,6 +9,7 @@
  * iniciativas/
  *   <ini-slug>-<iniId6>/
  *     index.md
+ *     definicion.md
  *     resumenes-ejecutivos/<summary-slug>-<id>.md
  *     documentos/<doc-slug>.md
  *     epics/
@@ -91,6 +92,10 @@ export function initiativeFolderPath(ini: InitiativeRef): string {
 
 export function initiativeIndexPath(ini: InitiativeRef): string {
   return `${initiativeFolderPath(ini)}/index.md`;
+}
+
+export function initiativeDefinitionPath(ini: InitiativeRef): string {
+  return `${initiativeFolderPath(ini)}/definicion.md`;
 }
 
 export function initiativeDocumentPath(ini: InitiativeRef, docName: string): string {
@@ -208,6 +213,25 @@ export function epicDesignPath(
     throw new Error(`epicDesignPath: design id invalido (charset fuera de [a-fA-F0-9-])`);
   }
   return `${epicFolderPath(ini, epic)}/disenos/${slugifyWithId(design.name, design.id)}.md`;
+}
+
+/**
+ * Path de la CARPETA donde se descomprime un bundle ZIP de Claude Design.
+ * Usado para diseños creados subiendo un ZIP — el folder contiene README,
+ * HTMLs, CSS, etc. Cada archivo del bundle se escribe individualmente al
+ * vault bajo este folder.
+ *
+ * Termina SIN slash trailing — el caller concatena `${folder}/<file>`.
+ */
+export function epicDesignBundleFolderPath(
+  ini: InitiativeRef,
+  epic: EpicRef,
+  design: { id: string; name: string },
+): string {
+  if (!DESIGN_ID_RE.test(design.id)) {
+    throw new Error(`epicDesignBundleFolderPath: design id invalido (charset fuera de [a-fA-F0-9-])`);
+  }
+  return `${epicFolderPath(ini, epic)}/disenos/${slugifyWithId(design.name, design.id)}`;
 }
 
 export type EpicMatrixKind = 'qa-funcional' | 'qa-sistemica';

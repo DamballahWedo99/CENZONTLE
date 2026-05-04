@@ -1,11 +1,12 @@
 'use client';
 
 import { useState, useMemo, useEffect, useRef, useCallback } from 'react';
-import { useRouter, useSearchParams } from 'next/navigation';
+import { useRouter, usePathname, useSearchParams } from 'next/navigation';
 import Link from 'next/link';
 import { useProyectos } from '@/context/ProyectosContext';
 import { useBreadcrumb } from '@/context/BreadcrumbContext';
-import { updateEpic as apiUpdateEpic, deleteEpic as apiDeleteEpic, getEpic as apiGetEpic, getDiscoveredDependencies as apiGetDiscoveredDependencies, getStoryDependencies as apiGetStoryDependencies, type StoryDependencyItem } from '@/lib/api/epics';
+import { updateEpic as apiUpdateEpic, deleteEpic as apiDeleteEpic, getEpic as apiGetEpic, getDiscoveredDependencies as apiGetDiscoveredDependencies, getStoryDependencies as apiGetStoryDependencies, uploadDesignBundle as apiUploadDesignBundle, deleteDesign as apiDeleteDesign, type StoryDependencyItem } from '@/lib/api/epics';
+import { getEpicDependenciesRollup } from '@/lib/api/story-dependencies';
 import { MOCK_DISCOVERED_DEPENDENCIES } from '@/data/mock/discovered-dependencies';
 import { MOCK_PROPOSED_STORIES, MOCK_STORY_DEPENDENCIES } from '@/data/mock/proposed-stories';
 import { topologicalSortProposals } from '@/lib/story-dag';
@@ -39,19 +40,23 @@ import { ProgressBar } from '../shared/ProgressBar';
 import { StoryPointsBadge } from '../shared/StoryPointsBadge';
 import { DownloadMenu } from '../shared/DownloadMenu';
 import { EpicDiagrams } from './EpicDiagrams';
-import { EpicQAMatrix } from './EpicQAMatrix';
 import { EpicDocuments } from './EpicDocuments';
 import { EpicDependencies } from './EpicDependencies';
 import { EpicDesigns } from './EpicDesigns';
+import { SectionTiptapEditor } from '../historias/editor/SectionTiptapEditor';
+import { ReadOnlyMarkdown } from '@/components/shared/tiptap/ReadOnlyMarkdown';
 import { IntegrationSettingsDialog } from '../settings/IntegrationSettingsDialog';
 import { EpicStoryList } from './EpicStoryList';
 import { StoryAgentPromptBar } from './StoryAgentPromptBar';
 import { StoryProposalList } from './StoryProposalList';
 import { streamStoryProposals } from '@/lib/story-agent';
+import { useScreenWakeLock } from '@/hooks/use-screen-wake-lock';
 import {
   getCachedStorySession,
   removeCachedStoryProposal,
   invalidateStoryCache,
+  getStorySession,
+  cancelStoryGeneration,
 } from '@/lib/api/story-generation';
 import type {
   ProposedStory,
@@ -74,14 +79,18 @@ import {
   Circle,
   Lock,
   ShieldCheck,
-  XCircle,
-  MessageSquare,
   ListChecks,
-  ClipboardCheck,
   GitBranch,
   Upload,
   Palette,
+  ExternalLink,
+  Loader2,
 } from 'lucide-react';
+import { LinearIcon } from '@/components/icons/LinearIcon';
+import { Tooltip, TooltipTrigger, TooltipContent, TooltipProvider } from '@/components/ui/tooltip';
+import { publishEpicToTracker } from '@/lib/api/integrations';
+import { ApiError } from '@/lib/api/client';
+import type { TrackerReference } from '@cenzontle/shared';
 
 // --- Changelog helpers ---
 
@@ -96,14 +105,8 @@ const actionVerbs: Record<ChangelogAction, string> = {
 };
 
 const fieldLabels: Record<string, string> = {
-  status: 'estado', priority: 'prioridad', title: 'título', description: 'descripción',
+  status: 'estado', priority: 'prioridad', title: 'título', markdown: 'definición',
   startDate: 'fecha de inicio', targetDate: 'fecha objetivo', storyPoints: 'story points',
-  qualitativeBenefits: 'beneficios cualitativos', quantitativeBenefits: 'beneficios cuantitativos',
-  benefitsMeasurement: 'medición de beneficios', scopeDescription: 'descripción del alcance',
-  acceptanceCriteria: 'criterios de aceptación', technologicalImprovements: 'mejoras tecnológicas',
-  businessPriority: 'prioridad de negocio', teamsInvolved: 'equipos involucrados',
-  impactedChannels: 'canales impactados', impactedFlows: 'flujos impactados',
-  impactSabreLevel: 'nivel de impacto Sabre', thirdPartyDependencies: 'dependencias de terceros',
   historias: 'historias de usuario', documento: 'documento', 'aprobación PO': 'aprobación PO', 'aprobación TL (diagrama)': 'aprobación TL (diagrama)', 'aprobación QA': 'aprobación QA',
   diseño: 'diseño', 'requiere diseño': 'requiere diseño',
 };
@@ -164,46 +167,51 @@ function ValueChip({ field, value, variant }: { field: string | null; value: str
   return <span className={`text-[11px] font-medium ${baseClass}`}>{humanized}</span>;
 }
 
-// --- Business field sections ---
+// --- Markdown placeholder ---
+// Estructura mínima sugerida para épicas — placeholder del editor cuando el
+// markdown está vacío. El user lo ve y empieza a escribir; el agente IA emite
+// el mismo set vía `validateTerminal` (ver epic-generation.service).
+// "Prioridad de negocio" y "Equipos involucrados" se omiten porque ya viven
+// como metadata estructurada (`priority` enum + `podIds` cells).
+const EPIC_MARKDOWN_PLACEHOLDER = `## Objetivo
 
-const businessFieldSections = [
-  {
-    title: 'Beneficios',
-    fields: [
-      { key: 'qualitativeBenefits' as const, label: 'Beneficios Cualitativos' },
-      { key: 'quantitativeBenefits' as const, label: 'Beneficios Cuantitativos' },
-      { key: 'benefitsMeasurement' as const, label: '¿Cómo se medirán los beneficios?' },
-    ],
-  },
-  {
-    title: 'Alcance y Criterios',
-    fields: [
-      { key: 'scopeDescription' as const, label: 'Descripción del Alcance' },
-      { key: 'acceptanceCriteria' as const, label: 'Criterios de Aceptación' },
-    ],
-  },
-  {
-    title: 'Aspectos Técnicos',
-    fields: [
-      { key: 'technologicalImprovements' as const, label: 'Mejoras Tecnológicas' },
-      { key: 'businessPriority' as const, label: 'Prioridad de Negocio' },
-      { key: 'teamsInvolved' as const, label: 'Equipos Involucrados' },
-    ],
-  },
-  {
-    title: 'Impacto',
-    fields: [
-      { key: 'impactedChannels' as const, label: 'Canales Impactados' },
-      { key: 'impactedFlows' as const, label: 'Flujos Impactados' },
-      { key: 'impactSabreLevel' as const, label: 'Nivel de Impacto en Sabre' },
-      { key: 'thirdPartyDependencies' as const, label: 'Dependencias de Terceros' },
-    ],
-  },
-];
+(Qué se construye y por qué surge.)
 
-type BusinessFieldKey = typeof businessFieldSections[number]['fields'][number]['key'];
+## Beneficios cualitativos
 
-const allBusinessFieldKeys: BusinessFieldKey[] = businessFieldSections.flatMap((s) => s.fields.map((f) => f.key));
+-
+
+## Beneficios cuantitativos
+
+-
+
+## Medición de beneficios
+
+(Cómo se mide cada beneficio: dashboard, métrica, KPI.)
+
+## Alcance
+
+EN alcance:
+-
+
+NO en alcance:
+-
+
+## Criterios de aceptación
+
+1.
+
+## Mejoras tecnológicas
+
+(Refactor, deuda técnica, capacidades de plataforma.)
+
+## Canales y flujos impactados
+
+-
+
+## Dependencias de terceros
+
+-`;
 
 // --- Protocol Checklist Component ---
 
@@ -290,7 +298,74 @@ function EpicFullPageInner({ epicId }: { epicId: string }) {
   }, [rawEpic, state.initiatives, state.pods, state.stories]);
 
   const [isEditing, setIsEditing] = useState(false);
+  const [isSaving, setIsSaving] = useState(false);
   const [deleteOpen, setDeleteOpen] = useState(false);
+  const [publishingTracker, setPublishingTracker] = useState(false);
+
+  const handlePublishToLinear = async () => {
+    if (!rawEpic) return;
+    setPublishingTracker(true);
+    try {
+      const result = await publishEpicToTracker(rawEpic.id, 'linear');
+      // Cascade hacia arriba: si la iniciativa también se publicó/reusó,
+      // sincronizamos su tracker en el Context.
+      if (result.initiativeTracker) {
+        dispatch({
+          type: 'UPDATE_INITIATIVE',
+          payload: {
+            id: rawEpic.initiativeId,
+            changes: { tracker: result.initiativeTracker },
+          },
+        });
+      }
+      dispatch({
+        type: 'UPDATE_EPIC',
+        payload: { id: rawEpic.id, changes: { tracker: result.epicTracker } },
+      });
+      for (const { storyId, tracker } of result.storyTrackers) {
+        dispatch({ type: 'UPDATE_STORY', payload: { id: storyId, changes: { tracker } } });
+      }
+      if (result.alreadyPublished) {
+        toast.info('La épica ya estaba publicada en Linear', {
+          description: `Project ${result.epicTracker.externalKey} → abrir`,
+          action: {
+            label: 'Abrir',
+            onClick: () => window.open(result.epicTracker.externalUrl, '_blank'),
+          },
+        });
+      } else {
+        const failCount = result.partialFailures.length;
+        const okCount = result.storyTrackers.length;
+        const initiativeNote = result.initiativeTracker
+          ? result.initiativeAlreadyPublished
+            ? 'Initiative reusada · '
+            : 'Initiative creada · '
+          : '';
+        const storiesNote =
+          failCount > 0
+            ? `${okCount} historias OK, ${failCount} fallaron`
+            : `${okCount} historias publicadas`;
+        toast.success(`Project creado en Linear`, {
+          description: `${initiativeNote}${storiesNote}`,
+          action: {
+            label: 'Abrir Linear',
+            onClick: () => window.open(result.epicTracker.externalUrl, '_blank'),
+          },
+        });
+      }
+    } catch (err: unknown) {
+      const message = err instanceof Error ? err.message : 'Error desconocido';
+      if (err instanceof ApiError && err.status === 409) {
+        toast.info('Otra publicación en curso', {
+          description: 'Espera unos segundos y reintenta.',
+        });
+      } else {
+        toast.error('No se pudo publicar la épica en Linear', { description: message });
+      }
+    } finally {
+      setPublishingTracker(false);
+    }
+  };
 
   const handleDelete = async () => {
     if (!rawEpic) return;
@@ -306,12 +381,12 @@ function EpicFullPageInner({ epicId }: { epicId: string }) {
   };
   const [showIntegrationDialog, setShowIntegrationDialog] = useState(false);
   const [editTitle, setEditTitle] = useState('');
-  const [editDescription, setEditDescription] = useState('');
+  /** Markdown único de la épica — reemplaza description + 11 sub-campos del shape v1. */
+  const [editMarkdown, setEditMarkdown] = useState('');
   const [editStatus, setEditStatus] = useState<EpicStatus>(EpicStatus.Draft);
   const [editPriority, setEditPriority] = useState<Priority>(Priority.Medium);
   const [editStartDate, setEditStartDate] = useState('');
   const [editTargetDate, setEditTargetDate] = useState('');
-  const [editBusinessFields, setEditBusinessFields] = useState<Record<BusinessFieldKey, string>>({} as Record<BusinessFieldKey, string>);
   const [editPodIds, setEditPodIds] = useState<string[]>([]);
   const [editInitiativeId, setEditInitiativeId] = useState('');
   const [storyAgentMode, setStoryAgentMode] = useState<'idle' | 'prompting' | 'streaming' | 'staging'>('idle');
@@ -319,9 +394,27 @@ function EpicFullPageInner({ epicId }: { epicId: string }) {
   const [storyAgentEvents, setStoryAgentEvents] = useState<StoryGenerationEvent[]>([]);
   const [acceptingStoryId, setAcceptingStoryId] = useState<string | null>(null);
   const storyAbortRef = useRef<AbortController | null>(null);
-  const [rejectComment, setRejectComment] = useState('');
-  const [showRejectForm, setShowRejectForm] = useState(false);
-  const [activeTab, setActiveTab] = useState(() => searchParams.get('tab') ?? 'definicion');
+
+  // Mantiene la pantalla activa mientras el run del agente está vivo. Sin
+  // esto, macOS/Chrome pueden suspender el sistema cuando la pantalla se
+  // apaga por inactividad y el SSE muere con `terminated` aunque el backend
+  // siga corriendo. Solo `streaming` aplica — `staging` ya tiene el run
+  // terminado del lado del backend (solo esperamos confirmación del usuario).
+  useScreenWakeLock(storyAgentMode === 'streaming');
+  // Counter del tab "Dependencias" — se sincroniza con el rollup que carga
+  // <EpicDependencies/> via callback. Inicializado con el cálculo legacy
+  // (epic.dependencies + discovered + storyDeps) para evitar flicker antes
+  // del primer fetch del rollup.
+  const [rollupCount, setRollupCount] = useState<number | null>(null);
+  // Tab state URL-synced bidireccional (ver mismo patrón en StoryFullPage).
+  // El init via searchParams ya existía; ahora también escribimos al cambiar.
+  const pathname = usePathname();
+  const activeTab = searchParams.get('tab') ?? 'definicion';
+  const setActiveTab = (tab: string) => {
+    const params = new URLSearchParams(searchParams.toString());
+    params.set('tab', tab);
+    router.replace(`${pathname}?${params.toString()}`, { scroll: false });
+  };
   const [showChecklist, setShowChecklist] = useState(false);
   const [discoveredDeps, setDiscoveredDeps] = useState<DiscoveredDependency[]>([]);
   const [storyDeps, setStoryDeps] = useState<StoryDependencyItem[]>([]);
@@ -382,6 +475,7 @@ function EpicFullPageInner({ epicId }: { epicId: string }) {
     if (!rawEpic?.id) {
       setDiscoveredDeps([]);
       setStoryDeps([]);
+      setRollupCount(null);
       return;
     }
     const controller = new AbortController();
@@ -399,6 +493,21 @@ function EpicFullPageInner({ epicId }: { epicId: string }) {
       .catch(() => {
         if (!controller.signal.aborted) setStoryDeps([]);
       });
+    // Rollup count: el componente <EpicDependencies/> hace su propio fetch
+    // cuando se monta — pero como vive dentro de <TabsContent value="dependencias"/>,
+    // Radix Tabs solo lo monta al cambiar a esa tab. Resultado: el badge
+    // mostraba un count parcial (epic.dependencies + discovered + storyDeps
+    // del state local) hasta que el user clickeaba la tab.
+    // Hacemos el fetch también desde el padre para que el badge sea correcto
+    // desde el primer render. Cuando el user entra a la tab, EpicDependencies
+    // refetch para refrescar — costo aceptable a cambio de no ver count parcial.
+    getEpicDependenciesRollup(rawEpic.id)
+      .then((deps) => {
+        if (!controller.signal.aborted) setRollupCount(deps.length);
+      })
+      .catch(() => {
+        if (!controller.signal.aborted) setRollupCount(null);
+      });
     return () => controller.abort();
   }, [rawEpic?.id]);
 
@@ -413,11 +522,26 @@ function EpicFullPageInner({ epicId }: { epicId: string }) {
   }, [state.changelog, epic]);
 
   // --- Protocol checklist state ---
+  // Definición considerada completa si el markdown contiene los 9 headings
+  // obligatorios. Si no, la épica está parcialmente definida y el checklist
+  // del protocolo lo refleja.
+  const REQUIRED_EPIC_HEADINGS = useMemo(() => [
+    '## descripción',
+    '## beneficios cualitativos',
+    '## beneficios cuantitativos',
+    '## medición de beneficios',
+    '## alcance',
+    '## criterios de aceptación',
+    '## mejoras tecnológicas',
+    '## canales y flujos impactados',
+    '## dependencias de terceros',
+  ], []);
   const definitionComplete = useMemo(() => {
     if (!rawEpic) return false;
-    return allBusinessFieldKeys.every((key) => (rawEpic[key] ?? '').trim().length > 0)
-      && rawEpic.description.trim().length > 0;
-  }, [rawEpic]);
+    const md = (rawEpic.markdown ?? '').toLowerCase();
+    if (md.trim().length === 0) return false;
+    return REQUIRED_EPIC_HEADINGS.every((h) => md.includes(h));
+  }, [rawEpic, REQUIRED_EPIC_HEADINGS]);
 
   const hasBusinessDiagram = useMemo(() => {
     if (!rawEpic) return false;
@@ -436,23 +560,13 @@ function EpicFullPageInner({ epicId }: { epicId: string }) {
     return epic.stories.length > 0;
   }, [epic]);
 
-  const tlApproval = rawEpic?.tlApproval ?? null;
-  const isTlApproved = tlApproval?.status === 'approved';
-
-  const hasQAMatrix = rawEpic?.qaMatrix != null || rawEpic?.epicQAMatrix != null;
-  const qaApproval = rawEpic?.qaApproval ?? null;
-  const isQaApproved = qaApproval?.status === 'approved';
-
-  const poApproval = rawEpic?.poApproval ?? null;
-  const isApproved = poApproval?.status === 'approved';
 
   const filledFieldsCount = useMemo(() => {
     if (!rawEpic) return 0;
-    let count = rawEpic.description.trim().length > 0 ? 1 : 0;
-    count += allBusinessFieldKeys.filter((key) => (rawEpic[key] ?? '').trim().length > 0).length;
-    return count;
-  }, [rawEpic]);
-  const totalFields = allBusinessFieldKeys.length + 1; // +1 for description
+    const md = (rawEpic.markdown ?? '').toLowerCase();
+    return REQUIRED_EPIC_HEADINGS.filter((h) => md.includes(h)).length;
+  }, [rawEpic, REQUIRED_EPIC_HEADINGS]);
+  const totalFields = REQUIRED_EPIC_HEADINGS.length;
 
   const checklistSteps: ChecklistStep[] = [
     {
@@ -472,18 +586,6 @@ function EpicFullPageInner({ epicId }: { epicId: string }) {
       locked: false,
     },
     {
-      id: 'tl-approval',
-      label: 'Visto bueno del TL',
-      description: isTlApproved
-        ? 'Diagrama aprobado por TL'
-        : tlApproval?.status === 'rejected'
-          ? 'Diagrama rechazado — edita y solicita nueva revisión'
-          : 'Pendiente de aprobación del Technical Leader',
-      completed: isTlApproved,
-      active: activeTab === 'diagramas',
-      locked: false,
-    },
-    {
       id: 'stories',
       label: 'Historias de usuario',
       description: hasStories
@@ -491,40 +593,6 @@ function EpicFullPageInner({ epicId }: { epicId: string }) {
         : 'Genera historias con el agente IA',
       completed: hasStories,
       active: activeTab === 'historias',
-      locked: false,
-    },
-    {
-      id: 'approval',
-      label: 'Validación del PO',
-      description: isApproved
-        ? 'Historias aprobadas'
-        : poApproval?.status === 'rejected'
-          ? 'Historias rechazadas — modifica y solicita nueva revisión'
-          : 'Pendiente de aprobación',
-      completed: isApproved,
-      active: false,
-      locked: false,
-    },
-    {
-      id: 'qa-matrix',
-      label: 'Matriz de QA',
-      description: hasQAMatrix
-        ? `${(rawEpic!.epicQAMatrix?.tests.length ?? 0)} tests sistémicos · ${(rawEpic!.qaMatrix?.rows.reduce((s, r) => s + r.testCases.length, 0) ?? 0)} funcionales`
-        : 'Genera las matrices de QA sistémico y funcional con IA',
-      completed: hasQAMatrix,
-      active: activeTab === 'matrices-qa',
-      locked: false,
-    },
-    {
-      id: 'qa-approval',
-      label: 'Visto bueno de QA',
-      description: isQaApproved
-        ? 'QA aprobado'
-        : qaApproval?.status === 'rejected'
-          ? 'QA rechazado — edita y solicita nueva revisión'
-          : 'Pendiente de aprobación de QA',
-      completed: isQaApproved,
-      active: activeTab === 'matrices-qa',
       locked: false,
     },
   ];
@@ -535,11 +603,7 @@ function EpicFullPageInner({ epicId }: { epicId: string }) {
     const tabMap: Record<string, string> = {
       definition: 'definicion',
       diagram: 'diagramas',
-      'tl-approval': 'diagramas',
       stories: 'historias',
-      approval: 'historias',
-      'qa-matrix': 'matrices-qa',
-      'qa-approval': 'matrices-qa',
     };
     setActiveTab(tabMap[stepId] ?? 'definicion');
   };
@@ -577,10 +641,23 @@ function EpicFullPageInner({ epicId }: { epicId: string }) {
   }, []);
 
   const handleCancelStoryAgent = useCallback(() => {
+    // Cancelación doble:
+    //   1. AbortController local — cierra el SSE de este cliente al instante.
+    //   2. DELETE /:epicId/session/active al backend — aborta el agente que
+    //      ahora corre en background (el backend ya no lo mata al cerrar SSE)
+    //      e invalida la session cache.
+    // Sin (2), tras el abort local el agente seguía corriendo en background
+    // hasta su timeout natural (~10min) — exactamente el comportamiento que
+    // teníamos en diagrams antes del fix análogo.
     storyAbortRef.current?.abort();
     storyAbortRef.current = null;
+    if (rawEpic?.id) {
+      cancelStoryGeneration(rawEpic.id).catch(() => {});
+    }
     setStoryAgentMode('idle');
-  }, []);
+    setStoryProposals([]);
+    setStoryAgentEvents([]);
+  }, [rawEpic?.id]);
 
   const handleStartStoryStreaming = useCallback(async (prompt: string, webSearch: boolean) => {
     if (!rawEpic) return;
@@ -627,20 +704,11 @@ function EpicFullPageInner({ epicId }: { epicId: string }) {
     }
   }, [rawEpic]);
 
-  const handleAcceptStoryProposal = useCallback(async (proposal: ProposedStory) => {
+  const handleAcceptStoryProposal = useCallback(async (proposal: ProposedStory, options?: { silent?: boolean }) => {
     if (!rawEpic) return;
+    const silent = options?.silent === true;
     setAcceptingStoryId(proposal.clientId);
-    // eslint-disable-next-line no-console
-    console.log(
-      `[StoryAccept] ▶ "${proposal.title}" SP=${proposal.storyPoints} pod=${proposal.podId} docs=${proposal.relatedDocuments?.length ?? 0} deps=${proposal.discoveredDependencies?.length ?? 0}`,
-    );
     try {
-      const whatHowWhenStr = [
-        proposal.po.whatHowWhen.what,
-        proposal.po.whatHowWhen.how,
-        proposal.po.whatHowWhen.when,
-      ].filter(Boolean).join(' / ');
-
       const created = await apiCreateStory({
         title: proposal.title,
         epicId: proposal.epicId,
@@ -649,19 +717,9 @@ function EpicFullPageInner({ epicId }: { epicId: string }) {
         storyPoints: proposal.storyPoints,
         sprintId: proposal.sprintId ?? undefined,
         labels: proposal.labels,
-        po: {
-          background: proposal.po.background,
-          objective: proposal.po.objective,
-          userStory: proposal.po.userStory,
-          whatHowWhen: whatHowWhenStr,
-          acceptanceCriteria: proposal.po.acceptanceCriteria.join('\n'),
-          additionalNotes: proposal.po.additionalNotes,
-        },
-        technical: proposal.technical,
-        qa: {
-          testingStrategy: proposal.qa.testingStrategy,
-          linkedQAMatrixId: proposal.qa.linkedQAMatrixId ?? undefined,
-        },
+        po: { markdown: proposal.po.markdown ?? '' },
+        technical: { markdown: proposal.technical.markdown ?? '' },
+        qa: { markdown: proposal.qa.markdown ?? '' },
         relatedDocuments: proposal.relatedDocuments,
         discoveredDependencies: proposal.discoveredDependencies,
         // `sourceClientId` sirve como ancla para que edges del DAG (blockedBy)
@@ -689,24 +747,24 @@ function EpicFullPageInner({ epicId }: { epicId: string }) {
         if (next.length === 0) setStoryAgentMode('idle');
         return next;
       });
-      // El vaultPath del backend apunta a `stories/<folder>/index.md`. Mostramos
-      // el folder (sin el /index.md) al usuario para que identifique donde quedo.
-      const folderPath = created.vaultPath
-        ? created.vaultPath.replace(/\/index\.md$/, '/')
-        : null;
-      // eslint-disable-next-line no-console
-      console.log(
-        `[StoryAccept] ✓ "${proposal.title}" created id=${created.id} folder=${folderPath ?? '(no vault)'}`,
-      );
-      if (folderPath) {
-        toast.success(`Historia "${proposal.title}" creada en ${folderPath}`);
-      } else {
+      // En modo `silent` (durante bulk accept), suprimimos el toast individual.
+      // El loader del botón "Aceptar todas" + el toast resumen al final son
+      // suficiente feedback — los toasts por historia inundaban la pantalla.
+      if (!silent) {
         toast.success(`Historia "${proposal.title}" creada`);
       }
     } catch (err: any) {
-      // eslint-disable-next-line no-console
-      console.error(`[StoryAccept] ✗ "${proposal.title}" failed: ${err?.message}`);
-      toast.error(err?.message || 'Error al crear la historia');
+      // Errors también se suprimen en silent — el toast resumen al final
+      // dice "X fallaron". Si todas fallan, el resumen sigue siendo
+      // informativo (`successCount=0, failureCount=N`) sin spam de toasts
+      // individuales.
+      if (!silent) {
+        toast.error(err?.message || 'Error al crear la historia');
+      }
+      // Re-throw para que `Promise.allSettled` / `runSequentiallySettled`
+      // detecten el rejection en el batch caller. Sin esto, fallidas se
+      // contaban como `fulfilled` y el toast resumen mentía.
+      throw err;
     } finally {
       setAcceptingStoryId(null);
     }
@@ -724,31 +782,34 @@ function EpicFullPageInner({ epicId }: { epicId: string }) {
     // clientIds a storyIds reales. Kahn's algorithm (BFS con in-degree).
     const ordered = topologicalSortProposals(snapshot);
     const hasDag = snapshot.some((p) => (p.blockedBy?.length ?? 0) > 0);
-    // eslint-disable-next-line no-console
-    console.log(
-      `[StoryAccept:batch] ▶ aceptando ${ordered.length} historias ` +
-        (hasDag ? 'en orden topológico (DAG detectado)' : 'en paralelo (sin DAG)'),
-    );
+    // Wrapper que llama al handler en modo silent — suprime los toasts
+    // individuales durante el batch para no inundar la pantalla. El loader
+    // del botón "Aceptar todas" + el toast resumen al final son el único
+    // feedback visual durante este flow.
+    const acceptSilent = (p: ProposedStory) => handleAcceptStoryProposal(p, { silent: true });
     try {
       // Si hay DAG: aceptar secuencialmente en orden topológico para que
       // las bloqueantes existan en DB antes que sus bloqueadas.
       // Si NO hay DAG: paralelizar como antes (máxima velocidad).
       const results: PromiseSettledResult<void>[] = hasDag
-        ? await runSequentiallySettled(ordered, handleAcceptStoryProposal)
-        : await Promise.allSettled(ordered.map((p) => handleAcceptStoryProposal(p)));
+        ? await runSequentiallySettled(ordered, acceptSilent)
+        : await Promise.allSettled(ordered.map((p) => acceptSilent(p)));
       const successCount = results.filter((r) => r.status === 'fulfilled').length;
       const failureCount = results.filter((r) => r.status === 'rejected').length;
       const durMs = Date.now() - startMs;
-      // eslint-disable-next-line no-console
-      console.log(
-        `[StoryAccept:batch] ✓ done: ${successCount} OK, ${failureCount} fallidas (${durMs}ms total, avg ${Math.round(durMs / snapshot.length)}ms/historia)`,
-      );
-      if (failureCount > 0) {
+      // Toast resumen — UNO solo al final, cubre los 3 casos:
+      //  - Todas fallaron: error explicit.
+      //  - Algunas fallaron: warning con conteos.
+      //  - Todas OK: success con conteo (incluso si fue solo 1 — el toast
+      //    individual ahora se suprimió porque pasamos silent=true, así
+      //    que necesitamos confirmar al user que se creó).
+      if (failureCount > 0 && successCount === 0) {
+        toast.error(`Las ${failureCount} historias fallaron al crear. Intenta de nuevo.`);
+      } else if (failureCount > 0) {
         toast.warning(`${successCount} historias creadas, ${failureCount} fallaron. Las fallidas siguen en staging.`);
-      } else if (successCount > 1) {
-        // Toast consolidado para batch exitoso (los individuales ya dispararon sus propios toast)
-        // No duplicamos mensaje si solo fue 1 historia — handleAcceptStoryProposal ya lo hizo.
-        toast.success(`${successCount} historias creadas en ${(durMs / 1000).toFixed(1)}s`);
+      } else if (successCount > 0) {
+        const label = successCount === 1 ? 'Historia creada' : `${successCount} historias creadas`;
+        toast.success(`${label} en ${(durMs / 1000).toFixed(1)}s`);
       }
     } finally {
       setAcceptingAllStories(false);
@@ -784,7 +845,10 @@ function EpicFullPageInner({ epicId }: { epicId: string }) {
   }, []);
 
   // Recuperar sesion cacheada al montar / cambiar de epica.
-  // Si hay propuestas en cache (ej: recarga tras generar), las mostramos en staging.
+  // - status='staging' → run terminado con propuestas: mostrar para revisar.
+  // - status='streaming' → run sigue activo en background: cargar events y
+  //   props parciales, modo='streaming' (ningún SSE local activo todavía;
+  //   el polling effect de abajo se encarga de seguir actualizando).
   useEffect(() => {
     if (!rawEpic) return;
     let cancelled = false;
@@ -797,11 +861,95 @@ function EpicFullPageInner({ epicId }: { epicId: string }) {
           setStoryProposals(session.proposals);
           setStoryAgentEvents(session.events);
           setStoryAgentMode('staging');
+          return;
+        }
+        if (session.status === 'streaming') {
+          // Hay un agente activo en el backend — restaurar todo el state
+          // parcial y dejar que el polling effect lo siga actualizando.
+          setStoryProposals(session.proposals);
+          setStoryAgentEvents(session.events);
+          setStoryAgentMode('streaming');
         }
       } catch { /* ignore recovery errors */ }
     })();
     return () => { cancelled = true; };
   }, [rawEpic?.id]);
+
+  // Polling cuando el agente sigue corriendo en otra tab/sesión y este
+  // cliente no tiene SSE local activo. Cada 3s relee el cache; si hay events
+  // nuevos, hidrata. Cuando status='staging' (run terminó) los aplica como
+  // propuestas finales y para el polling.
+  // Stale detection: 5min sin events nuevos → asume run muerto.
+  useEffect(() => {
+    if (!rawEpic?.id) return;
+    if (storyAgentMode !== 'streaming') return;
+    // Si ya hay un SSE local feeding events, no hacemos polling — el handler
+    // de streamStoryProposals ya está actualizando state directamente.
+    if (storyAbortRef.current) return;
+
+    let cancelled = false;
+    const POLL_INTERVAL_MS = 3000;
+    const STALE_THRESHOLD_TICKS = 100; // 100 × 3s = 5min
+    let lastEventCount = -1;
+    let staleTickCount = 0;
+
+    const tick = async () => {
+      if (cancelled) return;
+      // Mid-tick guard: si entre el setInterval y este tick el user disparó
+      // handleStartStoryStreaming (poblando sseAbortRef), saltamos para no
+      // duplicar dispatches con el SSE local que ya está activo.
+      if (storyAbortRef.current) return;
+      try {
+        const sessionData = await getStorySession(rawEpic.id);
+        if (cancelled) return;
+        if (!sessionData) {
+          // Cache desapareció — el run probablemente terminó y se invalidó.
+          setStoryAgentMode('idle');
+          cancelled = true;
+          return;
+        }
+        const { session, isActive } = sessionData;
+        setStoryAgentEvents(session.events);
+        setStoryProposals(session.proposals);
+
+        if (session.status === 'staging' || !isActive) {
+          // Agente terminó. Aplicar como propuestas finales si hay.
+          if (session.proposals.length > 0) {
+            setStoryAgentMode('staging');
+          } else {
+            setStoryAgentMode('idle');
+          }
+          cancelled = true;
+          return;
+        }
+
+        if (session.events.length === lastEventCount) {
+          staleTickCount++;
+          if (staleTickCount >= STALE_THRESHOLD_TICKS) {
+            if (session.proposals.length > 0) {
+              setStoryAgentMode('staging');
+            } else {
+              setStoryAgentMode('idle');
+            }
+            cancelled = true;
+            return;
+          }
+        } else {
+          lastEventCount = session.events.length;
+          staleTickCount = 0;
+        }
+      } catch {
+        // Tick transitorio falló — siguiente reintenta.
+      }
+    };
+
+    void tick();
+    const interval = setInterval(tick, POLL_INTERVAL_MS);
+    return () => {
+      cancelled = true;
+      clearInterval(interval);
+    };
+  }, [rawEpic?.id, storyAgentMode]);
 
   if (!epic) {
     return (
@@ -819,18 +967,11 @@ function EpicFullPageInner({ epicId }: { epicId: string }) {
 
   const handleStartEdit = () => {
     setEditTitle(epic.title);
-    setEditDescription(epic.description);
+    setEditMarkdown(epic.markdown ?? '');
     setEditStatus(epic.status);
     setEditPriority(epic.priority);
     setEditStartDate(epic.startDate);
     setEditTargetDate(epic.targetDate);
-    const bf = {} as Record<BusinessFieldKey, string>;
-    for (const section of businessFieldSections) {
-      for (const field of section.fields) {
-        bf[field.key] = epic[field.key];
-      }
-    }
-    setEditBusinessFields(bf);
     setEditPodIds([...epic.podIds]);
     setEditInitiativeId(epic.initiativeId);
     setIsEditing(true);
@@ -839,7 +980,7 @@ function EpicFullPageInner({ epicId }: { epicId: string }) {
   const handleSave = async () => {
     const changes: Record<string, unknown> = {};
     if (editTitle !== epic.title) changes.title = editTitle;
-    if (editDescription !== epic.description) changes.description = editDescription;
+    if (editMarkdown !== (epic.markdown ?? '')) changes.markdown = editMarkdown;
     if (editStatus !== epic.status) changes.status = editStatus;
     if (editPriority !== epic.priority) changes.priority = editPriority;
     if (editStartDate !== epic.startDate) changes.startDate = editStartDate;
@@ -848,64 +989,36 @@ function EpicFullPageInner({ epicId }: { epicId: string }) {
     const podsSorted = [...editPodIds].sort();
     const origPodsSorted = [...epic.podIds].sort();
     if (JSON.stringify(podsSorted) !== JSON.stringify(origPodsSorted)) changes.podIds = editPodIds;
-    for (const section of businessFieldSections) {
-      for (const field of section.fields) {
-        if (editBusinessFields[field.key] !== epic[field.key]) {
-          changes[field.key] = editBusinessFields[field.key];
-        }
-      }
-    }
 
     if (Object.keys(changes).length === 0) {
       setIsEditing(false);
       return;
     }
 
-    // Optimistic update local primero para UX responsiva
-    dispatch({ type: 'UPDATE_EPIC', payload: { id: epic.id, changes } });
-    setIsEditing(false);
+    if (isSaving) return;
+    setIsSaving(true);
 
-    // Persistir al backend (PG + vault). Si falla, revertir el optimistic update.
+    // Pessimistic: esperar al backend antes de cerrar edición y aplicar al state.
+    // Trade-off: pierde el feel inmediato del optimistic, pero permite mostrar el
+    // Loader2 dentro del botón "Guardar cambios" durante el await.
     try {
       await apiUpdateEpic(epic.id, changes);
+      dispatch({ type: 'UPDATE_EPIC', payload: { id: epic.id, changes } });
       toast.success('Épica actualizada');
+      setIsEditing(false);
     } catch (err: any) {
-      // Rollback: regresar los valores originales al state local
-      const rollback: Record<string, unknown> = {};
-      for (const key of Object.keys(changes)) {
-        rollback[key] = (epic as any)[key];
-      }
-      dispatch({ type: 'UPDATE_EPIC', payload: { id: epic.id, changes: rollback } });
       toast.error(err?.message || 'Error al guardar la épica');
+    } finally {
+      setIsSaving(false);
     }
   };
 
-  const updateBusinessField = (key: BusinessFieldKey, value: string) => {
-    setEditBusinessFields((prev) => ({ ...prev, [key]: value }));
-  };
-
-  const handleApprove = () => {
-    dispatch({
-      type: 'APPROVE_EPIC_STORIES',
-      payload: { epicId: epic.id, poId: state.currentUserId, poName: state.currentUserName },
-    });
-  };
-
-  const handleReject = () => {
-    if (!rejectComment.trim()) return;
-    dispatch({
-      type: 'REJECT_EPIC_STORIES',
-      payload: { epicId: epic.id, poId: state.currentUserId, poName: state.currentUserName, comment: rejectComment.trim() },
-    });
-    setRejectComment('');
-    setShowRejectForm(false);
-  };
 
   return (
     <div className="h-full min-h-0">
       {/* Scrollable content */}
       <div className="h-full min-h-0 overflow-y-auto">
-        <div className="mx-auto px-6 py-8 max-w-6xl">
+        <div className="mx-auto px-6 py-8 max-w-7xl">
         {/* Title + metadata header */}
         <div className="mb-8">
           <div className="flex items-start gap-2">
@@ -919,46 +1032,112 @@ function EpicFullPageInner({ epicId }: { epicId: string }) {
             ) : (
               <h1 className="text-3xl font-bold tracking-tight flex-1">{epic.title}</h1>
             )}
-            <div className="flex gap-1 shrink-0 mt-1">
-              {!isEditing ? (
-                <>
-                  <DownloadMenu entity={{ kind: 'epic', epic }} fetchFullContent />
-                  <Button
-                    variant="ghost"
-                    size="icon"
-                    onClick={() => setShowChecklist((v) => !v)}
-                    className={`relative text-muted-foreground hover:text-foreground ${showChecklist ? 'bg-muted text-foreground' : ''}`}
-                  >
-                    <ListChecks className="h-4 w-4" />
-                    {completedStepsCount > 0 && completedStepsCount < checklistSteps.length && (
-                      <span className="absolute -top-0.5 -right-0.5 h-4 w-4 rounded-full bg-foreground text-background text-[10px] font-bold flex items-center justify-center">
-                        {completedStepsCount}
-                      </span>
+            <TooltipProvider delayDuration={200}>
+              <div className="flex gap-1 shrink-0 mt-1">
+                {!isEditing ? (
+                  <>
+                    <DownloadMenu entity={{ kind: 'epic', epic }} fetchFullContent />
+                    {(epic.tracker as TrackerReference | undefined)?.externalKey ? (
+                      <Tooltip>
+                        <TooltipTrigger asChild>
+                          <a
+                            href={(epic.tracker as TrackerReference).externalUrl}
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            className="inline-flex items-center gap-1.5 h-9 px-3 rounded-md text-xs font-medium border border-border text-muted-foreground hover:text-foreground hover:bg-accent dark:hover:bg-accent/50 transition-colors"
+                          >
+                            <ExternalLink className="h-3.5 w-3.5" />
+                            {(epic.tracker as TrackerReference).externalKey}
+                          </a>
+                        </TooltipTrigger>
+                        <TooltipContent>
+                          Abrir {(epic.tracker as TrackerReference).externalKey} en Linear
+                        </TooltipContent>
+                      </Tooltip>
+                    ) : (
+                      <Tooltip>
+                        <TooltipTrigger asChild>
+                          <Button
+                            variant="ghost"
+                            size="icon"
+                            onClick={handlePublishToLinear}
+                            disabled={publishingTracker}
+                            className="text-muted-foreground hover:text-foreground"
+                          >
+                            {publishingTracker ? (
+                              <Loader2 className="h-4 w-4 animate-spin" />
+                            ) : (
+                              <LinearIcon className="h-4 w-4" />
+                            )}
+                          </Button>
+                        </TooltipTrigger>
+                        <TooltipContent>Publicar épica + historias en Linear</TooltipContent>
+                      </Tooltip>
                     )}
-                    {completedStepsCount === checklistSteps.length && (
-                      <span className="absolute -top-0.5 -right-0.5 h-4 w-4 rounded-full bg-green-600 text-white text-[10px] flex items-center justify-center">
-                        <Check className="h-2.5 w-2.5" />
-                      </span>
-                    )}
-                  </Button>
-                  <Button variant="ghost" size="icon" onClick={handleStartEdit} className="text-muted-foreground hover:text-foreground">
-                    <Pencil className="h-4 w-4" />
-                  </Button>
-                  <Button variant="ghost" size="icon" onClick={() => setDeleteOpen(true)} className="text-muted-foreground hover:text-destructive">
-                    <Trash2 className="h-4 w-4" />
-                  </Button>
-                </>
-              ) : (
-                <>
-                  <Button variant="ghost" size="icon" onClick={() => setIsEditing(false)} className="text-muted-foreground hover:text-foreground">
-                    <X className="h-4 w-4" />
-                  </Button>
-                  <Button variant="ghost" size="icon" onClick={handleSave} className="text-foreground">
-                    <Check className="h-4 w-4" />
-                  </Button>
-                </>
-              )}
-            </div>
+                    <Tooltip>
+                      <TooltipTrigger asChild>
+                        <Button
+                          variant="ghost"
+                          size="icon"
+                          onClick={() => setShowChecklist((v) => !v)}
+                          className={`relative text-muted-foreground hover:text-foreground ${showChecklist ? 'bg-muted text-foreground' : ''}`}
+                        >
+                          <ListChecks className="h-4 w-4" />
+                          {completedStepsCount > 0 && completedStepsCount < checklistSteps.length && (
+                            <span className="absolute -top-0.5 -right-0.5 h-4 w-4 rounded-full bg-foreground text-background text-[10px] font-bold flex items-center justify-center">
+                              {completedStepsCount}
+                            </span>
+                          )}
+                          {completedStepsCount === checklistSteps.length && (
+                            <span className="absolute -top-0.5 -right-0.5 h-4 w-4 rounded-full bg-green-600 text-white text-[10px] flex items-center justify-center">
+                              <Check className="h-2.5 w-2.5" />
+                            </span>
+                          )}
+                        </Button>
+                      </TooltipTrigger>
+                      <TooltipContent>
+                        {showChecklist ? 'Ocultar checklist del protocolo' : 'Ver checklist del protocolo'}
+                      </TooltipContent>
+                    </Tooltip>
+                    <Tooltip>
+                      <TooltipTrigger asChild>
+                        <Button variant="ghost" size="icon" onClick={handleStartEdit} className="text-muted-foreground hover:text-foreground">
+                          <Pencil className="h-4 w-4" />
+                        </Button>
+                      </TooltipTrigger>
+                      <TooltipContent>Editar épica</TooltipContent>
+                    </Tooltip>
+                    <Tooltip>
+                      <TooltipTrigger asChild>
+                        <Button variant="ghost" size="icon" onClick={() => setDeleteOpen(true)} className="text-muted-foreground hover:text-destructive">
+                          <Trash2 className="h-4 w-4" />
+                        </Button>
+                      </TooltipTrigger>
+                      <TooltipContent>Eliminar épica</TooltipContent>
+                    </Tooltip>
+                  </>
+                ) : (
+                  <>
+                    <Tooltip>
+                      <TooltipTrigger asChild>
+                        <Button variant="ghost" size="icon" onClick={() => setIsEditing(false)} className="text-muted-foreground hover:text-foreground">
+                          <X className="h-4 w-4" />
+                        </Button>
+                      </TooltipTrigger>
+                      <TooltipContent>Cancelar edición</TooltipContent>
+                    </Tooltip>
+                    <Tooltip>
+                      <TooltipTrigger asChild>
+                        <Button variant="ghost" size="icon" onClick={handleSave} disabled={isSaving} className="text-foreground">
+                          {isSaving ? <Loader2 className="h-4 w-4 animate-spin" /> : <Check className="h-4 w-4" />}
+                        </Button>
+                      </TooltipTrigger>
+                      <TooltipContent>Guardar cambios</TooltipContent>
+                    </Tooltip>
+                  </>
+                )}
+              </div>
+            </TooltipProvider>
           </div>
 
           {/* ── Collapsible Protocol Checklist ── */}
@@ -1111,13 +1290,6 @@ function EpicFullPageInner({ epicId }: { epicId: string }) {
                   Definición
                 </TabsTrigger>
                 <TabsTrigger
-                  value="diagramas"
-                  className="gap-1.5 rounded-none border-b-2 border-transparent data-[state=active]:border-foreground data-[state=active]:shadow-none"
-                >
-                  <Network className="h-3.5 w-3.5" />
-                  Diagrama
-                </TabsTrigger>
-                <TabsTrigger
                   value="disenos"
                   className="gap-1.5 rounded-none border-b-2 border-transparent data-[state=active]:border-foreground data-[state=active]:shadow-none"
                 >
@@ -1125,28 +1297,31 @@ function EpicFullPageInner({ epicId }: { epicId: string }) {
                   Diseño {rawEpic?.designSkipped ? '(N/A)' : (rawEpic?.designs?.length ? `(${rawEpic.designs.length})` : '')}
                 </TabsTrigger>
                 <TabsTrigger
+                  value="diagramas"
+                  className="gap-1.5 rounded-none border-b-2 border-transparent data-[state=active]:border-foreground data-[state=active]:shadow-none"
+                >
+                  <Network className="h-3.5 w-3.5" />
+                  Diagrama
+                </TabsTrigger>
+                <TabsTrigger
                   value="historias"
                   className="gap-1.5 rounded-none border-b-2 border-transparent data-[state=active]:border-foreground data-[state=active]:shadow-none"
                 >
                   <BookOpen className="h-3.5 w-3.5" />
-                  Historias ({epic.stories.length})
+                  Historias de Usuario ({epic.stories.length})
                 </TabsTrigger>
-                <TabsTrigger
-                  value="matrices-qa"
-                  className="gap-1.5 rounded-none border-b-2 border-transparent data-[state=active]:border-foreground data-[state=active]:shadow-none"
-                >
-                  <ClipboardCheck className="h-3.5 w-3.5" />
-                  Matrices QA
+                <TabsTrigger value="dependencias" className="gap-1.5 rounded-none border-b-2 border-transparent data-[state=active]:border-foreground data-[state=active]:shadow-none">
+                  <GitBranch className="h-3.5 w-3.5" />
+                  {/* Counter — usa el rollup como fuente única (que ya une nuevas
+                      + legacy + discovered del vault). Mientras el rollup carga,
+                      mostramos el cálculo legacy local para evitar flicker.
+                      Suma el DAG de orden entre historias (storyDeps) que no es
+                      parte del rollup técnico. */}
+                  Dependencias ({(rollupCount ?? ((epic.dependencies ?? []).filter((d) => !d.id?.startsWith('ai-dep-')).length + effectiveDiscoveredDeps.length)) + effectiveStoryDeps.length})
                 </TabsTrigger>
                 <TabsTrigger value="documentos" className="gap-1.5 rounded-none border-b-2 border-transparent data-[state=active]:border-foreground data-[state=active]:shadow-none">
                   <Paperclip className="h-3.5 w-3.5" />
                   Documentos ({epic.documents.length})
-                </TabsTrigger>
-                <TabsTrigger value="dependencias" className="gap-1.5 rounded-none border-b-2 border-transparent data-[state=active]:border-foreground data-[state=active]:shadow-none">
-                  <GitBranch className="h-3.5 w-3.5" />
-                  {/* Contamos solo las manuales del JSONB (no las IA persistidas con id="ai-dep-*"
-                      que también viven ahí) para evitar double-count con effectiveDiscoveredDeps. */}
-                  Dependencias ({(epic.dependencies ?? []).filter((d) => !d.id?.startsWith('ai-dep-')).length + effectiveDiscoveredDeps.length + effectiveStoryDeps.length})
                 </TabsTrigger>
                 <TabsTrigger value="changelog" className="gap-1.5 rounded-none border-b-2 border-transparent data-[state=active]:border-foreground data-[state=active]:shadow-none">
                   <History className="h-3.5 w-3.5" />
@@ -1155,60 +1330,24 @@ function EpicFullPageInner({ epicId }: { epicId: string }) {
               </TabsList>
 
               {/* ── Definición ── */}
-              <TabsContent value="definicion" className="mt-8 space-y-8">
-                <section>
-                  <h3 className="text-sm font-semibold uppercase tracking-wider text-muted-foreground mb-3">Descripción</h3>
-                  {isEditing ? (
-                    <textarea
-                      value={editDescription}
-                      onChange={(e) => setEditDescription(e.target.value)}
-                      rows={4}
-                      className="w-full rounded-lg border border-input bg-transparent px-4 py-3 text-sm leading-relaxed shadow-xs focus-visible:border-ring focus-visible:ring-ring/50 focus-visible:ring-[3px] outline-none resize-none dark:bg-input/30"
-                    />
-                  ) : (
-                    <p className="text-sm leading-relaxed text-foreground/80 whitespace-pre-line">{epic.description}</p>
-                  )}
-                </section>
-
-
-                {businessFieldSections.map((section) => (
-                  <section key={section.title}>
-                    <h3 className="text-sm font-semibold uppercase tracking-wider text-muted-foreground mb-4">{section.title}</h3>
-                    {isEditing ? (
-                      <div className="space-y-4">
-                        {section.fields.map((field) => (
-                          <div key={field.key}>
-                            <label className="text-xs font-medium text-muted-foreground mb-1.5 block">{field.label}</label>
-                            <textarea
-                              value={editBusinessFields[field.key] ?? ''}
-                              onChange={(e) => updateBusinessField(field.key, e.target.value)}
-                              rows={2}
-                              className="w-full rounded-lg border border-input bg-transparent px-3 py-2 text-sm leading-relaxed shadow-xs focus-visible:border-ring focus-visible:ring-ring/50 focus-visible:ring-[3px] outline-none resize-none dark:bg-input/30"
-                            />
-                          </div>
-                        ))}
-                      </div>
-                    ) : (
-                      <div className="space-y-5">
-                        {section.fields.map((field) => {
-                          const value = epic[field.key];
-                          if (!value) return (
-                            <div key={field.key} className="flex items-center gap-2">
-                              <Circle className="h-3 w-3 text-amber-500/60" />
-                              <span className="text-xs text-amber-600 dark:text-amber-400">{field.label} — sin completar</span>
-                            </div>
-                          );
-                          return (
-                            <div key={field.key}>
-                              <span className="text-xs text-muted-foreground block mb-1">{field.label}</span>
-                              <p className="text-sm leading-relaxed text-foreground/80 whitespace-pre-line">{value}</p>
-                            </div>
-                          );
-                        })}
-                      </div>
-                    )}
-                  </section>
-                ))}
+              <TabsContent value="definicion" className="mt-8 space-y-6">
+                {/* Markdown único de la épica con los 9 headings obligatorios.
+                    En modo edit, SectionTiptapEditor full-feature; en read,
+                    ReadOnlyMarkdown. Mismo patrón que StoryFullPage. */}
+                {isEditing ? (
+                  <SectionTiptapEditor
+                    initialMarkdown={editMarkdown && editMarkdown.trim().length > 0 ? editMarkdown : EPIC_MARKDOWN_PLACEHOLDER}
+                    onChange={setEditMarkdown}
+                    variant="paragraph"
+                    placeholder="Escribe la definición de la épica en markdown..."
+                  />
+                ) : epic.markdown && epic.markdown.trim().length > 0 ? (
+                  <ReadOnlyMarkdown content={epic.markdown} />
+                ) : (
+                  <p className="text-sm text-muted-foreground italic">
+                    Sin contenido. Click en el lápiz para empezar a editar.
+                  </p>
+                )}
               </TabsContent>
 
               {/* ── Diagramas ── */}
@@ -1221,13 +1360,6 @@ function EpicFullPageInner({ epicId }: { epicId: string }) {
                   }
                   onDiagramEdited={(diagram) =>
                     dispatch({ type: 'UPDATE_EPIC_DIAGRAM', payload: { epicId: rawEpic!.id, diagram } })
-                  }
-                  tlApproval={rawEpic!.tlApproval}
-                  onTlApprove={() =>
-                    dispatch({ type: 'APPROVE_EPIC_DIAGRAM_TL', payload: { epicId: rawEpic!.id, tlName: 'Tech Lead' } })
-                  }
-                  onTlReject={(comment) =>
-                    dispatch({ type: 'REJECT_EPIC_DIAGRAM_TL', payload: { epicId: rawEpic!.id, tlName: 'Tech Lead', comment } })
                   }
                   onDocumentReady={() => {
                     // El backend ya registró el .md del vault en epic.documents[]
@@ -1261,12 +1393,22 @@ function EpicFullPageInner({ epicId }: { epicId: string }) {
                 <EpicDesigns
                   designs={rawEpic!.designs ?? []}
                   designSkipped={rawEpic!.designSkipped ?? false}
-                  onAddDesign={(design) => {
-                    dispatch({ type: 'ADD_EPIC_DESIGN', payload: { epicId: rawEpic!.id, design } });
-                    const nextDesigns = [...(rawEpic!.designs ?? []), design];
-                    void apiUpdateEpic(rawEpic!.id, { designs: nextDesigns }).catch((err) => {
-                      toast.error(`Diseño agregado localmente, pero falló al guardar: ${err?.message ?? 'error desconocido'}`);
-                    });
+                  onAddDesignBundle={async (input) => {
+                    // Upload multipart al backend → recibe el EpicDesign ya
+                    // construido (con bundleKey, handoff sintético, etc.)
+                    // y lo dispatchamos al state local. El backend escribe
+                    // los archivos al vault y persiste a BD; no hace falta
+                    // un PATCH adicional como en el flujo legacy.
+                    try {
+                      const created = await apiUploadDesignBundle(rawEpic!.id, input);
+                      dispatch({ type: 'ADD_EPIC_DESIGN', payload: { epicId: rawEpic!.id, design: created } });
+                      toast.success(`Diseño "${created.name}" agregado.`);
+                      return created;
+                    } catch (err) {
+                      const msg = err instanceof Error ? err.message : 'Error desconocido';
+                      toast.error(`No se pudo subir el bundle: ${msg}`);
+                      throw err;
+                    }
                   }}
                   onUpdateDesign={(design) => {
                     dispatch({ type: 'UPDATE_EPIC_DESIGN', payload: { epicId: rawEpic!.id, design } });
@@ -1276,10 +1418,17 @@ function EpicFullPageInner({ epicId }: { epicId: string }) {
                     });
                   }}
                   onDeleteDesign={(designId) => {
+                    // Optimistic update: borra del estado local inmediato.
+                    // Si el backend falla, revertimos. El backend hace
+                    // cleanup completo (vault + ZIP de disco + array).
+                    const removed = (rawEpic!.designs ?? []).find((d) => d.id === designId);
                     dispatch({ type: 'DELETE_EPIC_DESIGN', payload: { epicId: rawEpic!.id, designId } });
-                    const nextDesigns = (rawEpic!.designs ?? []).filter((d) => d.id !== designId);
-                    void apiUpdateEpic(rawEpic!.id, { designs: nextDesigns }).catch((err) => {
-                      toast.error(`Diseño eliminado localmente, pero falló al guardar: ${err?.message ?? 'error desconocido'}`);
+                    void apiDeleteDesign(rawEpic!.id, designId).catch((err) => {
+                      toast.error(`No se pudo borrar el diseño: ${err?.message ?? 'error desconocido'}`);
+                      // Revertir al estado previo si tenemos el design original.
+                      if (removed) {
+                        dispatch({ type: 'ADD_EPIC_DESIGN', payload: { epicId: rawEpic!.id, design: removed } });
+                      }
                     });
                   }}
                   onToggleSkip={(skipped) => {
@@ -1362,11 +1511,12 @@ function EpicFullPageInner({ epicId }: { epicId: string }) {
                   stories={epic.stories}
                   epicId={rawEpic!.id}
                   pods={state.pods}
-                  qaMatrix={rawEpic!.qaMatrix}
                   onGenerateWithAI={storyAgentMode === 'idle' ? handleOpenStoryPrompt : undefined}
                   onCreateStory={async (story) => {
                     try {
-                      const po: any = story.po ?? {};
+                      const po = story.po ?? { markdown: '' };
+                      const technical = story.technical ?? { markdown: '' };
+                      const qa = story.qa ?? { markdown: '' };
                       const created = await apiCreateStory({
                         title: story.title,
                         epicId: story.epicId,
@@ -1375,14 +1525,9 @@ function EpicFullPageInner({ epicId }: { epicId: string }) {
                         storyPoints: story.storyPoints,
                         sprintId: story.sprintId ?? undefined,
                         labels: story.labels ?? [],
-                        po: {
-                          background: po.background ?? '',
-                          objective: po.objective ?? '',
-                          userStory: po.userStory ?? '',
-                          whatHowWhen: typeof po.whatHowWhen === 'string' ? po.whatHowWhen : '',
-                          acceptanceCriteria: Array.isArray(po.acceptanceCriteria) ? po.acceptanceCriteria.join('\n') : (po.acceptanceCriteria ?? ''),
-                          additionalNotes: po.additionalNotes ?? '',
-                        },
+                        po: { markdown: po.markdown ?? '' },
+                        technical: { markdown: technical.markdown ?? '' },
+                        qa: { markdown: qa.markdown ?? '' },
                       });
                       dispatch({ type: 'CREATE_STORY', payload: { ...story, id: created.id } });
                       toast.success('Historia creada');
@@ -1392,9 +1537,9 @@ function EpicFullPageInner({ epicId }: { epicId: string }) {
                   }}
                   onUpdateStory={async (id, changes) => {
                     try {
-                      const po: any = (changes as any).po ?? {};
-                      const technical: any = (changes as any).technical ?? {};
-                      const qa: any = (changes as any).qa ?? {};
+                      const po = changes.po;
+                      const technical = changes.technical;
+                      const qa = changes.qa;
                       await apiUpdateStory(id, {
                         title: changes.title,
                         status: changes.status as string | undefined,
@@ -1402,16 +1547,9 @@ function EpicFullPageInner({ epicId }: { epicId: string }) {
                         podId: changes.podId,
                         sprintId: changes.sprintId ?? undefined,
                         labels: changes.labels,
-                        po: Object.keys(po).length ? {
-                          background: po.background,
-                          objective: po.objective,
-                          userStory: po.userStory,
-                          whatHowWhen: typeof po.whatHowWhen === 'string' ? po.whatHowWhen : '',
-                          acceptanceCriteria: Array.isArray(po.acceptanceCriteria) ? po.acceptanceCriteria.join('\n') : po.acceptanceCriteria,
-                          additionalNotes: po.additionalNotes,
-                        } : undefined,
-                        technical: Object.keys(technical).length ? technical : undefined,
-                        qa: Object.keys(qa).length ? qa : undefined,
+                        po: po ? { markdown: po.markdown ?? '' } : undefined,
+                        technical: technical ? { markdown: technical.markdown ?? '' } : undefined,
+                        qa: qa ? { markdown: qa.markdown ?? '' } : undefined,
                       });
                       dispatch({ type: 'UPDATE_STORY', payload: { id, changes } });
                       toast.success('Historia actualizada');
@@ -1428,147 +1566,35 @@ function EpicFullPageInner({ epicId }: { epicId: string }) {
                       toast.error(err.message || 'Error al eliminar historia');
                     }
                   }}
+                  onBulkDeleteStories={async (ids) => {
+                    // Toast unificado loading → success/warning/error.
+                    // El loader del toast.loading de sonner viene built-in,
+                    // y reemplazar el toast por id evita el flicker de
+                    // dismiss + nuevo toast.
+                    const toastId = toast.loading(
+                      `Eliminando ${ids.length} ${ids.length === 1 ? 'historia de usuario' : 'historias de usuario'}…`,
+                    );
+                    let ok = 0;
+                    let fail = 0;
+                    for (const id of ids) {
+                      try {
+                        await apiDeleteStory(id);
+                        dispatch({ type: 'DELETE_STORY', payload: { id } });
+                        ok++;
+                      } catch {
+                        fail++;
+                      }
+                    }
+                    if (ok > 0 && fail === 0) {
+                      toast.success(`${ok} ${ok === 1 ? 'historia eliminada' : 'historias eliminadas'}`, { id: toastId });
+                    } else if (ok > 0 && fail > 0) {
+                      toast.warning(`${ok} eliminadas, ${fail} fallaron`, { id: toastId });
+                    } else {
+                      toast.error(`No se pudieron eliminar ${fail === 1 ? 'la historia' : 'las historias'}`, { id: toastId });
+                    }
+                  }}
                 />
 
-                {/* PO Approval Section */}
-                {epic.stories.length > 0 && (
-                  <div className="rounded-xl border p-5">
-                    {!poApproval && (
-                      <div className="flex items-center justify-between">
-                        <div className="flex items-center gap-3">
-                          <div className="h-10 w-10 rounded-full bg-amber-100 dark:bg-amber-900/30 flex items-center justify-center">
-                            <ShieldCheck className="h-5 w-5 text-amber-600 dark:text-amber-400" />
-                          </div>
-                          <div>
-                            <p className="text-sm font-medium">Validación del Product Owner</p>
-                            <p className="text-xs text-muted-foreground">
-                              Revisa las historias y aprueba o solicita cambios
-                            </p>
-                          </div>
-                        </div>
-                        <div className="flex gap-2">
-                          <Button
-                            variant="outline"
-                            size="sm"
-                            onClick={() => setShowRejectForm(true)}
-                            className="gap-1.5 text-red-600 hover:text-red-700 hover:bg-red-50 dark:text-red-400 dark:hover:bg-red-950/30"
-                          >
-                            <XCircle className="h-3.5 w-3.5" />
-                            Rechazar
-                          </Button>
-                          <Button
-                            size="sm"
-                            onClick={handleApprove}
-                            className="gap-1.5 bg-green-600 hover:bg-green-700 text-white"
-                          >
-                            <CheckCircle2 className="h-3.5 w-3.5" />
-                            Aprobar
-                          </Button>
-                        </div>
-                      </div>
-                    )}
-
-                    {poApproval?.status === 'approved' && (
-                      <div className="flex items-center gap-3">
-                        <div className="h-10 w-10 rounded-full bg-green-100 dark:bg-green-900/30 flex items-center justify-center">
-                          <CheckCircle2 className="h-5 w-5 text-green-600 dark:text-green-400" />
-                        </div>
-                        <div>
-                          <p className="text-sm font-medium text-green-700 dark:text-green-400">Historias aprobadas</p>
-                          <p className="text-xs text-muted-foreground">
-                            Aprobado por {poApproval.approvedBy ?? 'PO'} · {poApproval.approvedAt ? formatShortDate(poApproval.approvedAt) : ''}
-                          </p>
-                        </div>
-                      </div>
-                    )}
-
-                    {poApproval?.status === 'rejected' && (
-                      <div>
-                        <div className="flex items-center gap-3">
-                          <div className="h-10 w-10 rounded-full bg-red-100 dark:bg-red-900/30 flex items-center justify-center">
-                            <XCircle className="h-5 w-5 text-red-600 dark:text-red-400" />
-                          </div>
-                          <div className="flex-1">
-                            <p className="text-sm font-medium text-red-700 dark:text-red-400">Historias rechazadas</p>
-                            <p className="text-xs text-muted-foreground">
-                              Rechazado por {poApproval.approvedBy ?? 'PO'} · {poApproval.approvedAt ? formatShortDate(poApproval.approvedAt) : ''}
-                            </p>
-                          </div>
-                          <Button
-                            size="sm"
-                            variant="outline"
-                            onClick={handleApprove}
-                            className="gap-1.5 text-green-600 hover:text-green-700"
-                          >
-                            <CheckCircle2 className="h-3.5 w-3.5" />
-                            Aprobar
-                          </Button>
-                        </div>
-                        {poApproval.comment && (
-                          <div className="flex items-start gap-2 mt-3 ml-[52px] rounded-lg bg-red-50 dark:bg-red-950/20 px-3 py-2">
-                            <MessageSquare className="h-3.5 w-3.5 text-red-500 mt-0.5 shrink-0" />
-                            <p className="text-xs text-red-700 dark:text-red-400">{poApproval.comment}</p>
-                          </div>
-                        )}
-                      </div>
-                    )}
-
-                    {/* Reject form */}
-                    {showRejectForm && !poApproval && (
-                      <div className="mt-4 pt-4 border-t space-y-3">
-                        <textarea
-                          value={rejectComment}
-                          onChange={(e) => setRejectComment(e.target.value)}
-                          placeholder="Describe los cambios necesarios..."
-                          rows={3}
-                          className="w-full rounded-lg border border-input bg-transparent px-3 py-2 text-sm shadow-xs focus-visible:border-ring focus-visible:ring-ring/50 focus-visible:ring-[3px] outline-none resize-none dark:bg-input/30"
-                        />
-                        <div className="flex justify-end gap-2">
-                          <Button variant="ghost" size="sm" onClick={() => { setShowRejectForm(false); setRejectComment(''); }}>
-                            Cancelar
-                          </Button>
-                          <Button
-                            size="sm"
-                            onClick={handleReject}
-                            disabled={!rejectComment.trim()}
-                            className="gap-1.5 bg-red-600 hover:bg-red-700 text-white"
-                          >
-                            Confirmar rechazo
-                          </Button>
-                        </div>
-                      </div>
-                    )}
-                  </div>
-                )}
-              </TabsContent>
-
-              {/* ── Matrices QA ── */}
-              <TabsContent value="matrices-qa" className="mt-8">
-                <EpicQAMatrix
-                  epic={rawEpic!}
-                  stories={epic.stories}
-                  qaMatrix={rawEpic!.qaMatrix}
-                  onMatrixGenerated={(matrix) =>
-                    dispatch({ type: 'SAVE_QA_MATRIX', payload: { epicId: rawEpic!.id, matrix } })
-                  }
-                  onMatrixEdited={(matrix) =>
-                    dispatch({ type: 'UPDATE_QA_MATRIX', payload: { epicId: rawEpic!.id, matrix } })
-                  }
-                  qaApproval={rawEpic!.qaApproval}
-                  onQaApprove={() =>
-                    dispatch({ type: 'APPROVE_EPIC_QA', payload: { epicId: rawEpic!.id, qaName: 'QA Lead' } })
-                  }
-                  onQaReject={(comment) =>
-                    dispatch({ type: 'REJECT_EPIC_QA', payload: { epicId: rawEpic!.id, qaName: 'QA Lead', comment } })
-                  }
-                  epicQAMatrix={rawEpic!.epicQAMatrix}
-                  onEpicMatrixGenerated={(matrix) =>
-                    dispatch({ type: 'SAVE_EPIC_QA_MATRIX', payload: { epicId: rawEpic!.id, matrix } })
-                  }
-                  onEpicMatrixEdited={(matrix) =>
-                    dispatch({ type: 'UPDATE_EPIC_QA_MATRIX', payload: { epicId: rawEpic!.id, matrix } })
-                  }
-                />
               </TabsContent>
 
               {/* ── Documentos ── */}
@@ -1602,13 +1628,9 @@ function EpicFullPageInner({ epicId }: { epicId: string }) {
               {/* ── Dependencias ── */}
               <TabsContent value="dependencias" className="mt-8">
                 <EpicDependencies
-                  epic={epic}
-                  discoveredDependencies={effectiveDiscoveredDeps}
+                  epicId={rawEpic!.id}
                   storyOrderDependencies={effectiveStoryDeps}
-                  onDiscoveredDepsRefresh={refreshDiscoveredDeps}
-                  onAddDependency={(dep) => dispatch({ type: 'ADD_EPIC_DEPENDENCY', payload: { epicId: rawEpic!.id, dependency: dep } })}
-                  onUpdateDependency={(dep) => dispatch({ type: 'UPDATE_EPIC_DEPENDENCY', payload: { epicId: rawEpic!.id, dependency: dep } })}
-                  onDeleteDependency={(depId) => dispatch({ type: 'DELETE_EPIC_DEPENDENCY', payload: { epicId: rawEpic!.id, dependencyId: depId } })}
+                  onRollupCountChange={setRollupCount}
                 />
               </TabsContent>
 

@@ -81,7 +81,6 @@ import { PropertyPanel } from './diagram-layout/editor/PropertyPanel';
 import { useDropNode } from './diagram-layout/editor/useDropNode';
 import { useDiagramHistory } from './diagram-layout/editor/useDiagramHistory';
 import { useDiagramKeyboard } from './diagram-layout/editor/useDiagramKeyboard';
-import { ValidationPanel } from './diagram-layout/editor/ValidationPanel';
 import { DiagramContextMenu, useContextMenu } from './diagram-layout/editor/DiagramContextMenu';
 import { useDiagramAutoSave } from './diagram-layout/editor/useDiagramAutoSave';
 import { SaveIndicator } from './diagram-layout/editor/SaveIndicator';
@@ -163,8 +162,8 @@ export function DiagramViewer({
   const [isEditing, setIsEditing] = useState(false);
   /*
     `editModeMounted` desacopla presencia en el DOM de la animación. Cuando
-    `isEditing` pasa de true → false, el paneles (EditToolbar, PropertyPanel,
-    ValidationPanel) permanecen montados durante `EDIT_ANIM_MS` para que la
+    `isEditing` pasa de true → false, los paneles (EditToolbar, PropertyPanel)
+    permanecen montados durante `EDIT_ANIM_MS` para que la
     animación-out se reproduzca; tras ese delay, `editModeMounted` pasa a
     false y los paneles se desmontan. Mismo patrón que `DiagramThemePanel`.
 
@@ -259,8 +258,29 @@ export function DiagramViewer({
   const containerRef = useRef<HTMLDivElement | null>(null);
   // Instancia de ReactFlow para llamar fitView controlado
   const rfInstanceRef = useRef<ReactFlowInstance | null>(null);
-  // Último diagram.id al que ajustamos viewport — evita jumps durante edit
-  const lastFittedIdRef = useRef<string | null>(null);
+  // Estado paralelo a `rfInstanceRef` para uso REACTIVO (refs no disparan
+  // re-renders ni invalidan deps de useEffect). Sin este flag, el useEffect
+  // de fitView corría una vez con `rfInstanceRef.current=null` y no se
+  // re-disparaba cuando `onInit` asignaba la instancia → el diagrama
+  // cargaba sin centrar correctamente.
+  const [isInstanceReady, setIsInstanceReady] = useState(false);
+  // Fingerprint del último layout fitteado. Cambia cuando ELK produce nuevas
+  // posiciones (por ej. después de `useMeasuredDimensions` que mide los
+  // nodos reales y dispara re-layout). Antes usábamos `diagram.id`, pero
+  // múltiples re-layouts del mismo diagrama producían fingerprints distintos
+  // que nuestro guard ignoraba — el primer fit quedaba aplicado a layout
+  // stale. Ahora re-fittea cada vez que las posiciones reales cambian.
+  const lastFittedFingerprintRef = useRef<string | null>(null);
+  // Flag para suprimir el flickering del primer load: ELK produce 2-3 passes
+  // de layout (primero con dimensiones default, luego con tamaños medidos
+  // por ResizeObserver, luego con collision resolution). Cada pass cambia
+  // las posiciones de los nodos y dispara re-fit — visualmente el user ve
+  // los nodos "saltar" mientras estabilizan. Con este flag mostramos un
+  // skeleton hasta que el primer fit corra sobre el último layout estable;
+  // el reveal del diagrama ya centrado es instantáneo y limpio.
+  // Se resetea a false cuando cambia `diagram.id` (nuevo diagrama → nuevo
+  // ciclo de loading + fit).
+  const [hasFittedFirstTime, setHasFittedFirstTime] = useState(false);
 
   // Mediciones reales de tamaños — si el CSS expandió un nodo más allá del
   // default en `nodeDimensions`, el hook devuelve un map para forzar re-layout.
@@ -530,29 +550,93 @@ export function DiagramViewer({
     setEdges(layoutedEdges);
   }, [layoutedNodes, layoutedEdges, setNodes, setEdges, isEditing]);
 
-  // fitView controlado: solo dispara cuando cambia el `diagram.id` (recibimos
-  // un diagrama diferente), no en cada render ni durante edición.
-  useEffect(() => {
-    if (lastFittedIdRef.current === diagram.id) return;
-    if (!rfInstanceRef.current) return;
-    rfInstanceRef.current.fitView({ padding: 0.15 });
-    lastFittedIdRef.current = diagram.id;
+  // Fingerprint del layout actual: id + posiciones de cada nodo. Si las
+  // posiciones cambian (re-layout post-medición de `useMeasuredDimensions`,
+  // recompute por colisiones), el fingerprint cambia y el useEffect
+  // re-fittea. Usar `useMemo` para evitar recompute en cada render — solo
+  // cambia cuando layoutedNodes referencia distinta.
+  const layoutFingerprint = useMemo(() => {
+    return `${diagram.id}:${layoutedNodes
+      .map((n) => `${n.id}@${n.position.x.toFixed(0)},${n.position.y.toFixed(0)}`)
+      .join('|')}`;
   }, [diagram.id, layoutedNodes]);
+
+  // fitView controlado: re-fittea cada vez que el LAYOUT cambia (no solo
+  // cuando cambia diagram.id). Razón: ELK produce dos pases — el primero
+  // con dimensiones default de los nodos, el segundo después de que
+  // `useMeasuredDimensions` mide los tamaños reales y dispara re-layout
+  // con `setLayoutedNodes` posiciones distintas. Con el guard antiguo
+  // (`lastFittedIdRef.current === diagram.id`) el primer fit se quedaba
+  // aplicado al layout stale del primer pass — el viewport mostraba un
+  // bbox que ya no era válido. Con fingerprint, cada pass triggers su
+  // propio fit.
+  //
+  // Skip durante edición (`isEditing=true`) — el user puede estar moviendo
+  // nodos manualmente, no queremos pisar su drag con un fit automático.
+  //
+  // Doble rAF: rAF #1 espera al primer paint post-render. rAF #2 da
+  // otro frame para que React Flow internal state (bbox del container,
+  // measurements de nodos vía ResizeObserver) esté estable.
+  useEffect(() => {
+    if (!isInstanceReady || !rfInstanceRef.current) return;
+    if (layoutedNodes.length === 0) return;
+    if (isEditing) return;
+    if (lastFittedFingerprintRef.current === layoutFingerprint) return;
+    let cancelled = false;
+    let raf2: number | null = null;
+    const raf1 = requestAnimationFrame(() => {
+      if (cancelled) return;
+      raf2 = requestAnimationFrame(() => {
+        if (cancelled) return;
+        rfInstanceRef.current?.fitView({ padding: 0.1 });
+        lastFittedFingerprintRef.current = layoutFingerprint;
+        // Después del primer fit exitoso, revelar el viewport con fade-in.
+        // Los re-fits siguientes (de pases ulteriores de ELK) ocurrirán mientras
+        // el viewport ya está visible, pero como el fingerprint dispara fit
+        // ANTES del paint del nuevo layout, el user no ve "saltos" — solo el
+        // estado final ya centrado.
+        setHasFittedFirstTime(true);
+      });
+    });
+    return () => {
+      cancelled = true;
+      cancelAnimationFrame(raf1);
+      if (raf2 !== null) cancelAnimationFrame(raf2);
+    };
+  }, [layoutFingerprint, isInstanceReady, isEditing, layoutedNodes.length]);
+
+  // Reset del flag cuando cambia el diagrama. Sin esto, navegar de un
+  // diagrama a otro mostraría el viewport ya visible (con el viewport del
+  // diagrama anterior) durante los pases iniciales de ELK del nuevo —
+  // exactamente el flickering que estamos evitando.
+  useEffect(() => {
+    setHasFittedFirstTime(false);
+    lastFittedFingerprintRef.current = null;
+  }, [diagram.id]);
 
   // Zoom/pan al grupo de nodos del paso clickeado. Se dispara SOLO cuando
   // cambia `focusNodeIds` (driven por click-del-step, no por hover).
   // `maxZoom: 1.2` evita sobre-zoom en pasos de 1-2 nodos (el viewport no
   // gigantiza los nodos chicos); `padding: 0.25` da aire alrededor.
-  // Al recibir null/empty (step deselected), hacemos un fitView a todos los
-  // nodos para restaurar la vista panorámica del diagrama.
   //
-  // Usamos `join(',')` en la dep para estabilidad referencial: arrays nuevos
-  // con los mismos IDs no disparan el efecto (evita re-zoom innecesario
-  // cuando el parent recrea el array en cada render sin cambio real).
+  // BUG FIX (2026-05-04 v3): trackear `prevFocusKey` con ref para distinguir
+  // "mount inicial con focusKey vacío" de "user deseleccionó algo". Antes
+  // este efecto corría al mount con focusKey='' y llamaba `fitView` con
+  // padding 0.15 + duration 400 — un fit COMPETIDOR contra mi useEffect
+  // controlado del fit inicial. La animación de 400ms del competidor pisaba
+  // el resultado de mi fitView, y los logs mostraban delta=0 porque RF ya
+  // tenía la animación del competidor en curso al momento de mi llamada.
+  //
+  // Ahora: solo re-fit a la vista panorámica cuando focusKey transiciona
+  // de algo (ej. "node1,node2") a vacío (""). El fit inicial del mount lo
+  // hace EXCLUSIVAMENTE el useEffect controlado de arriba.
   const focusKey = (focusNodeIds ?? []).join(',');
+  const prevFocusKeyRef = useRef<string | null>(null);
   useEffect(() => {
     const instance = rfInstanceRef.current;
     if (!instance) return;
+    const prevFocusKey = prevFocusKeyRef.current;
+    prevFocusKeyRef.current = focusKey;
     if (focusNodeIds && focusNodeIds.length > 0) {
       instance.fitView({
         nodes: focusNodeIds.map((id) => ({ id })),
@@ -560,8 +644,11 @@ export function DiagramViewer({
         maxZoom: 1.2,
         duration: 500,
       });
-    } else {
-      instance.fitView({ padding: 0.15, duration: 400 });
+    } else if (prevFocusKey !== null && prevFocusKey !== '' && focusKey === '') {
+      // Solo re-fit panorámico cuando el user DESELECCIONÓ algo (transición
+      // de focusKey con contenido → vacío). Skip al mount inicial (prevFocusKey
+      // === null) y skip si seguimos sin focus desde antes.
+      instance.fitView({ padding: 0.1, duration: 400 });
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [focusKey]);
@@ -1044,13 +1131,6 @@ export function DiagramViewer({
         overlapThreshold: 0.5,
         margin: 50,
       });
-      if (result.nodesMoved > 0) {
-        console.debug(
-          `[DIAGRAM-DEBUG][DiagramViewer] onNodeDragStop: snap + ` +
-            `${result.nodesMoved} nodo(s) empujados tras drag (` +
-            `${result.iterations} iteraciones).`,
-        );
-      }
       return result.nodes;
     });
   }, [isEditing, setNodes]);
@@ -1126,15 +1206,25 @@ export function DiagramViewer({
         onDragOver={isEditing ? onDragOver : undefined}
         onDrop={isEditing ? onDropTool : undefined}
       >
-        {/* Overlay mientras ELK computa el layout inicial. Típicamente
-            <500ms para 20 nodos con thoroughness=30. Ocupa toda el área
-            sin bloquear los hooks de React Flow detrás. */}
-        {layoutLoading && (
-          <div className="absolute inset-0 z-20 flex items-center justify-center bg-background/70 backdrop-blur-sm text-xs text-muted-foreground">
-            Calculando layout…
+        {/* Overlay mientras ELK computa el layout inicial Y mientras el
+            primer fitView no ha corrido. Cubre el flickering de los pases
+            sucesivos de ELK (initial → measured → collision-resolved) que
+            antes el user veía como "saltos" de nodos. Una vez fitteado,
+            fade-out suave de 200ms. Ocupa toda el área sin bloquear los
+            hooks de React Flow detrás. */}
+        <div
+          className={`absolute inset-0 z-20 flex items-center justify-center bg-background backdrop-blur-sm text-xs text-muted-foreground transition-opacity duration-300 ${
+            layoutLoading || !hasFittedFirstTime
+              ? 'opacity-100'
+              : 'opacity-0 pointer-events-none'
+          }`}
+        >
+          <div className="flex flex-col items-center gap-2">
+            <div className="h-5 w-5 rounded-full border-2 border-muted-foreground/30 border-t-muted-foreground animate-spin" />
+            <span>{layoutLoading ? 'Calculando layout…' : 'Centrando…'}</span>
           </div>
-        )}
-        {layoutError && !layoutLoading && (
+        </div>
+        {layoutError && !layoutLoading && hasFittedFirstTime && (
           <div className="absolute top-3 left-1/2 -translate-x-1/2 z-20 flex items-center gap-2 rounded-md bg-amber-500/10 border border-amber-500/30 px-3 py-1.5 text-[11px] text-amber-600 dark:text-amber-400">
             Layout en modo fallback (ELK falló): {layoutError}
           </div>
@@ -1157,7 +1247,12 @@ export function DiagramViewer({
         <ReactFlow
           nodes={enrichedNodes}
           edges={enrichedEdges}
-          onInit={(instance) => { rfInstanceRef.current = instance; }}
+          onInit={(instance) => {
+            rfInstanceRef.current = instance;
+            // Setea el state reactivo para que el useEffect de fitView
+            // controlado se dispare (la ref por sí sola no invalida deps).
+            setIsInstanceReady(true);
+          }}
           onNodesChange={handleNodesChange}
           onEdgesChange={handleEdgesChange}
           onConnect={isEditing ? onConnect : undefined}
@@ -1238,8 +1333,19 @@ export function DiagramViewer({
            */
           snapToGrid
           snapGrid={[DRAG_SNAP_GRID_SIZE, DRAG_SNAP_GRID_SIZE]}
-          fitView
-          fitViewOptions={{ padding: 0.15 }}
+          /*
+           * Removido `fitView` + `fitViewOptions` del prop builtin de
+           * ReactFlow (BUG FIX 2026-05-04 v3): el fit automático del prop
+           * se ejecuta SYNC al mount con bbox stale (los nodos no han sido
+           * medidos por ResizeObserver todavía). El viewport queda
+           * descentrado y RF cachea ese estado como "fit aplicado".
+           * Cuando mi useEffect controlado llama fitView() después en
+           * doble rAF, RF ve que el viewport "ya fue fiteado" y no lo
+           * actualiza — los logs mostraban delta=0.
+           *
+           * Solo el useEffect controlado arriba (con doble rAF tras
+           * isInstanceReady && layoutedNodes ready) hace el fit inicial.
+           */
           minZoom={0.2}
           maxZoom={2.5}
           proOptions={{ hideAttribution: true }}
@@ -1280,11 +1386,14 @@ export function DiagramViewer({
             contrastar automáticamente en cualquier tema elegido.
           */}
           <Background gap={DRAG_SNAP_GRID_SIZE} size={1.5} color={dotsColor} />
-          {/* Controles de zoom/fit — posición default (bottom-left) mientras
-              diagnosticamos un crash. Si el crash se resuelve al revertir
-              esta línea, sabemos que `position` de xyflow v12 tenía un
-              problema de runtime a pesar de aceptarlo el type check. */}
+          {/* Controles de zoom/fit en bottom-right (donde antes vivía el
+              ValidationPanel que removimos). Provee:
+                - Zoom + / Zoom -
+                - Fit view (centra y ajusta el contenido al viewport)
+              `showInteractive={false}` oculta el toggle de interactividad
+              (locked/unlocked) que rara vez se usa en este flujo. */}
           <Controls
+            position="bottom-right"
             showInteractive={false}
             className="!bg-zinc-900 !border-zinc-700 !shadow-lg !rounded-lg [&>button]:!bg-zinc-900 [&>button]:!border-zinc-700 [&>button]:!text-zinc-300 [&>button:hover]:!bg-zinc-800"
           />
@@ -1455,25 +1564,6 @@ export function DiagramViewer({
             <ColorLegend colors={orgTheme.colors} />
           </Panel>
 
-          {/* Panel de validación en bottom-right. Colapsado por default muestra
-              un pill compacto con score + dot color-coded; expandido muestra
-              métricas + warnings (decisions sin ramas, nodes huérfanos, labels
-              largos, duplicados). Solo en edit — el modo view no muestra
-              feedback de calidad. Fade-in/out sin slide (es pequeño). */}
-          {editModeMounted && (
-            <Panel
-              position="bottom-right"
-              className="!mb-2 !mr-2"
-              data-state={isEditing ? 'open' : 'closed'}
-            >
-              <div
-                data-state={isEditing ? 'open' : 'closed'}
-                className="duration-[180ms] data-[state=open]:animate-in data-[state=open]:fade-in data-[state=closed]:animate-out data-[state=closed]:fade-out"
-              >
-                <ValidationPanel nodes={nodes} edges={edges} defaultOpen={false} />
-              </div>
-            </Panel>
-          )}
         </ReactFlow>
 
         {/*

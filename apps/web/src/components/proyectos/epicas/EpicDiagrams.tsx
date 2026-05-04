@@ -1,22 +1,24 @@
 'use client';
 
-import { useCallback, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import Link from 'next/link';
 import { toast } from 'sonner';
 import { Epic, EpicDiagram } from '@cenzontle/shared';
 import { Button } from '@/components/ui/button';
 import { TypeToConfirmDialog } from '@/components/ui/type-to-confirm-dialog';
 import { DiagramViewer } from './DiagramViewer';
-import { streamDiagramGeneration, type DiagramGenerationEventWithMeta } from '@/lib/diagram-agent';
+import {
+  streamDiagramGeneration,
+  getDiagramSession,
+  cancelDiagramGeneration,
+  type DiagramGenerationEventWithMeta,
+} from '@/lib/diagram-agent';
 import { AgentThinkingDisplay } from '@/components/proyectos/overview/agent-thinking';
+import { useScreenWakeLock } from '@/hooks/use-screen-wake-lock';
 import {
   Sparkles,
   GitBranch,
   Loader2,
-  ShieldCheck,
-  CheckCircle2,
-  XCircle,
-  MessageSquare,
   Maximize2,
 } from 'lucide-react';
 
@@ -25,9 +27,6 @@ interface EpicDiagramsProps {
   diagrams: EpicDiagram[];
   onDiagramGenerated: (diagram: EpicDiagram) => void;
   onDiagramEdited: (diagram: EpicDiagram) => void;
-  tlApproval: Epic['tlApproval'];
-  onTlApprove: () => void;
-  onTlReject: (comment: string) => void;
   /**
    * Callback opcional invocado cuando el backend emite `document_ready`.
    * El padre (EpicFullPage) lo usa para refrescar la lista de documentos
@@ -42,15 +41,15 @@ export function EpicDiagrams({
   diagrams,
   onDiagramGenerated,
   onDiagramEdited,
-  tlApproval,
-  onTlApprove,
-  onTlReject,
   onDocumentReady,
 }: EpicDiagramsProps) {
   const [isGenerating, setIsGenerating] = useState(false);
   const [events, setEvents] = useState<DiagramGenerationEventWithMeta[]>([]);
-  const [showRejectForm, setShowRejectForm] = useState(false);
-  const [rejectComment, setRejectComment] = useState('');
+
+  // Mantiene pantalla activa durante diagram generation. Sin esto, system
+  // sleep mata el SSE con `terminated` y el progreso visual del agente se
+  // pierde aunque el backend complete.
+  useScreenWakeLock(isGenerating);
   // Confirmación antes de regenerar: regenerar con IA sobrescribe el diagrama
   // existente (incluyendo ediciones manuales y posiciones personalizadas).
   // Solo se pide confirmación si ya hay un diagrama — la primera generación
@@ -76,17 +75,167 @@ export function EpicDiagrams({
   const businessDiagram = diagrams.find((d) => d.type === 'business');
   const showThinking = isGenerating || events.length > 0;
 
+  // Ref para el AbortController del SSE local — evita que el polling effect
+  // arranque cuando este cliente ya está escuchando vía SSE.
+  const sseAbortRef = useRef<AbortController | null>(null);
+
+  // Hidratar la sesión SSE cacheada al mount — sobrevive a refresh / cambio
+  // de pestaña. Si el agente sigue corriendo en background (status='streaming')
+  // marca isGenerating=true para activar el polling effect siguiente.
+  useEffect(() => {
+    if (!epic.id) return;
+    let cancelled = false;
+    (async () => {
+      try {
+        const session = await getDiagramSession(epic.id, 'business');
+        if (cancelled || !session) return;
+        if (session.events.length > 0) {
+          setEvents(session.events);
+          // Si la sesión sigue 'streaming' Y el último event no es un terminal,
+          // asumimos que el agente sigue corriendo en background.
+          const lastEvent = session.events[session.events.length - 1];
+          const isFinal =
+            lastEvent?.type === 'run_finished' ||
+            lastEvent?.type === 'done' ||
+            lastEvent?.type === 'diagram_ready' ||
+            lastEvent?.type === 'error';
+          if (session.status === 'streaming' && !isFinal) {
+            setIsGenerating(true);
+          }
+        }
+      } catch {
+        // Cache no disponible — ignorar, el flujo idle es válido.
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [epic.id]);
+
+  // Polling cuando el agente sigue corriendo en otra tab/sesión y este
+  // cliente no tiene SSE local activo. Cada 3s relee el cache; si llegan
+  // events nuevos, hidrata. Cuando status='staging' o llega diagram_ready,
+  // dispatcha el diagrama al state global y para polling.
+  // Stale detection: 5 min sin nuevos events → asume run muerto. Sube de
+  // los 60s anteriores porque iter4 con tool_use grande puede pasar 4+ min
+  // dentro de un solo messages.stream sin emitir cambios visibles al cache.
+  useEffect(() => {
+    if (!epic.id || !isGenerating) return;
+    // Si abortRef del SSE local está activo, no necesitamos polling
+    // (el stream ya está alimentando events directamente).
+    if (sseAbortRef.current) return;
+
+    let cancelled = false;
+    const POLL_INTERVAL_MS = 3000;
+    const STALE_THRESHOLD_TICKS = 100; // 100 × 3s = 5min
+    let lastEventCount = -1;
+    let staleTickCount = 0;
+
+    /**
+     * Busca un evento `diagram_ready` en la lista de events del cache.
+     * Si existe, dispatcha el diagrama al state global vía onDiagramGenerated.
+     * Crítico: cuando el SSE local se desconectó pero el agente terminó en
+     * background, el cache contiene el diagrama y necesitamos aplicarlo
+     * sin requerir refresh manual del user.
+     */
+    const tryApplyDiagramFromEvents = (events: DiagramGenerationEventWithMeta[]) => {
+      for (const ev of events) {
+        if (ev.type === 'diagram_ready' && (ev as { diagram?: EpicDiagram }).diagram) {
+          const diagram = (ev as { diagram: EpicDiagram }).diagram;
+          // Buscar document_ready previo para hidratar campos del integration doc.
+          const docEvent = events.find((e) => e.type === 'document_ready') as
+            | { path?: string; generatedAt?: string }
+            | undefined;
+          const merged: EpicDiagram = {
+            ...diagram,
+            integrationFlowDocPath: diagram.integrationFlowDocPath ?? docEvent?.path,
+            integrationFlowGeneratedAt: diagram.integrationFlowGeneratedAt ?? docEvent?.generatedAt,
+          };
+          onDiagramGenerated(merged);
+          return true;
+        }
+      }
+      return false;
+    };
+
+    const tick = async () => {
+      if (cancelled) return;
+      // Guard de mid-tick: si entre el setInterval y este tick el user
+      // disparó handleGenerate (→ pobló sseAbortRef), saltamos para no
+      // duplicar el dispatch. El effect deps `[epic.id, isGenerating]` no
+      // re-ejecuta el effect porque isGenerating ya era true cuando arrancó
+      // el polling, así que sin este chequeo, el setInterval seguía vivo
+      // mientras el SSE local también dispatchaba el diagrama.
+      if (sseAbortRef.current) return;
+      try {
+        const session = await getDiagramSession(epic.id, 'business');
+        if (cancelled) return;
+        if (!session) {
+          setIsGenerating(false);
+          cancelled = true;
+          return;
+        }
+        setEvents(session.events);
+        const lastEvent = session.events[session.events.length - 1];
+        const isFinal =
+          lastEvent?.type === 'run_finished' ||
+          lastEvent?.type === 'done' ||
+          lastEvent?.type === 'diagram_ready' ||
+          lastEvent?.type === 'error';
+        if (session.status === 'staging' || isFinal) {
+          // Agente terminó. Intentar aplicar el diagrama si está en events.
+          const applied = tryApplyDiagramFromEvents(session.events);
+          if (applied) {
+            // Limpiar cache de sesión — el diagrama ya está en DiagramCacheService (5d).
+            cancelDiagramGeneration(epic.id, 'business').catch(() => {});
+          }
+          setIsGenerating(false);
+          cancelled = true;
+          return;
+        }
+        if (session.events.length === lastEventCount) {
+          staleTickCount++;
+          if (staleTickCount >= STALE_THRESHOLD_TICKS) {
+            // Última oportunidad: si por algún motivo hay un diagram_ready
+            // que no detectamos antes, aplicarlo ahora.
+            tryApplyDiagramFromEvents(session.events);
+            setIsGenerating(false);
+            cancelled = true;
+            return;
+          }
+        } else {
+          lastEventCount = session.events.length;
+          staleTickCount = 0;
+        }
+      } catch {
+        // Tick transitorio falló — siguiente reintenta.
+      }
+    };
+
+    void tick();
+    const interval = setInterval(tick, POLL_INTERVAL_MS);
+    return () => {
+      cancelled = true;
+      clearInterval(interval);
+    };
+  }, [epic.id, isGenerating]);
+
   const handleGenerate = useCallback(async () => {
     setIsGenerating(true);
     setEvents([]);
     pendingDocRef.current = null;
 
+    // AbortController para el SSE local. Almacenado en sseAbortRef para que
+    // el polling effect lo detecte y NO duplique el polling cuando este
+    // cliente ya tiene SSE activo alimentando events directamente.
+    const controller = new AbortController();
+    sseAbortRef.current = controller;
+
     const collected: DiagramGenerationEventWithMeta[] = [];
     let emittedDiagram: EpicDiagram | null = null;
     let lastError: string | null = null;
 
+    let userCancelled = false;
     try {
-      for await (const event of streamDiagramGeneration(epic, 'business')) {
+      for await (const event of streamDiagramGeneration(epic, 'business', { signal: controller.signal })) {
         collected.push(event);
         setEvents([...collected]);
         if (event.type === 'diagram_ready') {
@@ -108,6 +257,13 @@ export function EpicDiagrams({
           } else {
             emittedDiagram = event.diagram;
           }
+          // Dispatch INMEDIATO al store global — antes esperábamos al cierre
+          // del for-await loop, pero si la SSE tarda en cerrar tras
+          // `run_finished` (proxy timeout, latencia de red), el user veía
+          // la UI "trabada" hasta que daba refresh y `useDiagramCacheHydration`
+          // recogía el diagrama del cache backend. Aplicarlo aquí garantiza
+          // render inmediato y no requiere acción del usuario.
+          onDiagramGenerated(emittedDiagram);
         } else if (event.type === 'document_ready') {
           // Toast informativo — el path puede ser largo; recortar a 60 chars
           // para no reventar el toast component (sonner respeta layout pero
@@ -148,41 +304,76 @@ export function EpicDiagrams({
         }
       }
     } catch (err) {
-      lastError = err instanceof Error ? err.message : 'Error desconocido al generar el diagrama.';
+      // AbortError es comportamiento esperado cuando el user da Cancel.
+      // No es un error real — no mostrar toast rojo. El handler de cancel
+      // ya limpió la UI a idle y borró el cache via cancelDiagramGeneration.
+      const errName = (err as { name?: string })?.name;
+      if (errName === 'AbortError' || controller.signal.aborted) {
+        userCancelled = true;
+      } else {
+        lastError = err instanceof Error ? err.message : 'Error desconocido al generar el diagrama.';
+      }
     }
 
-    if (emittedDiagram) {
-      onDiagramGenerated(emittedDiagram);
+    if (userCancelled) {
+      // Cancel intencional: NO toast, NO error. UI ya está en idle.
+    } else if (emittedDiagram) {
+      // El dispatch ya ocurrió al recibir `diagram_ready` arriba — no
+      // duplicamos aquí. Solo verificamos que tengamos un diagrama emitido
+      // para no caer al else-branch del error.
     } else {
       const description = lastError ?? 'El agente finalizó sin emitir un diagrama.';
       toast.error('No fue posible generar el diagrama', { description });
     }
     pendingDocRef.current = null;
+    sseAbortRef.current = null;
     setIsGenerating(false);
-  }, [epic, diagrams, onDiagramGenerated, onDiagramEdited]);
 
-  const handleReject = () => {
-    if (!rejectComment.trim()) return;
-    onTlReject(rejectComment.trim());
-    setRejectComment('');
-    setShowRejectForm(false);
-  };
+    // Cuando el run termina exitosamente Y el cliente recibió el diagrama
+    // localmente, limpiamos el cache de sesión para no mostrar la cadena
+    // de pensamiento "stale" en futuros mounts (el diagrama ya está
+    // persistido en el cache de DiagramCacheService de 5 días).
+    if (emittedDiagram) {
+      cancelDiagramGeneration(epic.id, 'business').catch(() => {});
+    }
+  }, [epic, diagrams, onDiagramGenerated, onDiagramEdited, onDocumentReady]);
 
   const handleConfirmRegenerate = useCallback(() => {
     setConfirmRegenerateOpen(false);
     handleGenerate();
   }, [handleGenerate]);
 
-  function formatShortDate(dateStr: string): string {
-    return new Date(dateStr).toLocaleDateString('es-MX', { day: 'numeric', month: 'short' });
-  }
+  /**
+   * Cancela la generación en curso. Doble cancelación (mismo patrón que
+   * épicas):
+   *   1. AbortController local — cierra el SSE de este cliente.
+   *   2. DELETE /session/active al backend — aborta el agente Anthropic +
+   *      invalida cache de sesión. Sin (2), tras `req.close` el backend
+   *      dejaba el agente corriendo en background hasta el timeout de 10min.
+   *
+   * Fire-and-forget — el user no espera la respuesta del DELETE para que
+   * la UI vuelva a idle al instante.
+   */
+  const handleCancelGeneration = useCallback(() => {
+    sseAbortRef.current?.abort();
+    sseAbortRef.current = null;
+    if (epic.id) {
+      cancelDiagramGeneration(epic.id, 'business').catch(() => {});
+    }
+    setIsGenerating(false);
+    setEvents([]);
+  }, [epic.id]);
 
   // No diagram yet — show generation prompt
   if (!businessDiagram) {
     return (
       <div className="space-y-4">
         {showThinking && (
-          <AgentThinkingDisplay events={events} isStreaming={isGenerating} />
+          <AgentThinkingDisplay
+          events={events}
+          isStreaming={isGenerating}
+          onCancel={isGenerating ? handleCancelGeneration : undefined}
+        />
         )}
         <div className="rounded-xl border-2 border-dashed py-12 flex flex-col items-center gap-4 text-center">
           <div className="h-12 w-12 rounded-full bg-muted flex items-center justify-center">
@@ -217,7 +408,11 @@ export function EpicDiagrams({
     <div className="space-y-4">
       {/* Agent thinking — shown above the diagram while streaming and persisted after */}
       {showThinking && (
-        <AgentThinkingDisplay events={events} isStreaming={isGenerating} />
+        <AgentThinkingDisplay
+          events={events}
+          isStreaming={isGenerating}
+          onCancel={isGenerating ? handleCancelGeneration : undefined}
+        />
       )}
 
       {/* Header with regenerate */}
@@ -278,115 +473,6 @@ export function EpicDiagrams({
         <span>
           Generado por {businessDiagram.generatedBy === 'ai' ? 'IA' : 'usuario'} · {new Date(businessDiagram.generatedAt).toLocaleDateString('es-MX', { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' })}
         </span>
-      </div>
-
-      {/* TL Approval Section */}
-      <div className="rounded-xl border p-5">
-        {!tlApproval && (
-          <div className="flex items-center justify-between">
-            <div className="flex items-center gap-3">
-              <div className="h-10 w-10 rounded-full bg-indigo-100 dark:bg-indigo-950/30 flex items-center justify-center">
-                <ShieldCheck className="h-5 w-5 text-indigo-900 dark:text-indigo-400" />
-              </div>
-              <div>
-                <p className="text-sm font-medium">Visto Bueno del Technical Leader</p>
-                <p className="text-xs text-muted-foreground">
-                  El TL debe validar que el diagrama de negocio sea correcto antes de generar historias
-                </p>
-              </div>
-            </div>
-            <div className="flex gap-2">
-              <Button
-                variant="outline"
-                size="sm"
-                onClick={() => setShowRejectForm(true)}
-                className="gap-1.5 text-red-600 hover:text-red-700 hover:bg-red-50 dark:text-red-400 dark:hover:bg-red-950/30"
-              >
-                <XCircle className="h-3.5 w-3.5" />
-                Rechazar
-              </Button>
-              <Button
-                size="sm"
-                onClick={onTlApprove}
-                className="gap-1.5 bg-indigo-900 hover:bg-indigo-700 text-white"
-              >
-                <CheckCircle2 className="h-3.5 w-3.5" />
-                Aprobar
-              </Button>
-            </div>
-          </div>
-        )}
-
-        {tlApproval?.status === 'approved' && (
-          <div className="flex items-center gap-3">
-            <div className="h-10 w-10 rounded-full bg-green-100 dark:bg-green-900/30 flex items-center justify-center">
-              <CheckCircle2 className="h-5 w-5 text-green-600 dark:text-green-400" />
-            </div>
-            <div>
-              <p className="text-sm font-medium text-green-700 dark:text-green-400">Diagrama aprobado por TL</p>
-              <p className="text-xs text-muted-foreground">
-                Aprobado por {tlApproval.approvedBy ?? 'TL'} · {tlApproval.approvedAt ? formatShortDate(tlApproval.approvedAt) : ''}
-              </p>
-            </div>
-          </div>
-        )}
-
-        {tlApproval?.status === 'rejected' && (
-          <div>
-            <div className="flex items-center gap-3">
-              <div className="h-10 w-10 rounded-full bg-red-100 dark:bg-red-900/30 flex items-center justify-center">
-                <XCircle className="h-5 w-5 text-red-600 dark:text-red-400" />
-              </div>
-              <div className="flex-1">
-                <p className="text-sm font-medium text-red-700 dark:text-red-400">Diagrama rechazado por TL</p>
-                <p className="text-xs text-muted-foreground">
-                  Rechazado por {tlApproval.approvedBy ?? 'TL'} · {tlApproval.approvedAt ? formatShortDate(tlApproval.approvedAt) : ''}
-                </p>
-              </div>
-              <Button
-                size="sm"
-                variant="outline"
-                onClick={onTlApprove}
-                className="gap-1.5 text-green-600 hover:text-green-700"
-              >
-                <CheckCircle2 className="h-3.5 w-3.5" />
-                Aprobar
-              </Button>
-            </div>
-            {tlApproval.comment && (
-              <div className="flex items-start gap-2 mt-3 ml-[52px] rounded-lg bg-red-50 dark:bg-red-950/20 px-3 py-2">
-                <MessageSquare className="h-3.5 w-3.5 text-red-500 mt-0.5 shrink-0" />
-                <p className="text-xs text-red-700 dark:text-red-400">{tlApproval.comment}</p>
-              </div>
-            )}
-          </div>
-        )}
-
-        {/* Reject form */}
-        {showRejectForm && !tlApproval && (
-          <div className="mt-4 pt-4 border-t space-y-3">
-            <textarea
-              value={rejectComment}
-              onChange={(e) => setRejectComment(e.target.value)}
-              placeholder="Describe qué cambios necesita el diagrama..."
-              rows={3}
-              className="w-full rounded-lg border border-input bg-transparent px-3 py-2 text-sm shadow-xs focus-visible:border-ring focus-visible:ring-ring/50 focus-visible:ring-[3px] outline-none resize-none dark:bg-input/30"
-            />
-            <div className="flex justify-end gap-2">
-              <Button variant="ghost" size="sm" onClick={() => { setShowRejectForm(false); setRejectComment(''); }}>
-                Cancelar
-              </Button>
-              <Button
-                size="sm"
-                onClick={handleReject}
-                disabled={!rejectComment.trim()}
-                className="gap-1.5 bg-red-600 hover:bg-red-700 text-white"
-              >
-                Confirmar rechazo
-              </Button>
-            </div>
-          </div>
-        )}
       </div>
 
       {/* Confirmación type-to-confirm antes de regenerar. Regenerar es una

@@ -58,33 +58,13 @@ const formatIcons: Record<ExportFormat, typeof FileText> = {
 };
 
 function mergeEpicNarrative(base: Epic, api: Awaited<ReturnType<typeof getEpic>>): Epic {
+  // Post-refactor v2: el contenido narrativo entero vive en `markdown`.
+  // El backend hace el merge vault-vs-PG en `findOne(includeContent=true)`,
+  // así que el `api.markdown` ya viene como source of truth.
   return {
     ...base,
-    qualitativeBenefits: api.qualitativeBenefits ?? base.qualitativeBenefits,
-    quantitativeBenefits: api.quantitativeBenefits ?? base.quantitativeBenefits,
-    benefitsMeasurement: api.benefitsMeasurement ?? base.benefitsMeasurement,
-    scopeDescription: api.scopeDescription ?? base.scopeDescription,
-    acceptanceCriteria: api.acceptanceCriteria ?? base.acceptanceCriteria,
-    technologicalImprovements: api.technologicalImprovements ?? base.technologicalImprovements,
-    businessPriority: api.businessPriority ?? base.businessPriority,
-    teamsInvolved: api.teamsInvolved ?? base.teamsInvolved,
-    impactedChannels: api.impactedChannels ?? base.impactedChannels,
-    impactedFlows: api.impactedFlows ?? base.impactedFlows,
-    impactSabreLevel: api.impactSabreLevel ?? base.impactSabreLevel,
-    thirdPartyDependencies: api.thirdPartyDependencies ?? base.thirdPartyDependencies,
+    markdown: api.markdown ?? base.markdown,
   };
-}
-
-function parseWhatHowWhen(raw: string | undefined): { what: string; how: string; when: string } {
-  if (!raw) return { what: '', how: '', when: '' };
-  // The API stores the 3 sub-fields as one string joined with known separators.
-  // We accept labeled forms ("Qué: ... Cómo: ... Cuándo: ...") and fall back to putting
-  // everything into `what`.
-  const labeled = raw.match(/Qu[ée]:\s*([\s\S]*?)\s*C[óo]mo:\s*([\s\S]*?)\s*Cu[áa]ndo:\s*([\s\S]*)$/i);
-  if (labeled) {
-    return { what: labeled[1].trim(), how: labeled[2].trim(), when: labeled[3].trim() };
-  }
-  return { what: raw, how: '', when: '' };
 }
 
 function mergeStoryContent(
@@ -93,28 +73,13 @@ function mergeStoryContent(
 ): UserStory {
   if (!api.content) return base;
   const po: StoryPOFields = {
-    background: api.content.po?.background ?? base.po.background,
-    objective: api.content.po?.objective ?? base.po.objective,
-    userStory: api.content.po?.userStory ?? base.po.userStory,
-    whatHowWhen: api.content.po?.whatHowWhen
-      ? parseWhatHowWhen(api.content.po.whatHowWhen)
-      : base.po.whatHowWhen,
-    acceptanceCriteria: api.content.po?.acceptanceCriteria
-      ? api.content.po.acceptanceCriteria.split(/\n/).map((l) => l.trim()).filter(Boolean)
-      : base.po.acceptanceCriteria,
-    additionalNotes: api.content.po?.additionalNotes ?? base.po.additionalNotes,
+    markdown: api.content.po?.markdown ?? base.po.markdown,
   };
   const technical: StoryTechnicalFields = {
-    architecture: api.content.technical?.architecture ?? base.technical.architecture,
-    integrationFlow: api.content.technical?.integrationFlow ?? base.technical.integrationFlow,
-    validations: api.content.technical?.validations ?? base.technical.validations,
-    errorHandling: api.content.technical?.errorHandling ?? base.technical.errorHandling,
-    implementationChecklist:
-      api.content.technical?.implementationChecklist ?? base.technical.implementationChecklist,
+    markdown: api.content.technical?.markdown ?? base.technical.markdown,
   };
   const qa: StoryQAFields = {
-    testingStrategy: api.content.qa?.testingStrategy ?? base.qa.testingStrategy,
-    linkedQAMatrixId: api.content.qa?.linkedQAMatrixId ?? base.qa.linkedQAMatrixId,
+    markdown: api.content.qa?.markdown ?? base.qa.markdown,
   };
   return { ...base, po, technical, qa };
 }

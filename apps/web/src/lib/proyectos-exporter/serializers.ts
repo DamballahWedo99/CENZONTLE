@@ -67,8 +67,10 @@ export function initiativeToFlatRow(
     name: initiative.name,
     status: statusLabel(initiative.status),
     owner: initiative.owner,
-    startDate: initiative.startDate,
-    targetDate: initiative.targetDate,
+    // Fechas opcionales — si la iniciativa está en planning sin compromiso,
+    // exportamos string vacío para que las celdas de tabla queden en blanco.
+    startDate: initiative.startDate ?? '',
+    targetDate: initiative.targetDate ?? '',
     epicCount: initiativeEpics.length,
     storyCount: initiativeStories.length,
     doneStoryCount: doneStories.length,
@@ -102,8 +104,24 @@ export function epicToFlatRow(
     storyCount: epicStories.length,
     doneStoryCount: doneStories.length,
     progress: progressOf(epicStories),
-    description: epic.description,
+    description: extractEpicSummary(epic.markdown),
   };
+}
+
+/**
+ * Extrae un summary corto del epic.markdown para vistas tabulares (Excel,
+ * CSV, JSON). Busca el primer párrafo después del heading `## Objetivo`
+ * (nuevo), con fallback a `## Descripción` (épicas creadas antes del
+ * rename), o el primer párrafo de cualquier heading. Fallback a string
+ * vacío.
+ */
+function extractEpicSummary(md: string | undefined): string {
+  const text = (md ?? '').trim();
+  if (!text) return '';
+  const objetivoMatch = text.match(/^##\s+Objetivo\s*\n+([\s\S]*?)(?=\n##\s|$)/m);
+  const descMatch = text.match(/^##\s+Descripción\s*\n+([\s\S]*?)(?=\n##\s|$)/m);
+  const firstParaMatch = text.match(/^##\s+\S[^\n]*\n+([\s\S]*?)(?=\n##\s|$)/m);
+  return (objetivoMatch?.[1] ?? descMatch?.[1] ?? firstParaMatch?.[1] ?? text).trim();
 }
 
 export function storyToFlatRow(
@@ -125,21 +143,6 @@ export function storyToFlatRow(
 }
 
 // === DOCUMENT SECTIONS (PDF / Word) ===
-
-export const NARRATIVE_FIELDS: ReadonlyArray<{ key: keyof Epic; label: string }> = [
-  { key: 'qualitativeBenefits', label: 'Beneficios Cualitativos' },
-  { key: 'quantitativeBenefits', label: 'Beneficios Cuantitativos' },
-  { key: 'benefitsMeasurement', label: 'Medición de Beneficios' },
-  { key: 'scopeDescription', label: 'Descripción del Alcance' },
-  { key: 'acceptanceCriteria', label: 'Criterios de Aceptación' },
-  { key: 'technologicalImprovements', label: 'Mejoras Tecnológicas' },
-  { key: 'businessPriority', label: 'Prioridad de Negocio' },
-  { key: 'teamsInvolved', label: 'Equipos Involucrados' },
-  { key: 'impactedChannels', label: 'Canales Impactados' },
-  { key: 'impactedFlows', label: 'Flujos Impactados' },
-  { key: 'impactSabreLevel', label: 'Nivel de Impacto Sabre' },
-  { key: 'thirdPartyDependencies', label: 'Dependencias de Terceros' },
-];
 
 export function getInitiativeRelations(
   initiative: Initiative,
@@ -176,8 +179,8 @@ export function initiativeToSections(
         ['Nombre', initiative.name],
         ['Estado', statusLabel(initiative.status)],
         ['Owner', initiative.owner],
-        ['Fecha de inicio', initiative.startDate],
-        ['Fecha objetivo', initiative.targetDate],
+        ['Fecha de inicio', initiative.startDate ?? '—'],
+        ['Fecha objetivo', initiative.targetDate ?? '—'],
         ['Total de épicas', String(initiativeEpics.length)],
         ['Total de historias', String(initiativeStories.length)],
         ['Story points totales', String(initiativeStories.reduce((s, x) => s + x.storyPoints, 0))],
@@ -215,8 +218,11 @@ export function initiativeToSections(
           ],
         },
       });
-      if (epic.description) {
-        sections.push({ level: 3, title: 'Descripción', body: epic.description });
+      if (epic.markdown && epic.markdown.trim().length > 0) {
+        // Split por H2 para preservar la estructura (post-refactor v2).
+        for (const sub of splitMarkdownByH2(epic.markdown)) {
+          sections.push({ level: 3, title: sub.title, body: sub.body });
+        }
       }
       if (epicStories.length > 0) {
         sections.push({
@@ -262,19 +268,12 @@ export function epicToSections(
     },
   });
 
-  if (epic.description) {
-    sections.push({ level: 1, title: 'Descripción', body: epic.description });
-  }
-
-  // 12 campos narrativos
-  const narrativeFilled = NARRATIVE_FIELDS.filter((f) => {
-    const v = epic[f.key];
-    return typeof v === 'string' && v.trim().length > 0;
-  });
-  if (narrativeFilled.length > 0) {
-    sections.push({ level: 1, title: 'Campos de Negocio' });
-    for (const f of narrativeFilled) {
-      sections.push({ level: 2, title: f.label, body: String(epic[f.key]) });
+  // Markdown único de la épica — split dinámico por H2 para preservar la
+  // estructura semántica (post-refactor v2).
+  if (epic.markdown && epic.markdown.trim().length > 0) {
+    sections.push({ level: 1, title: 'Definición' });
+    for (const sub of splitMarkdownByH2(epic.markdown)) {
+      sections.push({ level: 2, title: sub.title, body: sub.body });
     }
   }
 
@@ -411,73 +410,57 @@ export function storyToSections(
     sections.push({ level: 1, title: 'Descripción', body: story.description });
   }
 
-  // PO Fields
-  sections.push({ level: 1, title: 'Product Owner' });
-  if (story.po.background) sections.push({ level: 2, title: 'Antecedentes', body: story.po.background });
-  if (story.po.objective) sections.push({ level: 2, title: 'Objetivo', body: story.po.objective });
-  if (story.po.userStory) sections.push({ level: 2, title: 'Historia de usuario', body: story.po.userStory });
-  const whw = story.po.whatHowWhen;
-  if (whw && (whw.what || whw.how || whw.when)) {
-    sections.push({
-      level: 2,
-      title: 'Qué/Cómo/Cuándo',
-      table: {
-        headers: ['Qué', 'Cómo', 'Cuándo'],
-        rows: [[whw.what, whw.how, whw.when]],
-      },
-    });
-  }
-  if (story.po.acceptanceCriteria.length > 0) {
-    sections.push({
-      level: 2,
-      title: 'Criterios de Aceptación',
-      body: story.po.acceptanceCriteria.map((c, i) => `${i + 1}. ${c}`).join('\n'),
-    });
-  }
-  if (story.po.additionalNotes) {
-    sections.push({ level: 2, title: 'Notas adicionales', body: story.po.additionalNotes });
+  // PO Fields — split dinámico por encabezados ## del markdown
+  sections.push({ level: 1, title: 'Definición de Negocio' });
+  for (const sub of splitMarkdownByH2(story.po.markdown ?? '')) {
+    sections.push({ level: 2, title: sub.title, body: sub.body });
   }
 
   // Technical Fields
   sections.push({ level: 1, title: 'Técnico' });
-  if (story.technical.architecture) {
-    sections.push({ level: 2, title: 'Arquitectura', body: story.technical.architecture });
-  }
-  if (story.technical.integrationFlow) {
-    sections.push({ level: 2, title: 'Flujo de Integración', body: story.technical.integrationFlow });
-  }
-  if (story.technical.validations.length > 0) {
-    sections.push({
-      level: 2,
-      title: 'Validaciones',
-      body: story.technical.validations.map((v, i) => `${i + 1}. ${v}`).join('\n'),
-    });
-  }
-  if (story.technical.errorHandling.length > 0) {
-    sections.push({
-      level: 2,
-      title: 'Manejo de Errores',
-      body: story.technical.errorHandling.map((v, i) => `${i + 1}. ${v}`).join('\n'),
-    });
-  }
-  if (story.technical.implementationChecklist.length > 0) {
-    sections.push({
-      level: 2,
-      title: 'Checklist de Implementación',
-      body: story.technical.implementationChecklist.map((v, i) => `${i + 1}. ${v}`).join('\n'),
-    });
+  for (const sub of splitMarkdownByH2(story.technical.markdown ?? '')) {
+    sections.push({ level: 2, title: sub.title, body: sub.body });
   }
 
   // QA Fields
   sections.push({ level: 1, title: 'QA' });
-  if (story.qa.testingStrategy) {
-    sections.push({ level: 2, title: 'Estrategia de Pruebas', body: story.qa.testingStrategy });
-  }
-  if (story.qa.linkedQAMatrixId) {
-    sections.push({ level: 2, title: 'Matriz QA vinculada', body: story.qa.linkedQAMatrixId });
+  for (const sub of splitMarkdownByH2(story.qa.markdown ?? '')) {
+    sections.push({ level: 2, title: sub.title, body: sub.body });
   }
 
   return sections;
+}
+
+/**
+ * Split de un markdown por encabezados level-2 (`## Título`). Cada sub-sección
+ * preserva el body desde el inicio del heading hasta el siguiente ## (o EOF).
+ *
+ * Si el markdown no tiene ningún `## ` (texto plano), retorna un único bloque
+ * sin título — el caller decide si lo emite con un `level: 2` genérico.
+ */
+export function splitMarkdownByH2(md: string): Array<{ title: string; body: string }> {
+  const text = (md ?? '').trim();
+  if (!text) return [];
+  const out: Array<{ title: string; body: string }> = [];
+  const re = /^##\s+(.+?)\s*$/gm;
+  const headings: Array<{ title: string; start: number; bodyStart: number }> = [];
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(text)) !== null) {
+    headings.push({ title: m[1].trim(), start: m.index, bodyStart: m.index + m[0].length });
+  }
+  if (headings.length === 0) {
+    out.push({ title: 'Contenido', body: text });
+    return out;
+  }
+  // Si hay contenido antes del primer ##, lo emitimos como "Resumen"
+  const preamble = text.slice(0, headings[0].start).trim();
+  if (preamble) out.push({ title: 'Resumen', body: preamble });
+  for (let i = 0; i < headings.length; i++) {
+    const end = i + 1 < headings.length ? headings[i + 1].start : text.length;
+    const body = text.slice(headings[i].bodyStart, end).trim();
+    out.push({ title: headings[i].title, body });
+  }
+  return out;
 }
 
 function storiesTable(stories: UserStory[], pods: Pod[]) {

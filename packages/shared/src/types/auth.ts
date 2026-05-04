@@ -69,6 +69,10 @@ export enum Permission {
   MANAGE_USERS = 'manage:users',
   MANAGE_INTEGRATIONS = 'manage:integrations',
   MANAGE_DIAGRAM_THEME = 'manage:diagram-theme',
+  // Configuración de tokens (thinking + max_tokens) por agente IA. Restringido
+  // a Alta Gerencia porque toca presupuesto Anthropic — tokens excesivos
+  // pueden inflar costos por orden de magnitud.
+  MANAGE_AGENT_TOKENS = 'manage:agent-tokens',
   // Acceso a secrets externos (API keys de terceros, merchant codes). Separado
   // de MANAGE_INTEGRATIONS porque operaciones cripto (encrypt/rotate/delete)
   // son más sensibles y queremos poder otorgar/revocar independiente.
@@ -100,6 +104,7 @@ export const PERMISSION_LABELS: Record<Permission, string> = {
   [Permission.MANAGE_USERS]: 'Gestionar Usuarios',
   [Permission.MANAGE_INTEGRATIONS]: 'Gestionar Integraciones',
   [Permission.MANAGE_DIAGRAM_THEME]: 'Gestionar tema de diagramas',
+  [Permission.MANAGE_AGENT_TOKENS]: 'Gestionar tokens de agentes IA',
   [Permission.MANAGE_EXTERNAL_SECRETS]: 'Gestionar secretos externos',
   [Permission.VIEW_ALL]: 'Ver Todo',
 };
@@ -132,7 +137,7 @@ export const PERMISSION_CATEGORIES: PermissionCategory[] = [
   },
   {
     label: 'Gestión',
-    permissions: [Permission.MANAGE_DOCUMENTS, Permission.MANAGE_DEPENDENCIES, Permission.MANAGE_USERS, Permission.MANAGE_INTEGRATIONS, Permission.MANAGE_DIAGRAM_THEME, Permission.MANAGE_EXTERNAL_SECRETS],
+    permissions: [Permission.MANAGE_DOCUMENTS, Permission.MANAGE_DEPENDENCIES, Permission.MANAGE_USERS, Permission.MANAGE_INTEGRATIONS, Permission.MANAGE_DIAGRAM_THEME, Permission.MANAGE_AGENT_TOKENS, Permission.MANAGE_EXTERNAL_SECRETS],
   },
   {
     label: 'Acceso',
@@ -149,6 +154,7 @@ export const DEFAULT_ROLE_PERMISSIONS: Record<UserRole, Permission[]> = {
     Permission.CREATE_QA_MATRIX, Permission.EDIT_QA_MATRIX,
     Permission.MANAGE_DOCUMENTS, Permission.MANAGE_DEPENDENCIES,
     Permission.MANAGE_USERS, Permission.MANAGE_INTEGRATIONS, Permission.MANAGE_DIAGRAM_THEME,
+    Permission.MANAGE_AGENT_TOKENS,
     Permission.MANAGE_EXTERNAL_SECRETS,
     Permission.VIEW_ALL,
   ],
@@ -189,6 +195,7 @@ export const ROLE_PERMISSIONS: Record<UserRole, Permission[]> = {
     Permission.CREATE_QA_MATRIX, Permission.EDIT_QA_MATRIX,
     Permission.MANAGE_DOCUMENTS, Permission.MANAGE_DEPENDENCIES,
     Permission.MANAGE_USERS, Permission.MANAGE_INTEGRATIONS, Permission.MANAGE_DIAGRAM_THEME,
+    Permission.MANAGE_AGENT_TOKENS,
     Permission.MANAGE_EXTERNAL_SECRETS,
     Permission.VIEW_ALL,
   ],

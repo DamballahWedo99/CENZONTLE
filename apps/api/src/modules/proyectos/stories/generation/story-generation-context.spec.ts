@@ -21,7 +21,7 @@ jest.mock('@anthropic-ai/sdk', () => ({
   default: jest.fn(),
 }));
 
-import { StoryGenerationService } from './story-generation.service';
+import { StoryGenerationService, type EpicVaultFileKind } from './story-generation.service';
 
 type AnyObj = Record<string, unknown>;
 
@@ -29,20 +29,30 @@ interface TestContext {
   epic: {
     id: string;
     title: string;
-    description: string;
+    markdown: string;
     priority: string;
     startDate: Date;
     targetDate: Date;
     podIds: string[];
     vaultPath: string | null;
     initiative: { id: string; name: string; description: string };
-    stories: Array<{ id: string; title: string; storyPoints: number }>;
+    stories: Array<{
+      id: string;
+      title: string;
+      storyPoints: number;
+      technicalDependencies: Array<{ title: string; vendor: string | null; category: string; severity: string }>;
+    }>;
   };
   epicMarkdown: string;
   podsForAssignment: Array<{ id: string; name: string; description: string }>;
   existingStoriesSummary: string;
+  crossEpicDepsSummary: string;
+  crossEpicTruncated: boolean;
+  crossEpicTotalEpicsWithDeps: number;
+  existingDepKeys: Set<string>;
+  globalSecretsRegistry: Map<string, { id: string; name: string; vendor: string | null }>;
   enabledRepos: Array<{ name: string; branch: string }>;
-  epicVaultFiles: Array<{ path: string; sizeBytes: number; kind: string }>;
+  epicVaultFiles: Array<{ path: string; sizeBytes: number; kind: EpicVaultFileKind }>;
   designs: Array<{ id: string; name: string; description: string; handoff: string }>;
   designSkipped: boolean;
   ctx: { initiativeId: string };
@@ -54,9 +64,17 @@ function buildService(): StoryGenerationService {
   // como objetos vacíos para satisfacer la firma del constructor sin importar
   // las clases reales.
   const empty = {} as AnyObj;
+  // tokenSettings sí se invoca desde runPOAgent/runTLAgent/runQAAgent — mock
+  // real con los métodos tipados que el service usa.
+  const tokenSettingsStub = {
+    getStoryPo: jest.fn().mockResolvedValue({ thinking: 10000, maxTokens: 28000 }),
+    getStoryTl: jest.fn().mockResolvedValue({ thinking: 12000, maxTokens: 44000 }),
+    getStoryQa: jest.fn().mockResolvedValue({ thinking: 12000, maxTokens: 44000 }),
+  } as AnyObj;
   return new (StoryGenerationService as any)(
     configStub,
     empty, empty, empty, empty, empty, empty, empty, empty, empty, empty, empty,
+    tokenSettingsStub,
   );
 }
 
@@ -65,7 +83,7 @@ function baseContext(): TestContext {
     epic: {
       id: 'epic-1',
       title: 'Rediseño Checkout',
-      description: 'Rediseño del checkout web con soporte multi-pago.',
+      markdown: '## Descripción\n\nRediseño del checkout web con soporte multi-pago.',
       priority: 'high',
       startDate: new Date('2026-01-15T00:00:00Z'),
       targetDate: new Date('2026-06-30T00:00:00Z'),
@@ -77,6 +95,11 @@ function baseContext(): TestContext {
     epicMarkdown: '',
     podsForAssignment: [{ id: 'pod-1', name: 'Checkout', description: 'Equipo checkout.' }],
     existingStoriesSummary: '',
+    crossEpicDepsSummary: '',
+    crossEpicTruncated: false,
+    crossEpicTotalEpicsWithDeps: 0,
+    existingDepKeys: new Set<string>(),
+    globalSecretsRegistry: new Map<string, { id: string; name: string; vendor: string | null }>(),
     enabledRepos: [],
     epicVaultFiles: [],
     designs: [],
@@ -140,8 +163,20 @@ describe('buildCommonContextBlock — bloque <epic_designs>', () => {
   describe('cuando hay diseños con handoffs', () => {
     it('incluye el handoff TEXTUALMENTE en el prompt (propósito core de la feature)', () => {
       const ctx = baseContext();
-      const handoffText =
-        'Fetch this design file, read its readme, and implement the relevant aspects of the design. https://api.anthropic.com/v1/design/h/abc123?open_file=brutalist.html\nImplement: brutalist.html';
+      // Handoff sintético típico que emite `DesignBundleService.buildSyntheticHandoff`
+      // tras descomprimir un bundle de Claude Design al vault. Cubre el path
+      // principal post-migración URL→bundle.
+      const handoffText = [
+        'Bundle de Claude Design — slug: `checkout-mobile-abc123` (Checkout Mobile)',
+        '',
+        'Pantalla principal: `iniciativas/init-1/epics/checkout-abc123/disenos/checkout-mobile-abc123/brutalist.html`',
+        '  (la que el usuario tenía abierta al exportar — empieza por acá si la historia toca esa pantalla)',
+        '',
+        'Archivos del bundle (accesibles via `vault_read` bajo `iniciativas/init-1/epics/checkout-abc123/disenos/checkout-mobile-abc123/`):',
+        '- README.md',
+        '- brutalist.html (primary)',
+        '- styles.css',
+      ].join('\n');
       ctx.designs = [
         {
           id: 'design-1',
@@ -157,9 +192,11 @@ describe('buildCommonContextBlock — bloque <epic_designs>', () => {
       expect(out).toContain(handoffText);
       expect(out).toContain('Checkout Mobile');
       expect(out).toContain('(id: design-1)');
-      // Instrucción al agente sobre qué hacer con la URL.
-      expect(out).toContain('NO tienes `web_fetch`');
-      expect(out).toContain('preservar la URL textualmente');
+      // Instrucciones al agente sobre cómo consumir el bundle (modelo nuevo
+      // post-migración: el agente lee los archivos reales via vault_read,
+      // no fetchea la URL del handoff).
+      expect(out).toContain('bundle de archivos');
+      expect(out).toContain('vault_read');
     });
 
     it('incluye múltiples diseños numerados y separados', () => {
@@ -268,6 +305,17 @@ describe('Integración — handoff llega al request HTTP de Anthropic', () => {
         stream: (args: any) => {
           streamCalls.push(JSON.parse(JSON.stringify(args)));
           return {
+            // Mock de stream.on() — defensa por si el service vuelve a usar
+            // el helper en el futuro.
+            on: (_event: string, _handler: (delta: string) => void) => {},
+            // Async-iterable: el service ahora itera el stream con
+            // `for await (const evt of stream)` para capturar text_delta y
+            // thinking_delta en vivo. En tests no emitimos deltas — el
+            // iterator se cierra inmediatamente y el flujo continúa con
+            // finalMessage().
+            [Symbol.asyncIterator]: async function* () {
+              // No-op: 0 events.
+            },
             finalMessage: async () => ({
               id: 'msg_test_1',
               type: 'message',
@@ -337,12 +385,17 @@ describe('Integración — handoff llega al request HTTP de Anthropic', () => {
       },
     ];
 
-    // @ts-expect-error — construimos el bloque vía el método privado
-    const commonContextBlock = service.buildCommonContextBlock(common);
+    // Métodos privados — accedemos vía cast a `any` porque TestContext es
+    // estructuralmente compatible con CommonContext pero EpicVaultFile (el
+    // tipo del campo `epicVaultFiles[].kind`) no está exportado del service,
+    // así que tsc en watch mode rechaza la asignación aunque jest la resuelva.
+    // Doble cast (svc + commonAny) para que tsc no infiera el tipo del param.
+    const svc = service as any;
+    const commonAny = common as any;
+    const commonContextBlock = svc.buildCommonContextBlock(commonAny);
 
-    // @ts-expect-error — invocamos el método privado runPOAgent
-    await service.runPOAgent(
-      common,
+    await svc.runPOAgent(
+      commonAny,
       commonContextBlock,
       undefined, // userPrompt
       3, // count
@@ -397,11 +450,13 @@ describe('Integración — handoff llega al request HTTP de Anthropic', () => {
       },
     ];
 
-    // @ts-expect-error — método privado
-    const commonContextBlock = service.buildCommonContextBlock(common);
-    // @ts-expect-error — método privado
-    await service.runPOAgent(
-      common,
+    // Métodos privados — cast a `any` (mismo motivo que el test anterior:
+    // EpicVaultFile no exportado fuerza un mismatch estructural en watch mode).
+    const svc = service as any;
+    const commonAny = common as any;
+    const commonContextBlock = svc.buildCommonContextBlock(commonAny);
+    await svc.runPOAgent(
+      commonAny,
       commonContextBlock,
       undefined,
       3,
@@ -417,5 +472,120 @@ describe('Integración — handoff llega al request HTTP de Anthropic', () => {
     // Cuando skipped, el handoff NO debe aparecer en el prompt — está aislado
     // del agente aunque permanezca en la DB.
     expect(commonBlock.text).not.toContain(handoffText);
+  });
+});
+
+describe('buildCommonContextBlock — bloque <existing_dependencies_other_epics> (cross-épica)', () => {
+  let service: StoryGenerationService;
+
+  beforeAll(() => {
+    service = buildService();
+  });
+
+  it('cuando crossEpicDepsSummary está vacío, NO emite el bloque', () => {
+    const ctx = baseContext();
+    const out = callBuildBlock(service, ctx);
+    expect(out).not.toContain('<existing_dependencies_other_epics>');
+  });
+
+  it('cuando crossEpicDepsSummary tiene contenido, emite el bloque con la regla de no re-emitir', () => {
+    const ctx = baseContext();
+    ctx.crossEpicDepsSummary = 'Épica "Search":\n    · AMADEUS_CLIENT_ID [vendor=Amadeus] (apis)';
+    ctx.crossEpicTotalEpicsWithDeps = 1;
+
+    const out = callBuildBlock(service, ctx);
+
+    expect(out).toContain('<existing_dependencies_other_epics>');
+    expect(out).toContain('Épica "Search"');
+    expect(out).toContain('AMADEUS_CLIENT_ID');
+    expect(out).toContain('NO la re-emitas');
+    expect(out).toContain('ya gestionada en épica');
+    expect(out).toContain('</existing_dependencies_other_epics>');
+  });
+
+  it('cuando crossEpicTruncated=true, incluye nota de truncación con el cap correcto', () => {
+    const ctx = baseContext();
+    ctx.crossEpicDepsSummary = 'Épica "Aaa":\n    · X';
+    ctx.crossEpicTruncated = true;
+    ctx.crossEpicTotalEpicsWithDeps = 25;
+
+    const out = callBuildBlock(service, ctx);
+
+    expect(out).toContain('Mostrando 10 de 25 épicas');
+    expect(out).toContain('dedup contra TODAS');
+  });
+
+  it('cuando NO hay truncación, NO menciona la nota de truncación', () => {
+    const ctx = baseContext();
+    ctx.crossEpicDepsSummary = 'Épica "Solo":\n    · X';
+    ctx.crossEpicTruncated = false;
+    ctx.crossEpicTotalEpicsWithDeps = 1;
+
+    const out = callBuildBlock(service, ctx);
+
+    expect(out).not.toContain('Mostrando');
+    expect(out).not.toContain('dedup contra TODAS');
+  });
+
+  it('el bloque <existing_stories> dice ahora "EN ESTA ÉPICA" para distinguir de cross-épica', () => {
+    const ctx = baseContext();
+    ctx.existingStoriesSummary = '- Historia previa (5 SP)';
+
+    const out = callBuildBlock(service, ctx);
+
+    expect(out).toContain('<existing_stories>');
+    expect(out).toContain('EN ESTA ÉPICA');
+  });
+});
+
+describe('buildTLSystemPrompt / buildQASystemPrompt — gating de web_search', () => {
+  let service: StoryGenerationService;
+
+  beforeAll(() => {
+    service = buildService();
+  });
+
+  describe('TL prompt', () => {
+    it('cuando webSearch=true incluye sección de web_search con instrucciones de credenciales OAuth2', () => {
+      // @ts-expect-error — método privado
+      const out = service.buildTLSystemPrompt(true);
+      expect(out).toContain('web_search');
+      expect(out).toContain('max 5 usos');
+      expect(out).toContain('OAuth2');
+      expect(out).toContain('CLIENT_ID');
+      expect(out).toContain('CLIENT_SECRET');
+      // Anti-patrón explícito contra search creep:
+      expect(out).toContain('investigar el codebase');
+      expect(out).toContain('code_*');
+    });
+
+    it('cuando webSearch=false instruye a emitir set completo desde training data', () => {
+      // @ts-expect-error — método privado
+      const out = service.buildTLSystemPrompt(false);
+      expect(out).toContain('DESHABILITADO');
+      expect(out).toContain('emite el SET COMPLETO conocido');
+      // No debe mencionar la tool habilitada cuando está off:
+      expect(out).not.toContain('max 5 usos');
+    });
+  });
+
+  describe('QA prompt', () => {
+    it('cuando webSearch=true incluye sección de web_search focalizada en testing', () => {
+      // @ts-expect-error — método privado
+      const out = service.buildQASystemPrompt(true);
+      expect(out).toContain('web_search');
+      expect(out).toContain('max 4 usos');
+      expect(out).toContain('Mock strategies');
+      // No debe mencionar librerías inventadas (Finding 2 del QA reviewer):
+      expect(out).not.toContain('twilio-mock');
+    });
+
+    it('cuando webSearch=false instruye a basarse en training data', () => {
+      // @ts-expect-error — método privado
+      const out = service.buildQASystemPrompt(false);
+      expect(out).toContain('DESHABILITADO');
+      expect(out).toContain('training data');
+      expect(out).not.toContain('max 4 usos');
+    });
   });
 });

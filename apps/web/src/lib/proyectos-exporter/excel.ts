@@ -5,8 +5,8 @@ import {
   storyToFlatRow,
   statusLabel,
   priorityLabel,
-  NARRATIVE_FIELDS,
   getInitiativeRelations,
+  splitMarkdownByH2,
 } from './serializers';
 
 // We avoid a top-level import of exceljs to keep the bundle small.
@@ -185,12 +185,12 @@ export async function exportEpicToExcel(
     ['Fecha objetivo', epic.targetDate],
     ['Creada', epic.createdAt],
     ['Actualizada', epic.updatedAt],
-    ['Descripción', epic.description],
   ];
-  for (const { key, label } of NARRATIVE_FIELDS) {
-    const v = epic[key];
-    if (typeof v === 'string' && v.trim().length > 0) {
-      metadata.push([label, v]);
+  // Markdown único de la épica — split por H2 para preservar la estructura
+  // en filas key-value (post-refactor v2).
+  if (epic.markdown && epic.markdown.trim().length > 0) {
+    for (const sub of splitMarkdownByH2(epic.markdown)) {
+      metadata.push([sub.title, sub.body]);
     }
   }
   addKeyValueSheet(workbook, 'Épica', metadata);
@@ -254,48 +254,33 @@ export async function exportStoryToExcel(
   ]);
 
   const detailRows: Array<{ section: string; field: string; value: string }> = [];
-  const pushIf = (section: string, field: string, value: string | undefined | null) => {
-    if (value && value.trim().length > 0) detailRows.push({ section, field, value });
+
+  // Cada sección es un markdown único — split por encabezados level 2
+  // para preservar la separación semántica en el Excel.
+  const expandSection = (section: string, md: string | undefined) => {
+    const text = (md ?? '').trim();
+    if (!text) return;
+    const re = /^##\s+(.+?)\s*$/gm;
+    const headings: Array<{ title: string; bodyStart: number; start: number }> = [];
+    let m: RegExpExecArray | null;
+    while ((m = re.exec(text)) !== null) {
+      headings.push({ title: m[1].trim(), bodyStart: m.index + m[0].length, start: m.index });
+    }
+    if (headings.length === 0) {
+      detailRows.push({ section, field: 'Contenido', value: text });
+      return;
+    }
+    const preamble = text.slice(0, headings[0].start).trim();
+    if (preamble) detailRows.push({ section, field: 'Resumen', value: preamble });
+    for (let i = 0; i < headings.length; i++) {
+      const end = i + 1 < headings.length ? headings[i + 1].start : text.length;
+      const body = text.slice(headings[i].bodyStart, end).trim();
+      if (body) detailRows.push({ section, field: headings[i].title, value: body });
+    }
   };
-  pushIf('PO', 'Antecedentes', story.po.background);
-  pushIf('PO', 'Objetivo', story.po.objective);
-  pushIf('PO', 'Historia de usuario', story.po.userStory);
-  pushIf('PO', 'Qué', story.po.whatHowWhen?.what);
-  pushIf('PO', 'Cómo', story.po.whatHowWhen?.how);
-  pushIf('PO', 'Cuándo', story.po.whatHowWhen?.when);
-  if (story.po.acceptanceCriteria.length > 0) {
-    detailRows.push({
-      section: 'PO',
-      field: 'Criterios de aceptación',
-      value: story.po.acceptanceCriteria.map((c, i) => `${i + 1}. ${c}`).join('\n'),
-    });
-  }
-  pushIf('PO', 'Notas adicionales', story.po.additionalNotes);
-  pushIf('Técnico', 'Arquitectura', story.technical.architecture);
-  pushIf('Técnico', 'Flujo de integración', story.technical.integrationFlow);
-  if (story.technical.validations.length > 0) {
-    detailRows.push({
-      section: 'Técnico',
-      field: 'Validaciones',
-      value: story.technical.validations.map((v, i) => `${i + 1}. ${v}`).join('\n'),
-    });
-  }
-  if (story.technical.errorHandling.length > 0) {
-    detailRows.push({
-      section: 'Técnico',
-      field: 'Manejo de errores',
-      value: story.technical.errorHandling.map((v, i) => `${i + 1}. ${v}`).join('\n'),
-    });
-  }
-  if (story.technical.implementationChecklist.length > 0) {
-    detailRows.push({
-      section: 'Técnico',
-      field: 'Checklist de implementación',
-      value: story.technical.implementationChecklist.map((v, i) => `${i + 1}. ${v}`).join('\n'),
-    });
-  }
-  pushIf('QA', 'Estrategia de pruebas', story.qa.testingStrategy);
-  pushIf('QA', 'Matriz QA vinculada', story.qa.linkedQAMatrixId);
+  expandSection('PO', story.po.markdown);
+  expandSection('Técnico', story.technical.markdown);
+  expandSection('QA', story.qa.markdown);
 
   addTableSheet(
     workbook,

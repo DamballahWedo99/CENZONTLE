@@ -31,11 +31,15 @@ function mapInitiative(r: InitiativeResponse): Initiative {
     name: r.name,
     description: r.description,
     status: r.status as InitiativeStatus,
-    startDate: toDateStr(r.startDate),
-    targetDate: toDateStr(r.targetDate),
+    // Las fechas son opcionales — null si la iniciativa está en planning
+    // sin fechas comprometidas. Preservamos null para que la UI muestre
+    // estados consistentes ("Sin fechas (borrador)" vs valor real).
+    startDate: r.startDate ? toDateStr(r.startDate) : null,
+    targetDate: r.targetDate ? toDateStr(r.targetDate) : null,
     owner: r.owner,
     epicIds: r.epics.map((e) => e.id),
     documents: r.documents ?? [],
+    tracker: r.tracker ?? undefined,
   };
 }
 
@@ -59,13 +63,18 @@ function mapPod(r: PodResponse): Pod {
 }
 
 function mapStory(r: StoryResponse): UserStory {
+  // El list endpoint solo retorna metadata — el contenido markdown vive en el
+  // vault y se carga via `getStory(id, true)` en `StoryFullPage`. Aquí
+  // inicializamos los 3 markdowns vacíos en shape v2; los consumers que
+  // necesiten contenido completo deben pasar por la story page o por
+  // `mergeStoryContent` (DownloadMenu).
   return {
     id: r.id,
     title: r.title,
     description: '',
-    po: { background: '', objective: '', userStory: '', whatHowWhen: { what: '', how: '', when: '' }, acceptanceCriteria: [], additionalNotes: '' },
-    technical: { architecture: '', integrationFlow: '', validations: [], errorHandling: [], implementationChecklist: [] },
-    qa: { testingStrategy: '', linkedQAMatrixId: null },
+    po: { markdown: '' },
+    technical: { markdown: '' },
+    qa: { markdown: '' },
     status: r.status as StoryStatus,
     storyPoints: r.storyPoints as 1 | 2 | 3 | 5 | 8 | 13,
     epicId: r.epicId,
@@ -75,7 +84,7 @@ function mapStory(r: StoryResponse): UserStory {
     tracker: r.tracker ?? null,
     createdAt: r.createdAt,
     updatedAt: r.updatedAt,
-  } as unknown as UserStory;
+  };
 }
 
 function mapChangelog(r: ChangelogEntryResponse): ChangelogEntry {
@@ -839,7 +848,6 @@ export function ProyectosProvider({ children }: { children: ReactNode }) {
         },
       });
     } catch (err) {
-      console.error('Failed to load data from API:', err);
       dispatch({ type: 'SET_ERROR', payload: err instanceof Error ? err.message : 'Error cargando datos' });
     }
   }, [currentUser?.name]);
@@ -903,7 +911,8 @@ export function ProyectosProvider({ children }: { children: ReactNode }) {
       if (filters.priorities.length > 0 && !filters.priorities.includes(epic.priority)) return false;
       if (filters.searchQuery) {
         const q = filters.searchQuery.toLowerCase();
-        if (!epic.title.toLowerCase().includes(q) && !epic.description.toLowerCase().includes(q)) return false;
+        // Search en title + markdown completo (post-refactor v2 reemplaza description).
+        if (!epic.title.toLowerCase().includes(q) && !(epic.markdown ?? '').toLowerCase().includes(q)) return false;
       }
       if (filters.trackerKey && (!epic.tracker?.externalKey || !epic.tracker.externalKey.toLowerCase().includes(filters.trackerKey.toLowerCase()))) return false;
       return true;

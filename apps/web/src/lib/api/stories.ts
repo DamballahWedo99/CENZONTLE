@@ -1,25 +1,20 @@
 import { apiFetch } from './client';
 
+/**
+ * En v2 (refactor Jira-style) cada sección es un único string markdown con
+ * headings obligatorios dictados por el prompt al agente IA. El frontend
+ * renderea 1 editor Tiptap full-feature por tab.
+ */
 export interface StoryPoFields {
-  background?: string;
-  objective?: string;
-  userStory?: string;
-  whatHowWhen?: string;
-  acceptanceCriteria?: string;
-  additionalNotes?: string;
+  markdown?: string;
 }
 
 export interface StoryTechnicalFields {
-  architecture?: string;
-  integrationFlow?: string;
-  validations?: string[];
-  errorHandling?: string[];
-  implementationChecklist?: string[];
+  markdown?: string;
 }
 
 export interface StoryQaFields {
-  testingStrategy?: string;
-  linkedQAMatrixId?: string;
+  markdown?: string;
 }
 
 export interface StoryResponse {

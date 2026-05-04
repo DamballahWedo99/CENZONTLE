@@ -42,22 +42,9 @@ function mockStory(overrides: Partial<ProposedStory> & {
     sprintId: null,
     status: 'backlog',
     labels: [],
-    po: {
-      background: '',
-      objective: '',
-      userStory: '',
-      whatHowWhen: { what: '', how: '', when: '' },
-      acceptanceCriteria: [],
-      additionalNotes: '',
-    },
-    technical: {
-      architecture: '',
-      integrationFlow: '',
-      validations: [],
-      errorHandling: [],
-      implementationChecklist: [],
-    },
-    qa: { testingStrategy: '', linkedQAMatrixId: null },
+    po: { markdown: '' },
+    technical: { markdown: '' },
+    qa: { markdown: '' },
   };
   return { ...base, ...overrides } as unknown as ProposedStory;
 }

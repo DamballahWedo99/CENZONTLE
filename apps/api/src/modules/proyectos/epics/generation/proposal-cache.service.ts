@@ -41,28 +41,39 @@ export class ProposalCacheService {
     await this.redis.setex(this.key(initiativeId), STREAMING_TTL_SECONDS, JSON.stringify(session));
   }
 
-  async appendEvent(initiativeId: string, event: EpicGenerationEvent): Promise<void> {
-    const session = await this.getSession(initiativeId);
-    if (!session) return;
-    session.events.push(event);
-    // SETEX en vez de SET para no eliminar el TTL de la key. Si el stream se
-    // interrumpe (cliente cierra, proceso crashea) la key caduca sola y no
-    // fuga en Redis. Preservamos el TTL original si queda tiempo, si no
-    // volvemos al default de streaming.
-    const remaining = await this.redis.ttl(this.key(initiativeId));
-    const ttl = remaining > 0 ? remaining : STREAMING_TTL_SECONDS;
-    await this.redis.setex(this.key(initiativeId), ttl, scrubSecrets(JSON.stringify(session)));
-  }
-
-  async appendProposal(initiativeId: string, proposal: ProposedEpic): Promise<void> {
-    const session = await this.getSession(initiativeId);
-    if (!session) return;
-    session.proposals.push(proposal);
-    // Ver comentario en appendEvent — aplicamos la misma estrategia de
-    // preservar TTL para evitar fugas de sesiones huérfanas en Redis.
-    const remaining = await this.redis.ttl(this.key(initiativeId));
-    const ttl = remaining > 0 ? remaining : STREAMING_TTL_SECONDS;
-    await this.redis.setex(this.key(initiativeId), ttl, scrubSecrets(JSON.stringify(session)));
+  /**
+   * Escribe el state COMPLETO del controller al cache. NO hace read-modify-write
+   * — el controller ya tiene el snapshot autoritativo en memoria
+   * (`collectedEvents` + `collectedProposals`), así que escribimos directo.
+   *
+   * Reemplaza al patrón legacy `appendEvent`/`appendProposal` que sufría
+   * race conditions: cuando llegaban N eventos en paralelo (burst de
+   * proposal_ready × 4 + done + run_finished al final del run), los reads
+   * concurrentes leían snapshots stale y la última escritura ganaba con el
+   * snapshot más viejo, perdiendo proposals.
+   *
+   * Fire-and-forget por design — el controller llama esto sin await tras cada
+   * event. Si Redis está abajo, el run sigue (in-memory state es source of
+   * truth) y el saveFullSession final escribe todo.
+   */
+  async writeSession(
+    initiativeId: string,
+    events: EpicGenerationEvent[],
+    proposals: ProposedEpic[],
+  ): Promise<void> {
+    const session: CachedGenerationSession = {
+      initiativeId,
+      status: 'streaming',
+      proposals,
+      events,
+      createdAt: new Date().toISOString(),
+      ttlSeconds: STREAMING_TTL_SECONDS,
+    };
+    await this.redis.setex(
+      this.key(initiativeId),
+      STREAMING_TTL_SECONDS,
+      scrubSecrets(JSON.stringify(session)),
+    );
   }
 
   async completeSession(initiativeId: string): Promise<void> {

@@ -435,6 +435,7 @@ const TIPTAP_EXTENSIONS = [
     tightLists: true,
     transformPastedText: true,
     breaks: true, // GFM: un \n genera <br>, no se colapsa como en CommonMark strict
+    linkify: true, // GFM: URLs sueltas se auto-convierten en <a>
   }),
   Highlight,
   TaskList,
@@ -442,13 +443,133 @@ const TIPTAP_EXTENSIONS = [
   TiptapImage,
   TiptapLink.configure({
     openOnClick: false,
-    HTMLAttributes: { class: 'text-primary underline underline-offset-2 cursor-pointer hover:text-primary/80' },
+    autolink: true,
+    linkOnPaste: true,
+    HTMLAttributes: {
+      class:
+        'text-blue-600 dark:text-blue-400 underline underline-offset-2 cursor-pointer hover:text-blue-700 dark:hover:text-blue-300 transition-colors',
+    },
   }),
   TiptapTable.configure({ resizable: false }),
   TableRow,
   TableCell,
   TableHeader,
 ];
+
+/* ─── Raw text viewer (no-markdown files) ─── */
+
+/**
+ * Devuelve la extensión en lowercase (sin punto) o `''` si el path no
+ * tiene extensión.
+ *
+ * IMPORTANTE: el caller debe pasar el `selectedNode.id` (= path completo en
+ * el vault, e.g., `disenos/home-page-abc/project/Aerovia.html`), NO el
+ * `selectedNode.name` que viene humanizado por `humanizeFilename` y SIN
+ * extensión para archivos `.md`. Si pasas el name, todos los markdown caen
+ * al rama "no-md" del viewer y se renderizan como código crudo en lugar
+ * del WYSIWYG TipTap.
+ */
+function getFileExtension(pathOrName: string): string {
+  // Extraemos solo el último segmento del path para no confundir un punto
+  // dentro de un folder name (ej `iniciativas/home.page/...`) con
+  // la extensión del archivo.
+  const lastSegment = pathOrName.split('/').pop() ?? pathOrName;
+  const idx = lastSegment.lastIndexOf('.');
+  if (idx === -1 || idx === lastSegment.length - 1) return '';
+  return lastSegment.slice(idx + 1).toLowerCase();
+}
+
+/**
+ * Mapa extensión → label legible para el chip "Tipo: <X>" del header del
+ * viewer raw. Mantiene en sync con `SHOWN_FILE_EXTENSIONS` del context.
+ */
+const FILE_TYPE_LABELS: Record<string, string> = {
+  html: 'HTML',
+  htm: 'HTML',
+  css: 'CSS',
+  js: 'JavaScript',
+  jsx: 'JSX',
+  ts: 'TypeScript',
+  tsx: 'TSX',
+  json: 'JSON',
+  txt: 'Texto',
+  svg: 'SVG',
+  xml: 'XML',
+  yaml: 'YAML',
+  yml: 'YAML',
+};
+
+/**
+ * Viewer simple para archivos no-markdown (HTML/CSS/JS/etc del bundle de
+ * Claude Design u otros assets texto que el agente persiste al vault).
+ *
+ * Decisiones:
+ *  - Render como `<pre><code>` plano — NADA de innerHTML del HTML porque
+ *    sería XSS si un bundle malicioso pega scripts. El usuario que quiera
+ *    ver el HTML renderizado debe abrir el ZIP de respaldo o el GitHub
+ *    web view.
+ *  - Sin syntax highlighting (Prism/Shiki agregan ~80KB JS). Si en el
+ *    futuro queremos resaltado, agregar lazy-load de highlight.js.
+ *  - `whiteSpace: pre` preserva indentación; `overflow-x-auto` evita que
+ *    líneas largas (HTML inline styles) rompan el layout.
+ *  - Botón "Copiar" porque para un coding agent que copy-pastea snippets
+ *    del HTML al implementar es una operación frecuente.
+ */
+function RawTextViewer({ content, fileName }: { content: string; fileName: string }) {
+  const [copied, setCopied] = useState(false);
+  const ext = getFileExtension(fileName);
+  const typeLabel = FILE_TYPE_LABELS[ext] ?? ext.toUpperCase() ?? 'Archivo';
+
+  const handleCopy = async () => {
+    try {
+      await navigator.clipboard.writeText(content);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 1500);
+    } catch {
+      // Clipboard API rechazada (permisos): silencioso, el botón muestra
+      // estado normal. Algunos browsers en localhost requieren https.
+    }
+  };
+
+  return (
+    // `min-w-0 max-w-full` previene que un `<pre>` con líneas largas
+    // (e.g., <script src=... integrity="sha384-..."> de 200+ chars del HTML
+    // de Claude Design) empuje el ancho del viewer más allá del contenedor
+    // del vault. Sin esto, el flex padre crecía con el contenido y el panel
+    // se desbordaba al área del explorador.
+    <div className="p-6 min-w-0 max-w-full">
+      <div className="bg-card rounded-lg border border-border/40 shadow-sm overflow-hidden max-w-full">
+        <div className="flex items-center justify-between px-4 py-2 border-b border-border/40 bg-muted/40">
+          <div className="flex items-center gap-2">
+            <Code2 className="h-3.5 w-3.5 text-muted-foreground" />
+            <span className="text-[11px] font-mono uppercase tracking-wider text-muted-foreground">
+              {typeLabel}
+            </span>
+            <span className="text-[10px] text-muted-foreground/60 tabular-nums">
+              {content.length.toLocaleString()} chars
+            </span>
+          </div>
+          <button
+            type="button"
+            onClick={handleCopy}
+            className="text-[11px] text-muted-foreground hover:text-foreground transition-colors px-2 py-0.5 rounded hover:bg-muted"
+          >
+            {copied ? 'Copiado ✓' : 'Copiar'}
+          </button>
+        </div>
+        {/* `overflow-x-auto` en el wrapper (no en el <pre>) garantiza que
+            el scrollbar horizontal aparezca en el contenedor con borde,
+            consistente visualmente con el card. `whitespace-pre` preserva
+            indentación. */}
+        <div className="overflow-x-auto">
+          <pre className="p-4 text-xs leading-relaxed font-mono text-foreground/90 whitespace-pre">
+            <code>{content}</code>
+          </pre>
+        </div>
+      </div>
+    </div>
+  );
+}
 
 /* ─── Read-only viewer using TipTap ─── */
 
@@ -461,7 +582,7 @@ function ReadOnlyViewer({ content, onContentChange }: { content: string; onConte
       listItem: { HTMLAttributes: { class: 'my-1' } },
       blockquote: { HTMLAttributes: { class: 'border-l-3 border-border pl-4 my-2 text-muted-foreground' } },
     }),
-    Markdown.configure({ html: true, tightLists: true, breaks: true }),
+    Markdown.configure({ html: true, tightLists: true, breaks: true, linkify: true }),
     Highlight,
     TaskList,
     TaskItem.configure({
@@ -471,7 +592,14 @@ function ReadOnlyViewer({ content, onContentChange }: { content: string; onConte
     TiptapImage,
     TiptapLink.configure({
       openOnClick: true,
-      HTMLAttributes: { class: 'text-primary underline underline-offset-2 cursor-pointer hover:text-primary/80', target: '_blank', rel: 'noopener noreferrer' },
+      autolink: true,
+      linkOnPaste: true,
+      HTMLAttributes: {
+        class:
+          'text-blue-600 dark:text-blue-400 underline underline-offset-2 cursor-pointer hover:text-blue-700 dark:hover:text-blue-300 transition-colors',
+        target: '_blank',
+        rel: 'noopener noreferrer',
+      },
     }),
     TiptapTable.configure({ resizable: false }),
     TableRow,
@@ -811,7 +939,14 @@ export function DocumentViewer() {
   };
 
   return (
-    <div className="flex-1 flex flex-col min-h-0">
+    // `min-w-0` en la raíz del DocumentViewer es CRÍTICO. Por default los
+    // flex items tienen `min-width: auto` (= min-content), así que cuando
+    // un descendiente tiene contenido grande (un <pre> con líneas largas
+    // del HTML de un bundle), el contenedor entero se expande para
+    // acomodarlo — sobrescribiendo cualquier `width` o `flex-basis` del
+    // padre. Sin esto, los `min-w-0` que pusimos en niveles internos no
+    // logran nada porque la cadena se rompe en este nivel.
+    <div className="flex-1 flex flex-col min-h-0 min-w-0">
       {/* Header */}
       <div className="px-6 py-3 border-b border-border/50 shrink-0 space-y-2 bg-muted/30">
         <div className="flex items-center justify-between">
@@ -837,11 +972,17 @@ export function DocumentViewer() {
                 </button>
               </>
             ) : (
-              // Solo mostrar el lápiz si el usuario tiene al menos nivel 'editor' en este nodo
+              // Solo mostrar el lápiz si:
+              //   1. El user tiene al menos nivel 'editor' en este nodo
+              //   2. El archivo es markdown (TipTap WYSIWYG rompería un .html
+              //      o .css al re-serializarlo como markdown — pierde tags,
+              //      atributos, indentación). Para editar archivos del
+              //      bundle, el user va a GitHub directamente.
               (() => {
                 const access = getEffectiveAccessForNode(selectedNode.id);
                 const canEdit = access.level === 'editor' || access.level === 'owner';
-                return canEdit ? (
+                const isMarkdown = getFileExtension(selectedNode.id) === 'md';
+                return canEdit && isMarkdown ? (
                   <button
                     onClick={toggleEditing}
                     className="text-muted-foreground hover:text-primary transition-colors shrink-0"
@@ -880,7 +1021,7 @@ export function DocumentViewer() {
       </div>
 
       {/* Content */}
-      <div className="flex-1 flex flex-col min-h-0 bg-muted/20">
+      <div className="flex-1 flex flex-col min-h-0 min-w-0 bg-muted/20">
         {state.isEditing && (
           <WysiwygToolbar
             items={toolbarItems}
@@ -889,7 +1030,7 @@ export function DocumentViewer() {
           />
         )}
         {state.isEditing ? (
-          <div className="flex-1 overflow-y-auto">
+          <div className="flex-1 overflow-y-auto min-w-0">
             {/* Metadata table (read-only, visible en ambos modos) */}
             {selectedNode.metadata && <MetadataTable metadata={selectedNode.metadata} />}
             {showSource ? (
@@ -907,17 +1048,24 @@ export function DocumentViewer() {
             )}
           </div>
         ) : (
-          <div className="flex-1 overflow-y-auto">
+          <div className="flex-1 overflow-y-auto min-w-0">
             {/* Metadata table (read-only, visible en ambos modos) */}
             {selectedNode.metadata && <MetadataTable metadata={selectedNode.metadata} />}
             {selectedNode.content === undefined ? (
               /* Skeleton loader mientras el content lazy-loadea desde GitHub */
               <DocumentSkeleton />
-            ) : (
+            ) : getFileExtension(selectedNode.id) === 'md' ? (
+              /* Markdown → TipTap viewer rico (headings, listas, links, etc.) */
               <ReadOnlyViewer
                 content={selectedNode.content}
                 onContentChange={(md) => updateContent(selectedNode.id, md)}
               />
+            ) : (
+              /* Archivos texto no-markdown (HTML, CSS, JS del bundle de
+                 Claude Design, etc.) → render como código plano. NO se
+                 renderiza el HTML por seguridad (XSS) ni se intenta
+                 parsearlo como markdown (rompía el viewer). */
+              <RawTextViewer content={selectedNode.content} fileName={selectedNode.id} />
             )}
           </div>
         )}

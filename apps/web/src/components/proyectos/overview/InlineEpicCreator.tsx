@@ -16,18 +16,14 @@ import {
   SelectTrigger,
   SelectValue,
 } from '@/components/ui/select';
-import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import {
   Plus,
   X,
   ChevronDown,
   ChevronUp,
-  Target,
-  Ruler,
-  Cpu,
-  Zap,
   Loader2,
 } from 'lucide-react';
+import { SectionTiptapEditor } from '../historias/editor/SectionTiptapEditor';
 
 // --- Labels ---
 
@@ -47,7 +43,6 @@ const priorityLabels: Record<Priority, string> = {
 
 const epicSchema = z.object({
   title: z.string().min(1, 'El título es obligatorio').max(200, 'Máximo 200 caracteres'),
-  description: z.string().min(1, 'La descripción es obligatoria'),
   selectedPodIds: z.array(z.string()).min(1, 'Selecciona al menos una célula'),
   startDate: z.string().min(1, 'La fecha de inicio es obligatoria'),
   targetDate: z.string().min(1, 'La fecha objetivo es obligatoria'),
@@ -55,56 +50,70 @@ const epicSchema = z.object({
 
 type EpicFieldErrors = Partial<Record<keyof z.infer<typeof epicSchema>, string>>;
 
-// --- Textarea class ---
+// --- Markdown placeholder ---
+// Estructura mínima sugerida: 9 headings level-2 obligatorios. Coincide con
+// el placeholder del editor en EpicFullPage y con el prompt del agente IA.
+const EPIC_MARKDOWN_PLACEHOLDER = `## Descripción
 
-const inputCls =
-  'w-full rounded-lg border border-input bg-transparent px-3 py-2 text-sm shadow-xs focus-visible:border-ring focus-visible:ring-ring/50 focus-visible:ring-[3px] outline-none resize-none dark:bg-input/30 placeholder:text-muted-foreground';
+(Qué se construye y por qué surge.)
+
+## Beneficios cualitativos
+
+-
+
+## Beneficios cuantitativos
+
+-
+
+## Medición de beneficios
+
+(Cómo se mide cada beneficio: dashboard, métrica, KPI.)
+
+## Alcance
+
+EN alcance:
+-
+
+NO en alcance:
+-
+
+## Criterios de aceptación
+
+1.
+
+## Mejoras tecnológicas
+
+(Refactor, deuda técnica, capacidades de plataforma.)
+
+## Canales y flujos impactados
+
+-
+
+## Dependencias de terceros
+
+-`;
 
 // --- Form state ---
 
 export interface EpicFormData {
   title: string;
-  description: string;
+  /** Markdown único de la épica con los 9 headings obligatorios. */
+  markdown: string;
   priority: Priority;
   status: EpicStatus;
   selectedPodIds: string[];
   startDate: string;
   targetDate: string;
-  // Definition fields
-  qualitativeBenefits: string;
-  quantitativeBenefits: string;
-  benefitsMeasurement: string;
-  scopeDescription: string;
-  acceptanceCriteria: string;
-  technologicalImprovements: string;
-  businessPriority: string;
-  teamsInvolved: string;
-  impactedChannels: string;
-  impactedFlows: string;
-  impactSabreLevel: string;
-  thirdPartyDependencies: string;
 }
 
 const emptyForm: EpicFormData = {
   title: '',
-  description: '',
+  markdown: '',
   priority: Priority.Medium,
   status: EpicStatus.Draft,
   selectedPodIds: [],
   startDate: '',
   targetDate: '',
-  qualitativeBenefits: '',
-  quantitativeBenefits: '',
-  benefitsMeasurement: '',
-  scopeDescription: '',
-  acceptanceCriteria: '',
-  technologicalImprovements: '',
-  businessPriority: '',
-  teamsInvolved: '',
-  impactedChannels: '',
-  impactedFlows: '',
-  impactSabreLevel: '',
-  thirdPartyDependencies: '',
 };
 
 // --- Component ---
@@ -129,7 +138,6 @@ export function InlineEpicCreator({
   const [formData, setFormData] = useState<EpicFormData>(() =>
     initialData ? { ...emptyForm, ...initialData } : emptyForm,
   );
-  const [formTab, setFormTab] = useState<string>('benefits');
   const [showDefinition, setShowDefinition] = useState(false);
   const [saving, setSaving] = useState(false);
   const [errors, setErrors] = useState<EpicFieldErrors>({});
@@ -166,7 +174,6 @@ export function InlineEpicCreator({
   const handleCreate = useCallback(async () => {
     const result = epicSchema.safeParse({
       title: formData.title.trim(),
-      description: formData.description.trim(),
       selectedPodIds: formData.selectedPodIds,
       startDate: formData.startDate,
       targetDate: formData.targetDate,
@@ -185,7 +192,7 @@ export function InlineEpicCreator({
     try {
       const created = await apiCreateEpic({
         title: formData.title.trim(),
-        description: formData.description.trim(),
+        markdown: formData.markdown.trim(),
         status: formData.status as string,
         priority: formData.priority as string,
         initiativeId,
@@ -194,23 +201,10 @@ export function InlineEpicCreator({
         targetDate: formData.targetDate,
       });
 
-      const now = new Date().toISOString();
       const newEpic: Epic = {
         id: created.id,
         title: created.title,
-        description: created.description,
-        qualitativeBenefits: formData.qualitativeBenefits.trim(),
-        quantitativeBenefits: formData.quantitativeBenefits.trim(),
-        benefitsMeasurement: formData.benefitsMeasurement.trim(),
-        scopeDescription: formData.scopeDescription.trim(),
-        acceptanceCriteria: formData.acceptanceCriteria.trim(),
-        technologicalImprovements: formData.technologicalImprovements.trim(),
-        businessPriority: formData.businessPriority.trim(),
-        teamsInvolved: formData.teamsInvolved.trim(),
-        impactedChannels: formData.impactedChannels.trim(),
-        impactedFlows: formData.impactedFlows.trim(),
-        impactSabreLevel: formData.impactSabreLevel.trim(),
-        thirdPartyDependencies: formData.thirdPartyDependencies.trim(),
+        markdown: created.markdown,
         documents: [],
         diagrams: [],
         dependencies: [],
@@ -288,19 +282,6 @@ export function InlineEpicCreator({
             autoFocus
           />
           {errors.title && <p className="text-xs text-destructive">{errors.title}</p>}
-        </div>
-
-        {/* Description */}
-        <div className="space-y-1.5">
-          <label className="text-xs font-medium text-muted-foreground">Descripción</label>
-          <textarea
-            value={formData.description}
-            onChange={(e) => { setFormData((prev) => ({ ...prev, description: e.target.value })); setErrors((p) => ({ ...p, description: undefined })); }}
-            placeholder="Describe el alcance y objetivo de esta épica..."
-            rows={2}
-            className={`${inputCls}${errors.description ? ' border-destructive' : ''}`}
-          />
-          {errors.description && <p className="text-xs text-destructive">{errors.description}</p>}
         </div>
 
         {/* Meta fields row */}
@@ -393,7 +374,7 @@ export function InlineEpicCreator({
           {errors.selectedPodIds && <p className="text-xs text-destructive mt-1">{errors.selectedPodIds}</p>}
         </div>
 
-        {/* Collapsible definition section */}
+        {/* Markdown único — colapsable opcional */}
         <div className="border-t pt-3">
           <button
             type="button"
@@ -406,163 +387,17 @@ export function InlineEpicCreator({
               <ChevronDown className="h-3.5 w-3.5" />
             )}
             Definición de la Épica
-            <span className="text-[10px] font-normal">(opcional)</span>
+            <span className="text-[10px] font-normal">(opcional · markdown)</span>
           </button>
 
           {showDefinition && (
             <div className="mt-3 animate-in fade-in slide-in-from-top-1 duration-150">
-              <Tabs value={formTab} onValueChange={setFormTab}>
-                <TabsList className="w-full grid grid-cols-4">
-                  <TabsTrigger value="benefits" className="gap-1 text-xs">
-                    <Target className="h-3 w-3" />
-                    Beneficios
-                  </TabsTrigger>
-                  <TabsTrigger value="scope" className="gap-1 text-xs">
-                    <Ruler className="h-3 w-3" />
-                    Alcance
-                  </TabsTrigger>
-                  <TabsTrigger value="technical" className="gap-1 text-xs">
-                    <Cpu className="h-3 w-3" />
-                    Técnico
-                  </TabsTrigger>
-                  <TabsTrigger value="impact" className="gap-1 text-xs">
-                    <Zap className="h-3 w-3" />
-                    Impacto
-                  </TabsTrigger>
-                </TabsList>
-
-                <TabsContent value="benefits" className="mt-3 space-y-3">
-                  <div className="space-y-1.5">
-                    <label className="text-xs font-medium text-muted-foreground">Beneficios Cualitativos</label>
-                    <textarea
-                      value={formData.qualitativeBenefits}
-                      onChange={(e) => setFormData((prev) => ({ ...prev, qualitativeBenefits: e.target.value }))}
-                      rows={2}
-                      placeholder="Beneficios cualitativos esperados..."
-                      className={inputCls}
-                    />
-                  </div>
-                  <div className="space-y-1.5">
-                    <label className="text-xs font-medium text-muted-foreground">Beneficios Cuantitativos</label>
-                    <textarea
-                      value={formData.quantitativeBenefits}
-                      onChange={(e) => setFormData((prev) => ({ ...prev, quantitativeBenefits: e.target.value }))}
-                      rows={2}
-                      placeholder="Métricas y beneficios cuantitativos..."
-                      className={inputCls}
-                    />
-                  </div>
-                  <div className="space-y-1.5">
-                    <label className="text-xs font-medium text-muted-foreground">Medición de Beneficios</label>
-                    <textarea
-                      value={formData.benefitsMeasurement}
-                      onChange={(e) => setFormData((prev) => ({ ...prev, benefitsMeasurement: e.target.value }))}
-                      rows={2}
-                      placeholder="¿Cómo se medirán los beneficios?"
-                      className={inputCls}
-                    />
-                  </div>
-                </TabsContent>
-
-                <TabsContent value="scope" className="mt-3 space-y-3">
-                  <div className="space-y-1.5">
-                    <label className="text-xs font-medium text-muted-foreground">Descripción del Alcance</label>
-                    <textarea
-                      value={formData.scopeDescription}
-                      onChange={(e) => setFormData((prev) => ({ ...prev, scopeDescription: e.target.value }))}
-                      rows={3}
-                      placeholder="Describe el alcance detallado de la épica..."
-                      className={inputCls}
-                    />
-                  </div>
-                  <div className="space-y-1.5">
-                    <label className="text-xs font-medium text-muted-foreground">Criterios de Aceptación</label>
-                    <textarea
-                      value={formData.acceptanceCriteria}
-                      onChange={(e) => setFormData((prev) => ({ ...prev, acceptanceCriteria: e.target.value }))}
-                      rows={3}
-                      placeholder="Criterios que deben cumplirse para considerar la épica completada..."
-                      className={inputCls}
-                    />
-                  </div>
-                </TabsContent>
-
-                <TabsContent value="technical" className="mt-3 space-y-3">
-                  <div className="space-y-1.5">
-                    <label className="text-xs font-medium text-muted-foreground">Mejoras Tecnológicas</label>
-                    <textarea
-                      value={formData.technologicalImprovements}
-                      onChange={(e) => setFormData((prev) => ({ ...prev, technologicalImprovements: e.target.value }))}
-                      rows={2}
-                      placeholder="Mejoras tecnológicas incluidas..."
-                      className={inputCls}
-                    />
-                  </div>
-                  <div className="space-y-1.5">
-                    <label className="text-xs font-medium text-muted-foreground">Prioridad de Negocio</label>
-                    <textarea
-                      value={formData.businessPriority}
-                      onChange={(e) => setFormData((prev) => ({ ...prev, businessPriority: e.target.value }))}
-                      rows={2}
-                      placeholder="Prioridad y justificación de negocio..."
-                      className={inputCls}
-                    />
-                  </div>
-                  <div className="space-y-1.5">
-                    <label className="text-xs font-medium text-muted-foreground">Equipos Involucrados</label>
-                    <textarea
-                      value={formData.teamsInvolved}
-                      onChange={(e) => setFormData((prev) => ({ ...prev, teamsInvolved: e.target.value }))}
-                      rows={2}
-                      placeholder="Equipos que participarán..."
-                      className={inputCls}
-                    />
-                  </div>
-                </TabsContent>
-
-                <TabsContent value="impact" className="mt-3 space-y-3">
-                  <div className="space-y-1.5">
-                    <label className="text-xs font-medium text-muted-foreground">Canales Impactados</label>
-                    <textarea
-                      value={formData.impactedChannels}
-                      onChange={(e) => setFormData((prev) => ({ ...prev, impactedChannels: e.target.value }))}
-                      rows={2}
-                      placeholder="Canales que serán afectados..."
-                      className={inputCls}
-                    />
-                  </div>
-                  <div className="space-y-1.5">
-                    <label className="text-xs font-medium text-muted-foreground">Flujos Impactados</label>
-                    <textarea
-                      value={formData.impactedFlows}
-                      onChange={(e) => setFormData((prev) => ({ ...prev, impactedFlows: e.target.value }))}
-                      rows={2}
-                      placeholder="Flujos de negocio que serán afectados..."
-                      className={inputCls}
-                    />
-                  </div>
-                  <div className="space-y-1.5">
-                    <label className="text-xs font-medium text-muted-foreground">Nivel de Impacto en Sabre</label>
-                    <textarea
-                      value={formData.impactSabreLevel}
-                      onChange={(e) => setFormData((prev) => ({ ...prev, impactSabreLevel: e.target.value }))}
-                      rows={2}
-                      placeholder="Impacto a nivel de Sabre..."
-                      className={inputCls}
-                    />
-                  </div>
-                  <div className="space-y-1.5">
-                    <label className="text-xs font-medium text-muted-foreground">Dependencias de Terceros</label>
-                    <textarea
-                      value={formData.thirdPartyDependencies}
-                      onChange={(e) => setFormData((prev) => ({ ...prev, thirdPartyDependencies: e.target.value }))}
-                      rows={2}
-                      placeholder="Dependencias externas o de terceros..."
-                      className={inputCls}
-                    />
-                  </div>
-                </TabsContent>
-              </Tabs>
+              <SectionTiptapEditor
+                initialMarkdown={formData.markdown && formData.markdown.trim().length > 0 ? formData.markdown : EPIC_MARKDOWN_PLACEHOLDER}
+                onChange={(md) => setFormData((prev) => ({ ...prev, markdown: md }))}
+                variant="paragraph"
+                placeholder="Escribe la definición de la épica en markdown..."
+              />
             </div>
           )}
         </div>

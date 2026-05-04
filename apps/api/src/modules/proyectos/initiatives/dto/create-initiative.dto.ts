@@ -25,13 +25,18 @@ export class CreateInitiativeDto {
   @IsEnum(InitiativeStatus)
   status?: InitiativeStatus;
 
-  @ApiProperty({ example: '2026-01-06' })
+  // Las fechas son opcionales: una iniciativa puede crearse en estado
+  // 'planning' (borrador) sin compromiso temporal todavía. El frontend pide
+  // las fechas cuando se transiciona el status fuera de 'planning'.
+  @ApiPropertyOptional({ example: '2026-01-06' })
+  @IsOptional()
   @IsDateString()
-  startDate!: string;
+  startDate?: string;
 
-  @ApiProperty({ example: '2026-12-31' })
+  @ApiPropertyOptional({ example: '2026-12-31' })
+  @IsOptional()
   @IsDateString()
-  targetDate!: string;
+  targetDate?: string;
 
   @ApiProperty({ example: 'VP de Tecnología' })
   @IsString()

@@ -17,6 +17,7 @@ import {
 } from 'lucide-react';
 import type { ProposedStory, Pod, DependencySeverity } from '@cenzontle/shared';
 import { StoryPointsBadge } from '../shared/StoryPointsBadge';
+import { ReadOnlyMarkdown } from '@/components/shared/tiptap/ReadOnlyMarkdown';
 
 type ExpandedSection = 'po' | 'technical' | 'qa' | 'deps' | null;
 
@@ -39,6 +40,32 @@ interface StoryProposalCardProps {
   onAccept: (proposal: ProposedStory) => void;
   onDiscard: (clientId: string) => void;
   accepting?: boolean;
+}
+
+// Cuenta items de listas markdown (bullets `-`/`*`/`+` o numerados `1.`).
+function countBullets(md: string): number {
+  if (!md) return 0;
+  const matches = md.match(/^\s*(?:[-*+]|\d+\.)\s+/gm);
+  return matches?.length ?? 0;
+}
+
+// Cuenta encabezados level 2 (estructura del agente IA).
+function countH2(md: string): number {
+  if (!md) return 0;
+  const matches = md.match(/^##\s+\S/gm);
+  return matches?.length ?? 0;
+}
+
+function sectionDetail(md: string | undefined): string {
+  const text = (md ?? '').trim();
+  if (!text) return 'Sin contenido';
+  const headings = countH2(text);
+  const bullets = countBullets(text);
+  const parts: string[] = [];
+  if (headings > 0) parts.push(`${headings} sección${headings === 1 ? '' : 'es'}`);
+  if (bullets > 0) parts.push(`${bullets} bullet${bullets === 1 ? '' : 's'}`);
+  if (parts.length === 0) parts.push(`${text.length} chars`);
+  return parts.join(' · ');
 }
 
 export function StoryProposalCard({
@@ -176,30 +203,30 @@ export function StoryProposalCard({
       <div className="space-y-1">
         <SectionToggle
           icon={<ClipboardList className="h-3 w-3" />}
-          label="PO"
-          detail={`${proposal.po.acceptanceCriteria.length} criterios`}
+          label="Definición de Negocio"
+          detail={sectionDetail(proposal.po.markdown)}
           expanded={expandedSection === 'po'}
           onToggle={() => toggleSection('po')}
         />
-        {expandedSection === 'po' && <POPreview po={proposal.po} />}
+        {expandedSection === 'po' && <MarkdownPreview md={proposal.po.markdown} />}
 
         <SectionToggle
           icon={<Code2 className="h-3 w-3" />}
           label="Tech Lead"
-          detail={`${proposal.technical.validations.length} valid, ${proposal.technical.errorHandling.length} err, ${proposal.technical.implementationChecklist.length} pasos`}
+          detail={sectionDetail(proposal.technical.markdown)}
           expanded={expandedSection === 'technical'}
           onToggle={() => toggleSection('technical')}
         />
-        {expandedSection === 'technical' && <TechnicalPreview technical={proposal.technical} />}
+        {expandedSection === 'technical' && <MarkdownPreview md={proposal.technical.markdown} />}
 
         <SectionToggle
           icon={<TestTube2 className="h-3 w-3" />}
           label="QA"
-          detail={proposal.qa.testingStrategy ? 'Strategy definida' : 'Sin strategy'}
+          detail={sectionDetail(proposal.qa.markdown)}
           expanded={expandedSection === 'qa'}
           onToggle={() => toggleSection('qa')}
         />
-        {expandedSection === 'qa' && <QAPreview qa={proposal.qa} />}
+        {expandedSection === 'qa' && <MarkdownPreview md={proposal.qa.markdown} />}
 
         {depsCount > 0 && (
           <>
@@ -273,91 +300,21 @@ function SectionToggle({
   );
 }
 
-function POPreview({ po }: { po: ProposedStory['po'] }) {
+function MarkdownPreview({ md }: { md: string | undefined }) {
+  const text = (md ?? '').trim();
+  if (!text) {
+    return (
+      <div className="rounded-md bg-muted/30 px-2.5 py-2 text-[11px]">
+        <p className="text-muted-foreground italic">Sin contenido generado</p>
+      </div>
+    );
+  }
   return (
-    <div className="rounded-md bg-muted/30 px-2.5 py-2 space-y-2 text-[11px]">
-      {po.userStory && (
-        <div>
-          <div className="text-muted-foreground font-medium mb-0.5">Historia</div>
-          <p className="text-foreground/80 line-clamp-2">{po.userStory}</p>
-        </div>
-      )}
-      {po.objective && (
-        <div>
-          <div className="text-muted-foreground font-medium mb-0.5">Objetivo</div>
-          <p className="text-foreground/80 line-clamp-2">{po.objective}</p>
-        </div>
-      )}
-      {po.acceptanceCriteria.length > 0 && (
-        <div>
-          <div className="text-muted-foreground font-medium mb-0.5">
-            Criterios ({po.acceptanceCriteria.length})
-          </div>
-          <ul className="space-y-0.5">
-            {po.acceptanceCriteria.slice(0, 3).map((c, i) => (
-              <li key={i} className="text-foreground/80 line-clamp-1">
-                <span className="text-muted-foreground mr-1">·</span>
-                {c}
-              </li>
-            ))}
-            {po.acceptanceCriteria.length > 3 && (
-              <li className="text-muted-foreground italic">+{po.acceptanceCriteria.length - 3} mas</li>
-            )}
-          </ul>
-        </div>
-      )}
-    </div>
-  );
-}
-
-function TechnicalPreview({ technical }: { technical: ProposedStory['technical'] }) {
-  return (
-    <div className="rounded-md bg-muted/30 px-2.5 py-2 space-y-2 text-[11px]">
-      {technical.architecture && (
-        <div>
-          <div className="text-muted-foreground font-medium mb-0.5">Arquitectura</div>
-          <p className="text-foreground/80 line-clamp-3 whitespace-pre-line">
-            {technical.architecture}
-          </p>
-        </div>
-      )}
-      {technical.implementationChecklist.length > 0 && (
-        <div>
-          <div className="text-muted-foreground font-medium mb-0.5">
-            Checklist ({technical.implementationChecklist.length})
-          </div>
-          <ul className="space-y-0.5">
-            {technical.implementationChecklist.slice(0, 3).map((c, i) => (
-              <li key={i} className="text-foreground/80 line-clamp-1">
-                <span className="text-muted-foreground mr-1">·</span>
-                {c}
-              </li>
-            ))}
-            {technical.implementationChecklist.length > 3 && (
-              <li className="text-muted-foreground italic">
-                +{technical.implementationChecklist.length - 3} mas
-              </li>
-            )}
-          </ul>
-        </div>
-      )}
-    </div>
-  );
-}
-
-function QAPreview({ qa }: { qa: ProposedStory['qa'] }) {
-  return (
-    <div className="rounded-md bg-muted/30 px-2.5 py-2 space-y-1 text-[11px]">
-      {qa.testingStrategy ? (
-        <>
-          <div className="text-muted-foreground font-medium mb-0.5">Testing Strategy</div>
-          <p className="text-foreground/80 line-clamp-4 whitespace-pre-line">
-            {qa.testingStrategy}
-          </p>
-        </>
-      ) : (
-        <p className="text-muted-foreground italic">Sin estrategia generada</p>
-      )}
+    <div className="rounded-md bg-muted/30 px-2.5 py-2 text-[11px] max-h-72 overflow-y-auto">
+      <ReadOnlyMarkdown
+        content={text}
+        className="outline-none prose prose-xs dark:prose-invert max-w-none [&>*:first-child]:!mt-0 [&>*:last-child]:!mb-0 [&_h2]:text-[12px] [&_h2]:mt-2 [&_h2]:mb-1 [&_h3]:text-[11px] [&_p]:text-[11px] [&_li]:text-[11px]"
+      />
     </div>
   );
 }

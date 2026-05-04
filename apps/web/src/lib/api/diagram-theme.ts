@@ -1,5 +1,5 @@
 import type { DiagramGroupColors, DiagramTextColors } from '@cenzontle/shared';
-import { apiFetch, ApiError } from './client';
+import { apiFetch } from './client';
 
 export interface DiagramThemeResponse {
   colors: DiagramGroupColors;
@@ -46,12 +46,7 @@ export interface DiagramThemeUpdatePayload {
 export async function fetchDiagramTheme(): Promise<DiagramThemeResponse | null> {
   try {
     return await apiFetch<DiagramThemeResponse>('/diagram-theme');
-  } catch (err) {
-    if (err instanceof ApiError) {
-      console.warn(`[diagram-theme] fetch failed (${err.status}): ${err.message}`);
-    } else {
-      console.warn('[diagram-theme] fetch failed:', err);
-    }
+  } catch {
     return null;
   }
 }
@@ -71,12 +66,7 @@ export async function updateDiagramTheme(
       method: 'PUT',
       body: JSON.stringify(payload),
     });
-  } catch (err) {
-    if (err instanceof ApiError) {
-      console.warn(`[diagram-theme] update failed (${err.status}): ${err.message}`);
-    } else {
-      console.warn('[diagram-theme] update failed:', err);
-    }
+  } catch {
     return null;
   }
 }

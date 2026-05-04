@@ -136,6 +136,55 @@ export async function fetchCachedDiagram(
 }
 
 /**
+ * Sesión SSE cacheada (events del agente en curso o terminado). Permite
+ * hidratar la cadena de pensamiento al reabrir la pestaña tras cerrarla
+ * mid-run, igual que en épicas/stories.
+ */
+export interface CachedDiagramSession {
+  epicId: string;
+  type: DiagramGenerationType;
+  status: 'streaming' | 'staging';
+  events: DiagramGenerationEventWithMeta[];
+  createdAt: string;
+  completedAt?: string;
+}
+
+export async function getDiagramSession(
+  epicId: string,
+  type: DiagramGenerationType = 'business',
+): Promise<CachedDiagramSession | null> {
+  const params = new URLSearchParams({ type });
+  const url = `/api/proxy/proyectos/diagram-generation/${epicId}/session?${params}`;
+
+  try {
+    const response = await fetch(url);
+    if (!response.ok) return null;
+    const body = (await response.json()) as { session: CachedDiagramSession | null };
+    return body.session ?? null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Cancela el run activo de generación (aborta el agente backend + invalida
+ * el cache de sesión). Idempotente.
+ */
+export async function cancelDiagramGeneration(
+  epicId: string,
+  type: DiagramGenerationType = 'business',
+): Promise<void> {
+  const params = new URLSearchParams({ type });
+  const url = `/api/proxy/proyectos/diagram-generation/${epicId}/session/active?${params}`;
+  try {
+    await fetch(url, { method: 'DELETE' });
+  } catch {
+    // Best-effort: si Redis está caído o el server no responde, el frontend
+    // sigue su flujo. El agente backend tiene timeout de 10min como safety.
+  }
+}
+
+/**
  * Persiste un diagrama editado manualmente al cache Redis del backend.
  *
  * Usado por el editor de diagramas tras aplicar cambios (drag de nodos,

@@ -1,6 +1,7 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import Anthropic from '@anthropic-ai/sdk';
+import { anthropicFetch } from '../../../../lib/anthropic-fetch';
 import { PrismaService } from '../../../prisma/prisma.service';
 import { PodsService } from '../../pods/pods.service';
 // Tools vestigiales removidas (archivos existen pero no se registran):
@@ -20,13 +21,35 @@ import type { EpicGenerationEvent, ProposedEpic, Priority, EpicStatus } from '@c
 import { Subject } from 'rxjs';
 import { scrubSecrets } from '../../../../common/utils/scrub-secrets.util';
 import { sanitizeUserPromptForLLM } from '../../../../common/utils/sanitize-llm-input.util';
+import { AgentTokenSettingsService } from '../../../agent-token-settings/agent-token-settings.service';
 
 const MAX_TOOL_ITERATIONS = 15;
-const MODEL = 'claude-sonnet-4-20250514';
+// Sonnet 4.6 — soporta adaptive thinking + effort levels.
+const MODEL = 'claude-sonnet-4-6';
 // Tope global de bytes acumulados en attachments multimodales por request.
 // Protege contra DoS por acumulación (15 iteraciones × N PDFs × 20 MB) y
 // limita el costo de tokens enviados a Anthropic. ~60 MB ≈ ~15 PDFs típicos.
 const MAX_ATTACHMENT_BYTES_TOTAL = 60 * 1024 * 1024;
+
+// Extended thinking + max_tokens del agente de épicas se leen ahora desde
+// AgentTokenSettingsService (singleton BD, configurable desde
+// /factory/settings?section=agent-tokens). Defaults: thinking=10K, cap=64K.
+//
+// max_tokens dinámico: escala con `count` para evitar truncado silencioso
+// (`stop_reason: max_tokens`). Con adaptive thinking, el thinking VIVE
+// dentro del max_tokens total (no se suma aparte como en el shape legacy).
+// Effort=high consume ~10-15K tokens en thinking — debemos reservar ese
+// espacio o el output se trunca.
+//
+//   count=5  → 10K base + 17.5K output + 15K thinking buffer = 42.5K
+//   count=10 → 10K base + 35K output + 15K thinking buffer = 60K
+//   count=15 → cap en `epicMaxTokens` settings (default 64K).
+const TOKENS_BASE = 10_000;
+const TOKENS_PER_EPIC = 3_500;
+const ADAPTIVE_THINKING_BUFFER = 15_000;
+function maxTokensForCount(count: number, cap: number): number {
+  return Math.min(TOKENS_BASE + count * TOKENS_PER_EPIC + ADAPTIVE_THINKING_BUFFER, cap);
+}
 
 // Topes por campo narrativo (alineados al DTO de epicas en apps/api/src/modules/proyectos/epics/dto).
 // Defense in depth: aunque el DTO ya limitaria una request con campos gigantes al aceptar,
@@ -59,12 +82,22 @@ export class EpicGenerationService {
     private readonly vaultGrep: VaultGrepTool,
     private readonly vaultRead: VaultReadTool,
     private readonly codeRepoClones: CodeRepoCloneService,
+    private readonly tokenSettings: AgentTokenSettingsService,
   ) {
     const apiKey = this.config.get<string>('ANTHROPIC_API_KEY');
     if (!apiKey) {
       this.logger.warn('ANTHROPIC_API_KEY not configured — epic generation will fail at runtime');
     }
-    this.client = new Anthropic({ apiKey: apiKey || undefined });
+    // `timeout: 30 * 60 * 1000` (30 min): override del default del SDK.
+    // Para resolver el `terminated` que viene de la capa undici durante
+    // silencios largos entre chunks, usamos `fetch: anthropicFetch` que
+    // configura un dispatcher con `bodyTimeout: 0`. Ver
+    // `apps/api/src/lib/anthropic-fetch.ts`.
+    this.client = new Anthropic({
+      apiKey: apiKey || undefined,
+      timeout: 30 * 60 * 1000,
+      fetch: anthropicFetch,
+    });
     this.tools = [initDocsTool, codeGlob, codeGrep, codeRead, vaultGlob, vaultGrep, vaultRead];
   }
 
@@ -114,7 +147,7 @@ export class EpicGenerationService {
 
     const initiative = await this.prisma.initiative.findUnique({
       where: { id: initiativeId },
-      include: { epics: { select: { id: true, title: true, description: true } } },
+      include: { epics: { select: { id: true, title: true, markdown: true } } },
     });
 
     if (!initiative) {
@@ -126,8 +159,18 @@ export class EpicGenerationService {
 
     const allPods = await this.pods.findAll();
 
+    // Para listar épicas existentes al agente, extraemos un summary corto del
+    // markdown (primer párrafo después del primer heading o las primeras 120 chars).
     const existingEpics = initiative.epics
-      .map((e: { title: string; description: string }) => `- ${e.title}: ${e.description.slice(0, 120)}`)
+      .map((e: { title: string; markdown: string }) => {
+        const summary = (e.markdown ?? '')
+          .replace(/^---\s*\n[\s\S]*?\n---\s*\n+/m, '')
+          .replace(/^#+\s+[^\n]*\n+/m, '')
+          .replace(/\s+/g, ' ')
+          .trim()
+          .slice(0, 120);
+        return `- ${e.title}: ${summary}`;
+      })
       .join('\n');
 
     // Carga de repos de código enabled (Opción C: multi-repo).
@@ -181,25 +224,52 @@ export class EpicGenerationService {
                 type: 'object',
                 properties: {
                   title: { type: 'string' },
-                  description: { type: 'string' },
                   priority: { type: 'string', enum: ['critical', 'high', 'medium', 'low'] },
                   podIds: { type: 'array', items: { type: 'string' }, description: 'IDs of pods this epic should be assigned to' },
                   startDate: { type: 'string', description: 'ISO date YYYY-MM-DD' },
                   targetDate: { type: 'string', description: 'ISO date YYYY-MM-DD' },
-                  qualitativeBenefits: { type: 'string' },
-                  quantitativeBenefits: { type: 'string' },
-                  benefitsMeasurement: { type: 'string' },
-                  scopeDescription: { type: 'string' },
-                  acceptanceCriteria: { type: 'string' },
-                  technologicalImprovements: { type: 'string' },
-                  businessPriority: { type: 'string' },
-                  teamsInvolved: { type: 'string' },
-                  impactedChannels: { type: 'string' },
-                  impactedFlows: { type: 'string' },
-                  impactSabreLevel: { type: 'string' },
-                  thirdPartyDependencies: { type: 'string' },
+                  markdown: {
+                    type: 'string',
+                    description: `Markdown único de la épica. DEBE incluir EXACTAMENTE estos 9 headings level-2 en este orden, con contenido REAL bajo cada uno:
+
+## Objetivo
+1-3 párrafos explicando qué se construye y por qué surge la épica.
+
+## Beneficios cualitativos
+Mejoras no-cuantificables (UX, retención, eliminación de fricción, riesgo operativo eliminado, etc.).
+
+## Beneficios cuantitativos
+Métricas concretas (revenue $, latencia ms, tasa de conversión %, costo evitado $/mes).
+
+## Medición de beneficios
+Cómo se mide cada beneficio: dashboard, evento de telemetría, query SQL, KPI de producto.
+
+## Alcance
+Lista markdown de lo que ESTÁ y lo que NO está en alcance. Sé explícito con exclusiones.
+
+## Criterios de aceptación
+Lista numerada de criterios verificables (Gherkin o bullets con métricas concretas). Mínimo 3.
+
+## Mejoras tecnológicas
+Mejoras infra/arquitectura que esta épica habilita: refactor, deuda técnica, nueva capacidad de plataforma.
+
+## Canales y flujos impactados
+Lista markdown de canales (web, mobile, kiosko, partner API, contact center) y flujos (checkout, signup, recovery, billing) afectados. Si aplica, incluir nivel de impacto en sistemas externos (Sabre, ERP, etc.).
+
+## Dependencias de terceros
+Lista markdown de proveedores externos involucrados (Stripe, Twilio, Auth0, etc.) y por qué cada uno es relevante para la épica.
+
+REGLAS DUROS:
+- Los 9 headings deben aparecer EXACTAMENTE como están escritos arriba.
+- NO emitas el heading sin contenido — cada sección con prosa o lista real.
+- NO uses "TBD", "N/A", "Pronto" — el sistema rechaza el output y fuerza retry.
+- NO incluyas sub-campos sueltos (description, qualitativeBenefits, scopeDescription, etc.) — el schema actual SOLO acepta \`markdown\`. Cualquier otro shape se descarta como vacío.
+- NO incluyas "## Prioridad de negocio" ni "## Equipos involucrados" — esos viven como metadata estructurada (\`priority\` enum + \`podIds\`) fuera del markdown.
+- Markdown válido GFM (listas, bold, links, code fences).
+- Idioma: español.`,
+                  },
                 },
-                required: ['title', 'description', 'priority'],
+                required: ['title', 'priority', 'markdown'],
               },
             },
           },
@@ -221,19 +291,55 @@ export class EpicGenerationService {
         return;
       }
 
-      // Nudge the agent to submit if running low on iterations
+      // Nudge the agent to submit if running low on iterations.
+      // Si el último mensaje ya es `user` (post-tool_results del iter anterior),
+      // anexamos el nudge como bloque de texto adicional dentro de ese mismo
+      // user message — evita la secuencia inválida `user[tool_results], user[nudge]`
+      // que rompe la alternancia estricta exigida por Anthropic con thinking activo.
       if (iteration === MAX_TOOL_ITERATIONS - 2) {
-        messages.push({
-          role: 'user',
-          content: 'Ya tienes suficiente contexto. Llama a submit_proposals AHORA con las epicas basadas en lo que has descubierto. No hagas mas busquedas.',
-        });
+        const nudgeText =
+          'Ya tienes suficiente contexto. Llama a submit_proposals AHORA con las epicas basadas en lo que has descubierto. No hagas mas busquedas.';
+        const last = messages[messages.length - 1];
+        if (last && last.role === 'user' && Array.isArray(last.content)) {
+          last.content.push({ type: 'text', text: nudgeText });
+        } else if (last && last.role === 'user' && typeof last.content === 'string') {
+          last.content = `${last.content}\n\n${nudgeText}`;
+        } else {
+          messages.push({ role: 'user', content: nudgeText });
+        }
       }
 
-      const response = await this.client.messages.create(
+      // Settings dinámicos (cached 30s) — un cambio en /factory/settings se
+      // refleja en runs nuevos sin redeploy. `effort` controla profundidad
+      // del adaptive thinking. `enabled=false` desactiva thinking entero.
+      const {
+        effort: epicEffort,
+        maxTokensCap: epicCap,
+        enabled: epicEnabled,
+      } = await this.tokenSettings.getEpic();
+      // Adaptive thinking activo en todas las iteraciones — el loop no fuerza
+      // `tool_choice` (incompatible con thinking), solo "nudge" textual en la
+      // penúltima iter.
+      const thinkingActive = epicEnabled;
+
+      const callStart = Date.now();
+      const maxTokens = maxTokensForCount(count, epicCap);
+      // Anthropic exige `messages.stream()` cuando el tiempo estimado puede
+      // exceder 10min. Con `max_tokens` que escala hasta 64K, esa estimación
+      // se gatilla. `stream()` agrupa los chunks internamente y
+      // `finalMessage()` espera al `message_stop`, drop-in con `create()`.
+      const stream = this.client.messages.stream(
         {
           model: MODEL,
-          max_tokens: 4096,
+          max_tokens: maxTokens,
           system: [{ type: 'text', text: systemPrompt, cache_control: { type: 'ephemeral' } }],
+          // Adaptive thinking + effort (Sonnet 4.6+).
+          ...(thinkingActive
+            ? {
+                thinking: { type: 'adaptive' as const },
+                output_config: { effort: epicEffort },
+              }
+            : {}),
           tools: claudeTools,
           messages,
         },
@@ -242,20 +348,97 @@ export class EpicGenerationService {
         signal ? { signal } : undefined,
       );
 
+      // STREAMING REAL: iterar raw events del SDK para capturar text_delta Y
+      // thinking_delta chunks. Los helpers `stream.on('text'/'thinking')` del
+      // SDK 0.88.0 no emiten thinking_delta en tiempo real con adaptive mode
+      // — esperan al final del bloque, dando sensación de "trabe". Iterar
+      // el stream raw garantiza que cada delta llegue al SSE en cuanto el
+      // SDK lo recibe, incluyendo los chunks de razonamiento adaptive.
+      for await (const evt of stream) {
+        // Tool_use TERMINAL (submit_*): emite aviso al user para que vea
+        // que el agente sigue trabajando mientras construye el JSON final.
+        // Sin esto, durante la fase de input_json_delta la UI parece trabada.
+        if (evt.type === 'content_block_start') {
+          const cb = evt.content_block as { type?: string; name?: string };
+          if (cb.type === 'tool_use' && cb.name?.startsWith('submit_')) {
+            subject.next({
+              data: { type: 'thinking', delta: `\n\n→ Estructurando entrega final…\n`, timestamp: new Date().toISOString() },
+            });
+          }
+          continue;
+        }
+        if (evt.type !== 'content_block_delta') continue;
+        const delta = evt.delta as { type?: string; text?: string; thinking?: string };
+        if (delta.type === 'text_delta' && delta.text?.trim()) {
+          subject.next({
+            data: { type: 'thinking', delta: scrubSecrets(delta.text), timestamp: new Date().toISOString() },
+          });
+        } else if (delta.type === 'thinking_delta' && delta.thinking?.trim()) {
+          subject.next({
+            data: { type: 'thinking', delta: scrubSecrets(delta.thinking), timestamp: new Date().toISOString() },
+          });
+        }
+      }
+      // El SDK acumula los blocks internamente — finalMessage() los reconstruye
+      // como Message tras iterar el stream completo.
+      const response = await stream.finalMessage();
+
+      // Guarda explícita: si el modelo se truncó por límite de tokens, el JSON
+      // final puede venir incompleto y el loop continuaría ciegamente
+      // consumiendo iteraciones. Mejor abortar y dar feedback al user.
+      if (response.stop_reason === 'max_tokens') {
+        this.logger.warn(
+          `[EpicGen] iter ${iteration} hit max_tokens (limit=${maxTokens}, count=${count}) — output truncated`,
+        );
+        subject.next({
+          data: {
+            type: 'error',
+            message:
+              'La respuesta del agente excedió el límite de tokens. Intenta con menos épicas (count) o un prompt más conciso.',
+            timestamp: new Date().toISOString(),
+          },
+        });
+        subject.next({ data: { type: 'run_finished', timestamp: new Date().toISOString(), totalDurationMs: Date.now() - runStartTime } });
+        subject.complete();
+        return;
+      }
+
+      // Logging por iteración: tokens, cache hit, thinking blocks emitidos.
+      // Si thinking está activo y `thinking_blocks=0`, el modelo decidió que
+      // la pregunta era trivial — válido, no es un bug.
+      const usage = response.usage as any;
+      const cacheRead = usage?.cache_read_input_tokens ?? 0;
+      const cacheCreate = usage?.cache_creation_input_tokens ?? 0;
+      const inputTokens = usage?.input_tokens ?? 0;
+      const outputTokens = usage?.output_tokens ?? 0;
+      const thinkingBlocksCount = response.content.filter(
+        (b: any) => b.type === 'thinking' || b.type === 'redacted_thinking',
+      ).length;
+      const toolUseBlocksCount = response.content.filter(
+        (b: any) => b.type === 'tool_use',
+      ).length;
+      this.logger.log(
+        `[EpicGen] iter ${iteration} stop=${response.stop_reason} dur=${Date.now() - callStart}ms ` +
+          `tokens(in=${inputTokens} out=${outputTokens} cache_read=${cacheRead} cache_create=${cacheCreate}) ` +
+          `thinking_blocks=${thinkingBlocksCount} tool_calls=${toolUseBlocksCount}` +
+          `${thinkingActive ? ' 🧠' : ''}${cacheRead > 0 ? ' 💾CACHE_HIT' : ''}`,
+      );
+
       // Collect text and tool-use blocks
       const assistantContent = response.content;
+      // Importante: assistantContent incluye los bloques `thinking` y
+      // `redacted_thinking` con su `signature`. Anthropic exige que se
+      // reenvíen tal cual en el siguiente turno cuando hay tool_use, así
+      // que pushear el array completo es correcto (no filtrar).
       messages.push({ role: 'assistant', content: assistantContent });
 
-      // Emit thinking text and detect server tool use (web_search)
+      // Detect server tool use (web_search). Los text/thinking blocks YA se
+      // emitieron en vivo via stream.on('text'/'thinking') arriba — no los
+      // re-emitimos aquí para evitar duplicación. Solo procesamos los blocks
+      // que llegan completos al final (server_tool_use, web_search_tool_result).
       const textBlocks = assistantContent.filter((b) => b.type === 'text' && (b as any).text?.trim());
 
       for (const block of assistantContent) {
-        if (block.type === 'text' && block.text.trim()) {
-          // Defense in depth: aunque el modelo no debería emitir tokens en sus
-          // razonamientos, redactamos cualquier patrón tipo PAT/URL con credenciales
-          // antes de enviar al SSE y antes de que llegue al cache.
-          subject.next({ data: { type: 'thinking', delta: scrubSecrets(block.text), timestamp: new Date().toISOString() } });
-        }
         // Server tool use (web_search) — emit timeline event
         if ((block as any).type === 'server_tool_use') {
           const serverBlock = block as any;
@@ -503,12 +686,14 @@ export class EpicGenerationService {
 
   private emitProposals(
     rawEpics: Record<string, unknown>[],
-    initiative: { id: string; name: string; startDate: Date; targetDate: Date },
+    initiative: { id: string; name: string; startDate: Date | null; targetDate: Date | null },
     allPods: { id: string; name: string }[],
     subject: Subject<{ data: EpicGenerationEvent }>,
   ) {
     const podIdSet = new Set(allPods.map((p) => p.id));
-    const baseDate = new Date(initiative.startDate);
+    // Si la iniciativa no tiene fecha de inicio (planning sin compromiso),
+    // usamos `now` como base para escalonar las épicas propuestas.
+    const baseDate = initiative.startDate ? new Date(initiative.startDate) : new Date();
 
     for (let i = 0; i < rawEpics.length; i++) {
       const raw = rawEpics[i];
@@ -523,28 +708,19 @@ export class EpicGenerationService {
       const epicEnd = new Date(epicStart);
       epicEnd.setDate(epicEnd.getDate() + 60);
 
+      // El agente debe emitir un solo `markdown` con los 9 headings obligatorios.
+      // Cap defensivo a 60K (~30 páginas) — coherente con MAX_EPIC_MARKDOWN del DTO.
+      const MAX_EPIC_MARKDOWN_LEN = 60_000;
       const proposed: ProposedEpic = {
         clientId: `ai-${randomUUID()}`,
         title: cap(String(raw.title ?? `Epica ${i + 1}`), MAX_TITLE_LEN),
-        description: cap(String(raw.description ?? '')),
+        markdown: cap(String(raw.markdown ?? ''), MAX_EPIC_MARKDOWN_LEN),
         status: 'draft' as EpicStatus,
         priority: this.validatePriority(raw.priority),
         initiativeId: initiative.id,
         podIds: validPodIds,
         startDate: raw.startDate ? String(raw.startDate).slice(0, 10) : epicStart.toISOString().slice(0, 10),
         targetDate: raw.targetDate ? String(raw.targetDate).slice(0, 10) : epicEnd.toISOString().slice(0, 10),
-        qualitativeBenefits: cap(String(raw.qualitativeBenefits ?? '')),
-        quantitativeBenefits: cap(String(raw.quantitativeBenefits ?? '')),
-        benefitsMeasurement: cap(String(raw.benefitsMeasurement ?? '')),
-        scopeDescription: cap(String(raw.scopeDescription ?? '')),
-        acceptanceCriteria: cap(String(raw.acceptanceCriteria ?? '')),
-        technologicalImprovements: cap(String(raw.technologicalImprovements ?? '')),
-        businessPriority: cap(String(raw.businessPriority ?? '')),
-        teamsInvolved: cap(String(raw.teamsInvolved ?? '')),
-        impactedChannels: cap(String(raw.impactedChannels ?? '')),
-        impactedFlows: cap(String(raw.impactedFlows ?? '')),
-        impactSabreLevel: cap(String(raw.impactSabreLevel ?? '')),
-        thirdPartyDependencies: cap(String(raw.thirdPartyDependencies ?? '')),
       };
 
       subject.next({ data: { type: 'proposal_ready', epic: proposed, timestamp: new Date().toISOString() } });
@@ -687,48 +863,104 @@ Cada epica que propongas DEBE pasar este checklist mental:
 - Listas de tecnologias sin contexto — no digas "Kubernetes, Istio, Datadog" solo por sonar tecnico. Solo menciona tech que la iniciativa REALMENTE necesita.
 - Beneficios inventados con porcentajes falsos — si no tienes datos reales, describe el impacto cualitativamente sin inventar numeros.
 
-## Ejemplo de una epica bien escrita
+## Ejemplo de \`markdown\` bien escrito (1 sola épica)
 
-<example>
-titulo: "Orquestador de routing multi-PSP con failover automatico"
-descripcion: "Implementar un router inteligente que distribuya transacciones entre DEUNA, Adyen y Stripe segun tasa de aprobacion historica por BIN y monto. Incluye failover automatico cuando un PSP reporta degradacion (circuit breaker con threshold de 3 fallos en 30s). Motivacion: hoy el 100% del volumen va a DEUNA y una caida de 20 min el 15-mar costo $180K en ventas perdidas."
-scopeDescription: "Router con 3 estrategias (round-robin, cost-optimized, approval-optimized), circuit breaker por PSP, panel de monitoreo con tasa de aprobacion en tiempo real, y conciliacion cruzada diaria."
-acceptanceCriteria: "Failover ejecuta en <5s. Tasa de aprobacion global sube de 89% a >=93% en los primeros 30 dias. Panel muestra routing decisions en tiempo real con latencia <2s."
-qualitativeBenefits: "Elimina el single point of failure en procesamiento de pagos. El equipo de ops deja de ser pager-duty humano durante caidas de DEUNA."
-</example>
+\`\`\`markdown
+## Objetivo
 
-Nota como el ejemplo:
-- Nombra proveedores REALES del contexto (no genericos)
-- Cuantifica el problema ($180K)
-- Los criterios son medibles (<5s, >=93%)
-- El alcance es concreto (3 estrategias, circuit breaker, panel, conciliacion)
+Implementar un router inteligente que distribuya transacciones entre DEUNA, Adyen y Stripe según tasa de aprobación histórica por BIN y monto. Incluye failover automático cuando un PSP reporta degradación (circuit breaker con threshold de 3 fallos en 30s). Motivación: hoy el 100% del volumen va a DEUNA y una caída de 20 min el 15-mar costó $180K en ventas perdidas.
+
+## Beneficios cualitativos
+
+- Elimina el single point of failure en procesamiento de pagos.
+- El equipo de ops deja de ser pager-duty humano durante caídas de DEUNA.
+- Habilita negociación con PSPs alternos al diversificar volumen.
+
+## Beneficios cuantitativos
+
+- Tasa de aprobación global sube de 89% a ≥93% en los primeros 30 días → +$420K mensuales recuperados.
+- Tiempo de mitigación de outage cae de ~20 min (humano) a <5s (automático).
+- Costo por transacción baja ~8% al rutear por PSP más barato cuando aprobación es comparable.
+
+## Medición de beneficios
+
+- Dashboard Datadog con tasa de aprobación global y por PSP (latencia <2s).
+- Evento \`payment.routed\` en BigQuery con \`{psp, decisionReason, approvalRate30d}\`.
+- Reporte semanal automatizado vía Looker.
+
+## Alcance
+
+EN alcance:
+- Router con 3 estrategias (round-robin, cost-optimized, approval-optimized).
+- Circuit breaker por PSP.
+- Panel de monitoreo con tasa de aprobación en tiempo real.
+- Conciliación cruzada diaria.
+
+NO en alcance:
+- Renegociación de contratos con PSPs (lo maneja Finanzas).
+- Soporte para criptopagos (futura iniciativa).
+
+## Criterios de aceptación
+
+1. Failover ejecuta en <5s end-to-end (medido p95).
+2. Tasa de aprobación global sube de 89% a ≥93% en los primeros 30 días post-launch.
+3. Panel muestra routing decisions en tiempo real con latencia <2s.
+4. Cada PSP tiene shadow-mode flag para A/B testing antes de habilitar producción.
+
+## Mejoras tecnológicas
+
+- Refactor del módulo \`payment-gateway\` para inyectar el router como middleware.
+- Capacidad de circuit breakers reutilizable (extraída a \`@cenzontle/resilience\`).
+- Telemetría estructurada estándar para todos los PSPs.
+
+## Canales y flujos impactados
+
+- Web checkout, app móvil, contact center (charge-on-call).
+- Flujos: charge, refund, void, partial-capture.
+- Sin impacto en sistemas externos Sabre/ERP — el routing es transparente downstream.
+
+## Dependencias de terceros
+
+- **DEUNA** (provider actual): API key + merchant ID (existente).
+- **Adyen** (nuevo): credenciales de sandbox + producción, contrato firmado.
+- **Stripe** (nuevo): API keys live + webhook signing secret.
+\`\`\`
+
+Nota cómo el ejemplo:
+- Nombra proveedores REALES del contexto (no genéricos).
+- Cuantifica el problema ($180K) y los beneficios ($420K).
+- Los criterios son medibles (<5s, ≥93%).
+- El alcance es explícito con inclusiones Y exclusiones.
+- NO incluye "Prioridad de negocio" ni "Equipos involucrados" — esos viven en \`priority\` y \`podIds\`.
 
 ## Formato de salida
 
-- Propon entre 3 y ${count} epicas llamando a \`submit_proposals\`.
+- Propón entre 3 y ${count} épicas llamando a \`submit_proposals\`.
 - Prioridad: critical = sin esto la iniciativa no puede avanzar, high = alto impacto directo, medium = importante pero no bloqueante, low = mejora incremental.
-- Pods: usa los IDs exactos de los pods proporcionados. Si no hay match claro, deja el array vacio.
-- Fechas: YYYY-MM-DD, escalonadas ~30 dias entre epicas.
-- Idioma: espanol.
-- Campos narrativos: especificos y concisos. Si no tienes info suficiente para un campo, dejalo vacio en vez de inventar.`;
+- Pods: usa los IDs exactos de los pods proporcionados. Si no hay match claro, deja el array vacío.
+- Fechas: YYYY-MM-DD, escalonadas ~30 días entre épicas.
+- \`markdown\`: UN solo string con los 9 headings level-2 obligatorios. Si no tienes info suficiente para un heading, escribe "Por definir tras descubrimiento adicional" — pero el heading debe existir, no lo omitas.
+- Idioma: español.`;
   }
 
   private buildContextBlock(
-    initiative: { name: string; description: string; startDate: Date; targetDate: Date; documents?: unknown },
+    initiative: { name: string; description: string; startDate: Date | null; targetDate: Date | null; documents?: unknown },
     pods: { id: string; name: string; description: string }[],
     existingEpics: string,
     enabledRepos: Array<{ name: string; branch: string }>,
     userPrompt?: string,
   ): string {
-    const startDate = initiative.startDate.toISOString().slice(0, 10);
-    const targetDate = initiative.targetDate.toISOString().slice(0, 10);
+    // Las fechas son opcionales — una iniciativa en planning puede no tenerlas.
+    // Si faltan, indicamos al agente que estime las fechas escalonadas él mismo.
+    const startDate = initiative.startDate?.toISOString().slice(0, 10) ?? 'sin definir';
+    const targetDate = initiative.targetDate?.toISOString().slice(0, 10) ?? 'sin definir';
     const docs = Array.isArray(initiative.documents) ? initiative.documents : [];
     const hasDocuments = docs.length > 0;
 
     const parts = [
       `<initiative>
 nombre: ${initiative.name}
-fechas: ${startDate} -> ${targetDate}
+fechas: ${startDate} -> ${targetDate}${initiative.startDate && initiative.targetDate ? '' : ' (la iniciativa está en planning sin compromiso temporal — propón fechas razonables escalonadas para las épicas)'}
 documentos_adjuntos: ${hasDocuments ? `${docs.length} documento(s) — USA read_initiative_documents para leerlos` : 'ninguno'}
 
 ${initiative.description}

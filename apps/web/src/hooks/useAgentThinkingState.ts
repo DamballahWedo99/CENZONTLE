@@ -108,6 +108,16 @@ function processEvents(events: AgentThinkingEvent[]): ThinkingState {
       case 'phase_change':
         currentPhase = event.phase;
         phaseLabel = event.label;
+        // Si todavía no tenemos `runStartedAt` (caso típico de eventos
+        // filtrados por role en el timeline multi-agente — el slice del
+        // sub-agente NO tiene un `run_started` propio, pero SÍ recibe un
+        // `phase_change` específico de su rol al arrancar), usamos el
+        // timestamp del primer phase_change como inicio. Esto da un tiempo
+        // por sub-agente que refleja CUÁNDO ARRANCÓ ESE sub-agente, no
+        // cuándo arrancó el run global.
+        if (runStartedAt === null) {
+          runStartedAt = getTimestamp(event);
+        }
         // Finalizar el thinking block anterior en cambios de fase, para que el
         // auto-checklist del draft_diagram aparezca como un bloque visual
         // separado del razonamiento previo del LLM. Sin esto, los deltas
@@ -254,9 +264,58 @@ function processEvents(events: AgentThinkingEvent[]): ThinkingState {
   // Infer phase if no explicit phase events (backward compat with old backend)
   if (currentPhase === 'idle' && blocks.length > 0) {
     currentPhase = 'researching';
-    isRunning = blocks.some(
-      (b) => (b.kind === 'thinking' && b.isActive) || (b.kind === 'tool_call' && b.status === 'active'),
-    );
+  }
+
+  // Fallback de runStartedAt: cuando los events son filtrados (e.g., por role
+  // en el timeline multi-agente de historias), NO hay `run_started` propio
+  // del slice — pero sí hay events. Tomamos el timestamp del primer event
+  // como aproximación del inicio. Sin esto, el chip de tiempo no se mostraría
+  // para sub-cadenas filtradas.
+  if (runStartedAt === null && events.length > 0) {
+    runStartedAt = getTimestamp(events[0]);
+  }
+
+  // Fallback de duración: si tenemos `runStartedAt` pero no llegó un
+  // `run_finished` (run abortado, cache hidratado stale, cliente cerró
+  // antes del terminal event), derivamos el tiempo del último event.
+  // Esto garantiza que el header SIEMPRE muestre cuánto tardó el agente
+  // — el user pidió que todos los flujos lo digan, así que cubrimos
+  // todos los casos edge en este punto único.
+  if (totalDurationMs === null && runStartedAt !== null && events.length > 0) {
+    const lastEvent = events[events.length - 1];
+    const lastTs = getTimestamp(lastEvent);
+    if (lastTs > runStartedAt) {
+      totalDurationMs = lastTs - runStartedAt;
+    }
+  }
+
+  // El backend del diagrama tiene un flujo multi-agente: el agente principal
+  // emite `run_started` → trabaja → `run_finished`, y DESPUÉS arranca un
+  // segundo agente (`layout_pass`) que emite su propio `run_started` y
+  // `run_finished`. Entre el primer `run_finished` y el segundo `run_started`,
+  // pueden llegar `phase_change` + `thinking` deltas — pero `isRunning` se
+  // habría quedado en `false` desde el primer terminal event, ocultando la
+  // UI del thinking activo.
+  //
+  // Solución: si hay bloques activos (thinking en stream o tool_call en
+  // ejecución) Y no hay error, OVERRIDE isRunning a true. Los terminal
+  // events (run_finished/done) cierran los activos antes, así que post-fin
+  // real no quedan bloques activos y isRunning es correctamente false.
+  //
+  // También revertimos `currentPhase` cuando estaba stuck en 'done': el primer
+  // `run_finished` lo dejaba ahí, pero si después hay actividad real (sub-
+  // agente) el label "Completado" mostraba info engañosa. Lo regresamos a
+  // 'analyzing' como default neutral hasta que el siguiente phase_change
+  // explícito lo refine.
+  const hasActiveBlocks = blocks.some(
+    (b) => (b.kind === 'thinking' && b.isActive) || (b.kind === 'tool_call' && b.status === 'active'),
+  );
+  if (hasActiveBlocks && !error) {
+    isRunning = true;
+    if (currentPhase === 'done') {
+      currentPhase = 'analyzing';
+      phaseLabel = 'Analizando';
+    }
   }
 
   return {

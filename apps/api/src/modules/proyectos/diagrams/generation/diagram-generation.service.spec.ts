@@ -54,6 +54,7 @@ function createService(): DiagramGenerationService {
     emptyStub,  // DiagramCacheService
     emptyStub,  // ChangelogService
     emptyStub,  // VaultService
+    emptyStub,  // AgentTokenSettingsService
   );
 }
 

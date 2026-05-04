@@ -78,6 +78,22 @@ export const DEFAULT_INTEGRATION_CONFIG: IntegrationConfig = {
   jira: null,
 };
 
+/**
+ * Shape de respuesta canónica para `GET/PUT /integrations/:provider`.
+ * Compartido entre backend (DTO) y frontend (client API). NUNCA contiene la
+ * apiKey en plaintext — siempre `maskedKey` (ej: "lin****a3f2").
+ */
+export interface IntegrationConfigResponse {
+  provider: IntegrationProvider;
+  status: ConnectionStatus;
+  maskedKey: string;
+  metadata: LinearConfig | JiraConfig;
+  lastTestedAt: string | null;
+  lastSyncedAt: string | null;
+  lastError: string | null;
+  updatedAt: string;
+}
+
 // === GITHUB / REPOSITORY CONFIGURATION ===
 
 export interface GitHubConfig {

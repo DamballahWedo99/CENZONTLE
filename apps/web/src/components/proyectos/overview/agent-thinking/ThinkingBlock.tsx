@@ -99,10 +99,17 @@ function truncateByCodePoint(text: string, maxChars: number): string {
 export function ThinkingBlock({ text, isActive }: ThinkingBlockProps) {
   const [expanded, setExpanded] = useState(false);
   const isLong = text.length > MAX_COLLAPSED_LENGTH;
+  // Mientras el block est\u00e1 STREAMING (`isActive=true`), siempre mostramos
+  // texto completo \u2014 el user necesita ver el thinking en vivo aunque pase
+  // de 400 chars. Sin esto, el texto se truncaba silenciosamente y el
+  // bot\u00f3n "Mostrar m\u00e1s" no aparec\u00eda hasta que el block se cerrara,
+  // dando la sensaci\u00f3n de que la generaci\u00f3n estaba "trabada".
+  // Solo colapsamos cuando el block ya cerr\u00f3 (isActive=false), que es
+  // cuando el bot\u00f3n "Mostrar m\u00e1s" se renderiza para expandir/colapsar.
   const displayText =
-    !expanded && isLong
-      ? truncateByCodePoint(text, MAX_COLLAPSED_LENGTH) + '\u2026'
-      : text;
+    isActive || expanded || !isLong
+      ? text
+      : truncateByCodePoint(text, MAX_COLLAPSED_LENGTH) + '\u2026';
 
   return (
     <div className="animate-[agent-slide-in_200ms_ease-out] py-1.5">

@@ -319,17 +319,32 @@ function humanizeFilename(filename: string): string {
  *
  * Filtrado:
  * - `.gitkeep` se omite (marcador para folders vacíos, no debe aparecer en UI)
- * - Archivos no-markdown se omiten
- * - Folders vacíos se conservan (sin children después del filtrado)
+ * - Archivos ocultos (empiezan con `.`) se omiten
+ * - Archivos texto soportados se MUESTRAN: markdown + assets de bundles de
+ *   diseño (HTML, CSS, JS, JSON, SVG, TXT, YAML, XML). Antes solo
+ *   mostrábamos `.md`, lo que ocultaba los archivos descomprimidos de
+ *   bundles de Claude Design — el user veía las carpetas `project/` vacías
+ *   aunque los HTMLs sí estaban commiteados al repo.
+ * - Otros archivos (binarios, extensiones desconocidas) se ocultan.
+ * - Folders vacíos se conservan (sin children después del filtrado).
  */
+const SHOWN_FILE_EXTENSIONS = [
+  '.md', '.html', '.htm', '.css', '.js', '.jsx', '.ts', '.tsx',
+  '.json', '.txt', '.svg', '.xml', '.yaml', '.yml',
+];
+
 function vaultTreeToDefinicionNodes(vaultNodes: VaultTreeNode[]): DefinicionNode[] {
   const out: DefinicionNode[] = [];
   const now = new Date().toISOString();
 
   for (const v of vaultNodes) {
-    // Ocultar archivos/folders ocultos (empiezan con .) y no-markdown
+    // Ocultar archivos/folders ocultos (empiezan con .)
     if (v.name.startsWith('.')) continue;
-    if (v.type === 'file' && !v.name.endsWith('.md')) continue;
+    if (v.type === 'file') {
+      const lowerName = v.name.toLowerCase();
+      const hasShownExt = SHOWN_FILE_EXTENSIONS.some((ext) => lowerName.endsWith(ext));
+      if (!hasShownExt) continue;
+    }
 
     const displayName = v.type === 'file' ? humanizeFilename(v.name) : v.name;
 
@@ -923,6 +938,10 @@ interface DefinicionesContextValue {
   vaults: VaultConfigApi[];
   vaultsLoaded: boolean;
   activeVaultId: string | null;
+  /** Vault que el user está VIENDO (puede diferir del activo). null = ver el activo. */
+  viewingVaultId: string | null;
+  /** ID efectivo: viewing si hay override, sino active. */
+  effectiveVaultId: string | null;
   switchVault: (vaultId: string) => Promise<void>;
   reloadVaults: () => Promise<void>;
   selectNode: (id: string | null) => void;
@@ -976,6 +995,12 @@ export function DefinicionesProvider({ children }: { children: ReactNode }) {
   const contentCache = useRef<Set<string>>(new Set());
   const frontmatterCache = useRef<Map<string, string>>(new Map());
 
+  // Ref que tracking el vaultId override del browse-mode. Necesario porque
+  // `reloadTree` y `loadFile` se declaran antes que el state `viewingVaultId`
+  // y sus closures necesitan leer el valor actual sin re-crearse en cada
+  // cambio (lo cual rompería los useEffect deps).
+  const browseVaultIdRef = useRef<string | undefined>(undefined);
+
   // === Async loader: fetch tree from GitHub vault ===
   const reloadTree = useCallback(async () => {
     // Solo mostrar spinner en la carga inicial (tree vacío).
@@ -990,7 +1015,9 @@ export function DefinicionesProvider({ children }: { children: ReactNode }) {
     contentCache.current.clear();
     frontmatterCache.current.clear();
     try {
-      const vaultTree = await getVaultTree(VAULT_ROOT);
+      // Lee del vault que el user está VIENDO (puede ser distinto del activo
+      // si abrió otro desde el dropdown). Sin override, lee del activo.
+      const vaultTree = await getVaultTree(VAULT_ROOT, browseVaultIdRef.current);
       const mapped = vaultTreeToDefinicionNodes(vaultTree);
       dispatch({ type: 'LOAD_TREE_SUCCESS', tree: mapped });
     } catch (err: any) {
@@ -1022,12 +1049,32 @@ export function DefinicionesProvider({ children }: { children: ReactNode }) {
 
   const [vaultsLoaded, setVaultsLoaded] = useState(false);
 
+  // viewingVaultId — vault que el user está VIENDO en la UI. Independiente
+  // del vinculado (`activeVaultId`). Cambiar el dropdown navega entre vaults
+  // sin alterar dónde se ESCRIBE — el "vínculo" se cambia solo desde Settings.
+  // Default null = ver el vault vinculado (comportamiento sin override).
+  const [viewingVaultId, setViewingVaultId] = useState<string | null>(null);
+
+  // El vault efectivamente mostrado: el viewing si existe, sino el active.
+  const effectiveVaultId = viewingVaultId ?? activeVaultId;
+
+  // Helper: pasa vaultId a las APIs de read solo cuando es DIFERENTE al activo.
+  // Pasar undefined hace que el backend lea del activo (default behavior).
+  // Esto evita query strings con vaultId redundante cuando viewing === active.
+  const browseVaultId = viewingVaultId && viewingVaultId !== activeVaultId ? viewingVaultId : undefined;
+
+  // Sincronizar el ref para que las closures de `reloadTree`/`loadFile`
+  // (declaradas antes en el archivo) puedan leer el browse override actual.
+  useEffect(() => {
+    browseVaultIdRef.current = browseVaultId;
+  }, [browseVaultId]);
+
   const reloadVaults = useCallback(async () => {
     try {
       const data = await getAccessibleVaultConfigs();
       setAllVaults(data);
-    } catch (err: any) {
-      console.error('[DefinicionesContext] Failed to load vault configs', err);
+    } catch {
+      /* fail-soft: el state vacío activa el empty-state legítimo de la UI */
     } finally {
       setVaultsLoaded(true);
     }
@@ -1037,19 +1084,31 @@ export function DefinicionesProvider({ children }: { children: ReactNode }) {
     void reloadVaults();
   }, [reloadVaults]);
 
+  // Si el user borra/cambia el activo, y el viewing apunta a un vault que
+  // ya no es accesible, resetear viewing a null (volver al activo).
+  useEffect(() => {
+    if (viewingVaultId && !vaults.find((v) => v.id === viewingVaultId)) {
+      setViewingVaultId(null);
+    }
+  }, [vaults, viewingVaultId]);
+
   const switchVault = useCallback(async (vaultId: string) => {
     const target = vaults.find((v) => v.id === vaultId);
-    if (!target || target.isActive) return;
-    try {
-      await activateVaultConfig(vaultId);
-      toast.success(`Cambiado a vault "${target.name}"`);
-      // Actualizar lista de vaults (nuevo activo) y recargar el árbol del nuevo vault
-      await reloadVaults();
-      await reloadTree();
-    } catch (err: any) {
-      toast.error(`Error cambiando de vault: ${err?.message ?? 'error desconocido'}`);
+    if (!target) return;
+    // Si el target es el activo, simplemente reset viewing (no override).
+    if (target.isActive) {
+      setViewingVaultId(null);
+      return;
     }
-  }, [vaults, reloadVaults, reloadTree]);
+    // Cambia el vault VISTO (no toca el isActive en BD). Las carpetas/docs
+    // que se creen aquí van al vault visto. Las épicas/historias siguen
+    // yendo al vault vinculado (el isActive de la BD).
+    setViewingVaultId(vaultId);
+    toast.success(`Viendo vault "${target.name}"`, {
+      description: 'Carpetas/docs manuales se guardan aquí. Épicas/historias van al vault vinculado.',
+    });
+    await reloadTree();
+  }, [vaults, reloadTree]);
 
   // === Sincronizar roleDefaults del vault activo al state ===
   useEffect(() => {
@@ -1066,7 +1125,8 @@ export function DefinicionesProvider({ children }: { children: ReactNode }) {
 
   // === Tree load condicionado a que haya vaults accesibles ===
   // Si el usuario no tiene ningún vault permitido, no carga el tree (empty state).
-  // Si tiene al menos uno, carga al montar y al cambiar de vault.
+  // Recarga al montar, al cambiar el activo, y al cambiar el viewing override
+  // (cuando el user navega a otro vault desde el dropdown).
   useEffect(() => {
     if (vaults.length === 0) {
       // Sin vaults accesibles → limpiar tree
@@ -1074,14 +1134,14 @@ export function DefinicionesProvider({ children }: { children: ReactNode }) {
       return;
     }
     void reloadTree();
-  }, [vaults.length > 0, activeVaultId, reloadTree]);
+  }, [vaults.length > 0, effectiveVaultId, reloadTree]);
 
   // === Changelog from git history ===
-  // Se recarga cada vez que cambia el vault activo para mostrar
-  // solo los commits del vault seleccionado.
+  // Se recarga cada vez que cambia el vault VISTO (active o browse override)
+  // para mostrar los commits del vault que el user está mirando.
   useEffect(() => {
-    if (!activeVaultId) return;
-    getVaultChangelog(50)
+    if (!effectiveVaultId) return;
+    getVaultChangelog(50, browseVaultId)
       .then((commits) => {
         const entries: ChangelogEntry[] = commits
           // Filtrar commits de config interna — no son documentos del usuario
@@ -1112,10 +1172,8 @@ export function DefinicionesProvider({ children }: { children: ReactNode }) {
         // REPLACE, no merge — cada vault tiene su propio historial de commits
         dispatch({ type: 'LOAD_CHANGELOG', entries });
       })
-      .catch((err) => {
-        console.error('[DefinicionesContext] Failed to load changelog', err);
-      });
-  }, [activeVaultId]);
+      .catch(() => {});
+  }, [effectiveVaultId, browseVaultId]);
 
   // === Per-folder access config persistence ===
   // Carga `.cenzontle/access.json` del vault al cambiar de vault activo.
@@ -1154,9 +1212,8 @@ export function DefinicionesProvider({ children }: { children: ReactNode }) {
         ACCESS_CONFIG_PATH,
         JSON.stringify(config, null, 2),
         'config(vault): update folder access permissions',
-      ).catch((err) => {
-        console.error('[DefinicionesContext] Failed to save access config', err);
-      });
+        browseVaultIdRef.current,
+      ).catch(() => {});
     }, 1500); // Debounce 1.5s para no hacer un commit por cada click de radio button
   }, []);
 
@@ -1191,7 +1248,8 @@ export function DefinicionesProvider({ children }: { children: ReactNode }) {
 
     for (const doc of docsToLoad) {
       contentCache.current.add(doc.id);
-      getVaultFile(doc.id)
+      // Lee del vault que el user está VIENDO (browse override si aplica).
+      getVaultFile(doc.id, browseVaultIdRef.current)
         .then((file) => {
           // Separar frontmatter del body
           const { frontmatter, body } = splitFrontmatter(file.content);
@@ -1225,7 +1283,6 @@ export function DefinicionesProvider({ children }: { children: ReactNode }) {
         })
         .catch((err) => {
           contentCache.current.delete(doc.id);
-          console.error('[DefinicionesContext] Failed to load file content', err);
           toast.error(`No se pudo cargar el archivo: ${err?.message ?? 'error desconocido'}`);
         });
     }
@@ -1301,7 +1358,7 @@ export function DefinicionesProvider({ children }: { children: ReactNode }) {
       // (id, type, initiativeId, created, etc.) que el backend necesita para parsear.
       const frontmatter = frontmatterCache.current.get(id) ?? null;
       const fullContent = joinFrontmatter(frontmatter, content);
-      await writeVaultFile(id, fullContent, `docs(vault): update ${id}`);
+      await writeVaultFile(id, fullContent, `docs(vault): update ${id}`, browseVaultIdRef.current);
     } catch (err: any) {
       if (previousContent !== undefined) {
         dispatch({ type: 'UPDATE_CONTENT', id, content: previousContent });
@@ -1334,7 +1391,7 @@ export function DefinicionesProvider({ children }: { children: ReactNode }) {
     dispatch({ type: 'ADD_FOLDER', parentId, name, node: newNode });
     try {
       // Git no trackea folders vacíos — creamos un .gitkeep como marcador
-      await writeVaultFile(gitkeepPath, '', `feat(vault): create folder ${folderPath}`);
+      await writeVaultFile(gitkeepPath, '', `feat(vault): create folder ${folderPath}`, browseVaultIdRef.current);
       toast.success(`Folder "${name}" creado`);
     } catch (err: any) {
       dispatch({ type: 'DELETE_NODE', id: folderPath });
@@ -1366,7 +1423,7 @@ export function DefinicionesProvider({ children }: { children: ReactNode }) {
     // Optimistic
     dispatch({ type: 'ADD_DOCUMENT', parentId, name, node: newNode });
     try {
-      await writeVaultFile(docPath, initialContent, `feat(vault): create ${docPath}`);
+      await writeVaultFile(docPath, initialContent, `feat(vault): create ${docPath}`, browseVaultIdRef.current);
     } catch (err: any) {
       dispatch({ type: 'DELETE_NODE', id: docPath });
       toast.error(`Error creando documento: ${err?.message ?? 'error desconocido'}`);
@@ -1382,18 +1439,17 @@ export function DefinicionesProvider({ children }: { children: ReactNode }) {
     dispatch({ type: 'DELETE_NODE', id });
 
     try {
+      const browseId = browseVaultIdRef.current;
       if (node.type === 'document') {
-        await deleteVaultFile(id, `chore(vault): delete ${id}`);
+        await deleteVaultFile(id, `chore(vault): delete ${id}`, browseId);
       } else {
         // Folder: recursive delete of all descendant files
         const descendantFiles = collectDescendantFilePaths(node);
         for (const filePath of descendantFiles) {
-          await deleteVaultFile(filePath, `chore(vault): delete ${filePath}`).catch((err) => {
-            console.warn(`[deleteNode] Failed to delete ${filePath}`, err);
-          });
+          await deleteVaultFile(filePath, `chore(vault): delete ${filePath}`, browseId).catch(() => {});
         }
         // También borrar el .gitkeep si existía
-        await deleteVaultFile(`${id}/.gitkeep`, `chore(vault): delete folder marker ${id}`).catch(() => {});
+        await deleteVaultFile(`${id}/.gitkeep`, `chore(vault): delete folder marker ${id}`, browseId).catch(() => {});
       }
       toast.success(`Eliminado "${node.name}"`);
     } catch (err: any) {
@@ -1424,21 +1480,22 @@ export function DefinicionesProvider({ children }: { children: ReactNode }) {
       try {
         // Recopilar todos los archivos descendientes del folder
         const descendantFiles = collectDescendantFilePaths(node);
+        const browseId = browseVaultIdRef.current;
 
         // Mover cada archivo: leer contenido → escribir en nueva ruta → borrar vieja
         for (const filePath of descendantFiles) {
           const relativePart = filePath.slice(oldFolderPath.length); // ej: /subfolder/doc.md
           const newFilePath = newFolderPath + relativePart;
 
-          const fileContent = await getVaultFile(filePath).then(f => f.content).catch(() => '');
-          await writeVaultFile(newFilePath, fileContent, `docs(vault): rename folder ${oldFolderPath} → ${newFolderPath}`);
-          await deleteVaultFile(filePath, `chore(vault): cleanup old path ${filePath}`);
+          const fileContent = await getVaultFile(filePath, browseId).then(f => f.content).catch(() => '');
+          await writeVaultFile(newFilePath, fileContent, `docs(vault): rename folder ${oldFolderPath} → ${newFolderPath}`, browseId);
+          await deleteVaultFile(filePath, `chore(vault): cleanup old path ${filePath}`, browseId);
         }
 
         // Mover el .gitkeep si existe
         try {
-          await writeVaultFile(`${newFolderPath}/.gitkeep`, '', `chore(vault): gitkeep for ${newFolderPath}`);
-          await deleteVaultFile(`${oldFolderPath}/.gitkeep`, `chore(vault): cleanup old gitkeep`).catch(() => {});
+          await writeVaultFile(`${newFolderPath}/.gitkeep`, '', `chore(vault): gitkeep for ${newFolderPath}`, browseId);
+          await deleteVaultFile(`${oldFolderPath}/.gitkeep`, `chore(vault): cleanup old gitkeep`, browseId).catch(() => {});
         } catch { /* puede no existir */ }
 
         await reloadTree();
@@ -1471,9 +1528,9 @@ export function DefinicionesProvider({ children }: { children: ReactNode }) {
       const fullContent = frontmatter ? `${frontmatter}\n\n${body}` : body;
 
       // Escribir con nuevo path
-      await writeVaultFile(newPath, fullContent, `docs(vault): rename ${id} → ${newPath}`);
+      await writeVaultFile(newPath, fullContent, `docs(vault): rename ${id} → ${newPath}`, browseVaultIdRef.current);
       // Borrar el viejo
-      await deleteVaultFile(id, `chore(vault): delete old path ${id}`);
+      await deleteVaultFile(id, `chore(vault): delete old path ${id}`, browseVaultIdRef.current);
 
       // Actualizar caches
       if (frontmatter) {
@@ -1598,6 +1655,8 @@ export function DefinicionesProvider({ children }: { children: ReactNode }) {
     vaults,
     vaultsLoaded,
     activeVaultId,
+    viewingVaultId,
+    effectiveVaultId,
     switchVault,
     reloadVaults,
     selectNode,
@@ -1620,7 +1679,7 @@ export function DefinicionesProvider({ children }: { children: ReactNode }) {
     updateAccess,
     removeAccess,
     setRoleDefault,
-  }), [state, selectedNode, filteredTree, unfilteredTree, reloadTree, vaults, vaultsLoaded, activeVaultId, switchVault, reloadVaults, selectNode, toggleFolder, expandFolder, setSearch, toggleEditing, updateContent, addFolder, addDocument, renameNode, updateTags, deleteNode, setSortBy, expandAll, collapseAll, getEffectiveAccessForNode, setInheritance, addAccess, updateAccess, removeAccess, setRoleDefault]);
+  }), [state, selectedNode, filteredTree, unfilteredTree, reloadTree, vaults, vaultsLoaded, activeVaultId, viewingVaultId, effectiveVaultId, switchVault, reloadVaults, selectNode, toggleFolder, expandFolder, setSearch, toggleEditing, updateContent, addFolder, addDocument, renameNode, updateTags, deleteNode, setSortBy, expandAll, collapseAll, getEffectiveAccessForNode, setInheritance, addAccess, updateAccess, removeAccess, setRoleDefault]);
 
   return (
     <DefinicionesContext.Provider value={value}>

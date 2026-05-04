@@ -32,6 +32,22 @@ export async function invalidateCache(initiativeId: string): Promise<void> {
   });
 }
 
+/**
+ * Cancela el run de generación activo en el backend (aborta el agente Anthropic
+ * y limpia el cache). Idempotente: si no hay run activo, igual limpia el cache.
+ *
+ * El frontend lo llama desde `handleCancelAgent` para que cuando el user da
+ * click en "Cancelar", el agente se detenga inmediatamente — no solo el SSE
+ * local. Sin esto, el agente seguiría corriendo en background hasta el
+ * timeout server-side de 10min.
+ */
+export async function cancelEpicGeneration(initiativeId: string): Promise<void> {
+  await apiFetch<{ ok: boolean; hadActiveRun: boolean }>(
+    `/proyectos/epic-generation/${initiativeId}/active`,
+    { method: 'DELETE' },
+  );
+}
+
 export async function removeCachedProposal(
   initiativeId: string,
   clientId: string,

@@ -135,16 +135,41 @@ export class VaultCloneService implements OnModuleInit {
   }
 
   /**
+   * Set en memoria de vaults con cambios pendientes de sincronizar al clone
+   * local. Marcado por `scheduleClone` (típicamente tras writeNote/deleteNote
+   * del agente o user). Consultado por `ensureFresh` para FORZAR un pull
+   * aunque el clone parezca fresh por timestamp — evita que tools como
+   * vault_glob/grep/read lean del clone stale tras escrituras recientes.
+   *
+   * Persistencia in-memory por proceso. Si el server reinicia, el flag se
+   * pierde — pero `lastPulledAt` en BD ya cubre ese caso (al reiniciar,
+   * el primer ensureFresh encontrará el clone "viejo" por edad y hará pull).
+   */
+  private readonly pendingSyncs = new Set<string>();
+
+  /**
    * Fire-and-forget: programa un clone en background. Actualiza DB con status.
    * Usado por: create/update/activate del controller, Y por VaultService
    * tras cada writeNote/deleteNote para invalidar el clone inmediatamente.
+   *
+   * Marca el vault como `pendingSyncs` para que el próximo `ensureFresh`
+   * fuerce un pull aunque el clone parezca fresh — el background pull
+   * puede tardar 1-2s y el agente típicamente busca con `vault_glob` justo
+   * después de escribir. Sin esta señal, el glob lee del clone stale.
    */
   scheduleClone(vaultId: string): void {
+    this.logger.log(`[scheduleClone] triggered vault=${vaultId} pendingSize=${this.pendingSyncs.size + 1}`);
+    this.pendingSyncs.add(vaultId);
     void this.withLock(vaultId, async () => {
       try {
         await this.doCloneOrPull(vaultId);
+        this.pendingSyncs.delete(vaultId);
+        this.logger.log(`[scheduleClone] completed vault=${vaultId} pendingFlag=cleared`);
       } catch (err: any) {
-        this.logger.warn(`[scheduleClone] failed for ${vaultId}: ${scrubSecrets(err.message ?? String(err))}`);
+        this.logger.warn(`[scheduleClone] failed vault=${vaultId} flagRetained=true error="${scrubSecrets(err.message ?? String(err))}"`);
+        // Mantener el vault en pendingSyncs — el próximo ensureFresh va a
+        // intentar pull de nuevo. Sin esto, un pull fallido dejaría el
+        // clone permanentemente stale hasta que pase el maxAge.
       }
     });
   }
@@ -158,11 +183,32 @@ export class VaultCloneService implements OnModuleInit {
     if (!vault) throw new Error(`Vault ${vaultId} not found`);
 
     const needsClone = vault.cloneStatus !== 'ready';
-    const isStale = !needsClone && (!vault.lastPulledAt || Date.now() - vault.lastPulledAt.getTime() > maxAgeMs);
+    const ageMs = vault.lastPulledAt ? Date.now() - vault.lastPulledAt.getTime() : Infinity;
+    const isStale = !needsClone && ageMs > maxAgeMs;
+    // Pending sync override: si el agente acaba de escribir al vault vía
+    // writeNote/deleteNote, scheduleClone marcó el vault como pending. Forzamos
+    // pull aunque el clone parezca fresh por timestamp — el writeNote modificó
+    // el remoto pero el clone local no lo refleja todavía.
+    const hasPendingSync = this.pendingSyncs.has(vaultId);
 
-    if (!needsClone && !isStale) return;
+    if (!needsClone && !isStale && !hasPendingSync) {
+      this.logger.debug(
+        `[ensureFresh] skip vault=${vaultId} status=ready age=${Math.round(ageMs / 1000)}s pending=false`,
+      );
+      return;
+    }
+
+    const reason = needsClone
+      ? `status=${vault.cloneStatus}`
+      : hasPendingSync
+        ? 'pendingSync (recent write)'
+        : `stale (age=${Math.round(ageMs / 1000)}s > maxAge=${Math.round(maxAgeMs / 1000)}s)`;
+    this.logger.log(`[ensureFresh] pulling vault=${vaultId} reason="${reason}"`);
 
     await this.withLock(vaultId, () => this.doCloneOrPull(vaultId));
+    // Limpiar el flag tras pull exitoso. Si falla, el flag permanece y el
+    // próximo ensureFresh reintenta.
+    this.pendingSyncs.delete(vaultId);
   }
 
   /**
@@ -266,14 +312,34 @@ export class VaultCloneService implements OnModuleInit {
       const authUrl = this.authUrl(config.owner, config.repo, token);
       const cleanUrl = this.cleanUrl(config.owner, config.repo);
 
+      // Capturar SHA actual antes del fetch para diagnosticar si el pull avanzó.
+      let oldSha: string | null = null;
+      if (hasGitDir) {
+        try {
+          oldSha = (await simpleGit(dest).revparse(['HEAD'])).trim();
+        } catch {
+          // .git existe pero corrupto — el fetch/reset abajo lo recuperará
+        }
+      }
+      this.logger.log(
+        `[doCloneOrPull] start vault=${vaultId} mode=${hasGitDir ? `pull (current=${oldSha?.slice(0, 7) ?? 'unknown'})` : 'fresh-clone'} branch=${config.branch}`,
+      );
+
       if (hasGitDir) {
         const git = simpleGit(dest);
         // Defensa en profundidad: si un clon previo persistió el PAT en
         // `.git/config`, lo reescribimos antes de cualquier operación.
-        // fetch(authUrl, branch) pasa la URL como argumento de línea de
-        // comando — NO se persiste en config.
+        // El authUrl se pasa como argumento explícito en cada fetch — no
+        // se persiste en config.
         await git.remote(['set-url', 'origin', cleanUrl]);
-        await git.fetch(authUrl, config.branch);
+        // Refspec explícito: sin él, `git fetch <url> <branch>` es anónimo —
+        // solo actualiza FETCH_HEAD, NO refs/remotes/origin/<branch>. Eso
+        // hacía que el siguiente `git reset --hard origin/<branch>` reseteara
+        // contra un origin/<branch> stale, dejando el clone permanentemente
+        // en el commit inicial sin importar cuántas veces se llamara pull.
+        // El `+` al inicio fuerza fast-forward + non-fast-forward updates.
+        const refspec = `+refs/heads/${config.branch}:refs/remotes/origin/${config.branch}`;
+        await git.raw(['fetch', authUrl, refspec]);
         await git.checkout(config.branch);
         await git.reset(['--hard', `origin/${config.branch}`]);
       } else {
@@ -311,6 +377,17 @@ export class VaultCloneService implements OnModuleInit {
 
       const sha = (await simpleGit(dest).revparse(['HEAD'])).trim();
 
+      // Conteo de archivos commiteados — verifica que el reset --hard trajo
+      // el árbol esperado. `git ls-tree -r HEAD --name-only` es O(1) en el
+      // tamaño del working tree (lee del index, no del filesystem).
+      let fileCount = 0;
+      try {
+        const lsTree = await simpleGit(dest).raw(['ls-tree', '-r', 'HEAD', '--name-only']);
+        fileCount = lsTree.split('\n').filter(Boolean).length;
+      } catch {
+        // best-effort — el conteo es solo diagnóstico, no debe fallar el pull
+      }
+
       await this.prisma.vaultConfig.update({
         where: { id: vaultId },
         data: {
@@ -322,7 +399,11 @@ export class VaultCloneService implements OnModuleInit {
         },
       });
 
-      this.logger.log(`[doCloneOrPull] ${vaultId} ready at ${sha.slice(0, 7)}`);
+      const changed = oldSha && oldSha !== sha;
+      const transition = oldSha
+        ? `${oldSha.slice(0, 7)} → ${sha.slice(0, 7)} ${changed ? '(updated)' : '(no changes)'}`
+        : sha.slice(0, 7);
+      this.logger.log(`[doCloneOrPull] success vault=${vaultId} ${transition} files=${fileCount}`);
       return { sha };
     } catch (err: any) {
       const scrubbed = scrubSecrets(String(err?.message ?? err));
@@ -333,6 +414,7 @@ export class VaultCloneService implements OnModuleInit {
           lastSyncError: scrubbed.slice(0, 500),
         },
       });
+      this.logger.error(`[doCloneOrPull] FAILED vault=${vaultId} error="${scrubbed}"`);
       throw new Error(scrubbed);
     }
   }

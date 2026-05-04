@@ -35,15 +35,24 @@ describe('mergeDiscoveredDependencies', () => {
     });
   });
 
-  describe('dedup por vendor+type', () => {
-    it('colapsa "Stripe" TL + "stripe" QA a una sola entry (case-insensitive)', () => {
+  describe('dedup por vendor+normalizedTitle', () => {
+    // Decisión documentada en `deps-merger.ts`: la key de dedup es
+    // `vendor + normalizedTitle`, paritaria con `dedupCrossStoriesPure`.
+    // Antes la key era `vendor + type` lo cual era buggy: colapsaba deps
+    // realmente distintas con mismo vendor (ej. "Stripe API Key" vs
+    // "Stripe Webhooks Service") y NO colapsaba aliases nominales del
+    // mismo concepto (ej. "VERCEL_TOKEN" vs "GitHub Secret: VERCEL_TOKEN").
+
+    it('colapsa "Stripe API Key" TL + "stripe api key" QA (case-insensitive vendor + title)', () => {
       const tl = [dep({ title: 'Stripe API Key', vendor: 'Stripe', type: 'api' })];
-      const qa = [dep({ title: 'Stripe SDK mock', vendor: 'stripe', type: 'api' })];
+      const qa = [dep({ title: 'stripe api key', vendor: 'stripe', type: 'api' })];
       const result = mergeDiscoveredDependencies(tl, qa);
       expect(result).toHaveLength(1);
     });
 
-    it('mantiene separadas dos deps del mismo vendor pero distinto type', () => {
+    it('mantiene separadas dos deps del mismo vendor pero TÍTULOS distintos', () => {
+      // Antes este test verificaba "distinto type". Ahora distinto type
+      // ya no separa — el discriminador real es el title.
       const tl = [
         dep({ title: 'Stripe API Key', vendor: 'Stripe', type: 'api' }),
         dep({ title: 'Stripe Webhooks Service', vendor: 'Stripe', type: 'service' }),
@@ -52,9 +61,19 @@ describe('mergeDiscoveredDependencies', () => {
       expect(result).toHaveLength(2);
     });
 
-    it('trim del vendor: "Stripe " y "Stripe" se tratan como uno', () => {
-      const tl = [dep({ title: 'Stripe X', vendor: 'Stripe ', type: 'api' })];
-      const qa = [dep({ title: 'Stripe Y', vendor: 'Stripe', type: 'api' })];
+    it('colapsa "VERCEL_TOKEN" TL + "GitHub Secret: VERCEL_TOKEN" QA (normalize de prefijo)', () => {
+      // Caso real reportado por user: TL emitía VERCEL_TOKEN y QA emitía
+      // la misma con prefijo "GitHub Secret:". El merger las trataba como
+      // distintas y persistía 2 rows.
+      const tl = [dep({ title: 'VERCEL_TOKEN', vendor: 'Vercel', type: 'api' })];
+      const qa = [dep({ title: 'GitHub Secret: VERCEL_TOKEN', vendor: 'Vercel', type: 'service' })];
+      const result = mergeDiscoveredDependencies(tl, qa);
+      expect(result).toHaveLength(1);
+    });
+
+    it('trim del vendor: "Stripe " y "Stripe" se tratan como uno (mismo title)', () => {
+      const tl = [dep({ title: 'Stripe API Key', vendor: 'Stripe ', type: 'api' })];
+      const qa = [dep({ title: 'Stripe API Key', vendor: 'Stripe', type: 'api' })];
       const result = mergeDiscoveredDependencies(tl, qa);
       expect(result).toHaveLength(1);
     });

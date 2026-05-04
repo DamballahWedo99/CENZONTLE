@@ -28,6 +28,13 @@ interface DiagramStepDetailProps {
    */
   onGenerateIntegrationDoc?: () => void;
   isGeneratingDoc?: boolean;
+  /**
+   * Título de la épica padre del diagrama. Se muestra como meta-label a la
+   * derecha del step header para anclar el contexto cuando el user navega
+   * entre pasos sin volver al breadcrumb. Opcional — si no se pasa, no se
+   * renderiza el bloque (oculto en mobile via `hidden md:flex`).
+   */
+  epicTitle?: string | null;
 }
 
 /**
@@ -49,6 +56,7 @@ export function DiagramStepDetail({
   integrationFlowDocPath,
   onGenerateIntegrationDoc,
   isGeneratingDoc = false,
+  epicTitle,
 }: DiagramStepDetailProps) {
   const closeButtonRef = useRef<HTMLButtonElement>(null);
 
@@ -89,6 +97,19 @@ export function DiagramStepDetail({
                 Paso {step.order} de {totalSteps}
               </p>
             </div>
+            {epicTitle ? (
+              <>
+                <div className="h-8 w-px bg-border/60 shrink-0 mx-1" aria-hidden="true" />
+                <div className="hidden md:flex flex-col min-w-0">
+                  <span className="text-[10px] uppercase tracking-widest font-semibold text-muted-foreground">
+                    Épica
+                  </span>
+                  <span className="text-sm font-medium text-foreground truncate mt-0.5">
+                    {epicTitle}
+                  </span>
+                </div>
+              </>
+            ) : null}
           </div>
           <div className="flex items-center gap-1 shrink-0">
             <Tooltip>

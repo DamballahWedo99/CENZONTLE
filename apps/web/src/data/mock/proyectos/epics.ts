@@ -5,20 +5,43 @@ export const mockEpics: Epic[] = [
   {
     id: 'epic-1',
     title: 'Rediseño de Checkout Web',
-    description:
-      'Rediseño completo del flujo de checkout con nuevo diseño, optimización de conversión y soporte para múltiples métodos de pago.',
-    qualitativeBenefits: 'Mejor experiencia de usuario, reducción de fricción en el proceso de compra, mayor confianza del cliente en la plataforma.',
-    quantitativeBenefits: 'Incremento del 15% en tasa de conversión, reducción del 25% en abandono de carrito, aumento del 10% en ticket promedio.',
-    benefitsMeasurement: 'A/B testing contra flujo actual, métricas de funnel en Google Analytics, tasa de conversión por paso del checkout.',
-    scopeDescription: 'Incluye rediseño visual, nuevo flujo de 3 pasos, integración de múltiples métodos de pago, optimización mobile-first.',
-    acceptanceCriteria: 'Flujo completo funcional con al menos 3 métodos de pago, tiempo de carga < 2s, accesibilidad WCAG 2.1 AA.',
-    technologicalImprovements: 'Migración de jQuery a React, implementación de lazy loading, uso de Web Components para embeds.',
-    businessPriority: 'Alta — Impacto directo en revenue y experiencia del cliente.',
-    teamsInvolved: 'Payments Backend, Frontend Digital, UX/UI Design.',
-    impactedChannels: 'Web desktop, Web mobile, Progressive Web App.',
-    impactedFlows: 'Compra de boletos, ancillaries, upgrades, paquetes vacacionales.',
-    impactSabreLevel: 'Medio — Requiere ajustes en el flujo de booking pero no en el core de reservaciones.',
-    thirdPartyDependencies: 'DEUNA (procesador de pagos), Stripe (fallback), Google Pay / Apple Pay APIs.',
+    markdown: `## Descripción
+
+Rediseño completo del flujo de checkout con nuevo diseño, optimización de conversión y soporte para múltiples métodos de pago.
+
+## Beneficios cualitativos
+
+Mejor experiencia de usuario, reducción de fricción en el proceso de compra, mayor confianza del cliente en la plataforma.
+
+## Beneficios cuantitativos
+
+Incremento del 15% en tasa de conversión, reducción del 25% en abandono de carrito, aumento del 10% en ticket promedio.
+
+## Medición de beneficios
+
+A/B testing contra flujo actual, métricas de funnel en Google Analytics, tasa de conversión por paso del checkout.
+
+## Alcance
+
+Incluye rediseño visual, nuevo flujo de 3 pasos, integración de múltiples métodos de pago, optimización mobile-first.
+
+## Criterios de aceptación
+
+Flujo completo funcional con al menos 3 métodos de pago, tiempo de carga < 2s, accesibilidad WCAG 2.1 AA.
+
+## Mejoras tecnológicas
+
+Migración de jQuery a React, implementación de lazy loading, uso de Web Components para embeds.
+
+## Canales y flujos impactados
+
+Canales: Web desktop, Web mobile, Progressive Web App.
+
+Flujos: Compra de boletos, ancillaries, upgrades, paquetes vacacionales.
+
+## Dependencias de terceros
+
+DEUNA (procesador de pagos), Stripe (fallback), Google Pay / Apple Pay APIs.`,
     status: EpicStatus.InProgress,
     priority: Priority.High,
     initiativeId: 'init-1',
@@ -101,20 +124,43 @@ export const mockEpics: Epic[] = [
   {
     id: 'epic-2',
     title: 'Migración a Microservicios',
-    description:
-      'Descomposición del monolito en microservicios independientes con API Gateway, service mesh y observabilidad centralizada.',
-    qualitativeBenefits: 'Mayor resiliencia del sistema, despliegues independientes por equipo, mejor aislamiento de fallos.',
-    quantitativeBenefits: 'Reducción del 40% en tiempo de despliegue, 99.95% de uptime (vs 99.5% actual), reducción del 30% en incidentes P1.',
-    benefitsMeasurement: 'Métricas de DORA (deployment frequency, lead time, MTTR, change failure rate), dashboards de SLOs.',
-    scopeDescription: 'Decomposición en 8 microservicios core: auth, booking, payments, inventory, pricing, notifications, users, analytics.',
-    acceptanceCriteria: 'Cada servicio desplegable independientemente, latencia p99 < 200ms, cobertura de tests > 80%.',
-    technologicalImprovements: 'Kubernetes, service mesh (Istio), distributed tracing (Jaeger), event-driven architecture (Kafka).',
-    businessPriority: 'Crítica — Habilitador para todas las demás iniciativas tecnológicas.',
-    teamsInvolved: 'Platform Infrastructure, todos los PODs de backend.',
-    impactedChannels: 'Todos — cambio transparente para canales externos.',
-    impactedFlows: 'Todos los flujos internos de backend.',
-    impactSabreLevel: 'Alto — Requiere nueva capa de abstracción para comunicación con Sabre GDS.',
-    thirdPartyDependencies: 'AWS (EKS), Datadog (observabilidad), Confluent (Kafka managed).',
+    markdown: `## Descripción
+
+Descomposición del monolito en microservicios independientes con API Gateway, service mesh y observabilidad centralizada.
+
+## Beneficios cualitativos
+
+Mayor resiliencia del sistema, despliegues independientes por equipo, mejor aislamiento de fallos.
+
+## Beneficios cuantitativos
+
+Reducción del 40% en tiempo de despliegue, 99.95% de uptime (vs 99.5% actual), reducción del 30% en incidentes P1.
+
+## Medición de beneficios
+
+Métricas de DORA (deployment frequency, lead time, MTTR, change failure rate), dashboards de SLOs.
+
+## Alcance
+
+Decomposición en 8 microservicios core: auth, booking, payments, inventory, pricing, notifications, users, analytics.
+
+## Criterios de aceptación
+
+Cada servicio desplegable independientemente, latencia p99 < 200ms, cobertura de tests > 80%.
+
+## Mejoras tecnológicas
+
+Kubernetes, service mesh (Istio), distributed tracing (Jaeger), event-driven architecture (Kafka).
+
+## Canales y flujos impactados
+
+Canales: Todos — cambio transparente para canales externos.
+
+Flujos: Todos los flujos internos de backend.
+
+## Dependencias de terceros
+
+AWS (EKS), Datadog (observabilidad), Confluent (Kafka managed).`,
     status: EpicStatus.InProgress,
     priority: Priority.Critical,
     initiativeId: 'init-1',
@@ -175,20 +221,43 @@ export const mockEpics: Epic[] = [
   {
     id: 'epic-3',
     title: 'API Gateway v2',
-    description:
-      'Implementación de nuevo API Gateway con rate limiting, autenticación centralizada, versionado de APIs y documentación automática.',
-    qualitativeBenefits: 'Seguridad centralizada, mejor experiencia de desarrolladores internos y externos, control de tráfico unificado.',
-    quantitativeBenefits: 'Reducción del 60% en endpoints duplicados, ahorro de 200hrs/año en mantenimiento de auth, 0 brechas de seguridad en APIs.',
-    benefitsMeasurement: 'Inventario de APIs antes/después, tickets de soporte relacionados con auth, security audit reports.',
-    scopeDescription: 'Nuevo gateway basado en Kong/AWS API Gateway, migración de todos los endpoints actuales, documentación OpenAPI 3.1.',
-    acceptanceCriteria: 'Todos los endpoints migrados, rate limiting funcional, autenticación OAuth2/JWT centralizada, docs auto-generadas.',
-    technologicalImprovements: 'Kong Gateway, OAuth2 con PKCE, OpenAPI 3.1, developer portal con Swagger UI.',
-    businessPriority: 'Media — Importante para seguridad pero no bloquea revenue directo.',
-    teamsInvolved: 'Platform Infrastructure, Payments Backend.',
-    impactedChannels: 'Todos los canales que consumen APIs internas.',
-    impactedFlows: 'Autenticación, autorización, todos los flujos que pasan por API.',
-    impactSabreLevel: 'Bajo — Gateway es transparente para Sabre.',
-    thirdPartyDependencies: 'Kong Inc. (soporte enterprise), Auth0 (identity provider).',
+    markdown: `## Descripción
+
+Implementación de nuevo API Gateway con rate limiting, autenticación centralizada, versionado de APIs y documentación automática.
+
+## Beneficios cualitativos
+
+Seguridad centralizada, mejor experiencia de desarrolladores internos y externos, control de tráfico unificado.
+
+## Beneficios cuantitativos
+
+Reducción del 60% en endpoints duplicados, ahorro de 200hrs/año en mantenimiento de auth, 0 brechas de seguridad en APIs.
+
+## Medición de beneficios
+
+Inventario de APIs antes/después, tickets de soporte relacionados con auth, security audit reports.
+
+## Alcance
+
+Nuevo gateway basado en Kong/AWS API Gateway, migración de todos los endpoints actuales, documentación OpenAPI 3.1.
+
+## Criterios de aceptación
+
+Todos los endpoints migrados, rate limiting funcional, autenticación OAuth2/JWT centralizada, docs auto-generadas.
+
+## Mejoras tecnológicas
+
+Kong Gateway, OAuth2 con PKCE, OpenAPI 3.1, developer portal con Swagger UI.
+
+## Canales y flujos impactados
+
+Canales: Todos los canales que consumen APIs internas.
+
+Flujos: Autenticación, autorización, todos los flujos que pasan por API.
+
+## Dependencias de terceros
+
+Kong Inc. (soporte enterprise), Auth0 (identity provider).`,
     status: EpicStatus.Draft,
     priority: Priority.Medium,
     initiativeId: 'init-1',
@@ -212,20 +281,43 @@ export const mockEpics: Epic[] = [
   {
     id: 'epic-4',
     title: 'App Móvil Checkout Nativo',
-    description:
-      'Implementación nativa del flujo de checkout en iOS y Android con Apple Pay, Google Pay y biometría.',
-    qualitativeBenefits: 'Experiencia nativa fluida, mayor confianza con biometría, paridad de funcionalidad con web.',
-    quantitativeBenefits: 'Incremento del 20% en conversión móvil, reducción del 35% en tiempo de checkout, 4.5+ rating en stores.',
-    benefitsMeasurement: 'Firebase Analytics, App Store / Play Store ratings, comparativo de conversión web vs nativo.',
-    scopeDescription: 'Flujo de checkout nativo iOS/Android, integración Apple Pay y Google Pay, autenticación biométrica pre-pago.',
-    acceptanceCriteria: 'Checkout funcional en iOS 16+ y Android 12+, Apple Pay y Google Pay integrados, Face ID / fingerprint para confirmar pago.',
-    technologicalImprovements: 'Swift UI, Jetpack Compose, SDK de pagos compartido iOS/Android, deep linking para retomar compras.',
-    businessPriority: 'Alta — 60% del tráfico viene de mobile.',
-    teamsInvolved: 'Mobile Experience, Payments Backend.',
-    impactedChannels: 'App iOS, App Android.',
-    impactedFlows: 'Compra de boletos mobile, ancillaries, notificaciones push de estado de pago.',
-    impactSabreLevel: 'Bajo — Usa las mismas APIs de booking existentes.',
-    thirdPartyDependencies: 'Apple (Apple Pay SDK), Google (Google Pay SDK), DEUNA (procesador).',
+    markdown: `## Descripción
+
+Implementación nativa del flujo de checkout en iOS y Android con Apple Pay, Google Pay y biometría.
+
+## Beneficios cualitativos
+
+Experiencia nativa fluida, mayor confianza con biometría, paridad de funcionalidad con web.
+
+## Beneficios cuantitativos
+
+Incremento del 20% en conversión móvil, reducción del 35% en tiempo de checkout, 4.5+ rating en stores.
+
+## Medición de beneficios
+
+Firebase Analytics, App Store / Play Store ratings, comparativo de conversión web vs nativo.
+
+## Alcance
+
+Flujo de checkout nativo iOS/Android, integración Apple Pay y Google Pay, autenticación biométrica pre-pago.
+
+## Criterios de aceptación
+
+Checkout funcional en iOS 16+ y Android 12+, Apple Pay y Google Pay integrados, Face ID / fingerprint para confirmar pago.
+
+## Mejoras tecnológicas
+
+Swift UI, Jetpack Compose, SDK de pagos compartido iOS/Android, deep linking para retomar compras.
+
+## Canales y flujos impactados
+
+Canales: App iOS, App Android.
+
+Flujos: Compra de boletos mobile, ancillaries, notificaciones push de estado de pago.
+
+## Dependencias de terceros
+
+Apple (Apple Pay SDK), Google (Google Pay SDK), DEUNA (procesador).`,
     status: EpicStatus.InProgress,
     priority: Priority.High,
     initiativeId: 'init-1',
@@ -250,20 +342,43 @@ export const mockEpics: Epic[] = [
   {
     id: 'epic-5',
     title: 'Soporte Multi-procesador',
-    description:
-      'Abstracción de procesadores de pago para soportar DEUNA, Stripe, Adyen y procesadores locales con routing inteligente.',
-    qualitativeBenefits: 'Eliminación de vendor lock-in, mayor disponibilidad de pagos, flexibilidad para negociar tarifas.',
-    quantitativeBenefits: 'Incremento del 8% en tasa de aprobación global, reducción del 15% en costos de procesamiento, 0 downtime por falla de procesador.',
-    benefitsMeasurement: 'Tasa de aprobación por procesador, costo por transacción, uptime del servicio de pagos.',
-    scopeDescription: 'Capa de abstracción de procesadores, routing inteligente basado en BIN/país/monto, failover automático.',
-    acceptanceCriteria: 'Al menos 3 procesadores integrados, routing configurable sin deploy, failover < 5s, dashboard de métricas por procesador.',
-    technologicalImprovements: 'Patrón Strategy para procesadores, circuit breaker pattern, configuración dinámica con feature flags.',
-    businessPriority: 'Crítica — Impacto directo en revenue por mejora en aprobación.',
-    teamsInvolved: 'Payments Backend.',
-    impactedChannels: 'Todos — transparente para el usuario final.',
-    impactedFlows: 'Todos los flujos de pago: boletos, ancillaries, suscripciones, reembolsos.',
-    impactSabreLevel: 'Ninguno — Pagos es independiente de Sabre.',
-    thirdPartyDependencies: 'DEUNA, Stripe, Adyen, procesadores locales (Prosa, Banorte).',
+    markdown: `## Descripción
+
+Abstracción de procesadores de pago para soportar DEUNA, Stripe, Adyen y procesadores locales con routing inteligente.
+
+## Beneficios cualitativos
+
+Eliminación de vendor lock-in, mayor disponibilidad de pagos, flexibilidad para negociar tarifas.
+
+## Beneficios cuantitativos
+
+Incremento del 8% en tasa de aprobación global, reducción del 15% en costos de procesamiento, 0 downtime por falla de procesador.
+
+## Medición de beneficios
+
+Tasa de aprobación por procesador, costo por transacción, uptime del servicio de pagos.
+
+## Alcance
+
+Capa de abstracción de procesadores, routing inteligente basado en BIN/país/monto, failover automático.
+
+## Criterios de aceptación
+
+Al menos 3 procesadores integrados, routing configurable sin deploy, failover < 5s, dashboard de métricas por procesador.
+
+## Mejoras tecnológicas
+
+Patrón Strategy para procesadores, circuit breaker pattern, configuración dinámica con feature flags.
+
+## Canales y flujos impactados
+
+Canales: Todos — transparente para el usuario final.
+
+Flujos: Todos los flujos de pago: boletos, ancillaries, suscripciones, reembolsos.
+
+## Dependencias de terceros
+
+DEUNA, Stripe, Adyen, procesadores locales (Prosa, Banorte).`,
     status: EpicStatus.InProgress,
     priority: Priority.Critical,
     initiativeId: 'init-2',
@@ -306,20 +421,43 @@ export const mockEpics: Epic[] = [
   {
     id: 'epic-6',
     title: 'Retry Engine',
-    description:
-      'Motor de reintentos inteligente con estrategias configurables, circuit breaker y fallback entre procesadores.',
-    qualitativeBenefits: 'Recuperación automática de transacciones fallidas, mejor experiencia del usuario ante errores temporales.',
-    quantitativeBenefits: 'Recuperación del 12% de transacciones declinadas, incremento de $2.5M MXN/mes en revenue recuperado.',
-    benefitsMeasurement: 'Tasa de recuperación por retry, revenue incremental por transacciones recuperadas, latencia adicional por retry.',
-    scopeDescription: 'Motor de reintentos con backoff exponencial, circuit breaker por procesador, fallback a procesador alternativo.',
-    acceptanceCriteria: 'Retry configurable por tipo de error, circuit breaker funcional, métricas en tiempo real de recuperación.',
-    technologicalImprovements: 'Circuit breaker pattern (Resilience4j), exponential backoff, dead letter queue para fallos permanentes.',
-    businessPriority: 'Alta — Revenue directo recuperado.',
-    teamsInvolved: 'Payments Backend.',
-    impactedChannels: 'Todos — transparente para el usuario.',
-    impactedFlows: 'Flujo de cobro, reintentos automáticos, notificaciones de estado.',
-    impactSabreLevel: 'Ninguno.',
-    thirdPartyDependencies: 'Procesadores de pago (para políticas de retry por procesador).',
+    markdown: `## Descripción
+
+Motor de reintentos inteligente con estrategias configurables, circuit breaker y fallback entre procesadores.
+
+## Beneficios cualitativos
+
+Recuperación automática de transacciones fallidas, mejor experiencia del usuario ante errores temporales.
+
+## Beneficios cuantitativos
+
+Recuperación del 12% de transacciones declinadas, incremento de $2.5M MXN/mes en revenue recuperado.
+
+## Medición de beneficios
+
+Tasa de recuperación por retry, revenue incremental por transacciones recuperadas, latencia adicional por retry.
+
+## Alcance
+
+Motor de reintentos con backoff exponencial, circuit breaker por procesador, fallback a procesador alternativo.
+
+## Criterios de aceptación
+
+Retry configurable por tipo de error, circuit breaker funcional, métricas en tiempo real de recuperación.
+
+## Mejoras tecnológicas
+
+Circuit breaker pattern (Resilience4j), exponential backoff, dead letter queue para fallos permanentes.
+
+## Canales y flujos impactados
+
+Canales: Todos — transparente para el usuario.
+
+Flujos: Flujo de cobro, reintentos automáticos, notificaciones de estado.
+
+## Dependencias de terceros
+
+Procesadores de pago (para políticas de retry por procesador).`,
     status: EpicStatus.Done,
     priority: Priority.High,
     initiativeId: 'init-2',
@@ -343,20 +481,43 @@ export const mockEpics: Epic[] = [
   {
     id: 'epic-7',
     title: 'Panel de Monitoreo de Pagos',
-    description:
-      'Dashboard en tiempo real de métricas de pagos: tasas de aprobación, latencias, errores por procesador y alertas configurables.',
-    qualitativeBenefits: 'Visibilidad operativa completa, detección proactiva de problemas, toma de decisiones basada en datos.',
-    quantitativeBenefits: 'Reducción del 50% en MTTR de incidentes de pagos, eliminación de reportes manuales (ahorro 40hrs/mes).',
-    benefitsMeasurement: 'MTTR de incidentes de pagos, tiempo dedicado a reportes manuales, cantidad de alertas accionables.',
-    scopeDescription: 'Dashboard real-time con métricas por procesador, alertas configurables, exportación de reportes, drill-down por transacción.',
-    acceptanceCriteria: 'Datos en tiempo real (< 30s delay), al menos 10 métricas clave, alertas por Slack y email, exportación CSV/PDF.',
-    technologicalImprovements: 'WebSockets para real-time, D3.js para visualizaciones, Elasticsearch para queries de alto volumen.',
-    businessPriority: 'Media — Operativo pero no revenue directo.',
-    teamsInvolved: 'Payments Backend, Frontend Digital.',
-    impactedChannels: 'Herramienta interna — no impacta canales de cliente.',
-    impactedFlows: 'Monitoreo operativo, gestión de incidentes, reportería ejecutiva.',
-    impactSabreLevel: 'Ninguno.',
-    thirdPartyDependencies: 'Elastic Cloud (Elasticsearch), PagerDuty (alertas), Slack (notificaciones).',
+    markdown: `## Descripción
+
+Dashboard en tiempo real de métricas de pagos: tasas de aprobación, latencias, errores por procesador y alertas configurables.
+
+## Beneficios cualitativos
+
+Visibilidad operativa completa, detección proactiva de problemas, toma de decisiones basada en datos.
+
+## Beneficios cuantitativos
+
+Reducción del 50% en MTTR de incidentes de pagos, eliminación de reportes manuales (ahorro 40hrs/mes).
+
+## Medición de beneficios
+
+MTTR de incidentes de pagos, tiempo dedicado a reportes manuales, cantidad de alertas accionables.
+
+## Alcance
+
+Dashboard real-time con métricas por procesador, alertas configurables, exportación de reportes, drill-down por transacción.
+
+## Criterios de aceptación
+
+Datos en tiempo real (< 30s delay), al menos 10 métricas clave, alertas por Slack y email, exportación CSV/PDF.
+
+## Mejoras tecnológicas
+
+WebSockets para real-time, D3.js para visualizaciones, Elasticsearch para queries de alto volumen.
+
+## Canales y flujos impactados
+
+Canales: Herramienta interna — no impacta canales de cliente.
+
+Flujos: Monitoreo operativo, gestión de incidentes, reportería ejecutiva.
+
+## Dependencias de terceros
+
+Elastic Cloud (Elasticsearch), PagerDuty (alertas), Slack (notificaciones).`,
     status: EpicStatus.InProgress,
     priority: Priority.Medium,
     initiativeId: 'init-2',
@@ -380,20 +541,43 @@ export const mockEpics: Epic[] = [
   {
     id: 'epic-8',
     title: 'Reconciliación Automática',
-    description:
-      'Sistema automático de reconciliación de transacciones entre procesadores y el sistema contable, con manejo de discrepancias.',
-    qualitativeBenefits: 'Eliminación de reconciliación manual, detección temprana de discrepancias, auditoría completa.',
-    quantitativeBenefits: 'Ahorro de 120hrs/mes en reconciliación manual, detección de discrepancias en < 1hr (vs 48hrs actual).',
-    benefitsMeasurement: 'Horas dedicadas a reconciliación, tiempo de detección de discrepancias, porcentaje de auto-conciliación.',
-    scopeDescription: 'Ingesta de archivos de procesadores, matching automático con transacciones internas, workflow de resolución de discrepancias.',
-    acceptanceCriteria: 'Auto-conciliación del 95% de transacciones, alertas automáticas para discrepancias, interfaz de resolución manual.',
-    technologicalImprovements: 'ETL pipelines (Airflow), matching algorithms, workflow engine para resolución.',
-    businessPriority: 'Media — Eficiencia operativa.',
-    teamsInvolved: 'Payments Backend.',
-    impactedChannels: 'Herramienta interna — Finanzas y Tesorería.',
-    impactedFlows: 'Reconciliación diaria, reportes financieros, auditoría.',
-    impactSabreLevel: 'Ninguno.',
-    thirdPartyDependencies: 'Procesadores (formatos de archivo de conciliación), SAP (sistema contable).',
+    markdown: `## Descripción
+
+Sistema automático de reconciliación de transacciones entre procesadores y el sistema contable, con manejo de discrepancias.
+
+## Beneficios cualitativos
+
+Eliminación de reconciliación manual, detección temprana de discrepancias, auditoría completa.
+
+## Beneficios cuantitativos
+
+Ahorro de 120hrs/mes en reconciliación manual, detección de discrepancias en < 1hr (vs 48hrs actual).
+
+## Medición de beneficios
+
+Horas dedicadas a reconciliación, tiempo de detección de discrepancias, porcentaje de auto-conciliación.
+
+## Alcance
+
+Ingesta de archivos de procesadores, matching automático con transacciones internas, workflow de resolución de discrepancias.
+
+## Criterios de aceptación
+
+Auto-conciliación del 95% de transacciones, alertas automáticas para discrepancias, interfaz de resolución manual.
+
+## Mejoras tecnológicas
+
+ETL pipelines (Airflow), matching algorithms, workflow engine para resolución.
+
+## Canales y flujos impactados
+
+Canales: Herramienta interna — Finanzas y Tesorería.
+
+Flujos: Reconciliación diaria, reportes financieros, auditoría.
+
+## Dependencias de terceros
+
+Procesadores (formatos de archivo de conciliación), SAP (sistema contable).`,
     status: EpicStatus.Draft,
     priority: Priority.Medium,
     initiativeId: 'init-2',
@@ -418,20 +602,43 @@ export const mockEpics: Epic[] = [
   {
     id: 'epic-9',
     title: 'Motor de Puntos Dinámico',
-    description:
-      'Nuevo motor de acumulación y redención de puntos con reglas dinámicas, multiplicadores por temporada y segmentación de clientes.',
-    qualitativeBenefits: 'Programa de lealtad más atractivo, personalización por segmento, flexibilidad para campañas.',
-    quantitativeBenefits: 'Incremento del 25% en engagement del programa, aumento del 18% en repeat purchases, reducción del 10% en churn.',
-    benefitsMeasurement: 'NPS del programa, tasa de redención, repeat purchase rate, churn rate por segmento.',
-    scopeDescription: 'Motor de reglas dinámicas, multiplicadores configurables, segmentación de clientes, API de acumulación y redención.',
-    acceptanceCriteria: 'Reglas configurables sin deploy, al menos 5 segmentos de cliente, API con latencia < 100ms.',
-    technologicalImprovements: 'Rules engine (Drools), event-driven accrual, real-time segmentation.',
-    businessPriority: 'Alta — Retención de clientes.',
-    teamsInvolved: 'Loyalty & Rewards.',
-    impactedChannels: 'Web, App, Call center, Counters.',
-    impactedFlows: 'Acumulación de puntos, redención, estado de cuenta, campañas promocionales.',
-    impactSabreLevel: 'Medio — Integración con frequent flyer de Sabre.',
-    thirdPartyDependencies: 'Sabre (frequent flyer), partners de coalición (hoteles, renta de autos).',
+    markdown: `## Descripción
+
+Nuevo motor de acumulación y redención de puntos con reglas dinámicas, multiplicadores por temporada y segmentación de clientes.
+
+## Beneficios cualitativos
+
+Programa de lealtad más atractivo, personalización por segmento, flexibilidad para campañas.
+
+## Beneficios cuantitativos
+
+Incremento del 25% en engagement del programa, aumento del 18% en repeat purchases, reducción del 10% en churn.
+
+## Medición de beneficios
+
+NPS del programa, tasa de redención, repeat purchase rate, churn rate por segmento.
+
+## Alcance
+
+Motor de reglas dinámicas, multiplicadores configurables, segmentación de clientes, API de acumulación y redención.
+
+## Criterios de aceptación
+
+Reglas configurables sin deploy, al menos 5 segmentos de cliente, API con latencia < 100ms.
+
+## Mejoras tecnológicas
+
+Rules engine (Drools), event-driven accrual, real-time segmentation.
+
+## Canales y flujos impactados
+
+Canales: Web, App, Call center, Counters.
+
+Flujos: Acumulación de puntos, redención, estado de cuenta, campañas promocionales.
+
+## Dependencias de terceros
+
+Sabre (frequent flyer), partners de coalición (hoteles, renta de autos).`,
     status: EpicStatus.InProgress,
     priority: Priority.High,
     initiativeId: 'init-3',
@@ -455,20 +662,43 @@ export const mockEpics: Epic[] = [
   {
     id: 'epic-10',
     title: 'Catálogo de Recompensas',
-    description:
-      'Rediseño del catálogo con categorización inteligente, recomendaciones personalizadas y experiencia de canje mejorada.',
-    qualitativeBenefits: 'Mejor descubrimiento de recompensas, experiencia de canje simplificada, mayor percepción de valor del programa.',
-    quantitativeBenefits: 'Incremento del 30% en tasa de redención, aumento del 20% en satisfacción con el catálogo.',
-    benefitsMeasurement: 'Tasa de redención, encuestas de satisfacción, tiempo promedio de canje, search-to-redeem conversion.',
-    scopeDescription: 'Nuevo catálogo con categorías dinámicas, motor de recomendaciones, flujo de canje en 2 clics, wishlist.',
-    acceptanceCriteria: 'Catálogo con al menos 500 productos, recomendaciones personalizadas, canje en máximo 2 pasos.',
-    technologicalImprovements: 'Algolia (search), ML-based recommendations, headless CMS para contenido del catálogo.',
-    businessPriority: 'Media — Complementario al motor de puntos.',
-    teamsInvolved: 'Loyalty & Rewards, Frontend Digital.',
-    impactedChannels: 'Web, App móvil.',
-    impactedFlows: 'Exploración de catálogo, canje de puntos, tracking de envíos.',
-    impactSabreLevel: 'Ninguno.',
-    thirdPartyDependencies: 'Algolia (search), proveedores de productos, operador logístico.',
+    markdown: `## Descripción
+
+Rediseño del catálogo con categorización inteligente, recomendaciones personalizadas y experiencia de canje mejorada.
+
+## Beneficios cualitativos
+
+Mejor descubrimiento de recompensas, experiencia de canje simplificada, mayor percepción de valor del programa.
+
+## Beneficios cuantitativos
+
+Incremento del 30% en tasa de redención, aumento del 20% en satisfacción con el catálogo.
+
+## Medición de beneficios
+
+Tasa de redención, encuestas de satisfacción, tiempo promedio de canje, search-to-redeem conversion.
+
+## Alcance
+
+Nuevo catálogo con categorías dinámicas, motor de recomendaciones, flujo de canje en 2 clics, wishlist.
+
+## Criterios de aceptación
+
+Catálogo con al menos 500 productos, recomendaciones personalizadas, canje en máximo 2 pasos.
+
+## Mejoras tecnológicas
+
+Algolia (search), ML-based recommendations, headless CMS para contenido del catálogo.
+
+## Canales y flujos impactados
+
+Canales: Web, App móvil.
+
+Flujos: Exploración de catálogo, canje de puntos, tracking de envíos.
+
+## Dependencias de terceros
+
+Algolia (search), proveedores de productos, operador logístico.`,
     status: EpicStatus.Draft,
     priority: Priority.Medium,
     initiativeId: 'init-3',
@@ -492,20 +722,43 @@ export const mockEpics: Epic[] = [
   {
     id: 'epic-11',
     title: 'Integración con Partners',
-    description:
-      'APIs de integración con aerolíneas partner, hoteles y servicios terrestres para acumulación y redención cruzada.',
-    qualitativeBenefits: 'Ecosistema de lealtad expandido, mayor valor percibido del programa, diferenciación competitiva.',
-    quantitativeBenefits: 'Incremento del 15% en acumulación total, 10 nuevos partners integrados, aumento del 12% en engagement.',
-    benefitsMeasurement: 'Volumen de transacciones cross-partner, nuevos partners onboarded, puntos acumulados/redimidos con partners.',
-    scopeDescription: 'APIs de acumulación y redención para partners, portal de onboarding, dashboard de métricas por partner.',
-    acceptanceCriteria: 'API REST documentada, proceso de onboarding < 2 semanas, reconciliación automática con partners.',
-    technologicalImprovements: 'API-first design, webhook-based notifications, partner portal con self-service.',
-    businessPriority: 'Baja — Fase 2 después de motor de puntos.',
-    teamsInvolved: 'Loyalty & Rewards, Platform Infrastructure.',
-    impactedChannels: 'APIs externas para partners, backoffice interno.',
-    impactedFlows: 'Acumulación cruzada, redención en partners, reconciliación inter-empresa.',
-    impactSabreLevel: 'Alto — Integración con interline agreements de Sabre.',
-    thirdPartyDependencies: 'Aerolíneas SkyTeam, cadenas hoteleras, Sabre (interline), IATA (estándares).',
+    markdown: `## Descripción
+
+APIs de integración con aerolíneas partner, hoteles y servicios terrestres para acumulación y redención cruzada.
+
+## Beneficios cualitativos
+
+Ecosistema de lealtad expandido, mayor valor percibido del programa, diferenciación competitiva.
+
+## Beneficios cuantitativos
+
+Incremento del 15% en acumulación total, 10 nuevos partners integrados, aumento del 12% en engagement.
+
+## Medición de beneficios
+
+Volumen de transacciones cross-partner, nuevos partners onboarded, puntos acumulados/redimidos con partners.
+
+## Alcance
+
+APIs de acumulación y redención para partners, portal de onboarding, dashboard de métricas por partner.
+
+## Criterios de aceptación
+
+API REST documentada, proceso de onboarding < 2 semanas, reconciliación automática con partners.
+
+## Mejoras tecnológicas
+
+API-first design, webhook-based notifications, partner portal con self-service.
+
+## Canales y flujos impactados
+
+Canales: APIs externas para partners, backoffice interno.
+
+Flujos: Acumulación cruzada, redención en partners, reconciliación inter-empresa.
+
+## Dependencias de terceros
+
+Aerolíneas SkyTeam, cadenas hoteleras, Sabre (interline), IATA (estándares).`,
     status: EpicStatus.Draft,
     priority: Priority.Low,
     initiativeId: 'init-3',

@@ -19,13 +19,36 @@ import { InitiativeStatus } from '@cenzontle/shared';
 import { createInitiative } from '@/lib/api/initiatives';
 import type { Initiative } from '@cenzontle/shared';
 
-const initiativeSchema = z.object({
-  name: z.string().min(1, 'El nombre es obligatorio').max(200, 'Máximo 200 caracteres'),
-  description: z.string().min(1, 'La descripción es obligatoria'),
-  owner: z.string().min(1, 'Selecciona un responsable'),
-  startDate: z.string().min(1, 'La fecha de inicio es obligatoria'),
-  targetDate: z.string().min(1, 'La fecha objetivo es obligatoria'),
-});
+// Schema con fechas condicionalmente requeridas: si status='planning' (borrador),
+// las fechas son opcionales — el user puede definirlas más adelante. Para
+// cualquier otro status (active/completed/on_hold), las fechas son obligatorias.
+const initiativeSchema = z
+  .object({
+    name: z.string().min(1, 'El nombre es obligatorio').max(200, 'Máximo 200 caracteres'),
+    description: z.string().min(1, 'La descripción es obligatoria'),
+    owner: z.string().min(1, 'Selecciona un responsable'),
+    status: z.string(),
+    startDate: z.string(),
+    targetDate: z.string(),
+  })
+  .superRefine((val, ctx) => {
+    if (val.status !== 'planning') {
+      if (!val.startDate) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ['startDate'],
+          message: 'La fecha de inicio es obligatoria fuera de borrador',
+        });
+      }
+      if (!val.targetDate) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ['targetDate'],
+          message: 'La fecha objetivo es obligatoria fuera de borrador',
+        });
+      }
+    }
+  });
 
 type FieldErrors = Partial<Record<keyof z.infer<typeof initiativeSchema>, string>>;
 
@@ -59,6 +82,7 @@ export function CreateInitiativeDialog({ open, onOpenChange }: CreateInitiativeD
       name: name.trim(),
       description: description.trim(),
       owner,
+      status,
       startDate,
       targetDate,
     });
@@ -80,8 +104,10 @@ export function CreateInitiativeDialog({ open, onOpenChange }: CreateInitiativeD
         name: name.trim(),
         description: description.trim(),
         status,
-        startDate,
-        targetDate,
+        // Si el user no llenó las fechas (borrador), pasamos undefined para
+        // que el backend las persista como null en PG.
+        ...(startDate ? { startDate } : {}),
+        ...(targetDate ? { targetDate } : {}),
         owner,
       });
 
@@ -125,7 +151,7 @@ export function CreateInitiativeDialog({ open, onOpenChange }: CreateInitiativeD
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="sm:max-w-lg">
+      <DialogContent className="sm:max-w-2xl">
         <DialogHeader>
           <DialogTitle>Nueva Iniciativa</DialogTitle>
         </DialogHeader>
@@ -188,7 +214,12 @@ export function CreateInitiativeDialog({ open, onOpenChange }: CreateInitiativeD
 
           <div className="grid grid-cols-2 gap-3">
             <div>
-              <label className="text-sm font-medium mb-1.5 block">Fecha inicio</label>
+              <label className="text-sm font-medium mb-1.5 block">
+                Fecha inicio
+                {status === 'planning' && (
+                  <span className="text-xs text-muted-foreground/70 font-normal ml-1">(opcional en borrador)</span>
+                )}
+              </label>
               <DatePicker
                 value={startDate}
                 onChange={(v) => { setStartDate(v); setErrors((p) => ({ ...p, startDate: undefined })); }}
@@ -198,7 +229,12 @@ export function CreateInitiativeDialog({ open, onOpenChange }: CreateInitiativeD
               <FieldError message={errors.startDate} />
             </div>
             <div>
-              <label className="text-sm font-medium mb-1.5 block">Fecha objetivo</label>
+              <label className="text-sm font-medium mb-1.5 block">
+                Fecha objetivo
+                {status === 'planning' && (
+                  <span className="text-xs text-muted-foreground/70 font-normal ml-1">(opcional en borrador)</span>
+                )}
+              </label>
               <DatePicker
                 value={targetDate}
                 onChange={(v) => { setTargetDate(v); setErrors((p) => ({ ...p, targetDate: undefined })); }}
