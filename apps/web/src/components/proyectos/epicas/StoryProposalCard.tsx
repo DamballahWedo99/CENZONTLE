@@ -203,7 +203,7 @@ export function StoryProposalCard({
       <div className="space-y-1">
         <SectionToggle
           icon={<ClipboardList className="h-3 w-3" />}
-          label="PO"
+          label="Definición de Negocio"
           detail={sectionDetail(proposal.po.markdown)}
           expanded={expandedSection === 'po'}
           onToggle={() => toggleSection('po')}

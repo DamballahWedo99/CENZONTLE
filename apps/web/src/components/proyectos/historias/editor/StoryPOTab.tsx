@@ -43,7 +43,7 @@ interface StoryPOTabProps {
 }
 
 /**
- * Tab "Product Owner" del editor de historias. UN solo editor Tiptap
+ * Tab "Definición de Negocio" del editor de historias. UN solo editor Tiptap
  * full-feature reemplaza los N EditableSection del shape v1. La estructura
  * obligatoria (Antecedentes, Objetivo, Historia, What/How/When, Criterios,
  * Notas) se sugiere via placeholder y se asegura via prompt al agente.
@@ -59,7 +59,7 @@ export function StoryPOTab({ value, onChange }: StoryPOTabProps) {
         initialMarkdown={initial}
         onChange={onChange}
         variant="paragraph"
-        placeholder="Escribe la sección Product Owner en markdown..."
+        placeholder="Escribe la definición de negocio en markdown..."
       />
     </div>
   );

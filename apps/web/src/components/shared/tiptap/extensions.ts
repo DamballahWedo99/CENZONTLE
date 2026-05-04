@@ -47,6 +47,7 @@ export const TIPTAP_EXTENSIONS = [
     tightLists: true,
     transformPastedText: true,
     breaks: true, // GFM: un \n genera <br>, no se colapsa como en CommonMark strict
+    linkify: true, // GFM: URLs sueltas (https://...) se auto-convierten en <a>
   }),
   Highlight,
   TaskList,
@@ -54,7 +55,12 @@ export const TIPTAP_EXTENSIONS = [
   TiptapImage,
   TiptapLink.configure({
     openOnClick: false,
-    HTMLAttributes: { class: 'text-primary underline underline-offset-2 cursor-pointer hover:text-primary/80' },
+    autolink: true,    // detecta URLs tipeadas en el editor y las wrappea
+    linkOnPaste: true, // pegar un URL lo auto-linkea
+    HTMLAttributes: {
+      class:
+        'text-blue-600 dark:text-blue-400 underline underline-offset-2 cursor-pointer hover:text-blue-700 dark:hover:text-blue-300 transition-colors',
+    },
   }),
   TiptapTable.configure({ resizable: false }),
   TableRow,
@@ -72,7 +78,8 @@ export const TIPTAP_READONLY_EXTENSIONS = [
     blockquote: { HTMLAttributes: { class: 'border-l-3 border-border pl-4 my-2 text-muted-foreground' } },
   }),
   // SECURITY: html=false (mismo motivo que TIPTAP_EXTENSIONS arriba).
-  Markdown.configure({ html: false, tightLists: true, breaks: true }),
+  // linkify=true convierte URLs sueltas en links clickeables al renderizar.
+  Markdown.configure({ html: false, tightLists: true, breaks: true, linkify: true }),
   Highlight,
   TaskList,
   TaskItem.configure({
@@ -82,8 +89,11 @@ export const TIPTAP_READONLY_EXTENSIONS = [
   TiptapImage,
   TiptapLink.configure({
     openOnClick: true,
+    autolink: true,
+    linkOnPaste: true,
     HTMLAttributes: {
-      class: 'text-primary underline underline-offset-2 cursor-pointer hover:text-primary/80',
+      class:
+        'text-blue-600 dark:text-blue-400 underline underline-offset-2 cursor-pointer hover:text-blue-700 dark:hover:text-blue-300 transition-colors',
       target: '_blank',
       rel: 'noopener noreferrer',
     },

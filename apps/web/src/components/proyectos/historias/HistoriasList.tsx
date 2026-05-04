@@ -183,8 +183,7 @@ export function HistoriasList() {
           qa: { markdown: data.content?.qa?.markdown ?? '' },
         }));
       }
-    } catch (err) {
-      console.error('[HistoriasList] failed to load vault content', err);
+    } catch {
       toast.error('No se pudo cargar el contenido completo de la historia');
     } finally {
       if (editingStoryIdRef.current === story.id) setLoadingVault(null);

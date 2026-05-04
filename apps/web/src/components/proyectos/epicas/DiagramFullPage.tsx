@@ -273,6 +273,7 @@ export function DiagramFullPage({ epicId }: DiagramFullPageProps) {
             integrationFlowDocPath={businessDiagram.integrationFlowDocPath}
             onGenerateIntegrationDoc={handleGenerateIntegrationDoc}
             isGeneratingDoc={isGeneratingDoc}
+            epicTitle={rawEpic?.title}
           />
         </div>
       ) : null}

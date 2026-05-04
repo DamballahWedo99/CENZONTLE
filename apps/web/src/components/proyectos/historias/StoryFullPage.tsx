@@ -1,7 +1,7 @@
 'use client';
 
-import { useState, useMemo, useEffect, useCallback } from 'react';
-import { useRouter } from 'next/navigation';
+import { useState, useMemo, useEffect, useCallback, useRef } from 'react';
+import { useRouter, usePathname, useSearchParams } from 'next/navigation';
 import Link from 'next/link';
 import { toast } from 'sonner';
 import { useProyectos } from '@/context/ProyectosContext';
@@ -49,10 +49,14 @@ import {
   Tag,
   Layers,
   ArrowLeft,
-  Upload,
   ExternalLink,
   Loader2,
+  ChevronDown,
 } from 'lucide-react';
+import { LinearIcon } from '@/components/icons/LinearIcon';
+import { Tooltip, TooltipTrigger, TooltipContent, TooltipProvider } from '@/components/ui/tooltip';
+import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover';
+import { Skeleton } from '@/components/ui/skeleton';
 import { publishStoryToTracker } from '@/lib/api/integrations';
 import { ApiError } from '@/lib/api/client';
 import type { TrackerReference } from '@cenzontle/shared';
@@ -87,6 +91,139 @@ function formatShortDate(dateStr: string): string {
   return new Date(dateStr).toLocaleDateString('es-MX', { day: 'numeric', month: 'short' });
 }
 
+// --- Markdown skeleton ---
+
+/**
+ * Placeholder visual mientras `vaultContent` lazy-loadea desde la API
+ * (`apiGetStory(id, true)`). Sin esto, el user ve "Sin contenido" durante
+ * ~150-300ms incluso en historias que SÍ tienen markdown — falso positivo
+ * porque el state global solo trae metadata, no el body del markdown.
+ *
+ * Imita la estructura típica de los markdowns de PO/Technical/QA: heading
+ * + párrafos + sub-heading + lista. Tamaño compacto para no empujar la
+ * matriz QA u otros elementos abajo durante el shimmer.
+ */
+function StoryMarkdownSkeleton() {
+  return (
+    <div className="space-y-6" aria-label="Cargando contenido del markdown">
+      <div className="space-y-3">
+        <Skeleton className="h-5 w-1/3" />
+        <div className="space-y-2">
+          <Skeleton className="h-3 w-full" />
+          <Skeleton className="h-3 w-11/12" />
+          <Skeleton className="h-3 w-4/5" />
+        </div>
+      </div>
+      <div className="space-y-3">
+        <Skeleton className="h-5 w-1/4" />
+        <div className="space-y-2">
+          <Skeleton className="h-3 w-full" />
+          <Skeleton className="h-3 w-5/6" />
+          <Skeleton className="h-3 w-3/4" />
+        </div>
+      </div>
+      <div className="space-y-3">
+        <Skeleton className="h-5 w-1/3" />
+        <div className="space-y-2 pl-4">
+          <Skeleton className="h-3 w-2/3" />
+          <Skeleton className="h-3 w-3/5" />
+          <Skeleton className="h-3 w-1/2" />
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// --- Breadcrumb dropdown ---
+
+/**
+ * Span del breadcrumb que al hover despliega un Popover con las otras
+ * historias de la misma épica para navegación rápida sin volver al EpicFullPage.
+ *
+ * Patrón hover-bridge: usa state controlado de Popover + timeout de 120ms al
+ * salir, así el cursor puede moverse del trigger al content sin que cierre.
+ *
+ * IMPORTANTE: el dropdown NO consume `useProyectos()` directamente. Las
+ * sibling stories se computan en `StoryFullPageInner` y se inyectan vía prop.
+ * Esto es porque el breadcrumb se monta vía `setBreadcrumb` en `BreadcrumbContext`,
+ * y el render real ocurre en el layout — fuera del `ProyectosProvider`. Llamar
+ * useProyectos aquí causa "useProyectos must be used within a ProyectosProvider".
+ *
+ * Si no hay sibling stories, renderiza un span plano sin chevron ni popover —
+ * el dropdown sería un menú vacío que solo confunde.
+ */
+function BreadcrumbStoryDropdown({
+  storyTitle,
+  siblings,
+}: {
+  storyTitle: string;
+  siblings: { id: string; title: string }[];
+}) {
+  const [open, setOpen] = useState(false);
+  const closeTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  const handleEnter = useCallback(() => {
+    if (closeTimer.current) {
+      clearTimeout(closeTimer.current);
+      closeTimer.current = null;
+    }
+    setOpen(true);
+  }, []);
+
+  const handleLeave = useCallback(() => {
+    closeTimer.current = setTimeout(() => setOpen(false), 120);
+  }, []);
+
+  useEffect(() => {
+    return () => {
+      if (closeTimer.current) clearTimeout(closeTimer.current);
+    };
+  }, []);
+
+  if (siblings.length === 0) {
+    return (
+      <span className="text-foreground truncate max-w-[250px]">{storyTitle}</span>
+    );
+  }
+
+  return (
+    <Popover open={open} onOpenChange={setOpen}>
+      <PopoverTrigger asChild>
+        <span
+          className="text-foreground inline-flex items-center gap-1 cursor-default max-w-[280px]"
+          onMouseEnter={handleEnter}
+          onMouseLeave={handleLeave}
+        >
+          <span className="truncate">{storyTitle}</span>
+          <ChevronDown className="h-3 w-3 text-muted-foreground/60 shrink-0" />
+        </span>
+      </PopoverTrigger>
+      <PopoverContent
+        align="start"
+        className="w-72 p-1 max-h-80 overflow-y-auto"
+        onMouseEnter={handleEnter}
+        onMouseLeave={handleLeave}
+        onOpenAutoFocus={(e) => e.preventDefault()}
+      >
+        <div className="text-[10px] uppercase tracking-widest font-semibold text-muted-foreground px-2 py-1.5">
+          Otras historias en esta épica ({siblings.length})
+        </div>
+        <div className="flex flex-col">
+          {siblings.map((s) => (
+            <Link
+              key={s.id}
+              href={`/proyectos/historias/${s.id}`}
+              className="text-xs px-2 py-1.5 rounded-sm hover:bg-muted truncate text-foreground/90 transition-colors"
+            >
+              {s.title}
+            </Link>
+          ))}
+        </div>
+      </PopoverContent>
+    </Popover>
+  );
+}
+
 // --- Main Component ---
 
 interface StoryFullPageProps {
@@ -115,9 +252,7 @@ function StoryFullPageInner({ storyId }: StoryFullPageProps) {
         if (cancelled) return;
         if (data.content) setVaultContent(data.content);
       })
-      .catch((err) => {
-        console.error('[StoryFullPage] failed to load vault content', err);
-      });
+      .catch(() => {});
     return () => { cancelled = true; };
   }, [storyId]);
 
@@ -139,7 +274,27 @@ function StoryFullPageInner({ storyId }: StoryFullPageProps) {
   const pod = useMemo(() => (story ? state.pods.find((p) => p.id === story.podId) ?? null : null), [story, state.pods]);
   const sprint = useMemo(() => (story?.sprintId ? state.sprints.find((s) => s.id === story.sprintId) ?? null : null), [story, state.sprints]);
 
+  // Loading flag para los 3 markdowns de la historia (PO/Technical/QA).
+  // `vaultContent === null` significa que el API call `apiGetStory(id, true)`
+  // todavía no resolvió. Tras resolver, `vaultContent` pasa a un objeto
+  // (potencialmente con strings vacíos) — entonces los empty states son
+  // legítimos y mostramos "Sin contenido".
+  const isVaultLoading = vaultContent === null;
+
+  // Hermanas de la historia actual (misma épica, excluyendo self), ordenadas
+  // por createdAt asc — refleja el orden de propuesta del agente IA.
+  // Se computa aquí dentro del ProyectosProvider para pasarlo serializable
+  // al BreadcrumbStoryDropdown que vive fuera del provider tree.
+  const siblingStories = useMemo(() => {
+    if (!story || !epic) return [];
+    return state.stories
+      .filter((s) => s.epicId === epic.id && s.id !== story.id)
+      .map((s) => ({ id: s.id, title: s.title }))
+      .sort((a, b) => a.title.localeCompare(b.title));
+  }, [state.stories, story, epic]);
+
   const [isEditing, setIsEditing] = useState(false);
+  const [isSaving, setIsSaving] = useState(false);
   const [deleteOpen, setDeleteOpen] = useState(false);
   const [publishingTracker, setPublishingTracker] = useState(false);
 
@@ -194,7 +349,19 @@ function StoryFullPageInner({ storyId }: StoryFullPageProps) {
       throw err;
     }
   };
-  const [activeTab, setActiveTab] = useState('po');
+  // Tab state URL-synced: la tab activa vive en el query string `?tab=` para
+  // que refresh/back/forward y deep-links funcionen. `replace` (no `push`)
+  // evita llenar el history; `{ scroll: false }` evita el salto al top al
+  // cambiar tab. Si la URL no trae `tab`, default a 'po' (Definición de
+  // Negocio).
+  const pathname = usePathname();
+  const searchParams = useSearchParams();
+  const activeTab = searchParams.get('tab') ?? 'po';
+  const setActiveTab = (tab: string) => {
+    const params = new URLSearchParams(searchParams.toString());
+    params.set('tab', tab);
+    router.replace(`${pathname}?${params.toString()}`, { scroll: false });
+  };
   const [editTitle, setEditTitle] = useState('');
   const [editStatus, setEditStatus] = useState<StoryStatus>(StoryStatus.Backlog);
   const [editStoryPoints, setEditStoryPoints] = useState(3);
@@ -237,11 +404,14 @@ function StoryFullPageInner({ storyId }: StoryFullPageProps) {
           {epic.title}
         </Link>
         <span className="text-muted-foreground/40">/</span>
-        <span className="text-foreground truncate max-w-[250px]">{story.title}</span>
+        <BreadcrumbStoryDropdown
+          storyTitle={story.title}
+          siblings={siblingStories}
+        />
       </div>
     );
     return () => setBreadcrumb(null);
-  }, [story, epic, initiative, setBreadcrumb]);
+  }, [story, epic, initiative, setBreadcrumb, siblingStories]);
 
   // --- Edit handlers ---
 
@@ -271,9 +441,11 @@ function StoryFullPageInner({ storyId }: StoryFullPageProps) {
   }, [story]);
 
   const handleSave = useCallback(async () => {
-    if (!story || !editTitle.trim()) {
+    if (!story || !editTitle.trim() || isSaving) {
       return;
     }
+
+    setIsSaving(true);
 
     try {
       await apiUpdateStory(story.id, {
@@ -311,13 +483,26 @@ function StoryFullPageInner({ storyId }: StoryFullPageProps) {
         },
       });
 
+      // Sincroniza vaultContent local con lo que acabamos de mandar al backend.
+      // Sin esto, el memo `story` sigue mostrando los markdowns viejos porque
+      // `vaultContent.po?.markdown ?? baseStory.po.markdown` shadowea al
+      // baseStory ya actualizado por el dispatch. El refresh "arregla" el bug
+      // porque al remount, el useEffect re-llama apiGetStory y rehidrata
+      // vaultContent con el contenido fresh.
+      setVaultContent({
+        po: { markdown: editPO },
+        technical: { markdown: editTechnical },
+        qa: { markdown: editQA },
+      });
+
       toast.success('Historia actualizada');
       setIsEditing(false);
     } catch (err: any) {
-      console.error('[StoryFullPage] apiUpdateStory FAILED', err);
       toast.error(err.message || 'Error al actualizar historia');
+    } finally {
+      setIsSaving(false);
     }
-  }, [story, editTitle, editStoryPoints, editStatus, editPodId, editLabels, editPO, editTechnical, editQA, dispatch]);
+  }, [story, editTitle, editStoryPoints, editStatus, editPodId, editLabels, editPO, editTechnical, editQA, dispatch, isSaving]);
 
   const addLabel = useCallback(() => {
     const trimmed = newLabel.trim();
@@ -372,60 +557,91 @@ function StoryFullPageInner({ storyId }: StoryFullPageProps) {
               ) : (
                 <h1 className="text-3xl font-bold tracking-tight flex-1">{story.title}</h1>
               )}
-              <div className="flex gap-1 shrink-0 mt-1">
-                {!isEditing ? (
-                  <>
-                    <DownloadMenu entity={{ kind: 'story', story }} fetchFullContent />
-                    {(story.tracker as TrackerReference | undefined)?.externalKey ? (
-                      <a
-                        href={(story.tracker as TrackerReference).externalUrl}
-                        target="_blank"
-                        rel="noopener noreferrer"
-                        className="inline-flex items-center gap-1.5 h-9 px-3 rounded-md text-xs font-medium border border-border text-muted-foreground hover:text-foreground hover:bg-accent dark:hover:bg-accent/50 transition-colors"
-                        title={`Abrir ${(story.tracker as TrackerReference).externalKey} en Linear`}
-                      >
-                        <ExternalLink className="h-3.5 w-3.5" />
-                        {(story.tracker as TrackerReference).externalKey}
-                      </a>
-                    ) : (
-                      <Button
-                        variant="ghost"
-                        size="sm"
-                        onClick={handlePublishToLinear}
-                        disabled={publishingTracker}
-                        className="text-muted-foreground hover:text-foreground gap-1.5"
-                        title={
-                          (epic?.tracker as TrackerReference | undefined)?.externalId
-                            ? 'Publicar como sub-issue de la épica'
-                            : 'Publicar historia en Linear'
-                        }
-                      >
-                        {publishingTracker ? (
-                          <Loader2 className="h-3.5 w-3.5 animate-spin" />
-                        ) : (
-                          <Upload className="h-3.5 w-3.5" />
-                        )}
-                        Subir a Linear
-                      </Button>
-                    )}
-                    <Button variant="ghost" size="icon" onClick={handleStartEdit} className="text-muted-foreground hover:text-foreground">
-                      <Pencil className="h-4 w-4" />
-                    </Button>
-                    <Button variant="ghost" size="icon" onClick={() => setDeleteOpen(true)} className="text-muted-foreground hover:text-destructive">
-                      <Trash2 className="h-4 w-4" />
-                    </Button>
-                  </>
-                ) : (
-                  <>
-                    <Button variant="ghost" size="icon" onClick={() => setIsEditing(false)} className="text-muted-foreground hover:text-foreground">
-                      <X className="h-4 w-4" />
-                    </Button>
-                    <Button variant="ghost" size="icon" onClick={handleSave} className="text-foreground">
-                      <Check className="h-4 w-4" />
-                    </Button>
-                  </>
-                )}
-              </div>
+              <TooltipProvider delayDuration={200}>
+                <div className="flex gap-1 shrink-0 mt-1">
+                  {!isEditing ? (
+                    <>
+                      <DownloadMenu entity={{ kind: 'story', story }} fetchFullContent />
+                      {(story.tracker as TrackerReference | undefined)?.externalKey ? (
+                        <Tooltip>
+                          <TooltipTrigger asChild>
+                            <a
+                              href={(story.tracker as TrackerReference).externalUrl}
+                              target="_blank"
+                              rel="noopener noreferrer"
+                              className="inline-flex items-center gap-1.5 h-9 px-3 rounded-md text-xs font-medium border border-border text-muted-foreground hover:text-foreground hover:bg-accent dark:hover:bg-accent/50 transition-colors"
+                            >
+                              <ExternalLink className="h-3.5 w-3.5" />
+                              {(story.tracker as TrackerReference).externalKey}
+                            </a>
+                          </TooltipTrigger>
+                          <TooltipContent>
+                            Abrir {(story.tracker as TrackerReference).externalKey} en Linear
+                          </TooltipContent>
+                        </Tooltip>
+                      ) : (
+                        <Tooltip>
+                          <TooltipTrigger asChild>
+                            <Button
+                              variant="ghost"
+                              size="icon"
+                              onClick={handlePublishToLinear}
+                              disabled={publishingTracker}
+                              className="text-muted-foreground hover:text-foreground"
+                            >
+                              {publishingTracker ? (
+                                <Loader2 className="h-4 w-4 animate-spin" />
+                              ) : (
+                                <LinearIcon className="h-4 w-4" />
+                              )}
+                            </Button>
+                          </TooltipTrigger>
+                          <TooltipContent>
+                            {(epic?.tracker as TrackerReference | undefined)?.externalId
+                              ? 'Publicar como sub-issue de la épica en Linear'
+                              : 'Publicar historia en Linear'}
+                          </TooltipContent>
+                        </Tooltip>
+                      )}
+                      <Tooltip>
+                        <TooltipTrigger asChild>
+                          <Button variant="ghost" size="icon" onClick={handleStartEdit} className="text-muted-foreground hover:text-foreground">
+                            <Pencil className="h-4 w-4" />
+                          </Button>
+                        </TooltipTrigger>
+                        <TooltipContent>Editar historia</TooltipContent>
+                      </Tooltip>
+                      <Tooltip>
+                        <TooltipTrigger asChild>
+                          <Button variant="ghost" size="icon" onClick={() => setDeleteOpen(true)} className="text-muted-foreground hover:text-destructive">
+                            <Trash2 className="h-4 w-4" />
+                          </Button>
+                        </TooltipTrigger>
+                        <TooltipContent>Eliminar historia</TooltipContent>
+                      </Tooltip>
+                    </>
+                  ) : (
+                    <>
+                      <Tooltip>
+                        <TooltipTrigger asChild>
+                          <Button variant="ghost" size="icon" onClick={() => setIsEditing(false)} className="text-muted-foreground hover:text-foreground">
+                            <X className="h-4 w-4" />
+                          </Button>
+                        </TooltipTrigger>
+                        <TooltipContent>Cancelar edición</TooltipContent>
+                      </Tooltip>
+                      <Tooltip>
+                        <TooltipTrigger asChild>
+                          <Button variant="ghost" size="icon" onClick={handleSave} disabled={isSaving} className="text-foreground">
+                            {isSaving ? <Loader2 className="h-4 w-4 animate-spin" /> : <Check className="h-4 w-4" />}
+                          </Button>
+                        </TooltipTrigger>
+                        <TooltipContent>Guardar cambios</TooltipContent>
+                      </Tooltip>
+                    </>
+                  )}
+                </div>
+              </TooltipProvider>
             </div>
 
             {isEditing ? (
@@ -560,7 +776,7 @@ function StoryFullPageInner({ storyId }: StoryFullPageProps) {
             <TabsList className="w-full justify-start border-b rounded-none bg-transparent px-0 h-auto pb-0">
               <TabsTrigger value="po" className="gap-1.5 rounded-none border-b-2 border-transparent data-[state=active]:border-foreground data-[state=active]:shadow-none">
                 <ClipboardList className="h-3.5 w-3.5" />
-                Product Owner
+                Definición de Negocio
               </TabsTrigger>
               <TabsTrigger value="technical" className="gap-1.5 rounded-none border-b-2 border-transparent data-[state=active]:border-foreground data-[state=active]:shadow-none">
                 <Code2 className="h-3.5 w-3.5" />
@@ -581,10 +797,14 @@ function StoryFullPageInner({ storyId }: StoryFullPageProps) {
             </TabsList>
 
             {/* ── PO Tab ── Editor solo en modo edición; en lectura, ReadOnlyMarkdown.
-                El toggle viene del botón con ícono de lápiz en el header. */}
+                El toggle viene del botón con ícono de lápiz en el header.
+                Skeleton mientras vaultContent lazy-loadea — evita falso
+                positivo de "Sin contenido" durante el fetch inicial. */}
             <TabsContent value="po" className="mt-8 space-y-6">
               {isEditing ? (
                 <StoryPOTab value={editPO} onChange={setEditPO} />
+              ) : isVaultLoading ? (
+                <StoryMarkdownSkeleton />
               ) : editPO.trim() ? (
                 <ReadOnlyMarkdown content={editPO} />
               ) : (
@@ -596,6 +816,8 @@ function StoryFullPageInner({ storyId }: StoryFullPageProps) {
             <TabsContent value="technical" className="mt-8 space-y-6">
               {isEditing ? (
                 <StoryTechnicalTab value={editTechnical} onChange={setEditTechnical} />
+              ) : isVaultLoading ? (
+                <StoryMarkdownSkeleton />
               ) : editTechnical.trim() ? (
                 <ReadOnlyMarkdown content={editTechnical} />
               ) : (
@@ -607,6 +829,8 @@ function StoryFullPageInner({ storyId }: StoryFullPageProps) {
             <TabsContent value="qa" className="mt-8 space-y-6">
               {isEditing ? (
                 <StoryQATab value={editQA} onChange={setEditQA} />
+              ) : isVaultLoading ? (
+                <StoryMarkdownSkeleton />
               ) : editQA.trim() ? (
                 <ReadOnlyMarkdown content={editQA} />
               ) : (
@@ -714,9 +938,9 @@ function StoryFullPageInner({ storyId }: StoryFullPageProps) {
               >
                 Cancelar
               </Button>
-              <Button onClick={handleSave} disabled={!editTitle.trim()} className="gap-1.5">
-                <Check className="h-3.5 w-3.5" />
-                Guardar cambios
+              <Button onClick={handleSave} disabled={!editTitle.trim() || isSaving} className="gap-1.5">
+                {isSaving ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Check className="h-3.5 w-3.5" />}
+                {isSaving ? 'Guardando...' : 'Guardar cambios'}
               </Button>
             </div>
           )}

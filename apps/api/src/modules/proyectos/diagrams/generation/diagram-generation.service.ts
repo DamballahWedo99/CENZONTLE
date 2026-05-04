@@ -2,6 +2,7 @@ import { BadRequestException, Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { Prisma } from '@prisma/client';
 import Anthropic from '@anthropic-ai/sdk';
+import { anthropicFetch } from '../../../../lib/anthropic-fetch';
 import { Subject } from 'rxjs';
 import { PrismaService } from '../../../prisma/prisma.service';
 import { InitiativeDocumentsTool } from '../../../factory/agent-tools/initiative-documents.tool';
@@ -39,10 +40,17 @@ import { scrubSecrets } from '../../../../common/utils/scrub-secrets.util';
 import { sanitizeUserPromptForLLM } from '../../../../common/utils/sanitize-llm-input.util';
 import { ChangelogService } from '../../changelog/changelog.service';
 import { DiagramCacheService } from './diagram-cache.service';
+import { AgentTokenSettingsService } from '../../../agent-token-settings/agent-token-settings.service';
 
 const MAX_TOOL_ITERATIONS = 20;
-const MODEL = 'claude-sonnet-4-20250514';
+// Sonnet 4.6 — soporta adaptive thinking + effort levels.
+const MODEL = 'claude-sonnet-4-6';
 const MAX_ATTACHMENT_BYTES_TOTAL = 60 * 1024 * 1024;
+
+// Extended thinking + max_tokens de los agentes de diagramas se leen ahora
+// desde AgentTokenSettingsService (singleton BD, configurable desde
+// /factory/settings?section=agent-tokens). Defaults coinciden con los
+// valores históricos: thinking=10K, max_tokens=32K.
 
 // Agent 2 (planner-executor layout pass). Número pequeño porque la tarea es
 // estructural y determinista — si no cumple en 3 turnos, el fallback conserva
@@ -255,12 +263,23 @@ export class DiagramGenerationService {
     private readonly diagramCache: DiagramCacheService,
     private readonly changelog: ChangelogService,
     private readonly vault: VaultService,
+    private readonly tokenSettings: AgentTokenSettingsService,
   ) {
     const apiKey = this.config.get<string>('ANTHROPIC_API_KEY');
     if (!apiKey) {
       this.logger.warn('ANTHROPIC_API_KEY not configured — diagram generation will fail at runtime');
     }
-    this.client = new Anthropic({ apiKey: apiKey || undefined });
+    // `timeout: 30 * 60 * 1000` (30 min): override del default del SDK.
+    // El `timeout` cubre la lógica del request — el `terminated` que
+    // veíamos venía de la capa undici subyacente (`bodyTimeout` default
+    // ~5 min). Pasamos `fetch: anthropicFetch` para que el SDK use un
+    // dispatcher con `bodyTimeout: 0`. Ver
+    // `apps/api/src/lib/anthropic-fetch.ts`.
+    this.client = new Anthropic({
+      apiKey: apiKey || undefined,
+      timeout: 30 * 60 * 1000,
+      fetch: anthropicFetch,
+    });
     this.tools = [initDocsTool, codeGlob, codeGrep, codeRead, vaultGlob, vaultGrep, vaultRead];
   }
 
@@ -562,6 +581,16 @@ export class DiagramGenerationService {
     const subject = new Subject<{ data: DiagramGenerationEvent }>();
 
     this.runAgent(epicId, type, prompt, subject, signal, user).catch((err) => {
+      // AbortError es comportamiento esperado cuando el cliente cancela —
+      // no es un error real, no necesita stack trace verboso ni emitir
+      // mensaje de error al cliente (la UI ya cambió a idle al disparar
+      // el cancel).
+      const errName = (err as { name?: string })?.name;
+      if (errName === 'AbortError' || signal?.aborted) {
+        this.logger.log(`[generate] Agent aborted (signal): epic=${epicId} type=${type}`);
+        subject.complete();
+        return;
+      }
       this.logger.error(`Agent error: ${err.message}`, err.stack);
       // Surface specific auth failures so the operator knows the problem is
       // the Anthropic API key, not the agent logic.
@@ -746,17 +775,31 @@ export class DiagramGenerationService {
         return;
       }
 
+      // Nudge en penúltimo turno. Si el último mensaje ya es `user`
+      // (post-tool_results del iter anterior), anexamos como bloque de texto
+      // adicional para evitar `user/user` consecutivos — Anthropic los
+      // rechaza con 400 cuando thinking está activo.
       if (iteration === MAX_TOOL_ITERATIONS - 2) {
-        messages.push({
-          role: 'user',
-          content: 'Ya tienes suficiente contexto. Llama a submit_diagram AHORA con el diagrama basado en lo que has descubierto. No hagas más búsquedas.',
-        });
+        const nudgeText =
+          'Ya tienes suficiente contexto. Llama a submit_diagram AHORA con el diagrama basado en lo que has descubierto. No hagas más búsquedas.';
+        const last = messages[messages.length - 1];
+        if (last && last.role === 'user' && Array.isArray(last.content)) {
+          last.content.push({ type: 'text', text: nudgeText });
+        } else if (last && last.role === 'user' && typeof last.content === 'string') {
+          last.content = `${last.content}\n\n${nudgeText}`;
+        } else {
+          messages.push({ role: 'user', content: nudgeText });
+        }
       }
 
-      // Extended thinking es toggleable por env flag para degradación
-      // graciosa si el tier de API o el modelo cambia y no lo soporta.
-      // Default: habilitado. Para desactivar: `DIAGRAM_AGENT_THINKING=false`.
-      const thinkingEnabled = process.env.DIAGRAM_AGENT_THINKING !== 'false';
+      // Settings dinámicos (cached 30s) — un cambio en /factory/settings se
+      // refleja en runs nuevos sin redeploy. `effort` reemplaza el budget
+      // numérico legacy. `enabled` es el toggle ON/OFF del thinking.
+      const {
+        effort: diagramEffort,
+        maxTokens: diagramMaxTokens,
+        enabled: diagramEnabled,
+      } = await this.tokenSettings.getDiagram();
 
       // Este turno fuerza `outline_flow` vía `tool_choice` si el agente
       // intentó saltarse la fase en el turno anterior. Anthropic REQUIERE
@@ -771,30 +814,141 @@ export class DiagramGenerationService {
         );
       }
 
-      const response = await this.client.messages.create({
-        model: MODEL,
-        // max_tokens incluye output tokens + thinking tokens. Con budget 2500
-        // de thinking + espacio para text/tool_use, 8192 da holgura cómoda
-        // (el agente rara vez excede ~4K tokens de output real). Si thinking
-        // está desactivado, 8192 sigue siendo seguro (solo no se consumirán
-        // thinking tokens).
-        max_tokens: 8192,
-        system: [{ type: 'text', text: systemPrompt, cache_control: { type: 'ephemeral' } }],
-        // Branching de configuración por turno:
-        //   - Si shouldForceOutlineTool: fuerza outline_flow a nivel API,
-        //     desactiva thinking (incompatible con tool_choice: tool).
-        //   - Si no: auto + extended thinking (default).
-        ...(shouldForceOutlineTool
-          ? { tool_choice: { type: 'tool' as const, name: 'outline_flow' } }
-          : thinkingEnabled
-            ? { thinking: { type: 'enabled' as const, budget_tokens: 2500 } }
-            : {}),
-        tools: claudeTools,
-        messages,
-      });
+      const callStart = Date.now();
+      const thinkingActive = diagramEnabled && !shouldForceOutlineTool;
+      // `messages.stream()` en lugar de `create()` — Anthropic exige stream
+      // cuando el tiempo estimado puede superar 10min, lo cual ocurre con
+      // `max_tokens` grande + thinking activo configurable hasta 64K desde
+      // /factory/settings. `finalMessage()` es drop-in con la response de
+      // create — el resto del loop no cambia.
+      const stream = this.client.messages.stream(
+        {
+          model: MODEL,
+          // max_tokens INCLUYE thinking_budget + output.
+          max_tokens: diagramMaxTokens,
+          system: [{ type: 'text', text: systemPrompt, cache_control: { type: 'ephemeral' } }],
+          // Branching de configuración por turno:
+          //   - Si shouldForceOutlineTool: fuerza outline_flow a nivel API,
+          //     desactiva thinking (incompatible con tool_choice: tool).
+          //   - Si no: auto + extended thinking (configurable).
+          ...(shouldForceOutlineTool
+            ? { tool_choice: { type: 'tool' as const, name: 'outline_flow' } }
+            : thinkingActive
+              ? {
+                  thinking: { type: 'adaptive' as const },
+                  output_config: { effort: diagramEffort },
+                }
+              : {}),
+          tools: claudeTools,
+          messages,
+        },
+        // Propagar AbortSignal al SDK — sin esto, controller.abort() del
+        // endpoint /cancel no detiene la conexión TCP con Anthropic y el
+        // agente sigue consumiendo tokens hasta terminar.
+        signal ? { signal } : undefined,
+      );
+
+      // STREAMING REAL: iterar raw events del SDK para capturar text_delta Y
+      // thinking_delta chunks. Los helpers `stream.on('text'/'thinking')` del
+      // SDK 0.88.0 no emiten thinking_delta en tiempo real con adaptive mode
+      // — esperan al final del bloque, dando sensación de "trabe". Iterar
+      // el stream raw garantiza que cada delta llegue al SSE en cuanto el
+      // SDK lo recibe, incluyendo los chunks de razonamiento adaptive.
+      const iterStart = Date.now();
+      let evtCount = 0;
+      let textDeltaCount = 0;
+      let thinkingDeltaCount = 0;
+      let totalTextChars = 0;
+      let totalThinkingChars = 0;
+      for await (const evt of stream) {
+        evtCount++;
+        const elapsed = Date.now() - iterStart;
+        // Log TODOS los tipos de events (no solo content_block_delta) para
+        // detectar gaps largos sin events.
+        this.logger.log(
+          `[DiagramAgent.iter${iteration}] raw event #${evtCount} type=${evt.type} elapsed=${elapsed}ms`,
+        );
+        // Tool_use TERMINAL (submit_*): emite aviso al user para que vea
+        // que el agente sigue trabajando mientras construye el JSON final.
+        if (evt.type === 'content_block_start') {
+          const cb = evt.content_block as { type?: string; name?: string };
+          if (cb.type === 'tool_use' && cb.name?.startsWith('submit_')) {
+            subject.next({
+              data: { type: 'thinking', delta: `\n\n→ Estructurando entrega final…\n`, timestamp: new Date().toISOString() },
+            });
+          }
+          continue;
+        }
+        if (evt.type !== 'content_block_delta') continue;
+        const delta = evt.delta as { type?: string; text?: string; thinking?: string };
+        if (delta.type === 'text_delta' && delta.text?.trim()) {
+          textDeltaCount++;
+          totalTextChars += delta.text.length;
+          this.logger.log(
+            `[DiagramAgent.iter${iteration}] ⬆ text_delta #${textDeltaCount} (${delta.text.length} chars, total=${totalTextChars}): "${delta.text.slice(0, 80)}${delta.text.length > 80 ? '…' : ''}"`,
+          );
+          subject.next({
+            data: { type: 'thinking', delta: scrubSecrets(delta.text), timestamp: new Date().toISOString() },
+          });
+        } else if (delta.type === 'thinking_delta' && delta.thinking?.trim()) {
+          thinkingDeltaCount++;
+          totalThinkingChars += delta.thinking.length;
+          this.logger.log(
+            `[DiagramAgent.iter${iteration}] 🧠 thinking_delta #${thinkingDeltaCount} (${delta.thinking.length} chars, total=${totalThinkingChars}): "${delta.thinking.slice(0, 80)}${delta.thinking.length > 80 ? '…' : ''}"`,
+          );
+          subject.next({
+            data: { type: 'thinking', delta: scrubSecrets(delta.thinking), timestamp: new Date().toISOString() },
+          });
+        }
+      }
+      this.logger.log(
+        `[DiagramAgent.iter${iteration}] 🏁 raw iterator done — total events=${evtCount} text_deltas=${textDeltaCount} (${totalTextChars} chars) thinking_deltas=${thinkingDeltaCount} (${totalThinkingChars} chars) duration=${Date.now() - iterStart}ms`,
+      );
+      // El SDK acumula los blocks internamente — finalMessage() los reconstruye
+      // como Message tras iterar el stream completo.
+      const response = await stream.finalMessage();
 
       // Reset del flag tras consumirlo — next turn vuelve a modo normal.
       forceOutlineNextTurn = false;
+
+      // Guarda explícita: si el modelo se truncó por límite de tokens, el
+      // tool_use final puede venir incompleto y el loop continuaría ciegamente
+      // consumiendo iteraciones. Mejor abortar y dar feedback al user.
+      if (response.stop_reason === 'max_tokens') {
+        this.logger.warn(
+          `[DiagramAgent] iter ${iteration} hit max_tokens (limit=${diagramMaxTokens}) — output truncated`,
+        );
+        subject.next({
+          data: {
+            type: 'error',
+            message:
+              'La respuesta del agente excedió el límite de tokens. Intenta con un prompt más conciso o un diagrama más simple.',
+            timestamp: new Date().toISOString(),
+          },
+        });
+        subject.next({ data: { type: 'run_finished', timestamp: new Date().toISOString(), totalDurationMs: Date.now() - runStartTime } });
+        subject.complete();
+        return;
+      }
+
+      // Logging por iteración: tokens, cache, thinking blocks emitidos.
+      const usage = response.usage as any;
+      const cacheRead = usage?.cache_read_input_tokens ?? 0;
+      const cacheCreate = usage?.cache_creation_input_tokens ?? 0;
+      const inputTokens = usage?.input_tokens ?? 0;
+      const outputTokens = usage?.output_tokens ?? 0;
+      const thinkingBlocksCount = response.content.filter(
+        (b: any) => b.type === 'thinking' || b.type === 'redacted_thinking',
+      ).length;
+      const toolUseBlocksCount = response.content.filter(
+        (b: any) => b.type === 'tool_use',
+      ).length;
+      this.logger.log(
+        `[DiagramAgent] iter ${iteration} stop=${response.stop_reason} dur=${Date.now() - callStart}ms ` +
+          `tokens(in=${inputTokens} out=${outputTokens} cache_read=${cacheRead} cache_create=${cacheCreate}) ` +
+          `thinking_blocks=${thinkingBlocksCount} tool_calls=${toolUseBlocksCount}` +
+          `${thinkingActive ? ' 🧠' : ''}${shouldForceOutlineTool ? ' 🎯FORCED' : ''}${cacheRead > 0 ? ' 💾CACHE_HIT' : ''}`,
+      );
 
       // `assistantContent` puede contener `thinking`, `redacted_thinking`,
       // `text` y `tool_use` blocks. Los pasamos tal cual al siguiente turno
@@ -805,23 +959,8 @@ export class DiagramGenerationService {
 
       const textBlocks = assistantContent.filter((b) => b.type === 'text' && (b as Anthropic.Messages.TextBlock).text?.trim());
 
-      for (const block of assistantContent) {
-        // Null-guards defensivos (`?.trim()`): si el SDK devolviera un block
-        // con `text`/`thinking` unset (cambio futuro de contrato, mock en
-        // tests), evitamos un TypeError que cerraría el subject sin emitir
-        // `run_finished` — dejando el SSE del cliente abierto indefinidamente.
-        if (block.type === 'text' && block.text?.trim()) {
-          subject.next({ data: { type: 'thinking', delta: scrubSecrets(block.text), timestamp: new Date().toISOString() } });
-        } else if (block.type === 'thinking' && block.thinking?.trim()) {
-          // Thinking blocks = razonamiento interno del agente. Lo emitimos
-          // como eventos `thinking` idénticos a los text blocks — el viewer
-          // (`ThinkingBlock.tsx` + Streamdown) los fusiona visualmente en la
-          // cadena de pensamiento. `redacted_thinking` NO se emite: Anthropic
-          // oscurece esos bloques por safety, solo se preservan en messages
-          // para mantener el contexto encriptado.
-          subject.next({ data: { type: 'thinking', delta: scrubSecrets(block.thinking), timestamp: new Date().toISOString() } });
-        }
-      }
+      // Los text/thinking blocks YA se emitieron en vivo via stream.on()
+      // arriba. No los re-emitimos del response.content para evitar duplicación.
 
       if (iteration >= 2 && textBlocks.length > 0 && currentPhase === 'researching') {
         currentPhase = 'analyzing';
@@ -1442,38 +1581,125 @@ export class DiagramGenerationService {
         return;
       }
 
+      // Nudge en penúltimo turno. Anexamos al último user message (si existe)
+      // para evitar `user/user` consecutivos — Anthropic los rechaza con 400
+      // cuando thinking está activo.
       if (iteration === MAX_DOC_ITERATIONS - 2) {
-        messages.push({
-          role: 'user',
-          content: 'Ya tienes suficiente contexto. Llama a submit_integration_doc AHORA con el documento y los steps basados en lo que has descubierto. No hagas más búsquedas.',
-        });
+        const nudgeText =
+          'Ya tienes suficiente contexto. Llama a submit_integration_doc AHORA con el documento y los steps basados en lo que has descubierto. No hagas más búsquedas.';
+        const last = messages[messages.length - 1];
+        if (last && last.role === 'user' && Array.isArray(last.content)) {
+          last.content.push({ type: 'text', text: nudgeText });
+        } else if (last && last.role === 'user' && typeof last.content === 'string') {
+          last.content = `${last.content}\n\n${nudgeText}`;
+        } else {
+          messages.push({ role: 'user', content: nudgeText });
+        }
       }
 
-      const thinkingEnabled = process.env.DIAGRAM_AGENT_THINKING !== 'false';
+      const callStart = Date.now();
+      // Settings dinámicos (cached). Mismo effort que el agente principal —
+      // los dos agentes de diagramas comparten un único set de valores.
+      const {
+        effort: diagramEffort,
+        maxTokens: diagramMaxTokens,
+        enabled: diagramEnabled,
+      } = await this.tokenSettings.getDiagram();
+      // `messages.stream()` por la misma razón que el agente principal:
+      // Anthropic exige stream cuando el tiempo estimado puede superar 10min.
+      const stream = this.client.messages.stream(
+        {
+          model: MODEL,
+          max_tokens: diagramMaxTokens,
+          system: [{ type: 'text', text: systemPrompt, cache_control: { type: 'ephemeral' } }],
+          ...(diagramEnabled
+            ? {
+                thinking: { type: 'adaptive' as const },
+                output_config: { effort: diagramEffort },
+              }
+            : {}),
+          tools: claudeTools,
+          messages,
+        },
+        // Propagar AbortSignal — ver doc en agente principal arriba.
+        signal ? { signal } : undefined,
+      );
 
-      const response = await this.client.messages.create({
-        model: MODEL,
-        max_tokens: 8192,
-        system: [{ type: 'text', text: systemPrompt, cache_control: { type: 'ephemeral' } }],
-        ...(thinkingEnabled
-          ? { thinking: { type: 'enabled' as const, budget_tokens: 2500 } }
-          : {}),
-        tools: claudeTools,
-        messages,
-      });
+      // STREAMING REAL: iterar raw events para capturar text_delta + thinking_delta
+      // (mismo patrón que en el agente principal). Los helpers stream.on() del
+      // SDK 0.88.0 no emiten thinking_delta en tiempo real con adaptive mode.
+      for await (const evt of stream) {
+        // Tool_use TERMINAL (submit_*): aviso para evitar que la UI parezca
+        // trabada mientras el modelo construye el JSON final.
+        if (evt.type === 'content_block_start') {
+          const cb = evt.content_block as { type?: string; name?: string };
+          if (cb.type === 'tool_use' && cb.name?.startsWith('submit_')) {
+            subject.next({
+              data: { type: 'thinking', delta: `\n\n→ Estructurando entrega final…\n`, timestamp: new Date().toISOString() },
+            });
+          }
+          continue;
+        }
+        if (evt.type !== 'content_block_delta') continue;
+        const delta = evt.delta as { type?: string; text?: string; thinking?: string };
+        if (delta.type === 'text_delta' && delta.text?.trim()) {
+          subject.next({
+            data: { type: 'thinking', delta: scrubSecrets(delta.text), timestamp: new Date().toISOString() },
+          });
+        } else if (delta.type === 'thinking_delta' && delta.thinking?.trim()) {
+          subject.next({
+            data: { type: 'thinking', delta: scrubSecrets(delta.thinking), timestamp: new Date().toISOString() },
+          });
+        }
+      }
+      const response = await stream.finalMessage();
+
+      // Guarda explícita: si el modelo se truncó por límite de tokens, el
+      // tool_use final puede venir incompleto. Abortamos con feedback al user
+      // en vez de seguir consumiendo iteraciones ciegamente.
+      if (response.stop_reason === 'max_tokens') {
+        this.logger.warn(
+          `[DiagramDoc] iter ${iteration} hit max_tokens (limit=${diagramMaxTokens}) — output truncated`,
+        );
+        subject.next({
+          data: {
+            type: 'error',
+            message:
+              'La respuesta del agente excedió el límite de tokens. Intenta con un prompt más conciso.',
+            timestamp: new Date().toISOString(),
+          },
+        });
+        subject.next({ data: { type: 'run_finished', timestamp: new Date().toISOString(), totalDurationMs: Date.now() - runStartTime } });
+        subject.complete();
+        return;
+      }
+
+      // Logging por iteración: tokens, cache, thinking blocks emitidos.
+      const usage = response.usage as any;
+      const cacheRead = usage?.cache_read_input_tokens ?? 0;
+      const cacheCreate = usage?.cache_creation_input_tokens ?? 0;
+      const inputTokens = usage?.input_tokens ?? 0;
+      const outputTokens = usage?.output_tokens ?? 0;
+      const thinkingBlocksCount = response.content.filter(
+        (b: any) => b.type === 'thinking' || b.type === 'redacted_thinking',
+      ).length;
+      const toolUseBlocksCount = response.content.filter(
+        (b: any) => b.type === 'tool_use',
+      ).length;
+      this.logger.log(
+        `[DiagramDoc] iter ${iteration} stop=${response.stop_reason} dur=${Date.now() - callStart}ms ` +
+          `tokens(in=${inputTokens} out=${outputTokens} cache_read=${cacheRead} cache_create=${cacheCreate}) ` +
+          `thinking_blocks=${thinkingBlocksCount} tool_calls=${toolUseBlocksCount}` +
+          `${diagramEnabled ? ' 🧠' : ''}${cacheRead > 0 ? ' 💾CACHE_HIT' : ''}`,
+      );
 
       const assistantContent = response.content;
       messages.push({ role: 'assistant', content: assistantContent });
 
       const textBlocks = assistantContent.filter((b) => b.type === 'text' && (b as Anthropic.Messages.TextBlock).text?.trim());
 
-      for (const block of assistantContent) {
-        if (block.type === 'text' && block.text?.trim()) {
-          subject.next({ data: { type: 'thinking', delta: scrubSecrets(block.text), timestamp: new Date().toISOString() } });
-        } else if (block.type === 'thinking' && block.thinking?.trim()) {
-          subject.next({ data: { type: 'thinking', delta: scrubSecrets(block.thinking), timestamp: new Date().toISOString() } });
-        }
-      }
+      // Los text/thinking blocks YA se emitieron en vivo via stream.on() arriba.
+      // No los re-emitimos del response.content para evitar duplicación.
 
       if (iteration >= 2 && textBlocks.length > 0 && currentPhase === 'researching') {
         currentPhase = 'analyzing';
@@ -3517,10 +3743,12 @@ ${safePrompt}
     subject: Subject<{ data: DiagramGenerationEvent }>,
     signal?: AbortSignal,
   ): Promise<EpicDiagram> {
-    // Toggle por env flag — paridad con `DIAGRAM_AGENT_THINKING`. Permite
-    // deshabilitar el Agent 2 en casos de billing/tier constraints, A/B
-    // tests, o si el modelo elegido no soporta `tool_choice: tool`. Default:
-    // habilitado. Para desactivar: `DIAGRAM_LAYOUT_PASS_ENABLED=false`.
+    // Toggle del Agent 2 (layout pass) por env flag. Sigue siendo env porque
+    // el layout pass NO está expuesto en /factory/settings (decisión de diseño:
+    // es estructural, no usa thinking, default es operacionalmente correcto).
+    // Permite desactivar en casos de billing/tier constraints, A/B tests, o si
+    // el modelo elegido no soporta `tool_choice: tool`. Default: habilitado.
+    // Para desactivar: `DIAGRAM_LAYOUT_PASS_ENABLED=false`.
     if (process.env.DIAGRAM_LAYOUT_PASS_ENABLED === 'false') {
       this.logger.log(
         `[layout_pass] skipped (DIAGRAM_LAYOUT_PASS_ENABLED=false) epic=${epicContext.id}`,
@@ -3996,6 +4224,11 @@ Output vía tool \`layout_pass\`:
     // interpolación textual (Prisma parametriza).
     const diagramJson = JSON.stringify(diagram);
 
+    // NOTA crítica: `epics.id` está modelado como `String @default(uuid())` en
+    // Prisma, lo cual se mapea a `TEXT` en Postgres (no UUID nativo). Por eso
+    // NO usamos `::uuid` cast — eso producía `42883: operator does not exist:
+    // text = uuid` porque el LHS de la columna es TEXT y forzábamos UUID en el
+    // RHS. Comparison TEXT = TEXT funciona directamente.
     const affected = await this.prisma.$executeRaw`
       UPDATE epics
       SET diagrams = COALESCE(
@@ -4011,7 +4244,7 @@ Output vía tool \`layout_pass\`:
         ),
         '[]'::jsonb
       )
-      WHERE id = ${epicId}::uuid
+      WHERE id = ${epicId}
     `;
 
     if (affected === 0) {

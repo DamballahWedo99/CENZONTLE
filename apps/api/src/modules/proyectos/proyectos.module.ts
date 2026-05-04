@@ -5,6 +5,7 @@ import { InitiativesController } from './initiatives/initiatives.controller';
 import { InitiativesService } from './initiatives/initiatives.service';
 import { EpicsController } from './epics/epics.controller';
 import { EpicsService } from './epics/epics.service';
+import { DesignBundleService } from './epics/design-bundle.service';
 import { StoriesController } from './stories/stories.controller';
 import { StoriesService } from './stories/stories.service';
 import { StoryDependenciesController } from './stories/dependencies/story-dependencies.controller';
@@ -24,6 +25,7 @@ import { StoryProposalCacheService } from './stories/generation/story-proposal-c
 import { DiagramGenerationController } from './diagrams/generation/diagram-generation.controller';
 import { DiagramGenerationService } from './diagrams/generation/diagram-generation.service';
 import { DiagramCacheService } from './diagrams/generation/diagram-cache.service';
+import { DiagramSessionCacheService } from './diagrams/generation/diagram-session-cache.service';
 import { VaultMigrationController } from './migration/vault-migration.controller';
 import { VaultMigrationService } from './migration/vault-migration.service';
 
@@ -46,10 +48,12 @@ import { VaultMigrationService } from './migration/vault-migration.service';
     PodsService,
     InitiativesService,
     EpicsService,
+    DesignBundleService,
     EpicGenerationService,
     ProposalCacheService,
     DiagramGenerationService,
     DiagramCacheService,
+    DiagramSessionCacheService,
     StoriesService,
     StoryDependenciesService,
     StoryGenerationService,

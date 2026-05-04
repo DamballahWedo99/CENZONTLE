@@ -13,6 +13,7 @@ import { PrismaService } from '../../prisma/prisma.service';
 import { VaultService } from '../../vault/vault.service';
 import { VaultFolderService } from '../../vault/vault-folder.service';
 import { IntegrationsService } from '../../integrations/integrations.service';
+import { assertUserCanAccessStoryByEpic } from '../epics/epic-access.util';
 
 const PENDING_TRACKER_SENTINEL = '__pending__';
 import { CreateStoryDto, RelatedDocumentDto, DiscoveredDependencyDto } from './dto/create-story.dto';
@@ -400,7 +401,7 @@ export class StoriesService {
     }
   }
 
-  async update(id: string, dto: UpdateStoryDto) {
+  async update(id: string, dto: UpdateStoryDto, user: AuthenticatedUser) {
     this.logger.log(`[StoryVault:update] START id=${id} fields=[${Object.keys(dto).join(',')}]`);
     const existing = await this.prisma.story.findUnique({
       where: { id },
@@ -410,6 +411,7 @@ export class StoriesService {
             id: true,
             title: true,
             initiative: { select: { id: true, name: true } },
+            pods: { select: { podId: true } },
           },
         },
       },
@@ -417,6 +419,16 @@ export class StoriesService {
     if (!existing) {
       throw new NotFoundException('Historia no encontrada');
     }
+
+    // CWE-639 BOLA — fix de security-reviewer HIGH 2026-05-04. EDIT_STORY es
+    // global para PO/TechLead/ScrumMaster; sin este check podían mutar
+    // historias de otros pods (overwrite de markdown, rename de folder, etc.).
+    // El set autorizado es la unión de los pods de la épica padre + el
+    // podId propio de la historia.
+    assertUserCanAccessStoryByEpic(user, {
+      epicPodIds: existing.epic?.pods?.map((p) => p.podId) ?? [],
+      storyPodId: existing.podId ?? null,
+    });
 
     // Excluir campos que no son columnas escalares de `story`: los 3 de
     // contenido (po/technical/qa van al vault), `relatedDocuments` y
@@ -581,9 +593,21 @@ export class StoriesService {
     return result;
   }
 
-  async remove(id: string) {
-    const story = await this.prisma.story.findUnique({ where: { id } });
+  async remove(id: string, user: AuthenticatedUser) {
+    const story = await this.prisma.story.findUnique({
+      where: { id },
+      include: {
+        epic: { select: { pods: { select: { podId: true } } } },
+      },
+    });
     if (!story) throw new NotFoundException('Historia no encontrada');
+
+    // CWE-639 BOLA — fix de security-reviewer HIGH 2026-05-04. DELETE_STORY
+    // simétrico al update: pod intersection contra epic.pods ∪ {story.podId}.
+    assertUserCanAccessStoryByEpic(user, {
+      epicPodIds: story.epic?.pods?.map((p) => p.podId) ?? [],
+      storyPodId: story.podId ?? null,
+    });
 
     this.logger.log(`[StoryVault:remove] START id=${id} title="${story.title}" vaultPath=${story.vaultPath}`);
 
@@ -761,23 +785,37 @@ export class StoriesService {
       team: 'teams',
       other: 'other',
     };
-    const rows = deps.map((d) => ({
-      storyId,
-      title: d.title,
-      description: d.description ?? '',
-      category: TYPE_TO_CATEGORY[d.type] ?? 'other',
-      severity: d.severity ?? 'medium',
-      source: 'discovered',
-      vendor: d.vendor ?? null,
-      requiresCredential: d.requiresCredential ?? false,
-      isBlocking: d.isBlocking ?? false,
-      status: 'identified',
-      mdContent: d.mdContent ?? null,
-    }));
+    // Auto-link cross-org: si la propuesta llegó con `linkedSecretId` poblado
+    // (resultado del registry global en `emitProposals`), lo persistimos
+    // junto con `status='resolved'`. Sin esto, el auto-link se perdería al
+    // crear la fila y el user vería la dep como pendiente aunque la org
+    // tuviera el secret. `resolutionNotes` deja trazabilidad del origen.
+    const rows = deps.map((d) => {
+      const hasLinkedSecret = typeof d.linkedSecretId === 'string' && d.linkedSecretId.length > 0;
+      return {
+        storyId,
+        title: d.title,
+        description: d.description ?? '',
+        category: TYPE_TO_CATEGORY[d.type] ?? 'other',
+        severity: d.severity ?? 'medium',
+        source: 'discovered',
+        vendor: d.vendor ?? null,
+        requiresCredential: d.requiresCredential ?? false,
+        isBlocking: d.isBlocking ?? false,
+        linkedSecretId: hasLinkedSecret ? d.linkedSecretId! : null,
+        status: hasLinkedSecret ? 'resolved' : 'identified',
+        resolutionNotes: hasLinkedSecret
+          ? 'Auto-vinculada al crear: secret ya provisto en la organización'
+          : '',
+        mdContent: d.mdContent ?? null,
+      };
+    });
     try {
       await this.prisma.storyTechnicalDependency.createMany({ data: rows });
+      const autoLinked = rows.filter((r) => r.linkedSecretId !== null).length;
       this.logger.log(
-        `[StoryDeps:persist] ✓ inserted ${rows.length} discovered deps for story=${storyId}`,
+        `[StoryDeps:persist] ✓ inserted ${rows.length} discovered deps for story=${storyId}` +
+          (autoLinked > 0 ? ` (${autoLinked} auto-linked to existing org secrets)` : ''),
       );
     } catch (err: unknown) {
       this.logger.warn(

@@ -1,7 +1,7 @@
 'use client';
 
 import { useState, useMemo, useEffect, useCallback, useRef } from 'react';
-import { useRouter } from 'next/navigation';
+import { useRouter, usePathname, useSearchParams } from 'next/navigation';
 import Link from 'next/link';
 import { toast } from 'sonner';
 import { useProyectos } from '@/context/ProyectosContext';
@@ -9,6 +9,7 @@ import { useBreadcrumb } from '@/context/BreadcrumbContext';
 import { updateInitiative as apiUpdateInitiative, deleteInitiative as apiDeleteInitiative } from '@/lib/api/initiatives';
 import { deleteEpic as apiDeleteEpic, getEpic } from '@/lib/api/epics';
 import { TypeToConfirmDialog } from '@/components/ui/type-to-confirm-dialog';
+import { RoundCheckbox } from '@/components/ui/round-checkbox';
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -56,7 +57,7 @@ import { AgentThinkingDisplay } from './agent-thinking';
 import { EpicProposalList } from './EpicProposalList';
 import type { ProposedEpic, EpicGenerationEvent, Epic } from '@cenzontle/shared';
 import { createEpic as apiCreateEpic } from '@/lib/api/epics';
-import { getCachedSession, invalidateCache, removeCachedProposal } from '@/lib/api/epic-generation';
+import { getCachedSession, invalidateCache, removeCachedProposal, cancelEpicGeneration } from '@/lib/api/epic-generation';
 import { publishInitiativeToTracker } from '@/lib/api/integrations';
 import { ApiError } from '@/lib/api/client';
 import type { TrackerReference } from '@cenzontle/shared';
@@ -79,12 +80,14 @@ import {
   Trash2,
   Download,
   ExternalLink,
-  Upload,
   FileType,
   FileSpreadsheet,
   FileCode,
   FileJson,
 } from 'lucide-react';
+import { LinearIcon } from '@/components/icons/LinearIcon';
+import { Tooltip, TooltipTrigger, TooltipContent, TooltipProvider } from '@/components/ui/tooltip';
+import { useScreenWakeLock } from '@/hooks/use-screen-wake-lock';
 
 const initiativeStatusConfig: Record<InitiativeStatus, { label: string; className: string }> = {
   [InitiativeStatus.Planning]: { label: 'Planning', className: 'bg-gray-100 text-gray-700 dark:bg-gray-800 dark:text-gray-300' },
@@ -159,6 +162,7 @@ function InitiativeFullPageInner({ initiativeId }: InitiativeFullPageProps) {
 
   // Edit + delete state
   const [isEditing, setIsEditing] = useState(false);
+  const [isSaving, setIsSaving] = useState(false);
   const [deleteOpen, setDeleteOpen] = useState(false);
   const [publishingTracker, setPublishingTracker] = useState(false);
 
@@ -208,11 +212,24 @@ function InitiativeFullPageInner({ initiativeId }: InitiativeFullPageProps) {
   const [editOwner, setEditOwner] = useState('');
   const [editStartDate, setEditStartDate] = useState('');
   const [editTargetDate, setEditTargetDate] = useState('');
-  const [activeTab, setActiveTab] = useState('descripcion');
+  // Tab state URL-synced (ver mismo patrón en Story/EpicFullPage). Default
+  // 'descripcion' cuando la URL no trae `?tab=`.
+  const pathname = usePathname();
+  const searchParams = useSearchParams();
+  const activeTab = searchParams.get('tab') ?? 'descripcion';
+  const setActiveTab = (tab: string) => {
+    const params = new URLSearchParams(searchParams.toString());
+    params.set('tab', tab);
+    router.replace(`${pathname}?${params.toString()}`, { scroll: false });
+  };
   const [isCreatingEpic, setIsCreatingEpic] = useState(false);
   const [epicContextMenu, setEpicContextMenu] = useState<{ epicId: string; x: number; y: number } | null>(null);
   const [deleteEpicId, setDeleteEpicId] = useState<string | null>(null);
   const [deleteEpicOpen, setDeleteEpicOpen] = useState(false);
+  // Selección múltiple de épicas para bulk delete (paritario al patrón en
+  // EpicStoryList). Set vacío oculta la action bar.
+  const [selectedEpicIds, setSelectedEpicIds] = useState<Set<string>>(new Set());
+  const [bulkDeleteEpicsOpen, setBulkDeleteEpicsOpen] = useState(false);
   const [exportingEpicFormat, setExportingEpicFormat] = useState<ExportFormat | null>(null);
 
   // AI agent states
@@ -221,11 +238,24 @@ function InitiativeFullPageInner({ initiativeId }: InitiativeFullPageProps) {
   const [agentEvents, setAgentEvents] = useState<EpicGenerationEvent[]>([]);
   const [acceptingId, setAcceptingId] = useState<string | null>(null);
   const [editingProposal, setEditingProposal] = useState<ProposedEpic | null>(null);
+
+  // Mantiene la pantalla activa durante runs largos del agente (epic
+  // generation puede tardar 5-15 min). Sin esto, macOS/Chrome pueden
+  // suspender el sistema y matar el SSE con `terminated`.
+  useScreenWakeLock(agentMode === 'streaming');
   const abortRef = useRef<AbortController | null>(null);
   const proposalsRef = useRef(proposals);
   proposalsRef.current = proposals;
 
-  // Recover cached session on mount (survives page refresh)
+  // Recover cached session on mount (survives tab close / page refresh).
+  // Hidrata 4 escenarios:
+  //   1. session.status='staging' + proposals → mostrar staging UI.
+  //   2. last event = 'run_finished' → run terminó (defensa contra zombies
+  //      donde el proceso murió antes de saveFullSession y el status quedó
+  //      stuck en 'streaming'). Tratar como staging.
+  //   3. session.status='streaming' + events sin run_finished → corre en
+  //      background, mostrar thinking display + polling.
+  //   4. session vacía o no existe → idle.
   useEffect(() => {
     if (!initiative) return;
     let cancelled = false;
@@ -235,10 +265,35 @@ function InitiativeFullPageInner({ initiativeId }: InitiativeFullPageProps) {
         const result = await getCachedSession(initiative.id);
         if (cancelled || !result?.session) return;
         const { session } = result;
-        if (session.proposals.length > 0) {
+
+        if (session.proposals.length > 0 && session.status === 'staging') {
           setAgentEvents(session.events);
           setProposals(session.proposals);
           setAgentMode('staging');
+          return;
+        }
+
+        // Defensa contra cache zombie: si el último event es 'run_finished'
+        // o 'done', el agente terminó aunque status diga 'streaming'.
+        // Esto pasa cuando saveFullSession no corrió (ej. proceso del backend
+        // murió mid-callback). El polling NO debe activarse en este caso.
+        const lastEvent = session.events[session.events.length - 1];
+        const runFinished =
+          lastEvent?.type === 'run_finished' || lastEvent?.type === 'done';
+        if (runFinished) {
+          setAgentEvents(session.events);
+          setProposals(session.proposals);
+          setAgentMode(session.proposals.length > 0 ? 'staging' : 'idle');
+          return;
+        }
+
+        // El run fue iniciado en otra tab/sesión y aún corre en background.
+        // Hidrata los eventos acumulados — el segundo useEffect (polling)
+        // se encarga de seguir trayendo updates hasta que termine.
+        if (session.events.length > 0 && session.status === 'streaming') {
+          setAgentEvents(session.events);
+          setProposals(session.proposals);
+          setAgentMode('streaming');
         }
       } catch {
         // Cache unavailable — stay idle
@@ -247,6 +302,89 @@ function InitiativeFullPageInner({ initiativeId }: InitiativeFullPageProps) {
 
     return () => { cancelled = true; };
   }, [initiative?.id]);
+
+  // Polling del cache cuando el run sigue corriendo en background (otra tab,
+  // o esta misma tab tras cerrarla). Solo se activa si NO hay un run iniciado
+  // por este cliente (abortRef vacío) — en ese caso el SSE stream local ya
+  // está alimentando agentEvents en vivo y el polling sería redundante.
+  //
+  // Stale detection: si el cache no recibe events nuevos en N ticks,
+  // asumimos que el run murió (server reinició, timeout disparado sin
+  // limpiar bien, etc.) y paramos el polling para no quemar requests.
+  useEffect(() => {
+    if (!initiative) return;
+    if (agentMode !== 'streaming') return;
+    if (abortRef.current) return; // SSE local activo; no necesitamos polling
+
+    let cancelled = false;
+    const POLL_INTERVAL_MS = 3000;
+    const STALE_THRESHOLD_TICKS = 20; // 20 × 3s = 60s sin nuevos events
+    let lastEventCount = -1;
+    let staleTickCount = 0;
+
+    const tick = async () => {
+      if (cancelled) return;
+      try {
+        const result = await getCachedSession(initiative.id);
+        if (cancelled || !result?.session) {
+          // Cache borrado (TTL expiró o consumido) — terminamos polling.
+          if (!cancelled) setAgentMode('idle');
+          return;
+        }
+        const { session } = result;
+        // Hidratar los eventos completos cada tick — son inmutables y el
+        // useAgentThinkingState memoiza, así que reasignar el array
+        // completo no causa render churn más allá de la diff de los blocks.
+        setAgentEvents(session.events);
+        setProposals(session.proposals);
+
+        if (session.status === 'staging') {
+          // Run terminó. Detenemos polling y mostramos staging UI.
+          setAgentMode('staging');
+          cancelled = true;
+          return;
+        }
+
+        // Defensa contra cache zombie: si el último event ya es run_finished
+        // o done, el agente terminó pero saveFullSession no actualizó el
+        // status. Paramos polling igual.
+        const lastEvent = session.events[session.events.length - 1];
+        if (lastEvent?.type === 'run_finished' || lastEvent?.type === 'done') {
+          setAgentMode(session.proposals.length > 0 ? 'staging' : 'idle');
+          cancelled = true;
+          return;
+        }
+
+        // Stale detection: si events no crecen, run probablemente murió.
+        // Marcamos como staging local (mostrando lo que hay) para parar polling.
+        // El cache seguirá con status='streaming' hasta TTL expire — no es
+        // ideal, pero evita el bucle infinito visible al user.
+        if (session.events.length === lastEventCount) {
+          staleTickCount++;
+          if (staleTickCount >= STALE_THRESHOLD_TICKS) {
+            setAgentMode(session.proposals.length > 0 ? 'staging' : 'idle');
+            cancelled = true;
+            return;
+          }
+        } else {
+          lastEventCount = session.events.length;
+          staleTickCount = 0;
+        }
+      } catch {
+        // Error transitorio — siguiente tick reintenta.
+      }
+    };
+
+    // Primer tick inmediato + interval. setInterval garantiza que aunque un
+    // tick demore (red lenta), no se solapan llamadas — el siguiente espera.
+    void tick();
+    const interval = setInterval(tick, POLL_INTERVAL_MS);
+
+    return () => {
+      cancelled = true;
+      clearInterval(interval);
+    };
+  }, [initiative?.id, agentMode]);
 
   // Changelog filtered to this initiative and its epics
   const changelog = useMemo(() => {
@@ -319,6 +457,55 @@ function InitiativeFullPageInner({ initiativeId }: InitiativeFullPageProps) {
     }
   }, [dispatch, deleteEpicId]);
 
+  const toggleSelectEpic = useCallback((epicId: string, checked: boolean) => {
+    setSelectedEpicIds((prev) => {
+      const next = new Set(prev);
+      if (checked) next.add(epicId);
+      else next.delete(epicId);
+      return next;
+    });
+  }, []);
+
+  const clearEpicSelection = useCallback(() => {
+    setSelectedEpicIds(new Set());
+  }, []);
+
+  const handleBulkDeleteEpics = useCallback(async () => {
+    // Snapshot del set antes de borrar — el array de épicas en state se
+    // muta por el dispatch de cada DELETE_EPIC mientras iteramos.
+    const idsToDelete = Array.from(selectedEpicIds);
+    setSelectedEpicIds(new Set());
+    setBulkDeleteEpicsOpen(false);
+
+    // Toast unificado con loader: arranca en estado loading, luego se
+    // reemplaza in-place por success/warning/error según el resultado
+    // agregado. Sonner muestra el spinner integrado en el loading state.
+    const toastId = toast.loading(
+      `Eliminando ${idsToDelete.length} ${idsToDelete.length === 1 ? 'épica' : 'épicas'}…`,
+    );
+    let successCount = 0;
+    let failCount = 0;
+    for (const id of idsToDelete) {
+      try {
+        await apiDeleteEpic(id);
+        dispatch({ type: 'DELETE_EPIC', payload: { id } });
+        successCount++;
+      } catch {
+        failCount++;
+        // Silencioso: agregamos al toast final el conteo de fallas. NO
+        // interrumpimos el bucle para que las épicas que SÍ se pueden borrar
+        // se procesen — el user vuelve a abrir el dialog si quiere reintentar.
+      }
+    }
+    if (successCount > 0 && failCount === 0) {
+      toast.success(`${successCount} ${successCount === 1 ? 'épica eliminada' : 'épicas eliminadas'}`, { id: toastId });
+    } else if (successCount > 0 && failCount > 0) {
+      toast.warning(`${successCount} eliminadas, ${failCount} fallaron`, { id: toastId });
+    } else if (failCount > 0) {
+      toast.error(`No se pudo eliminar ${failCount === 1 ? 'la épica' : 'las épicas'}`, { id: toastId });
+    }
+  }, [dispatch, selectedEpicIds]);
+
   if (!initiative) {
     return (
       <div className="flex flex-col items-center justify-center h-full gap-4">
@@ -365,25 +552,47 @@ function InitiativeFullPageInner({ initiativeId }: InitiativeFullPageProps) {
     if (editStartDate !== initiative.startDate) changes.startDate = editStartDate;
     if (editTargetDate !== initiative.targetDate) changes.targetDate = editTargetDate;
 
-    if (Object.keys(changes).length > 0) {
-      try {
-        await apiUpdateInitiative(initiative.id, changes);
-        dispatch({ type: 'UPDATE_INITIATIVE', payload: { id: initiative.id, changes } });
-        toast.success('Iniciativa actualizada');
-      } catch (err: any) {
-        toast.error(err.message || 'Error al actualizar');
-      }
+    if (Object.keys(changes).length === 0) {
+      setIsEditing(false);
+      return;
     }
-    setIsEditing(false);
+
+    if (isSaving) return;
+    setIsSaving(true);
+
+    try {
+      await apiUpdateInitiative(initiative.id, changes);
+      dispatch({ type: 'UPDATE_INITIATIVE', payload: { id: initiative.id, changes } });
+      toast.success('Iniciativa actualizada');
+      setIsEditing(false);
+    } catch (err: any) {
+      toast.error(err.message || 'Error al actualizar');
+    } finally {
+      setIsSaving(false);
+    }
   };
 
   const handleStartAgent = () => setAgentMode('prompting');
 
   const handleCancelAgent = () => {
+    // Doble cancelación:
+    //   1. AbortController local — cierra el SSE de este cliente.
+    //   2. DELETE /active al backend — aborta el agente Anthropic + limpia
+    //      el cache. Sin (2), tras `req.close` el backend dejaba el agente
+    //      corriendo en background hasta el timeout de 10min y al refrescar
+    //      el cliente veía el run "todavía corriendo".
+    //
+    // (2) es fire-and-forget — el user no espera la respuesta del DELETE
+    // para que la UI vuelva a idle al instante. Si la red falla, el cache
+    // queda con el run zombi y el timeout backend lo cierra eventualmente.
     abortRef.current?.abort();
     abortRef.current = null;
+    if (initiative) {
+      cancelEpicGeneration(initiative.id).catch(() => {});
+    }
     setAgentMode(proposalsRef.current.length > 0 ? 'staging' : 'idle');
     setAgentEvents([]);
+    setProposals(proposalsRef.current);
   };
 
   const handleSubmitPrompt = async (prompt: string, webSearch: boolean) => {
@@ -545,56 +754,85 @@ function InitiativeFullPageInner({ initiativeId }: InitiativeFullPageProps) {
               ) : (
                 <h1 className="text-3xl font-bold tracking-tight flex-1">{initiative.name}</h1>
               )}
-              <div className="flex gap-1 shrink-0 mt-1">
-                {!isEditing ? (
-                  <>
-                    <DownloadMenu entity={{ kind: 'initiative', initiative }} />
-                    {(initiative.tracker as TrackerReference | undefined)?.externalUrl ? (
-                      <a
-                        href={(initiative.tracker as TrackerReference).externalUrl}
-                        target="_blank"
-                        rel="noopener noreferrer"
-                        className="inline-flex items-center gap-1.5 h-9 px-3 rounded-md text-xs font-medium border border-border text-muted-foreground hover:text-foreground hover:bg-accent dark:hover:bg-accent/50 transition-colors"
-                        title="Abrir Initiative en Linear"
-                      >
-                        <ExternalLink className="h-3.5 w-3.5" />
-                        Linear
-                      </a>
-                    ) : (
-                      <Button
-                        variant="ghost"
-                        size="sm"
-                        onClick={handlePublishToLinear}
-                        disabled={publishingTracker}
-                        className="text-muted-foreground hover:text-foreground gap-1.5"
-                        title="Publicar como Linear Initiative"
-                      >
-                        {publishingTracker ? (
-                          <Loader2 className="h-3.5 w-3.5 animate-spin" />
-                        ) : (
-                          <Upload className="h-3.5 w-3.5" />
-                        )}
-                        Subir a Linear
-                      </Button>
-                    )}
-                    <Button variant="ghost" size="icon" onClick={handleStartEdit} className="text-muted-foreground hover:text-foreground">
-                      <Pencil className="h-4 w-4" />
-                    </Button>
-                    <Button variant="ghost" size="icon" onClick={() => setDeleteOpen(true)} className="text-muted-foreground hover:text-destructive">
-                      <Trash2 className="h-4 w-4" />
-                    </Button>
-                  </>
-                ) : (
-                  <>
-                    <Button variant="ghost" size="icon" onClick={() => setIsEditing(false)} className="text-muted-foreground hover:text-foreground">
-                      <X className="h-4 w-4" />
-                    </Button>
-                    <Button variant="ghost" size="icon" onClick={handleSave} className="text-foreground">
-                      <Check className="h-4 w-4" />
-                    </Button>
-                  </>
-                )}
-              </div>
+              <TooltipProvider delayDuration={200}>
+                <div className="flex gap-1 shrink-0 mt-1">
+                  {!isEditing ? (
+                    <>
+                      <DownloadMenu entity={{ kind: 'initiative', initiative }} />
+                      {(initiative.tracker as TrackerReference | undefined)?.externalUrl ? (
+                        <Tooltip>
+                          <TooltipTrigger asChild>
+                            <a
+                              href={(initiative.tracker as TrackerReference).externalUrl}
+                              target="_blank"
+                              rel="noopener noreferrer"
+                              className="inline-flex items-center gap-1.5 h-9 px-3 rounded-md text-xs font-medium border border-border text-muted-foreground hover:text-foreground hover:bg-accent dark:hover:bg-accent/50 transition-colors"
+                            >
+                              <ExternalLink className="h-3.5 w-3.5" />
+                              Linear
+                            </a>
+                          </TooltipTrigger>
+                          <TooltipContent>Abrir iniciativa en Linear</TooltipContent>
+                        </Tooltip>
+                      ) : (
+                        <Tooltip>
+                          <TooltipTrigger asChild>
+                            <Button
+                              variant="ghost"
+                              size="icon"
+                              onClick={handlePublishToLinear}
+                              disabled={publishingTracker}
+                              className="text-muted-foreground hover:text-foreground"
+                            >
+                              {publishingTracker ? (
+                                <Loader2 className="h-4 w-4 animate-spin" />
+                              ) : (
+                                <LinearIcon className="h-4 w-4" />
+                              )}
+                            </Button>
+                          </TooltipTrigger>
+                          <TooltipContent>Publicar como Linear Initiative</TooltipContent>
+                        </Tooltip>
+                      )}
+                      <Tooltip>
+                        <TooltipTrigger asChild>
+                          <Button variant="ghost" size="icon" onClick={handleStartEdit} className="text-muted-foreground hover:text-foreground">
+                            <Pencil className="h-4 w-4" />
+                          </Button>
+                        </TooltipTrigger>
+                        <TooltipContent>Editar iniciativa</TooltipContent>
+                      </Tooltip>
+                      <Tooltip>
+                        <TooltipTrigger asChild>
+                          <Button variant="ghost" size="icon" onClick={() => setDeleteOpen(true)} className="text-muted-foreground hover:text-destructive">
+                            <Trash2 className="h-4 w-4" />
+                          </Button>
+                        </TooltipTrigger>
+                        <TooltipContent>Eliminar iniciativa</TooltipContent>
+                      </Tooltip>
+                    </>
+                  ) : (
+                    <>
+                      <Tooltip>
+                        <TooltipTrigger asChild>
+                          <Button variant="ghost" size="icon" onClick={() => setIsEditing(false)} className="text-muted-foreground hover:text-foreground">
+                            <X className="h-4 w-4" />
+                          </Button>
+                        </TooltipTrigger>
+                        <TooltipContent>Cancelar edición</TooltipContent>
+                      </Tooltip>
+                      <Tooltip>
+                        <TooltipTrigger asChild>
+                          <Button variant="ghost" size="icon" onClick={handleSave} disabled={isSaving} className="text-foreground">
+                            {isSaving ? <Loader2 className="h-4 w-4 animate-spin" /> : <Check className="h-4 w-4" />}
+                          </Button>
+                        </TooltipTrigger>
+                        <TooltipContent>Guardar cambios</TooltipContent>
+                      </Tooltip>
+                    </>
+                  )}
+                </div>
+              </TooltipProvider>
             </div>
 
             {/* Metadata */}
@@ -761,17 +999,78 @@ function InitiativeFullPageInner({ initiativeId }: InitiativeFullPageProps) {
 
             {/* ── Tab: Épicas ── */}
             <TabsContent value="epicas" className="mt-8 space-y-4">
-              {/* Header with count + action buttons */}
-              <div className="flex items-center justify-between">
-                <p className="text-sm text-muted-foreground">
-                  {epics.length} {epics.length === 1 ? 'épica' : 'épicas'}
-                </p>
+              {/* Header with count + action buttons (o bulk action bar si hay selección) */}
+              <div className="flex items-center justify-between gap-3">
+                {selectedEpicIds.size > 0 ? (
+                  <div className="flex items-center gap-2 text-sm">
+                    <span className="font-medium">
+                      {selectedEpicIds.size}{' '}
+                      {selectedEpicIds.size === 1 ? 'épica seleccionada' : 'épicas seleccionadas'}
+                    </span>
+                    <Button
+                      size="sm"
+                      variant="ghost"
+                      onClick={clearEpicSelection}
+                      className="h-7 text-xs text-muted-foreground hover:text-foreground"
+                    >
+                      Cancelar
+                    </Button>
+                    <Button
+                      size="sm"
+                      variant="ghost"
+                      onClick={() => setBulkDeleteEpicsOpen(true)}
+                      className="h-7 gap-1.5 text-xs text-destructive hover:text-destructive hover:bg-destructive/10"
+                    >
+                      <Trash2 className="h-3.5 w-3.5" />
+                      Eliminar {selectedEpicIds.size}
+                    </Button>
+                  </div>
+                ) : (
+                  (() => {
+                    const allEpicsSelected = epics.length > 0 && selectedEpicIds.size === epics.length;
+                    const someEpicsSelected =
+                      selectedEpicIds.size > 0 && selectedEpicIds.size < epics.length;
+                    return (
+                      <div className="flex items-center gap-3 text-sm text-muted-foreground">
+                        <span>
+                          {epics.length} {epics.length === 1 ? 'épica' : 'épicas'}
+                        </span>
+                        {epics.length > 0 && !isCreatingEpic && (
+                          <>
+                            <span className="text-muted-foreground/40">·</span>
+                            <label className="flex items-center gap-2 cursor-pointer select-none hover:text-foreground transition-colors">
+                              <RoundCheckbox
+                                checked={allEpicsSelected ? true : someEpicsSelected ? 'indeterminate' : false}
+                                onCheckedChange={() => {
+                                  if (allEpicsSelected) {
+                                    setSelectedEpicIds(new Set());
+                                  } else {
+                                    setSelectedEpicIds(new Set(epics.map((e) => e.id)));
+                                  }
+                                }}
+                                aria-label="Seleccionar todas las épicas"
+                              />
+                              <span className="text-xs">
+                                {allEpicsSelected
+                                  ? 'Todas seleccionadas'
+                                  : someEpicsSelected
+                                    ? 'Selección parcial'
+                                    : 'Seleccionar todo'}
+                              </span>
+                            </label>
+                          </>
+                        )}
+                      </div>
+                    );
+                  })()
+                )}
                 <div className="flex gap-2">
                   {agentMode === 'idle' && (
                     <Button
                       variant="outline"
                       size="sm"
                       onClick={handleStartAgent}
+                      disabled={selectedEpicIds.size > 0}
                       className="gap-1.5 text-xs"
                     >
                       <Sparkles className="h-3.5 w-3.5" />
@@ -782,7 +1081,7 @@ function InitiativeFullPageInner({ initiativeId }: InitiativeFullPageProps) {
                     size="sm"
                     variant="outline"
                     onClick={() => { setEditingProposal(null); setIsCreatingEpic(true); }}
-                    disabled={isCreatingEpic}
+                    disabled={isCreatingEpic || selectedEpicIds.size > 0}
                     className="gap-1.5 text-xs"
                   >
                     <Plus className="h-3.5 w-3.5" />
@@ -841,11 +1140,14 @@ function InitiativeFullPageInner({ initiativeId }: InitiativeFullPageProps) {
                       const epicProgress = epicStories.length > 0 ? Math.round((epicDone / epicStories.length) * 100) : 0;
                       const epicPods = state.pods.filter((p) => epic.podIds.includes(p.id));
                       const epicPoints = epicStories.reduce((sum, s) => sum + s.storyPoints, 0);
+                      const isEpicSelected = selectedEpicIds.has(epic.id);
 
                       return (
                         <div
                           key={epic.id}
-                          className="rounded-lg border hover:bg-muted/30 transition-colors cursor-pointer"
+                          className={`rounded-lg border transition-colors cursor-pointer ${
+                            isEpicSelected ? 'border-primary/40 bg-primary/5' : 'hover:bg-muted/30'
+                          }`}
                           onClick={() => router.push(`/proyectos/epicas/${epic.id}`)}
                           onContextMenu={(e) => {
                             e.preventDefault();
@@ -857,6 +1159,17 @@ function InitiativeFullPageInner({ initiativeId }: InitiativeFullPageProps) {
                           }}
                         >
                           <div className="flex items-center gap-3 px-4 py-3">
+                            {/* Checkbox de selección — stopPropagation para no navegar */}
+                            <div
+                              className="shrink-0"
+                              onClick={(e) => e.stopPropagation()}
+                            >
+                              <RoundCheckbox
+                                checked={isEpicSelected}
+                                onCheckedChange={(checked) => toggleSelectEpic(epic.id, checked === true)}
+                                aria-label={`Seleccionar épica ${epic.title}`}
+                              />
+                            </div>
                             <span className="font-mono text-xs text-muted-foreground w-20 shrink-0">{epic.tracker?.externalKey ?? '—'}</span>
                             <span className="truncate flex-1 text-sm font-medium">{epic.title}</span>
                             <div className="flex gap-1 shrink-0 w-28 justify-center">
@@ -1215,6 +1528,37 @@ function InitiativeFullPageInner({ initiativeId }: InitiativeFullPageProps) {
           />
         );
       })()}
+
+      {/* Modal type-to-confirm bulk delete de épicas. Reusa
+          TypeToConfirmDialog con expectedValue="ELIMINAR" (palabra
+          constante) — paritario al patrón usado para historias. La
+          lista de épicas afectadas vive en `extraContent` para que el
+          user verifique scope antes de escribir la palabra. */}
+      <TypeToConfirmDialog
+        open={bulkDeleteEpicsOpen}
+        onOpenChange={setBulkDeleteEpicsOpen}
+        title={`Eliminar ${selectedEpicIds.size} ${selectedEpicIds.size === 1 ? 'épica' : 'épicas'}`}
+        resourceLabel="épicas"
+        expectedValue="ELIMINAR"
+        confirmLabel={
+          <>Para confirmar, escribe <span className="font-mono font-semibold text-foreground">ELIMINAR</span></>
+        }
+        hideExpectedValueBlock
+        description="Cada épica se eliminará junto con todas sus historias, diagramas, documentos y dependencias. La acción es permanente y no se puede deshacer."
+        confirmText="Eliminar"
+        extraContent={
+          <div className="max-h-32 overflow-y-auto rounded-md border border-border/60 bg-muted/40 px-3 py-1.5 text-xs space-y-0.5">
+            {state.epics
+              .filter((e) => selectedEpicIds.has(e.id))
+              .map((e) => (
+                <div key={e.id} className="truncate text-foreground/80">
+                  <span className="text-muted-foreground/60">·</span> {e.title}
+                </div>
+              ))}
+          </div>
+        }
+        onConfirm={handleBulkDeleteEpics}
+      />
     </div>
   );
 }

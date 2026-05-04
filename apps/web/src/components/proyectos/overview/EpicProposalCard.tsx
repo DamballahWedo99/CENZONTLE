@@ -7,15 +7,18 @@ import type { Pod } from '@cenzontle/shared';
 
 /**
  * Extrae un summary corto del markdown de una épica propuesta. Busca el
- * primer párrafo no-vacío bajo `## Descripción` o el primer heading. Sin
- * markdown, retorna string vacío y el caller muestra placeholder.
+ * primer párrafo no-vacío bajo `## Objetivo` (nuevo nombre del heading), con
+ * fallback a `## Descripción` (épicas creadas antes del rename), o el
+ * primer heading. Sin markdown, retorna string vacío y el caller muestra
+ * placeholder.
  */
 function extractEpicSummary(md: string | undefined): string {
   const text = (md ?? '').trim();
   if (!text) return '';
+  const objetivoMatch = text.match(/^##\s+Objetivo\s*\n+([\s\S]*?)(?=\n##\s|$)/m);
   const descMatch = text.match(/^##\s+Descripción\s*\n+([\s\S]*?)(?=\n##\s|$)/m);
   const firstParaMatch = text.match(/^##\s+\S[^\n]*\n+([\s\S]*?)(?=\n##\s|$)/m);
-  return (descMatch?.[1] ?? firstParaMatch?.[1] ?? text).trim().replace(/\s+/g, ' ').slice(0, 200);
+  return (objetivoMatch?.[1] ?? descMatch?.[1] ?? firstParaMatch?.[1] ?? text).trim().replace(/\s+/g, ' ').slice(0, 200);
 }
 
 const priorityColors: Record<Priority, string> = {

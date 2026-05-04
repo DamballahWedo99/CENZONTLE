@@ -2,6 +2,7 @@
 
 import { useState, useCallback, useRef, useEffect, useMemo } from 'react';
 import { useRouter } from 'next/navigation';
+import { toast } from 'sonner';
 import {
   UserStory,
   StoryStatus,
@@ -12,6 +13,7 @@ import {
 } from '@cenzontle/shared';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
+import { RoundCheckbox } from '@/components/ui/round-checkbox';
 import { TypeToConfirmDialog } from '@/components/ui/type-to-confirm-dialog';
 import {
   Select,
@@ -175,6 +177,12 @@ interface EpicStoryListProps {
   onUpdateStory: (id: string, changes: Partial<UserStory>) => void;
   onDeleteStory: (id: string) => void;
   /**
+   * Callback opcional para bulk delete. Cuando está definido, el bulk delete
+   * lo usa (en lugar de iterar `onDeleteStory`) para que el padre orqueste
+   * UN solo toast loading + success/error en lugar de N toasts individuales.
+   */
+  onBulkDeleteStories?: (ids: string[]) => Promise<void>;
+  /**
    * Si se provee, renderiza un boton "Crear con IA" inmediatamente a la izquierda
    * del boton "Agregar historia" en el header. Se oculta cuando esta undefined
    * (p.ej. cuando el agente ya esta en modo streaming/staging desde el padre).
@@ -189,6 +197,7 @@ export function EpicStoryList({
   onCreateStory,
   onUpdateStory,
   onDeleteStory,
+  onBulkDeleteStories,
   onGenerateWithAI,
 }: EpicStoryListProps) {
   const router = useRouter();
@@ -201,6 +210,75 @@ export function EpicStoryList({
   const [viewTab, setViewTab] = useState<string>('po');
   const [newLabel, setNewLabel] = useState('');
   const [deleteConfirmId, setDeleteConfirmId] = useState<string | null>(null);
+  // Selección múltiple para bulk delete. Usa Set por O(1) lookup y semántica
+  // clara de unicidad. Cuando el set está vacío, la action bar se oculta.
+  const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
+  const [bulkDeleteOpen, setBulkDeleteOpen] = useState(false);
+
+  const toggleSelect = useCallback((storyId: string, checked: boolean) => {
+    setSelectedIds((prev) => {
+      const next = new Set(prev);
+      if (checked) next.add(storyId);
+      else next.delete(storyId);
+      return next;
+    });
+  }, []);
+
+  const clearSelection = useCallback(() => {
+    setSelectedIds(new Set());
+  }, []);
+
+  const allSelected = stories.length > 0 && selectedIds.size === stories.length;
+  const someSelected = selectedIds.size > 0 && selectedIds.size < stories.length;
+
+  const toggleSelectAll = useCallback(() => {
+    if (allSelected) {
+      setSelectedIds(new Set());
+    } else {
+      setSelectedIds(new Set(stories.map((s) => s.id)));
+    }
+  }, [allSelected, stories]);
+
+  const handleBulkDelete = useCallback(async () => {
+    // Snapshot inmutable del set: el callback puede tardar y el set podría
+    // mutar mientras iteramos. Convertimos a array antes de iterar.
+    const idsToDelete = Array.from(selectedIds);
+    setSelectedIds(new Set());
+    setBulkDeleteOpen(false);
+
+    if (onBulkDeleteStories) {
+      // El padre orquesta el toast loading/success/error con un solo toast
+      // unificado (paritario UX al delete individual).
+      await onBulkDeleteStories(idsToDelete);
+      return;
+    }
+
+    // Fallback: iteramos onDeleteStory individualmente y mostramos UN toast
+    // que va de loading → success/error según el resultado agregado. El
+    // padre puede mostrar toasts individuales por cada onDeleteStory; no
+    // podemos suprimirlos desde aquí, pero el toast loading visual sigue
+    // siendo correcto.
+    const toastId = toast.loading(
+      `Eliminando ${idsToDelete.length} ${idsToDelete.length === 1 ? 'historia de usuario' : 'historias de usuario'}…`,
+    );
+    let ok = 0;
+    let fail = 0;
+    for (const id of idsToDelete) {
+      try {
+        await onDeleteStory(id);
+        ok++;
+      } catch {
+        fail++;
+      }
+    }
+    if (ok > 0 && fail === 0) {
+      toast.success(`${ok} ${ok === 1 ? 'historia eliminada' : 'historias eliminadas'}`, { id: toastId });
+    } else if (ok > 0 && fail > 0) {
+      toast.warning(`${ok} eliminadas, ${fail} fallaron`, { id: toastId });
+    } else {
+      toast.error(`No se pudieron eliminar ${fail === 1 ? 'la historia' : 'las historias'}`, { id: toastId });
+    }
+  }, [selectedIds, onBulkDeleteStories, onDeleteStory]);
   // Deriva la story completa para usarla en el modal type-to-confirm (necesita
   // expectedValue=title). Si la story se elimina del array, deleteConfirmId
   // tambien se limpia desde el handler.
@@ -543,7 +621,7 @@ export function EpicStoryList({
       {story.po.markdown ? (
         <ReadOnlyMarkdown content={story.po.markdown} />
       ) : (
-        <p className="text-xs text-muted-foreground italic">Sin definición de Product Owner</p>
+        <p className="text-xs text-muted-foreground italic">Sin definición de negocio</p>
       )}
     </div>
   );
@@ -572,19 +650,68 @@ export function EpicStoryList({
 
   return (
     <div className="space-y-3">
-      {/* Header */}
-      <div className="flex items-center justify-between">
-        <p className="text-sm text-muted-foreground">
-          {stories.length} {stories.length === 1 ? 'historia' : 'historias'} ·{' '}
-          {stories.reduce((sum, s) => sum + s.storyPoints, 0)} SP
-        </p>
+      {/* Header con counter, action bar de bulk select y CTAs */}
+      <div className="flex items-center justify-between gap-3">
+        {selectedIds.size > 0 ? (
+          // Action bar de bulk select reemplaza el counter cuando hay
+          // selección. Mantenemos los CTAs deshabilitados (no quieres crear
+          // mientras estás eligiendo qué borrar).
+          <div className="flex items-center gap-2 text-sm">
+            <span className="font-medium">
+              {selectedIds.size} {selectedIds.size === 1 ? 'historia seleccionada' : 'historias seleccionadas'}
+            </span>
+            <Button
+              size="sm"
+              variant="ghost"
+              onClick={clearSelection}
+              className="h-7 text-xs text-muted-foreground hover:text-foreground"
+            >
+              Cancelar
+            </Button>
+            <Button
+              size="sm"
+              variant="ghost"
+              onClick={() => setBulkDeleteOpen(true)}
+              className="h-7 gap-1.5 text-xs text-destructive hover:text-destructive hover:bg-destructive/10"
+            >
+              <Trash2 className="h-3.5 w-3.5" />
+              Eliminar {selectedIds.size}
+            </Button>
+          </div>
+        ) : (
+          <div className="flex items-center gap-3 text-sm text-muted-foreground">
+            <span>
+              {stories.length} {stories.length === 1 ? 'historia' : 'historias'} ·{' '}
+              {stories.reduce((sum, s) => sum + s.storyPoints, 0)} SP
+            </span>
+            {stories.length > 0 && !isCreating && (
+              <>
+                <span className="text-muted-foreground/40">·</span>
+                <label className="flex items-center gap-2 cursor-pointer select-none hover:text-foreground transition-colors">
+                  <RoundCheckbox
+                    checked={allSelected ? true : someSelected ? 'indeterminate' : false}
+                    onCheckedChange={toggleSelectAll}
+                    aria-label="Seleccionar todas las historias"
+                  />
+                  <span className="text-xs">
+                    {allSelected
+                      ? 'Todas seleccionadas'
+                      : someSelected
+                        ? 'Selección parcial'
+                        : 'Seleccionar todo'}
+                  </span>
+                </label>
+              </>
+            )}
+          </div>
+        )}
         <div className="flex items-center gap-2">
           {onGenerateWithAI && (
             <Button
               size="sm"
               variant="outline"
               onClick={onGenerateWithAI}
-              disabled={isCreating}
+              disabled={isCreating || selectedIds.size > 0}
               className="gap-1.5 text-xs"
             >
               <Sparkles className="h-3.5 w-3.5" />
@@ -595,7 +722,7 @@ export function EpicStoryList({
             size="sm"
             variant="outline"
             onClick={startCreating}
-            disabled={isCreating}
+            disabled={isCreating || selectedIds.size > 0}
             className="gap-1.5 text-xs"
           >
             <Plus className="h-3.5 w-3.5" />
@@ -609,11 +736,16 @@ export function EpicStoryList({
         {stories.map((story) => {
           const isEditing = editingStoryId === story.id;
           const isExpanded = expandedStoryId === story.id;
+          const isSelected = selectedIds.has(story.id);
           return (
             <div
               key={story.id}
               className={`rounded-lg border transition-colors ${
-                isEditing ? 'border-primary/50 bg-muted/20' : 'hover:bg-muted/30'
+                isEditing
+                  ? 'border-primary/50 bg-muted/20'
+                  : isSelected
+                    ? 'border-primary/40 bg-primary/5'
+                    : 'hover:bg-muted/30'
               }`}
             >
               {/* Row summary */}
@@ -625,6 +757,18 @@ export function EpicStoryList({
                   }
                 }}
               >
+                {/* Checkbox de selección — stopPropagation para que el click
+                    NO navegue al detalle de la story. */}
+                <div
+                  className="shrink-0"
+                  onClick={(e) => e.stopPropagation()}
+                >
+                  <RoundCheckbox
+                    checked={isSelected}
+                    onCheckedChange={(checked) => toggleSelect(story.id, checked === true)}
+                    aria-label={`Seleccionar historia ${story.title}`}
+                  />
+                </div>
                 <span className="font-mono text-xs text-muted-foreground w-20 shrink-0">
                   {story.tracker?.externalKey ?? '—'}
                 </span>
@@ -841,6 +985,40 @@ export function EpicStoryList({
           }}
         />
       )}
+
+      {/* ── Modal type-to-confirm para borrar múltiples historias ──
+          Reusa el mismo componente que el delete individual con
+          `expectedValue="ELIMINAR"` (palabra constante, no nombres
+          individuales — escribir N nombres es UX absurda). La fricción
+          consciente sigue siendo real: el botón destructive solo se
+          habilita cuando el user escribe "ELIMINAR" exactamente. */}
+      <TypeToConfirmDialog
+        open={bulkDeleteOpen}
+        onOpenChange={setBulkDeleteOpen}
+        title={`Eliminar ${selectedIds.size} ${selectedIds.size === 1 ? 'historia' : 'historias'}`}
+        resourceLabel="historias"
+        expectedValue="ELIMINAR"
+        confirmLabel={
+          <>Para confirmar, escribe <span className="font-mono font-semibold text-foreground">ELIMINAR</span></>
+        }
+        hideExpectedValueBlock
+        description="Cada historia se eliminará junto con su carpeta del vault. La acción es permanente y no se puede deshacer."
+        confirmText="Eliminar"
+        extraContent={
+          <div className="max-h-32 overflow-y-auto rounded-md border border-border/60 bg-muted/40 px-3 py-1.5 text-xs space-y-0.5">
+            {stories
+              .filter((s) => selectedIds.has(s.id))
+              .map((s) => (
+                <div key={s.id} className="truncate text-foreground/80">
+                  <span className="text-muted-foreground/60">·</span> {s.title}
+                </div>
+              ))}
+          </div>
+        }
+        onConfirm={async () => {
+          handleBulkDelete();
+        }}
+      />
     </div>
   );
 }

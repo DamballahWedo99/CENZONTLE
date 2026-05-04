@@ -25,7 +25,7 @@ import { createEpic as apiCreateEpic } from '@/lib/api/epics';
 import { SectionTiptapEditor } from '../historias/editor/SectionTiptapEditor';
 
 // Estructura mínima sugerida — coincide con EpicFullPage y InlineEpicCreator.
-const EPIC_MARKDOWN_PLACEHOLDER = `## Descripción
+const EPIC_MARKDOWN_PLACEHOLDER = `## Objetivo
 
 (Qué se construye y por qué surge.)
 

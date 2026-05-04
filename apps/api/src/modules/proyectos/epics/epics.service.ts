@@ -1,4 +1,5 @@
 import {
+  BadRequestException,
   ConflictException,
   ForbiddenException,
   Injectable,
@@ -32,6 +33,7 @@ import {
   epicDiagramPath,
   epicDependencyPath,
   epicDesignPath,
+  epicDesignBundleFolderPath,
   epicMatrixPath,
   isLegacyVaultPath,
   isNewFormatVaultPath,
@@ -39,6 +41,10 @@ import {
   type EpicRef,
   type EpicDiagramKind,
 } from '../vault-paths';
+import { DesignBundleService } from './design-bundle.service';
+import {
+  assertUserCanAccessEpicPods,
+} from './epic-access.util';
 import {
   buildDiagramMarkdown,
   buildDependencyMarkdown,
@@ -66,7 +72,7 @@ const EPIC_INCLUDE = {
  * (export PDF, agente IA derivado), usa `splitMarkdownByH2()` del exporter.
  */
 const REQUIRED_EPIC_HEADINGS = [
-  '## Descripción',
+  '## Objetivo',
   '## Beneficios cualitativos',
   '## Beneficios cuantitativos',
   '## Medición de beneficios',
@@ -139,6 +145,7 @@ export class EpicsService {
     private initiativesService: InitiativesService,
     private storiesService: StoriesService,
     private storyDependenciesService: StoryDependenciesService,
+    private designBundle: DesignBundleService,
   ) {}
 
   /**
@@ -446,12 +453,27 @@ export class EpicsService {
     return { kind: 'timeout' };
   }
 
-  async findAll(query: EpicQueryDto) {
+  async findAll(query: EpicQueryDto, user?: AuthenticatedUser) {
     const where: Prisma.EpicWhereInput = {};
     if (query.initiativeId) where.initiativeId = query.initiativeId;
     if (query.status) where.status = query.status;
     if (query.priority) where.priority = query.priority;
     if (query.podId) where.pods = { some: { podId: query.podId } };
+
+    // CWE-639 — restringir listing a pods del user para no-admins. Sin esto
+    // cualquier autenticado podía enumerar todas las épicas cross-pod, lo que
+    // habilitaba ataques downstream sobre los IDs descubiertos. AltaGerencia
+    // y callers internos (sin user) ven todo. Fix de security-reviewer
+    // MEDIUM 2026-05-04.
+    if (user && user.role !== UserRole.AltaGerencia) {
+      const userPodIds = user.podIds ?? [];
+      // Si el user no pertenece a ningún pod, no ve nada — fail-closed.
+      if (userPodIds.length === 0) return [];
+      where.pods = {
+        ...(where.pods as Prisma.EpicPodListRelationFilter | undefined),
+        some: { podId: { in: userPodIds } },
+      };
+    }
 
     const epics = await this.prisma.epic.findMany({
       where,
@@ -461,7 +483,7 @@ export class EpicsService {
     return epics.map(mapEpic);
   }
 
-  async findOne(id: string, includeContent = false) {
+  async findOne(id: string, includeContent = false, user?: AuthenticatedUser) {
     const epic = await this.prisma.epic.findUnique({
       where: { id },
       include: EPIC_INCLUDE,
@@ -471,6 +493,17 @@ export class EpicsService {
     const mapped = mapEpic(epic);
 
     if (includeContent && epic.vaultPath) {
+      // CWE-639 — gate del markdown narrativo (que vive en el vault y puede
+      // contener design notes, dependencias, referencias inline a credenciales)
+      // detrás de pod intersection. Metadata básica (id/title/status/...) sigue
+      // accesible cross-pod para flows como dashboards de tracker. Fix de
+      // security-reviewer MEDIUM 2026-05-04.
+      if (user) {
+        assertUserCanAccessEpicPods(
+          user,
+          epic.pods.map((ep) => ep.podId),
+        );
+      }
       // En formato nuevo, el markdown narrativo vive en `definicion.md` dentro
       // del folder de la épica. En legacy flat, vive en el archivo único.
       // El vault es la fuente de verdad — sobreescribe el `markdown` que viene
@@ -537,13 +570,26 @@ export class EpicsService {
 
     // 2. Create PG row (rollback ambos archivos on failure).
     try {
-      const { podIds, startDate, targetDate, diagrams, designs, ...data } = dto;
+      const { podIds, startDate, targetDate, diagrams, designs: rawDesigns, ...data } = dto;
       // `diagrams` y `designs` se extraen del spread y se reasignan como JSON.
       // El DTO valida solo `id` de cada item (critico para seguridad path
       // traversal en epicDiagramPath / epicDesignPath); el resto del shape
       // es free-form y se persiste as-is en el campo JSONB. Prisma requiere
       // `InputJsonValue` — cast via `unknown` porque un class-validator
       // DTO no declara la index signature de InputJsonObject.
+
+      // SECURITY: bundleVaultPath y bundleKey son server-only — solo
+      // `addDesignBundle` los setea (post-create, tras subir un ZIP). Stripamos
+      // cualquier valor enviado por el cliente en create para prevenir
+      // persistencia de paths atacker-controlled (que `deleteDesign` podría
+      // luego usar como sink de path traversal).
+      const designs = rawDesigns?.map((d) => {
+        const cleaned = { ...d };
+        delete (cleaned as { bundleVaultPath?: string }).bundleVaultPath;
+        delete (cleaned as { bundleKey?: string }).bundleKey;
+        return cleaned;
+      });
+
       const epic = await this.prisma.$transaction(async (tx) => {
         const created = await tx.epic.create({
           data: {
@@ -577,14 +623,25 @@ export class EpicsService {
     }
   }
 
-  async update(id: string, dto: UpdateEpicDto) {
+  async update(id: string, dto: UpdateEpicDto, user: AuthenticatedUser) {
     this.logger.log(`[update] START id=${id} fields=${Object.keys(dto).join(',')}`);
 
     const existing = await this.prisma.epic.findUnique({
       where: { id },
-      include: { initiative: { select: { id: true, name: true } } },
+      include: {
+        initiative: { select: { id: true, name: true } },
+        pods: { select: { podId: true } },
+      },
     });
     if (!existing) throw new NotFoundException('Épica no encontrada');
+
+    // CWE-639 BOLA — fix de security-reviewer HIGH 2026-05-04. TechLead/PO
+    // tienen EDIT_EPIC global; sin este check podían mutar épicas de otros
+    // pods (overwrite de markdown, rename de folder, reasignación de podIds).
+    assertUserCanAccessEpicPods(
+      user,
+      existing.pods.map((p) => p.podId),
+    );
 
     const incomingMarkdown = dto.markdown;
     const hasMarkdownChanges = incomingMarkdown !== undefined && incomingMarkdown !== existing.markdown;
@@ -658,8 +715,37 @@ export class EpicsService {
     }
 
     // ── PG update ──
-    const { podIds, startDate, targetDate, ...data } = dto;
-    const updateData: Prisma.EpicUpdateInput = { ...data } as Prisma.EpicUpdateInput;
+    const { podIds, startDate, targetDate, designs: rawDesigns, ...data } = dto;
+
+    // SECURITY: bundleVaultPath y bundleKey son server-only. Para cada design
+    // del input, stripamos los valores user-supplied y RESTAURAMOS los del
+    // existing.designs por `id` (round-trip-safe — los users PATCH la lista
+    // completa pero no deben poder reescribir estos campos). Designs nuevos
+    // (sin id existente) se persisten sin bundle — `addDesignBundle` los
+    // settea legítimamente después.
+    let sanitizedDesigns: typeof rawDesigns | undefined;
+    if (rawDesigns !== undefined) {
+      const existingArr = Array.isArray(existing.designs)
+        ? (existing.designs as Array<{ id: string; bundleVaultPath?: string; bundleKey?: string }>)
+        : [];
+      const existingById = new Map(existingArr.map((d) => [d.id, d]));
+      sanitizedDesigns = rawDesigns.map((d) => {
+        const cleaned = { ...d };
+        delete (cleaned as { bundleVaultPath?: string }).bundleVaultPath;
+        delete (cleaned as { bundleKey?: string }).bundleKey;
+        const prev = existingById.get(d.id);
+        if (prev?.bundleVaultPath) (cleaned as { bundleVaultPath?: string }).bundleVaultPath = prev.bundleVaultPath;
+        if (prev?.bundleKey) (cleaned as { bundleKey?: string }).bundleKey = prev.bundleKey;
+        return cleaned;
+      });
+    }
+
+    const updateData: Prisma.EpicUpdateInput = {
+      ...data,
+      ...(sanitizedDesigns !== undefined
+        ? { designs: sanitizedDesigns as unknown as Prisma.InputJsonValue }
+        : {}),
+    } as Prisma.EpicUpdateInput;
     if (startDate) updateData.startDate = new Date(startDate);
     if (targetDate) updateData.targetDate = new Date(targetDate);
     // Si renombraste y esta en formato nuevo, actualizar vaultPath al nuevo index.md.
@@ -687,15 +773,24 @@ export class EpicsService {
     return mapEpic(epic);
   }
 
-  async remove(id: string) {
+  async remove(id: string, user: AuthenticatedUser) {
     const epic = await this.prisma.epic.findUnique({
       where: { id },
       include: {
         initiative: { select: { id: true, name: true } },
         stories: { select: { id: true, title: true, vaultPath: true } },
+        pods: { select: { podId: true } },
       },
     });
     if (!epic) throw new NotFoundException('Épica no encontrada');
+
+    // CWE-639 BOLA — fix de security-reviewer HIGH 2026-05-04. DELETE_EPIC
+    // está limitado a roles más altos, pero igual aplicamos el check para que
+    // un AltaGerencia ↔ podOwner futuro siga el mismo patrón canónico.
+    assertUserCanAccessEpicPods(
+      user,
+      epic.pods.map((p) => p.podId),
+    );
 
     if (epic.vaultPath && isNewFormatVaultPath(epic.vaultPath)) {
       // Formato nuevo: deleteFolder recursivo limpia TODO el folder del epic
@@ -1495,5 +1590,321 @@ export class EpicsService {
       `[listStoryDependencies] epic=${epicId} stories-with-deps=${result.length} total-edges=${edges.length}`,
     );
     return result;
+  }
+
+  /**
+   * Borra un diseño de la épica con cleanup completo:
+   *  1. Si tiene `bundleVaultPath` (diseño con ZIP): lista TODOS los archivos
+   *     descomprimidos bajo ese path con `vault.listTree()` y los borra
+   *     uno por uno con `vault.deleteNote()`. GitHub no soporta "rm -rf"
+   *     atómico — cada archivo es un commit, así que los iteramos.
+   *  2. Si tiene `bundleKey` (ZIP de respaldo en disco): borra el archivo.
+   *  3. Si NO tiene bundle (diseño legacy con URL handoff): borra el
+   *     `.md` independiente bajo `disenos/<slug>-<id6>.md`.
+   *  4. Quita el design del array `epic.designs` y persiste.
+   *
+   * Idempotente: si el design ya no existe, retorna sin error.
+   * Tolerante a fallos de cleanup parciales: si un `deleteNote` falla
+   * (network, 404, etc.), loguea y continúa — el design se quita del array
+   * de cualquier manera. Archivos huérfanos en el vault son cosméticos,
+   * no rompen funcionalidad.
+   */
+  async deleteDesign(
+    epicId: string,
+    designId: string,
+    user: AuthenticatedUser,
+  ): Promise<void> {
+    const epic = await this.prisma.epic.findUnique({
+      where: { id: epicId },
+      include: {
+        initiative: { select: { id: true, name: true } },
+        pods: { select: { podId: true } },
+      },
+    });
+    if (!epic) throw new NotFoundException(`Épica ${epicId} no encontrada`);
+
+    // CWE-639 BOLA — fix de security-reviewer HIGH 2026-05-04. Sin esta
+    // validación, cualquier user con EDIT_EPIC podía borrar diseños de
+    // épicas de otros pods (DELETE simétrico al upload).
+    assertUserCanAccessEpicPods(
+      user,
+      epic.pods.map((p) => p.podId),
+    );
+
+    const designs = Array.isArray(epic.designs) ? (epic.designs as unknown as Array<{
+      id: string;
+      name: string;
+      bundleKey?: string;
+      bundleVaultPath?: string;
+    }>) : [];
+    const design = designs.find((d) => d.id === designId);
+    if (!design) {
+      // Idempotente: ya no está, nothing to clean.
+      this.logger.log(`[deleteDesign] design=${designId} ya no existe en epic=${epicId}, no-op`);
+      return;
+    }
+
+    // 1) Cleanup de archivos del vault.
+    if (design.bundleVaultPath) {
+      // Diseño con bundle ZIP. listTree devuelve un árbol NESTED — recorremos
+      // recursivo para colectar TODOS los archivos hoja.
+      const folder = design.bundleVaultPath.replace(/\/+$/, '');
+
+      // SECURITY (CWE-22 / CWE-639): bundleVaultPath se persiste en JSONB y
+      // es nominalmente user-supplied vía CreateEpicDto/UpdateEpicDto. Antes
+      // de listar/borrar archivos, validamos que apunte DENTRO del folder de
+      // disenos de esta épica y que termine con el sufijo `-<id6>` que produce
+      // `slugifyWithId(name, design.id)`. Sin esta validación, un user con
+      // EDIT_EPIC podría plantar bundleVaultPath="iniciativas" y borrar todo
+      // el vault de la org al triggerar este endpoint.
+      //
+      // No comparamos con el path reconstruido porque el slug del nombre puede
+      // haber cambiado tras un rename — el `update()` PRESERVA bundleVaultPath
+      // del valor original (ver línea ~696). El sufijo `-<id6>` sí es estable
+      // y suficiente: el id6 deriva del design.id actual, no del nombre.
+      // Defense-in-depth: rechazar caracteres que permitan path traversal
+      // o ataques downstream (..,  \\, //, control chars). Coste cero — un
+      // path legítimo generado por slugifyWithId nunca contiene estos.
+      if (
+        folder.includes('..') ||
+        folder.includes('\\') ||
+        folder.includes('//') ||
+        // eslint-disable-next-line no-control-regex
+        /[\x00-\x1f]/.test(folder)
+      ) {
+        this.logger.error(
+          `[deleteDesign] bundleVaultPath con caracteres peligrosos: epic=${epicId} design=${designId} folder="${folder}"`,
+        );
+        throw new ForbiddenException(
+          'bundleVaultPath contiene caracteres inválidos',
+        );
+      }
+
+      const iniRef: InitiativeRef = { id: epic.initiative.id, name: epic.initiative.name };
+      const epicRef: EpicRef = { id: epic.id, title: epic.title };
+      const expectedPrefix = `${epicFolderPath(iniRef, epicRef)}/disenos/`;
+      const expectedIdSuffix = `-${design.id.slice(-6)}`;
+      if (!folder.startsWith(expectedPrefix) || !folder.endsWith(expectedIdSuffix)) {
+        this.logger.error(
+          `[deleteDesign] bundleVaultPath inválido (posible tampering): epic=${epicId} design=${designId} folder="${folder}" expected_prefix="${expectedPrefix}" expected_id_suffix="${expectedIdSuffix}"`,
+        );
+        throw new ForbiddenException(
+          'bundleVaultPath inconsistente con el folder esperado del diseño',
+        );
+      }
+
+      try {
+        const tree = await this.vault.listTree(folder);
+        const flatFiles: Array<{ path: string }> = [];
+        const walk = (nodes: typeof tree): void => {
+          for (const node of nodes) {
+            if (node.type === 'file') {
+              flatFiles.push({ path: node.path });
+            } else if (node.children) {
+              walk(node.children);
+            }
+          }
+        };
+        walk(tree);
+        this.logger.log(
+          `[deleteDesign] bundle cleanup epic=${epicId} design=${designId} files=${flatFiles.length} folder=${folder}`,
+        );
+        for (const file of flatFiles) {
+          try {
+            await this.vault.deleteNote(
+              file.path,
+              `chore(design): cleanup ${design.name} [${epicId}]`,
+            );
+          } catch (err: any) {
+            this.logger.warn(
+              `[deleteDesign] no se pudo borrar ${file.path}: ${err?.message ?? err}`,
+            );
+          }
+        }
+      } catch (err: any) {
+        // listTree falló — log y continúa con el resto del cleanup.
+        this.logger.warn(
+          `[deleteDesign] listTree falló para ${folder}: ${err?.message ?? err}`,
+        );
+      }
+    } else if (epic.vaultPath) {
+      // Diseño legacy (URL handoff): un único .md hermano bajo disenos/.
+      try {
+        const iniRef: InitiativeRef = { id: epic.initiative.id, name: epic.initiative.name };
+        const epicRef: EpicRef = { id: epic.id, title: epic.title };
+        const path = epicDesignPath(iniRef, epicRef, { id: design.id, name: design.name });
+        await this.vault.deleteNote(
+          path,
+          `chore(design): remove ${design.name} [${epicId}]`,
+        );
+      } catch (err: any) {
+        this.logger.warn(
+          `[deleteDesign] legacy cleanup falló: ${err?.message ?? err}`,
+        );
+      }
+    }
+
+    // 2) Cleanup del ZIP de respaldo (solo bundles).
+    if (design.bundleKey) {
+      await this.designBundle.deleteBundle(design.bundleKey);
+    }
+
+    // 3) Quitar del array y persistir.
+    const next = designs.filter((d) => d.id !== designId);
+    await this.prisma.epic.update({
+      where: { id: epicId },
+      data: {
+        designs: next as unknown as Prisma.InputJsonValue,
+        updatedAt: new Date(),
+      },
+    });
+    this.logger.log(`[deleteDesign] epic=${epicId} design=${designId} cleanup completo`);
+  }
+
+  /**
+   * Sube un bundle ZIP de Claude Design y lo asocia como diseño de la épica.
+   *
+   * Orquesta:
+   *  1. Carga la épica + iniciativa para construir paths del vault.
+   *  2. Llama a DesignBundleService para validar + descomprimir el ZIP +
+   *     guardarlo a disco como respaldo.
+   *  3. Para cada archivo texto del bundle, hace `vault.writeNote()` bajo
+   *     `<epicFolder>/disenos/<designSlug>-<id6>/<relativePath>`.
+   *  4. Construye el handoff sintético y lo guarda en BD como
+   *     `EpicDesign.handoff`.
+   *  5. Persiste el EpicDesign al array `epic.designs` (JSONB).
+   *
+   * Falla con BadRequestException si el ZIP no es válido (estructura,
+   * tamaño, sin README). El cleanup parcial NO se hace: si falla a mitad
+   * de los `writeNote`, los archivos previos quedan en el vault. Razón:
+   * el agente puede ignorar archivos huérfanos via su listing — y un retry
+   * del user resuelve sin estado intermedio dañino.
+   */
+  async addDesignBundle(
+    epicId: string,
+    params: {
+      name: string;
+      description: string;
+      file: Express.Multer.File;
+      user: AuthenticatedUser;
+    },
+  ): Promise<{ id: string; name: string; description: string; handoff: string; bundleKey: string; bundleVaultPath: string; createdAt: string; updatedAt: string; createdBy?: string }> {
+    const epic = await this.prisma.epic.findUnique({
+      where: { id: epicId },
+      include: {
+        initiative: { select: { id: true, name: true } },
+        pods: { select: { podId: true } },
+      },
+    });
+    if (!epic) throw new NotFoundException(`Épica ${epicId} no encontrada`);
+
+    // CWE-639 BOLA — fix de security-reviewer HIGH 2026-05-04. Sin esta
+    // validación, cualquier user con EDIT_EPIC (TechLead, etc.) podía subir
+    // diseños a épicas de otros pods, plantando contenido en su vault y
+    // material de prompt-injection en sus agent handoffs.
+    assertUserCanAccessEpicPods(
+      params.user,
+      epic.pods.map((p) => p.podId),
+    );
+
+    if (!epic.vaultPath) {
+      throw new ConflictException(
+        'La épica no tiene vaultPath — no se puede asociar diseños sin folder en el vault.',
+      );
+    }
+
+    // 1) Extraer + validar. Dispatch por extensión:
+    //    - `.html` → standalone HTML (sin wrapper folder ni README).
+    //    - `.zip` → bundle de Claude Design (estructura wrapper/README/project/).
+    //    Cualquier otra extensión rechaza con BadRequestException explícita
+    //    para que el user no se confunda con un "estructura inválida" críptico.
+    const lowerName = (params.file.originalname || '').toLowerCase();
+    let extracted;
+    if (lowerName.endsWith('.html') || lowerName.endsWith('.htm')) {
+      extracted = await this.designBundle.extractStandaloneHtml(
+        params.file.buffer,
+        params.file.originalname,
+      );
+    } else if (lowerName.endsWith('.zip')) {
+      extracted = await this.designBundle.extractBundle(
+        params.file.buffer,
+        params.file.originalname,
+      );
+    } else {
+      throw new BadRequestException(
+        'Formato no soportado. Sube un `.zip` (bundle de Claude Design) o un `.html` standalone.',
+      );
+    }
+
+    // 2) Generar el id del nuevo design + paths del vault.
+    const designId = randomUUID();
+    const iniRef: InitiativeRef = { id: epic.initiative.id, name: epic.initiative.name };
+    const epicRef: EpicRef = { id: epic.id, title: epic.title };
+    const folder = epicDesignBundleFolderPath(iniRef, epicRef, {
+      id: designId,
+      name: params.name,
+    });
+    // bundleVaultPath con trailing slash para concatenación trivial.
+    const bundleVaultPath = `${folder}/`;
+
+    // 3) Escribir cada archivo texto del bundle al vault. Hacemos write
+    //    serial para no saturar la API de GitHub (Octokit) — en paralelo
+    //    a 50 archivos hemos visto rate limits 403 esporádicos.
+    for (const file of extracted.textFiles) {
+      // Defense-in-depth CWE-22: extractBundle ya valida `..` segments,
+      // pero re-validamos acá por si un caller futuro pasa un ExtractedBundle
+      // construido fuera del extractor canónico (ej: tests, sync hipotético
+      // desde otro storage). Fail-closed: skip + log, no abort del flow.
+      const segments = file.relativePath.split('/');
+      if (
+        segments.some((seg) => seg === '..' || seg === '') ||
+        file.relativePath.startsWith('/')
+      ) {
+        this.logger.warn(
+          `[addDesignBundle] Skipped entry with path traversal: epic=${epicId} entry="${file.relativePath}"`,
+        );
+        continue;
+      }
+      const path = `${folder}/${file.relativePath}`;
+      await this.vault.writeNote(
+        path,
+        file.content,
+        `docs(design): bundle ${extracted.bundleSlug} → ${file.relativePath} [${epicId}]`,
+      );
+    }
+    this.logger.log(
+      `[addDesignBundle] epic=${epicId} design=${designId} files=${extracted.textFiles.length} ` +
+      `binaries=${extracted.binaryEntries.length} bundleKey=${extracted.bundleKey}`,
+    );
+
+    // 4) Construir handoff sintético — usa el bundleVaultPath para que las
+    //    referencias sean absolutas dentro del vault.
+    const handoff = this.designBundle.buildSyntheticHandoff(extracted, bundleVaultPath);
+
+    // 5) Persistir el EpicDesign al array JSONB.
+    const nowIso = new Date().toISOString();
+    const newDesign = {
+      id: designId,
+      name: params.name,
+      description: params.description,
+      handoff,
+      bundleKey: extracted.bundleKey,
+      bundleVaultPath,
+      createdAt: nowIso,
+      updatedAt: nowIso,
+      createdBy: params.user.sub,
+    };
+
+    const currentDesigns = Array.isArray(epic.designs) ? epic.designs : [];
+    const updated = [...(currentDesigns as Prisma.JsonArray), newDesign as unknown as Prisma.JsonObject];
+    await this.prisma.epic.update({
+      where: { id: epicId },
+      data: {
+        designs: updated as Prisma.InputJsonValue,
+        updatedAt: new Date(),
+      },
+    });
+
+    return newDesign;
   }
 }

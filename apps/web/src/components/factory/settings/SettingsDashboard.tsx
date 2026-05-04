@@ -21,7 +21,6 @@ import type {
   GitHubConfig,
   BranchStrategy,
   LinearConfig,
-  JiraConfig,
   ComputeNode,
   ConnectionStatus,
 } from '@cenzontle/shared';
@@ -32,10 +31,9 @@ import {
 import {
   Github,
   GitBranch,
-  BarChart3,
-  TicketCheck,
   Server,
   Bot,
+  Brain,
   Eye,
   EyeOff,
   Plus,
@@ -60,10 +58,12 @@ import {
   RefreshCw,
   KeyRound,
 } from 'lucide-react';
+import { LinearIcon } from '@/components/icons/LinearIcon';
 import { TeamSection } from './TeamSection';
 import { RolesPermissionsSection } from './RolesPermissionsSection';
 import { PodsSection } from './PodsSection';
 import { ExternalSecretsSection } from './ExternalSecretsSection';
+import { AgentTokensSection } from './AgentTokensSection';
 import { UserRole, AccessLevel, USER_ROLE_LABELS, DEFAULT_ROLE_ACCESS, USER_ROLE_COLORS } from '@cenzontle/shared';
 import { useAuthContext } from '@/context/AuthContext';
 import {
@@ -77,25 +77,27 @@ import {
 // Types
 // ---------------------------------------------------------------------------
 
-type SettingsSection = 'repository' | 'branches' | 'linear' | 'jira' | 'vault' | 'codigo' | 'external-secrets' | 'nodes' | 'agents' | 'dod' | 'pods' | 'team' | 'roles';
+type SettingsSection = 'repository' | 'branches' | 'linear' | 'vault' | 'codigo' | 'external-secrets' | 'nodes' | 'agents' | 'agent-tokens' | 'dod' | 'pods' | 'team' | 'roles';
 
 interface SidebarItem {
   id: SettingsSection;
   label: string;
-  icon: typeof Github;
+  // Acepta tanto iconos de lucide-react (ForwardRef) como componentes SVG
+  // custom (e.g. LinearIcon brand mark). Ambos rendean con `className`.
+  icon: React.ComponentType<{ className?: string }>;
   group: string;
 }
 
 const SIDEBAR_ITEMS: SidebarItem[] = [
   { id: 'repository', label: 'Repositorio', icon: Github, group: 'Control de código' },
   { id: 'branches', label: 'Estrategia de ramas', icon: GitBranch, group: 'Control de código' },
-  { id: 'linear', label: 'Linear', icon: BarChart3, group: 'Integraciones' },
-  { id: 'jira', label: 'Jira', icon: TicketCheck, group: 'Integraciones' },
+  { id: 'linear', label: 'Linear', icon: LinearIcon, group: 'Integraciones' },
   { id: 'vault', label: 'Vault', icon: BookMarked, group: 'Integraciones' },
   { id: 'codigo', label: 'Código', icon: Code, group: 'Integraciones' },
   { id: 'external-secrets', label: 'Secretos externos', icon: KeyRound, group: 'Integraciones' },
   { id: 'nodes', label: 'Nodos de cómputo', icon: Server, group: 'Infraestructura' },
   { id: 'agents', label: 'Agentes', icon: Bot, group: 'Automatización' },
+  { id: 'agent-tokens', label: 'Tokens IA', icon: Brain, group: 'Automatización' },
   { id: 'dod', label: 'Definition of Done', icon: ClipboardCheck, group: 'Automatización' },
   { id: 'pods', label: 'Células', icon: Boxes, group: 'Ecosistema' },
   { id: 'team', label: 'Equipo', icon: Users, group: 'Ecosistema' },
@@ -686,134 +688,6 @@ function LinearSection() {
           )}
           <SaveButton saving={saving} onClick={handleSave} />
         </div>
-      </div>
-    </SettingsCard>
-  );
-}
-
-// ---------------------------------------------------------------------------
-// Section: Jira
-// ---------------------------------------------------------------------------
-
-function JiraSection() {
-  const [email, setEmail] = useState('');
-  const [apiToken, setApiToken] = useState('');
-  const [domain, setDomain] = useState('');
-  const [projectKey, setProjectKey] = useState('');
-  const [projectName, setProjectName] = useState('');
-  const [defaultIssueType, setDefaultIssueType] = useState('Story');
-  const [status, setStatus] = useState<ConnectionStatus>('disconnected');
-  const [saving, setSaving] = useState(false);
-  const [testing, setTesting] = useState(false);
-
-  const handleTest = () => {
-    setTesting(true);
-    setStatus('disconnected');
-    setTimeout(() => {
-      setStatus(email && apiToken && domain && projectKey ? 'connected' : 'error');
-      setTesting(false);
-    }, 1500);
-  };
-
-  const handleSave = () => {
-    setSaving(true);
-    setTimeout(() => setSaving(false), 1000);
-  };
-
-  return (
-    <SettingsCard
-      title="Conexión Jira"
-      description="Conecta con Jira para seguimiento de issues y gestión de sprints."
-    >
-      <div className="space-y-4">
-        <LabeledInput label="Email">
-          <Input
-            type="email"
-            value={email}
-            onChange={(e) => setEmail(e.target.value)}
-            placeholder="you@company.com"
-            className={inputClasses}
-          />
-        </LabeledInput>
-
-        <LabeledInput label="API Token">
-          <PasswordField
-            value={apiToken}
-            onChange={setApiToken}
-            placeholder="ATATT3x..."
-          />
-        </LabeledInput>
-
-        <div className="grid gap-4 sm:grid-cols-2">
-          <LabeledInput label="Domain">
-            <div className="flex items-center gap-0">
-              <Input
-                value={domain}
-                onChange={(e) => setDomain(e.target.value)}
-                placeholder="mycompany"
-                className={cn(inputClasses, 'rounded-r-none')}
-              />
-              <span className="flex h-9 items-center rounded-r-md border border-l-0 border-border bg-muted px-3 text-xs text-muted-foreground/70">
-                .atlassian.net
-              </span>
-            </div>
-          </LabeledInput>
-
-          <LabeledInput label="Project Key">
-            <Input
-              value={projectKey}
-              onChange={(e) => setProjectKey(e.target.value.toUpperCase())}
-              placeholder="PROJ"
-              className={inputClasses}
-            />
-          </LabeledInput>
-        </div>
-
-        <div className="grid gap-4 sm:grid-cols-2">
-          <LabeledInput label="Project Name">
-            <Input
-              value={projectName}
-              onChange={(e) => setProjectName(e.target.value)}
-              placeholder="Engineering Project"
-              className={inputClasses}
-            />
-          </LabeledInput>
-
-          <LabeledInput label="Default Issue Type">
-            <Select value={defaultIssueType} onValueChange={setDefaultIssueType}>
-              <SelectTrigger className={cn(inputClasses, 'w-full')}>
-                <SelectValue />
-              </SelectTrigger>
-              <SelectContent>
-                <SelectItem value="Story">Story</SelectItem>
-                <SelectItem value="Task">Task</SelectItem>
-                <SelectItem value="Bug">Bug</SelectItem>
-                <SelectItem value="Sub-task">Sub-task</SelectItem>
-              </SelectContent>
-            </Select>
-          </LabeledInput>
-        </div>
-      </div>
-
-      <div className="mt-5 flex items-center justify-between">
-        <div className="flex items-center gap-3">
-          <StatusDot status={status} />
-          <Button
-            variant="ghost"
-            size="sm"
-            onClick={handleTest}
-            disabled={testing || !apiToken}
-            className="text-muted-foreground hover:text-foreground gap-2"
-          >
-            {testing ? (
-              <Loader2 className="h-3.5 w-3.5 animate-spin" />
-            ) : (
-              <Wifi className="h-3.5 w-3.5" />
-            )}
-            Probar conexión
-          </Button>
-        </div>
-        <SaveButton saving={saving} onClick={handleSave} />
       </div>
     </SettingsCard>
   );
@@ -2295,8 +2169,6 @@ function SectionContent({ section }: { section: SettingsSection }) {
       return <BranchStrategySection />;
     case 'linear':
       return <LinearSection />;
-    case 'jira':
-      return <JiraSection />;
     case 'vault':
       return <VaultSection />;
     case 'codigo':
@@ -2307,6 +2179,8 @@ function SectionContent({ section }: { section: SettingsSection }) {
       return <ComputeNodesSection />;
     case 'agents':
       return <AgentsSection />;
+    case 'agent-tokens':
+      return <AgentTokensSection />;
     case 'dod':
       return <DodSection />;
     case 'pods':

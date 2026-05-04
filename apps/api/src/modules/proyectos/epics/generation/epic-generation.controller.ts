@@ -12,6 +12,7 @@ import {
   NotFoundException,
 } from '@nestjs/common';
 import { ApiTags, ApiOperation } from '@nestjs/swagger';
+import { Throttle } from '@nestjs/throttler';
 import { Permission, UserRole } from '@cenzontle/shared';
 import type { EpicGenerationEvent, ProposedEpic, AuthenticatedUser } from '@cenzontle/shared';
 import { Permissions, CurrentUser } from '../../../auth/decorators';
@@ -21,6 +22,8 @@ import { ProposalCacheService } from './proposal-cache.service';
 import { GenerateEpicsQueryDto } from './dto/generate-epics.dto';
 import { scrubSecrets } from '../../../../common/utils/scrub-secrets.util';
 import { sanitizeForLog } from '../../../../common/utils/sanitize-llm-input.util';
+import { setupSseHeartbeat } from '../../../../common/utils/sse-heartbeat.util';
+import { AgentRunRegistryService } from '../../../../common/services/agent-run-registry.service';
 import type { Request, Response } from 'express';
 
 @ApiTags('Épicas — Generación IA')
@@ -32,6 +35,7 @@ export class EpicGenerationController {
     private readonly generation: EpicGenerationService,
     private readonly cache: ProposalCacheService,
     private readonly prisma: PrismaService,
+    private readonly registry: AgentRunRegistryService,
   ) {}
 
   /**
@@ -133,6 +137,34 @@ export class EpicGenerationController {
     return { ok: true };
   }
 
+  @Delete(':initiativeId/active')
+  @Permissions(Permission.CREATE_EPIC)
+  @ApiOperation({
+    summary:
+      'Cancelar el run de generación activo (aborta el agente backend e invalida el cache). Solo el usuario que inició el run o AltaGerencia pueden cancelarlo.',
+  })
+  async cancelActiveRun(
+    @Param('initiativeId', ParseUUIDPipe) initiativeId: string,
+    @CurrentUser() user: AuthenticatedUser,
+  ) {
+    await this.assertUserCanAccessInitiative(user, initiativeId);
+    const controller = this.registry.getController(initiativeId);
+    if (controller) {
+      // Ownership: solo el usuario que arrancó el run puede cancelarlo.
+      // AltaGerencia mantiene override admin.
+      if (user.role !== UserRole.AltaGerencia && !this.registry.isOwner(initiativeId, user.sub)) {
+        throw new ForbiddenException('Solo el usuario que inició la generación puede cancelarla.');
+      }
+      this.logger.log(`[cancel] aborting active run for ${initiativeId}`);
+      this.registry.markCancelled(controller);
+      controller.abort();
+    }
+    // Aunque no haya run activo (timeout ya disparó, server reinició, etc.),
+    // limpiamos el cache. Idempotente.
+    await this.cache.invalidateSession(initiativeId);
+    return { ok: true, hadActiveRun: !!controller };
+  }
+
   @Delete(':initiativeId/cache/proposals/:clientId')
   @Permissions(Permission.CREATE_EPIC)
   @ApiOperation({ summary: 'Remover propuesta del cache' })
@@ -153,6 +185,11 @@ export class EpicGenerationController {
 
   // ── SSE streaming (must be LAST — :initiativeId is a catch-all param) ──
 
+  /**
+   * Throttle: 5 SSE generate-requests por minuto por IP. Cap por user
+   * (3 simultáneos cross-tipo) lo gestiona el registry.
+   */
+  @Throttle({ default: { ttl: 60_000, limit: 5 } })
   @Get(':initiativeId')
   @Permissions(Permission.CREATE_EPIC)
   @ApiOperation({ summary: 'Generar épicas con IA via SSE' })
@@ -173,18 +210,38 @@ export class EpicGenerationController {
     const promptForLog = query.prompt ? sanitizeForLog(scrubSecrets(query.prompt)) : '';
     this.logger.log(`[generate] initiative=${initiativeId} prompt="${promptForLog}" count=${query.count ?? 5} webSearch=${webSearchEnabled}`);
 
+    // Registramos el run ANTES de flushHeaders. ConflictException se
+    // propaga como 409 JSON real si user excede cap o ya hay run activo.
+    // El registry instala su propio hard timeout de 10min y se limpia
+    // automáticamente en complete/error vía unregister().
+    const abortController = new AbortController();
+    this.registry.register(user.sub, initiativeId, abortController);
+
     res.setHeader('Content-Type', 'text/event-stream');
     res.setHeader('Cache-Control', 'no-cache');
     res.setHeader('Connection', 'keep-alive');
+    res.setHeader('X-Accel-Buffering', 'no');
     res.flushHeaders();
 
-    const abortController = new AbortController();
-    let clientAborted = false;
+    // Heartbeat SSE — previene UND_ERR_BODY_TIMEOUT en corridas largas.
+    const stopHeartbeat = setupSseHeartbeat(res);
+
+    let clientDisconnected = false;
+    let streamCompleted = false;
 
     req.on('close', () => {
-      this.logger.log(`[generate] Client disconnected, aborting agent`);
-      clientAborted = true;
-      abortController.abort();
+      // Cuando el server llama `res.end()` en complete/error, Node emite
+      // `close` también — el guard `streamCompleted` evita loguear "Client
+      // disconnected" como falso positivo en terminaciones normales.
+      if (streamCompleted) return;
+      // El user cerró/cambió tab. NO abortamos al instante — el agente sigue
+      // corriendo en background y los eventos se siguen acumulando en Redis.
+      // El registry tiene su propio hard-timeout (10min) que dispara como
+      // red de seguridad si nadie regresa.
+      if (clientDisconnected) return;
+      stopHeartbeat();
+      this.logger.log(`[generate] Client disconnected — agent continues in background`);
+      clientDisconnected = true;
     });
 
     const subject = this.generation.generate(
@@ -198,47 +255,71 @@ export class EpicGenerationController {
     const collectedEvents: EpicGenerationEvent[] = [];
     const collectedProposals: ProposedEpic[] = [];
 
-    this.cache.initSession(initiativeId).catch(() => {});
+    await this.cache.initSession(initiativeId).catch((e) => {
+      this.logger.warn(`[cache] initSession failed: ${e?.message}`);
+    });
+
+    /** Wrapper defensivo: tras `req.close`, escribir al socket cerrado tira
+     *  ERR_STREAM_WRITE_AFTER_END. Capturamos para que el subject no se
+     *  rompa y el agente siga procesando hacia el cache de fondo. */
+    const safeWrite = (payload: string): void => {
+      if (clientDisconnected || res.writableEnded) return;
+      try {
+        res.write(payload);
+      } catch (e) {
+        this.logger.debug(`[generate] write failed (client gone): ${(e as Error)?.message}`);
+      }
+    };
 
     subject.subscribe({
       next: (event) => {
-        res.write(`data: ${JSON.stringify(event.data)}\n\n`);
-
         const data = event.data as EpicGenerationEvent;
-        collectedEvents.push(data);
+        safeWrite(`data: ${JSON.stringify(event.data)}\n\n`);
 
+        collectedEvents.push(data);
         if (data.type === 'proposal_ready') {
-          collectedProposals.push((data as EpicGenerationEvent & { type: 'proposal_ready' }).epic);
+          const proposal = (data as EpicGenerationEvent & { type: 'proposal_ready' }).epic;
+          collectedProposals.push(proposal);
         }
+
+        // Persistencia incremental sin race: writeSession reescribe el state
+        // COMPLETO desde memoria local. Sin read-modify-write → sin lost
+        // updates entre eventos consecutivos del burst final.
+        this.cache.writeSession(initiativeId, collectedEvents, collectedProposals).catch(() => {});
       },
       complete: () => {
-        this.logger.log(`[generate] SSE stream finalized for ${initiativeId}`);
-        res.end();
+        streamCompleted = true;
+        stopHeartbeat();
+        this.registry.unregister(user.sub, initiativeId, abortController);
+        this.logger.log(`[generate] SSE stream finalized for ${initiativeId} (clientDisconnected=${clientDisconnected})`);
+        if (!res.writableEnded) res.end();
 
-        // Si el cliente cerro la pestana, NO persistimos la sesion parcial.
-        // Invalidamos el cache inicializado por initSession para no dejar datos
-        // abortados que confundan el cache recovery del proximo mount.
-        if (clientAborted) {
+        if (this.registry.wasCancelled(abortController)) {
           this.cache.invalidateSession(initiativeId).catch(() => {});
           return;
         }
 
+        // Persistimos el resultado completo SIEMPRE — incluso si el cliente
+        // se desconectó. El cache contiene los eventos + proposals al regresar.
         this.cache.saveFullSession(initiativeId, collectedEvents, collectedProposals)
           .then(() => this.logger.debug(`[cache] session saved: ${collectedProposals.length} proposals, ${collectedEvents.length} events`))
           .catch((e) => this.logger.warn(`[cache] saveFullSession failed: ${e.message}`));
       },
       error: (err) => {
+        streamCompleted = true;
+        stopHeartbeat();
+        this.registry.unregister(user.sub, initiativeId, abortController);
         this.logger.error(`[generate] SSE stream error: ${err?.message}`);
-        if (!clientAborted) {
-          res.write(`data: ${JSON.stringify({ type: 'error', message: 'Error interno' })}\n\n`);
-        }
-        res.end();
+        safeWrite(`data: ${JSON.stringify({ type: 'error', message: 'Error interno' })}\n\n`);
+        if (!res.writableEnded) res.end();
 
-        if (clientAborted) {
+        if (this.registry.wasCancelled(abortController)) {
           this.cache.invalidateSession(initiativeId).catch(() => {});
           return;
         }
 
+        // Aún en error: persistimos lo que hayamos acumulado. Defensa frente a
+        // un user que regresa y al menos puede ver hasta dónde llegó el agente.
         this.cache.saveFullSession(initiativeId, collectedEvents, collectedProposals)
           .catch(() => {});
       },

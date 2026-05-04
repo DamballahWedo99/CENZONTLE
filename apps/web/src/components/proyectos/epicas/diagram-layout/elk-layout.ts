@@ -254,15 +254,9 @@ export function absolutizeElkLayout(root: ElkNode): {
   }
 
   const edgeRoutings = new Map<string, EdgeWaypoints>();
-  let totalIncomingEdges = 0;
-  let edgesWithSections = 0;
-  let edgesWithBends = 0;
-  let totalBendPoints = 0;
   for (const edge of root.edges ?? []) {
-    totalIncomingEdges++;
     const section = edge.sections?.[0];
     if (!section) continue;
-    edgesWithSections++;
     // Guard `Number.isFinite`: un grafo degenerado (auto-loops patológicos,
     // dimensiones cero) podría producir NaN/Infinity en los bends. Si cuela
     // NaN al SVG path, el edge entero se vuelve invisible sin error en
@@ -276,8 +270,6 @@ export function absolutizeElkLayout(root: ElkNode): {
     const bends = (section.bendPoints ?? [])
       .filter(isFinitePoint)
       .map((p) => ({ x: p.x, y: p.y }));
-    if (bends.length > 0) edgesWithBends++;
-    totalBendPoints += bends.length;
 
     // Inferir qué handle usó ELK consultando la posición del startPoint/
     // endPoint respecto al bounding box de cada nodo. Esto permite que el
@@ -301,21 +293,6 @@ export function absolutizeElkLayout(root: ElkNode): {
       sourceHandle,
       targetHandle,
     });
-  }
-
-  console.debug(
-    `[DIAGRAM-DEBUG][absolutizeElkLayout] edges_in=${totalIncomingEdges} ` +
-      `edges_with_sections=${edgesWithSections} ` +
-      `edges_with_bends=${edgesWithBends} ` +
-      `total_bendPoints=${totalBendPoints} ` +
-      `avg_bends_per_edge=${edgesWithSections > 0 ? (totalBendPoints / edgesWithSections).toFixed(2) : 'n/a'}`,
-  );
-  if (edgesWithSections > 0 && edgesWithBends === 0) {
-    console.warn(
-      '[DIAGRAM-DEBUG][absolutizeElkLayout] ELK devolvió sections pero CERO bendPoints en todos los edges. ' +
-        'Esto sugiere que `elk.edgeRouting: ORTHOGONAL` no está activo o el grafo es tan simple ' +
-        '(2 layers, pocos nodos) que ELK decidió trazos rectos. Los WaypointEdge caerán a smoothstep.',
-    );
   }
 
   return { positions, edgeRoutings };

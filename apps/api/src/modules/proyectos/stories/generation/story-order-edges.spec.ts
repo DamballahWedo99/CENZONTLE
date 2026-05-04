@@ -51,10 +51,21 @@ describe('wouldIntroduceCycle', () => {
     expect(wouldIntroduceCycle(edges, 1)).toBe(true);
   });
 
-  it('ignora edges con indices fuera del nodeCount sin crashear', () => {
-    const edges: StoryOrderEdge[] = [edge(0, 10)]; // adjacency[0] se llena con 10, pero DFS no entra al índice 10
-    // DFS solo recorre nodos [0, nodeCount), así que el edge out-of-range no dispara cycle detection
-    expect(() => wouldIntroduceCycle(edges, 3)).not.toThrow();
+  it('ignora edges con indices fuera del nodeCount y NO reporta ciclo', () => {
+    // Aserción semántica: el guard explícito en `wouldIntroduceCycle` descarta
+    // edges out-of-range antes del DFS, así que el resultado es `false`. Antes
+    // del fix HIGH del qa-reviewer, `color[v]` con `v` fuera de rango era
+    // `undefined` y `=== GRAY` siempre era false → un ciclo real con índices
+    // fuera de rango se reportaba como NO ciclo (silently). Ahora el path es
+    // explícito: out-of-range = skip, no contribuye al grafo.
+    const edges: StoryOrderEdge[] = [edge(0, 10)];
+    expect(wouldIntroduceCycle(edges, 3)).toBe(false);
+  });
+
+  it('descarta edges out-of-range pero detecta ciclos válidos en el mismo array', () => {
+    // Edges mezclados: uno fuera de rango (ignorado) + ciclo real (detectado).
+    const edges: StoryOrderEdge[] = [edge(0, 99), edge(0, 1), edge(1, 0)];
+    expect(wouldIntroduceCycle(edges, 2)).toBe(true);
   });
 });
 
@@ -179,5 +190,79 @@ describe('parseAndValidateStoryOrderEdges', () => {
     ];
     const result = parseAndValidateStoryOrderEdges(input, 4);
     expect(result).toHaveLength(4);
+  });
+
+  describe('pre-seed con existingEdges', () => {
+    // Caso clave: el StoryOrderAnalyzer (5to agente) llama esta función con
+    // los edges del TL como pre-seed. Sin esto, el merge cross-call podía
+    // duplicar o introducir ciclos contra los del TL (HIGH del qa-reviewer
+    // 2026-05-03). Estos tests garantizan paridad con el contrato.
+
+    it('NO duplica un edge que ya está en existingEdges', () => {
+      const existing: StoryOrderEdge[] = [edge(1, 0)];
+      const reasons: EdgeRejectReason[] = [];
+      const input = [
+        // Mismo par (1, 0) que ya existe — debe ser rechazado como duplicate.
+        { fromOutlineIndex: 1, blockedByOutlineIndex: 0, hardness: 'soft', reason: 'other', description: 'dup' },
+        // Edge nuevo válido — debe ser aceptado.
+        { fromOutlineIndex: 2, blockedByOutlineIndex: 0, hardness: 'hard', reason: 'api_contract', description: 'new' },
+      ];
+      const result = parseAndValidateStoryOrderEdges(input, 3, (r) => reasons.push(r), existing);
+      expect(result).toHaveLength(1);
+      expect(result[0].fromIndex).toBe(2);
+      expect(reasons).toEqual(['duplicate']);
+    });
+
+    it('NO acepta edge que formaría ciclo CONTRA los del existingEdges', () => {
+      // existing tiene 0→1; si emitimos 1→0 sería ciclo.
+      const existing: StoryOrderEdge[] = [edge(0, 1)];
+      const reasons: EdgeRejectReason[] = [];
+      const input = [
+        { fromOutlineIndex: 1, blockedByOutlineIndex: 0, hardness: 'hard', reason: 'other', description: 'cycle' },
+      ];
+      const result = parseAndValidateStoryOrderEdges(input, 2, (r) => reasons.push(r), existing);
+      expect(result).toEqual([]);
+      expect(reasons).toEqual(['cycle']);
+    });
+
+    it('detecta ciclo INDIRECTO formado entre existing + raw (existing 0→1, raw 1→2 + 2→0)', () => {
+      const existing: StoryOrderEdge[] = [edge(0, 1)];
+      const reasons: EdgeRejectReason[] = [];
+      const input = [
+        { fromOutlineIndex: 1, blockedByOutlineIndex: 2, hardness: 'hard', reason: 'other', description: 'ok' },
+        // Este edge crea ciclo 0→1→2→0.
+        { fromOutlineIndex: 2, blockedByOutlineIndex: 0, hardness: 'hard', reason: 'other', description: 'cycle' },
+      ];
+      const result = parseAndValidateStoryOrderEdges(input, 3, (r) => reasons.push(r), existing);
+      // Solo el primero pasa; el segundo se rechaza por ciclo.
+      expect(result).toHaveLength(1);
+      expect(result[0].fromIndex).toBe(1);
+      expect(reasons).toEqual(['cycle']);
+    });
+
+    it('retorna SOLO los edges nuevos del raw (no duplica el pre-seed)', () => {
+      // Contrato del API: el pre-seed NO se mezcla en el resultado, así el
+      // caller puede hacer `existing.concat(parse(raw, N, cb, existing))`
+      // sin riesgo de duplicar.
+      const existing: StoryOrderEdge[] = [edge(0, 1)];
+      const input = [
+        { fromOutlineIndex: 1, blockedByOutlineIndex: 2, hardness: 'hard', reason: 'other', description: 'new' },
+      ];
+      const result = parseAndValidateStoryOrderEdges(input, 3, undefined, existing);
+      expect(result).toHaveLength(1);
+      expect(result[0].fromIndex).toBe(1);
+      expect(result[0].blockedByIndex).toBe(2);
+      // No incluye el edge del existing.
+      expect(result.find((e) => e.fromIndex === 0 && e.blockedByIndex === 1)).toBeUndefined();
+    });
+
+    it('comportamiento legacy: existingEdges omitido se trata como []', () => {
+      const input = [
+        { fromOutlineIndex: 1, blockedByOutlineIndex: 0, hardness: 'hard', reason: 'other', description: '' },
+      ];
+      // Sin pasar existingEdges (4to argumento) — el default es [].
+      const result = parseAndValidateStoryOrderEdges(input, 3);
+      expect(result).toHaveLength(1);
+    });
   });
 });

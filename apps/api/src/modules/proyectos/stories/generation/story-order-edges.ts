@@ -38,6 +38,21 @@ export function wouldIntroduceCycle(
 ): boolean {
   const adjacency: number[][] = Array.from({ length: nodeCount }, () => []);
   for (const edge of edges) {
+    // Defensa-en-profundidad: silenciosamente descartamos edges con índices
+    // fuera de rango. El caller (`parseAndValidateStoryOrderEdges`) ya filtra
+    // antes de pasar el candidato, pero si esta función se invoca directamente
+    // con datos de otra fuente, el destino fuera del array `color` haría que
+    // `color[v] === GRAY` siempre retorne false → un ciclo se reportaría como
+    // NO ciclo. Con el guard explícito, la función es independiente del filtro
+    // del caller.
+    if (
+      edge.fromIndex < 0 ||
+      edge.fromIndex >= nodeCount ||
+      edge.blockedByIndex < 0 ||
+      edge.blockedByIndex >= nodeCount
+    ) {
+      continue;
+    }
     adjacency[edge.fromIndex]?.push(edge.blockedByIndex);
   }
   const WHITE = 0;
@@ -89,17 +104,31 @@ export type OnRejectCallback = (
  *  - Entries sin indices numéricos o fuera de rango [0, outlineCount).
  *  - Self-bloqueo (from === blockedBy).
  *  - Hardness/reason fuera del enum → fallback a 'hard' / 'other'.
- *  - Duplicados exactos (mismo from+blockedBy).
- *  - Ciclos: si un nuevo edge introduce un ciclo en el DAG acumulado, se
- *    rechaza con callback.
+ *  - Duplicados exactos (mismo from+blockedBy) — incluyendo duplicados con
+ *    edges ya presentes en `existingEdges` (defensa cross-call).
+ *  - Ciclos: si un nuevo edge introduce un ciclo en el DAG acumulado
+ *    (existing + accepted hasta ahora), se rechaza con callback.
+ *
+ * `existingEdges` permite invocar la función con un pre-seed ya validado:
+ *  ```
+ *  const recovered = parseAndValidateStoryOrderEdges(rawA, N);
+ *  const merged = parseAndValidateStoryOrderEdges(rawB, N, undefined, recovered);
+ *  ```
+ *  El segundo call NO duplica ni introduce ciclos contra el primer set —
+ *  patrón paritario con `dedupCrossStoriesPure(deps, existingDepKeys)`.
  */
 export function parseAndValidateStoryOrderEdges(
   raw: unknown[],
   outlineCount: number,
   onReject?: OnRejectCallback,
+  existingEdges: ReadonlyArray<StoryOrderEdge> = [],
 ): StoryOrderEdge[] {
-  const accepted: StoryOrderEdge[] = [];
-  const seenPairs = new Set<string>();
+  // Pre-seed: los existing entran al `accepted` y `seenPairs` para que el
+  // dedup y la detección de ciclos los consideren como ya presentes en el DAG.
+  const accepted: StoryOrderEdge[] = [...existingEdges];
+  const seenPairs = new Set<string>(
+    existingEdges.map((e) => `${e.fromIndex}->${e.blockedByIndex}`),
+  );
 
   for (const item of raw) {
     if (!item || typeof item !== 'object') continue;
@@ -144,5 +173,8 @@ export function parseAndValidateStoryOrderEdges(
     seenPairs.add(key);
   }
 
-  return accepted;
+  // Solo retornamos los edges NUEVOS (los del raw), no el pre-seed. Así el
+  // caller puede hacer `existing.concat(parseAndValidate(raw, N, cb, existing))`
+  // sin duplicar el pre-seed. Esto es paritario con el contrato anterior.
+  return accepted.slice(existingEdges.length);
 }

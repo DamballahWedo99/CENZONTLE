@@ -1,11 +1,22 @@
 import { NestFactory } from "@nestjs/core";
+import { NestExpressApplication } from "@nestjs/platform-express";
 import { ValidationPipe } from "@nestjs/common";
 import { SwaggerModule, DocumentBuilder } from "@nestjs/swagger";
 import { AppModule } from "./app.module";
 import { PrismaExceptionFilter } from "./common/filters/prisma-exception.filter";
 
 async function bootstrap() {
-  const app = await NestFactory.create(AppModule);
+  const app = await NestFactory.create<NestExpressApplication>(AppModule);
+
+  // CRÍTICO para ThrottlerGuard: detrás de un reverse proxy (Auth0 BFF,
+  // load balancer, CDN), `req.ip` por default es el IP del proxy, no del
+  // cliente real. Sin trust proxy, un solo proxy IP "agrupa" a TODOS los
+  // usuarios en el mismo bucket de throttle → 429 a usuarios legítimos
+  // cuando el budget se consume. El throttler se vuelve un DoS amplifier
+  // hacia los buenos en vez de defensa contra los malos.
+  // `1` = confía solo en el primer hop (el proxy más cercano). Si hay
+  // varios hops (CDN → proxy → app), ajustar a la cuenta correcta.
+  app.set("trust proxy", 1);
 
   app.setGlobalPrefix("api");
   app.enableCors({

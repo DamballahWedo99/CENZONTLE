@@ -848,7 +848,6 @@ export function ProyectosProvider({ children }: { children: ReactNode }) {
         },
       });
     } catch (err) {
-      console.error('Failed to load data from API:', err);
       dispatch({ type: 'SET_ERROR', payload: err instanceof Error ? err.message : 'Error cargando datos' });
     }
   }, [currentUser?.name]);

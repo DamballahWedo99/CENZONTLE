@@ -110,15 +110,18 @@ export function epicToFlatRow(
 
 /**
  * Extrae un summary corto del epic.markdown para vistas tabulares (Excel,
- * CSV, JSON). Busca el primer párrafo después del heading `## Descripción`,
- * o el primer párrafo de cualquier heading. Fallback a string vacío.
+ * CSV, JSON). Busca el primer párrafo después del heading `## Objetivo`
+ * (nuevo), con fallback a `## Descripción` (épicas creadas antes del
+ * rename), o el primer párrafo de cualquier heading. Fallback a string
+ * vacío.
  */
 function extractEpicSummary(md: string | undefined): string {
   const text = (md ?? '').trim();
   if (!text) return '';
+  const objetivoMatch = text.match(/^##\s+Objetivo\s*\n+([\s\S]*?)(?=\n##\s|$)/m);
   const descMatch = text.match(/^##\s+Descripción\s*\n+([\s\S]*?)(?=\n##\s|$)/m);
   const firstParaMatch = text.match(/^##\s+\S[^\n]*\n+([\s\S]*?)(?=\n##\s|$)/m);
-  return (descMatch?.[1] ?? firstParaMatch?.[1] ?? text).trim();
+  return (objetivoMatch?.[1] ?? descMatch?.[1] ?? firstParaMatch?.[1] ?? text).trim();
 }
 
 export function storyToFlatRow(
@@ -408,7 +411,7 @@ export function storyToSections(
   }
 
   // PO Fields — split dinámico por encabezados ## del markdown
-  sections.push({ level: 1, title: 'Product Owner' });
+  sections.push({ level: 1, title: 'Definición de Negocio' });
   for (const sub of splitMarkdownByH2(story.po.markdown ?? '')) {
     sections.push({ level: 2, title: sub.title, body: sub.body });
   }

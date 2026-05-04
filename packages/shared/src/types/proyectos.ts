@@ -562,7 +562,32 @@ export interface EpicDesign {
   id: string;
   name: string;
   description: string;
+  /**
+   * Texto que el agente PO/TL/QA ve como contexto del diseño en sus prompts.
+   *
+   * - Diseños creados antes del cambio a "bundle ZIP" (legacy): contiene la
+   *   URL del handoff de Claude Design tal cual la pegó el user.
+   * - Diseños creados con bundle ZIP: contiene un handoff sintético compacto
+   *   (slug del bundle, path al primary design, listing de archivos del
+   *   bundle accesibles via vault_read). El README crudo y los HTMLs viven
+   *   en el vault — Claude Code los lee al implementar la historia.
+   */
   handoff: string;
+  /**
+   * Si el diseño se creó subiendo un bundle ZIP de Claude Design, esta clave
+   * apunta al ZIP completo de respaldo en object/file storage. Permite
+   * descargar el bundle original (incluyendo binarios que no descomprimimos
+   * al vault). Ausente para diseños legacy (URL handoff).
+   */
+  bundleKey?: string;
+  /**
+   * Path en el vault donde se descomprimieron los archivos texto del bundle
+   * (HTML, CSS, JS, README, etc.). Formato:
+   * `iniciativas/<initSlug>/epics/<epicSlug>/disenos/<designSlug>/`. Los
+   * agentes pueden listar/leer estos archivos via `vault_glob` y `vault_read`.
+   * Ausente para diseños legacy.
+   */
+  bundleVaultPath?: string;
   createdAt: string; // ISO date
   updatedAt: string; // ISO date
   createdBy?: string;
@@ -688,31 +713,55 @@ export interface CachedGenerationSession {
 
 // --- Story generation (AI agent) types ---
 
-/** Fases de los 3 agentes especializados durante la generacion de historias. */
+/** Fases de los 5 agentes especializados durante la generacion de historias. */
 export type StoryGenerationPhase =
   | 'idle'
   | 'researching'      // Investigacion inicial (documentos + vault + codigo)
   | 'drafting_po'      // Agente PO redactando antecedentes/objetivo/criterios
   | 'drafting_technical' // Agente Tech Lead detallando arquitectura/flujo/validaciones
   | 'drafting_qa'      // Agente QA generando estrategia de testing + casos unitarios
+  | 'auditing_deps'    // Agente DepsAuditor — revisa que no falten credenciales/env vars
+  | 'analyzing_order'  // Agente StoryOrderAnalyzer — recupera el DAG hard/soft entre historias
   | 'proposing'        // Consolidando y emitiendo propuestas
   | 'done';
 
 /**
  * Rol del agente activo durante un step. Permite a la UI rotular que "sombrero"
- * esta usando el agente en cada momento (PO / Tech Lead / QA).
+ * esta usando el agente en cada momento (PO / Tech Lead / QA / DepsAuditor / StoryOrder).
  */
-export type StoryAgentRole = 'po' | 'technical' | 'qa' | 'orchestrator';
+export type StoryAgentRole = 'po' | 'technical' | 'qa' | 'deps_auditor' | 'story_order' | 'orchestrator';
 
 interface StoryGenerationEventBase {
   timestamp?: string;
+  /**
+   * Set por workers paralelos del TL/QA cuando emiten eventos durante el
+   * procesamiento de UNA historia específica del batch. Permite a la UI
+   * subdividir el bucket "Tech Lead" / "QA" en N sub-cadenas (una por
+   * historia). undefined = evento global (run_started, phase_change,
+   * proposal_ready, run_finished, error) o legacy non-parallel runs.
+   */
+  storyIndex?: number;
 }
 
 /** Eventos SSE emitidos durante la generacion de historias. */
 export type StoryGenerationEvent =
   | (StoryGenerationEventBase & { type: 'run_started' })
   | (StoryGenerationEventBase & { type: 'run_finished'; totalDurationMs: number })
-  | (StoryGenerationEventBase & { type: 'phase_change'; phase: StoryGenerationPhase; label: string; role?: StoryAgentRole })
+  | (StoryGenerationEventBase & {
+      type: 'phase_change';
+      phase: StoryGenerationPhase;
+      label: string;
+      role?: StoryAgentRole;
+      /**
+       * Titles de las historias del batch. Se incluye SOLO en el phase_change
+       * que arranca una fase paralela (ej. `drafting_technical`, `drafting_qa`),
+       * para que la UI pueda etiquetar las sub-cadenas paralelas con el nombre
+       * real de cada historia en lugar de "Historia 1, Historia 2…". Cada
+       * worker paralelo emite events con `storyIndex`; este campo da la
+       * correspondencia inversa `storyIndex → title`.
+       */
+      outlines?: { storyIndex: number; title: string }[];
+    })
   | (StoryGenerationEventBase & { type: 'thinking'; delta: string; role?: StoryAgentRole })
   | (StoryGenerationEventBase & { type: 'step_start'; step: string; label?: string; tool?: string; toolArgs?: Record<string, unknown>; role?: StoryAgentRole })
   | (StoryGenerationEventBase & { type: 'step_done'; step: string; tool?: string; summary?: string; durationMs?: number; resultPreview?: string; role?: StoryAgentRole })
@@ -1020,6 +1069,14 @@ export interface StoryTechnicalDependency {
   mdContent: string | null;
   createdAt: string;
   updatedAt: string;
+  /**
+   * Solo presente en respuestas del rollup cross-stories del epic. Lista las
+   * historias que mencionan la MISMA credencial cuando varias coinciden.
+   * Permite al frontend mostrar "Usado en N historias" en vez de duplicar
+   * la entry. Cuando viene `undefined`, la dep es de una sola story (caso
+   * normal del endpoint per-story).
+   */
+  relatedStories?: Array<{ storyId: string; storyTitle: string }>;
 }
 
 export interface Pod {

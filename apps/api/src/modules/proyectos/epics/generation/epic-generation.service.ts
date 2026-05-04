@@ -1,6 +1,7 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import Anthropic from '@anthropic-ai/sdk';
+import { anthropicFetch } from '../../../../lib/anthropic-fetch';
 import { PrismaService } from '../../../prisma/prisma.service';
 import { PodsService } from '../../pods/pods.service';
 // Tools vestigiales removidas (archivos existen pero no se registran):
@@ -20,13 +21,35 @@ import type { EpicGenerationEvent, ProposedEpic, Priority, EpicStatus } from '@c
 import { Subject } from 'rxjs';
 import { scrubSecrets } from '../../../../common/utils/scrub-secrets.util';
 import { sanitizeUserPromptForLLM } from '../../../../common/utils/sanitize-llm-input.util';
+import { AgentTokenSettingsService } from '../../../agent-token-settings/agent-token-settings.service';
 
 const MAX_TOOL_ITERATIONS = 15;
-const MODEL = 'claude-sonnet-4-20250514';
+// Sonnet 4.6 — soporta adaptive thinking + effort levels.
+const MODEL = 'claude-sonnet-4-6';
 // Tope global de bytes acumulados en attachments multimodales por request.
 // Protege contra DoS por acumulación (15 iteraciones × N PDFs × 20 MB) y
 // limita el costo de tokens enviados a Anthropic. ~60 MB ≈ ~15 PDFs típicos.
 const MAX_ATTACHMENT_BYTES_TOTAL = 60 * 1024 * 1024;
+
+// Extended thinking + max_tokens del agente de épicas se leen ahora desde
+// AgentTokenSettingsService (singleton BD, configurable desde
+// /factory/settings?section=agent-tokens). Defaults: thinking=10K, cap=64K.
+//
+// max_tokens dinámico: escala con `count` para evitar truncado silencioso
+// (`stop_reason: max_tokens`). Con adaptive thinking, el thinking VIVE
+// dentro del max_tokens total (no se suma aparte como en el shape legacy).
+// Effort=high consume ~10-15K tokens en thinking — debemos reservar ese
+// espacio o el output se trunca.
+//
+//   count=5  → 10K base + 17.5K output + 15K thinking buffer = 42.5K
+//   count=10 → 10K base + 35K output + 15K thinking buffer = 60K
+//   count=15 → cap en `epicMaxTokens` settings (default 64K).
+const TOKENS_BASE = 10_000;
+const TOKENS_PER_EPIC = 3_500;
+const ADAPTIVE_THINKING_BUFFER = 15_000;
+function maxTokensForCount(count: number, cap: number): number {
+  return Math.min(TOKENS_BASE + count * TOKENS_PER_EPIC + ADAPTIVE_THINKING_BUFFER, cap);
+}
 
 // Topes por campo narrativo (alineados al DTO de epicas en apps/api/src/modules/proyectos/epics/dto).
 // Defense in depth: aunque el DTO ya limitaria una request con campos gigantes al aceptar,
@@ -59,12 +82,22 @@ export class EpicGenerationService {
     private readonly vaultGrep: VaultGrepTool,
     private readonly vaultRead: VaultReadTool,
     private readonly codeRepoClones: CodeRepoCloneService,
+    private readonly tokenSettings: AgentTokenSettingsService,
   ) {
     const apiKey = this.config.get<string>('ANTHROPIC_API_KEY');
     if (!apiKey) {
       this.logger.warn('ANTHROPIC_API_KEY not configured — epic generation will fail at runtime');
     }
-    this.client = new Anthropic({ apiKey: apiKey || undefined });
+    // `timeout: 30 * 60 * 1000` (30 min): override del default del SDK.
+    // Para resolver el `terminated` que viene de la capa undici durante
+    // silencios largos entre chunks, usamos `fetch: anthropicFetch` que
+    // configura un dispatcher con `bodyTimeout: 0`. Ver
+    // `apps/api/src/lib/anthropic-fetch.ts`.
+    this.client = new Anthropic({
+      apiKey: apiKey || undefined,
+      timeout: 30 * 60 * 1000,
+      fetch: anthropicFetch,
+    });
     this.tools = [initDocsTool, codeGlob, codeGrep, codeRead, vaultGlob, vaultGrep, vaultRead];
   }
 
@@ -199,7 +232,7 @@ export class EpicGenerationService {
                     type: 'string',
                     description: `Markdown único de la épica. DEBE incluir EXACTAMENTE estos 9 headings level-2 en este orden, con contenido REAL bajo cada uno:
 
-## Descripción
+## Objetivo
 1-3 párrafos explicando qué se construye y por qué surge la épica.
 
 ## Beneficios cualitativos
@@ -258,19 +291,55 @@ REGLAS DUROS:
         return;
       }
 
-      // Nudge the agent to submit if running low on iterations
+      // Nudge the agent to submit if running low on iterations.
+      // Si el último mensaje ya es `user` (post-tool_results del iter anterior),
+      // anexamos el nudge como bloque de texto adicional dentro de ese mismo
+      // user message — evita la secuencia inválida `user[tool_results], user[nudge]`
+      // que rompe la alternancia estricta exigida por Anthropic con thinking activo.
       if (iteration === MAX_TOOL_ITERATIONS - 2) {
-        messages.push({
-          role: 'user',
-          content: 'Ya tienes suficiente contexto. Llama a submit_proposals AHORA con las epicas basadas en lo que has descubierto. No hagas mas busquedas.',
-        });
+        const nudgeText =
+          'Ya tienes suficiente contexto. Llama a submit_proposals AHORA con las epicas basadas en lo que has descubierto. No hagas mas busquedas.';
+        const last = messages[messages.length - 1];
+        if (last && last.role === 'user' && Array.isArray(last.content)) {
+          last.content.push({ type: 'text', text: nudgeText });
+        } else if (last && last.role === 'user' && typeof last.content === 'string') {
+          last.content = `${last.content}\n\n${nudgeText}`;
+        } else {
+          messages.push({ role: 'user', content: nudgeText });
+        }
       }
 
-      const response = await this.client.messages.create(
+      // Settings dinámicos (cached 30s) — un cambio en /factory/settings se
+      // refleja en runs nuevos sin redeploy. `effort` controla profundidad
+      // del adaptive thinking. `enabled=false` desactiva thinking entero.
+      const {
+        effort: epicEffort,
+        maxTokensCap: epicCap,
+        enabled: epicEnabled,
+      } = await this.tokenSettings.getEpic();
+      // Adaptive thinking activo en todas las iteraciones — el loop no fuerza
+      // `tool_choice` (incompatible con thinking), solo "nudge" textual en la
+      // penúltima iter.
+      const thinkingActive = epicEnabled;
+
+      const callStart = Date.now();
+      const maxTokens = maxTokensForCount(count, epicCap);
+      // Anthropic exige `messages.stream()` cuando el tiempo estimado puede
+      // exceder 10min. Con `max_tokens` que escala hasta 64K, esa estimación
+      // se gatilla. `stream()` agrupa los chunks internamente y
+      // `finalMessage()` espera al `message_stop`, drop-in con `create()`.
+      const stream = this.client.messages.stream(
         {
           model: MODEL,
-          max_tokens: 4096,
+          max_tokens: maxTokens,
           system: [{ type: 'text', text: systemPrompt, cache_control: { type: 'ephemeral' } }],
+          // Adaptive thinking + effort (Sonnet 4.6+).
+          ...(thinkingActive
+            ? {
+                thinking: { type: 'adaptive' as const },
+                output_config: { effort: epicEffort },
+              }
+            : {}),
           tools: claudeTools,
           messages,
         },
@@ -279,20 +348,97 @@ REGLAS DUROS:
         signal ? { signal } : undefined,
       );
 
+      // STREAMING REAL: iterar raw events del SDK para capturar text_delta Y
+      // thinking_delta chunks. Los helpers `stream.on('text'/'thinking')` del
+      // SDK 0.88.0 no emiten thinking_delta en tiempo real con adaptive mode
+      // — esperan al final del bloque, dando sensación de "trabe". Iterar
+      // el stream raw garantiza que cada delta llegue al SSE en cuanto el
+      // SDK lo recibe, incluyendo los chunks de razonamiento adaptive.
+      for await (const evt of stream) {
+        // Tool_use TERMINAL (submit_*): emite aviso al user para que vea
+        // que el agente sigue trabajando mientras construye el JSON final.
+        // Sin esto, durante la fase de input_json_delta la UI parece trabada.
+        if (evt.type === 'content_block_start') {
+          const cb = evt.content_block as { type?: string; name?: string };
+          if (cb.type === 'tool_use' && cb.name?.startsWith('submit_')) {
+            subject.next({
+              data: { type: 'thinking', delta: `\n\n→ Estructurando entrega final…\n`, timestamp: new Date().toISOString() },
+            });
+          }
+          continue;
+        }
+        if (evt.type !== 'content_block_delta') continue;
+        const delta = evt.delta as { type?: string; text?: string; thinking?: string };
+        if (delta.type === 'text_delta' && delta.text?.trim()) {
+          subject.next({
+            data: { type: 'thinking', delta: scrubSecrets(delta.text), timestamp: new Date().toISOString() },
+          });
+        } else if (delta.type === 'thinking_delta' && delta.thinking?.trim()) {
+          subject.next({
+            data: { type: 'thinking', delta: scrubSecrets(delta.thinking), timestamp: new Date().toISOString() },
+          });
+        }
+      }
+      // El SDK acumula los blocks internamente — finalMessage() los reconstruye
+      // como Message tras iterar el stream completo.
+      const response = await stream.finalMessage();
+
+      // Guarda explícita: si el modelo se truncó por límite de tokens, el JSON
+      // final puede venir incompleto y el loop continuaría ciegamente
+      // consumiendo iteraciones. Mejor abortar y dar feedback al user.
+      if (response.stop_reason === 'max_tokens') {
+        this.logger.warn(
+          `[EpicGen] iter ${iteration} hit max_tokens (limit=${maxTokens}, count=${count}) — output truncated`,
+        );
+        subject.next({
+          data: {
+            type: 'error',
+            message:
+              'La respuesta del agente excedió el límite de tokens. Intenta con menos épicas (count) o un prompt más conciso.',
+            timestamp: new Date().toISOString(),
+          },
+        });
+        subject.next({ data: { type: 'run_finished', timestamp: new Date().toISOString(), totalDurationMs: Date.now() - runStartTime } });
+        subject.complete();
+        return;
+      }
+
+      // Logging por iteración: tokens, cache hit, thinking blocks emitidos.
+      // Si thinking está activo y `thinking_blocks=0`, el modelo decidió que
+      // la pregunta era trivial — válido, no es un bug.
+      const usage = response.usage as any;
+      const cacheRead = usage?.cache_read_input_tokens ?? 0;
+      const cacheCreate = usage?.cache_creation_input_tokens ?? 0;
+      const inputTokens = usage?.input_tokens ?? 0;
+      const outputTokens = usage?.output_tokens ?? 0;
+      const thinkingBlocksCount = response.content.filter(
+        (b: any) => b.type === 'thinking' || b.type === 'redacted_thinking',
+      ).length;
+      const toolUseBlocksCount = response.content.filter(
+        (b: any) => b.type === 'tool_use',
+      ).length;
+      this.logger.log(
+        `[EpicGen] iter ${iteration} stop=${response.stop_reason} dur=${Date.now() - callStart}ms ` +
+          `tokens(in=${inputTokens} out=${outputTokens} cache_read=${cacheRead} cache_create=${cacheCreate}) ` +
+          `thinking_blocks=${thinkingBlocksCount} tool_calls=${toolUseBlocksCount}` +
+          `${thinkingActive ? ' 🧠' : ''}${cacheRead > 0 ? ' 💾CACHE_HIT' : ''}`,
+      );
+
       // Collect text and tool-use blocks
       const assistantContent = response.content;
+      // Importante: assistantContent incluye los bloques `thinking` y
+      // `redacted_thinking` con su `signature`. Anthropic exige que se
+      // reenvíen tal cual en el siguiente turno cuando hay tool_use, así
+      // que pushear el array completo es correcto (no filtrar).
       messages.push({ role: 'assistant', content: assistantContent });
 
-      // Emit thinking text and detect server tool use (web_search)
+      // Detect server tool use (web_search). Los text/thinking blocks YA se
+      // emitieron en vivo via stream.on('text'/'thinking') arriba — no los
+      // re-emitimos aquí para evitar duplicación. Solo procesamos los blocks
+      // que llegan completos al final (server_tool_use, web_search_tool_result).
       const textBlocks = assistantContent.filter((b) => b.type === 'text' && (b as any).text?.trim());
 
       for (const block of assistantContent) {
-        if (block.type === 'text' && block.text.trim()) {
-          // Defense in depth: aunque el modelo no debería emitir tokens en sus
-          // razonamientos, redactamos cualquier patrón tipo PAT/URL con credenciales
-          // antes de enviar al SSE y antes de que llegue al cache.
-          subject.next({ data: { type: 'thinking', delta: scrubSecrets(block.text), timestamp: new Date().toISOString() } });
-        }
         // Server tool use (web_search) — emit timeline event
         if ((block as any).type === 'server_tool_use') {
           const serverBlock = block as any;
@@ -720,7 +866,7 @@ Cada epica que propongas DEBE pasar este checklist mental:
 ## Ejemplo de \`markdown\` bien escrito (1 sola épica)
 
 \`\`\`markdown
-## Descripción
+## Objetivo
 
 Implementar un router inteligente que distribuya transacciones entre DEUNA, Adyen y Stripe según tasa de aprobación histórica por BIN y monto. Incluye failover automático cuando un PSP reporta degradación (circuit breaker con threshold de 3 fallos en 30s). Motivación: hoy el 100% del volumen va a DEUNA y una caída de 20 min el 15-mar costó $180K en ventas perdidas.
 

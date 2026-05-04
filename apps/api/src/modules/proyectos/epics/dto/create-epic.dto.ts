@@ -11,10 +11,13 @@ const MAX_DESCRIPTION = 5_000;
 // narrativos (~13 × 20K = 260K) capeada conservadoramente. 60K es ~30 páginas
 // de prosa rica, suficiente para la épica más extensa que haya emitido el agente.
 const MAX_EPIC_MARKDOWN = 60_000;
-// El handoff de Claude Design es una instrucción corta + URL al HTML exportado
-// (~250 chars típicos). 2 KB deja margen para handoffs con varios archivos o
-// instrucciones extendidas, y mantiene un cap razonable contra DoS al vault.
-const MAX_HANDOFF = 2_000;
+// El handoff puede ser:
+//  - Legacy (URL): instrucción corta + URL al HTML exportado (~250 chars).
+//  - Bundle sintético: slug + primary path + listing de hasta ~50 archivos
+//    del bundle descomprimido (~3-4K chars típicos para bundles ricos).
+// 8K capa el peor caso de bundle muy grande sin permitir DoS al prompt del
+// agente.
+const MAX_HANDOFF = 8_000;
 
 /**
  * Sub-DTO de un diagrama asociado a una epica.
@@ -70,10 +73,42 @@ export class EpicDesignItemDto {
   @MaxLength(MAX_DESCRIPTION)
   description?: string;
 
-  @ApiProperty({ example: 'Fetch this design file, read its readme, and implement the relevant aspects of the design. https://api.anthropic.com/v1/design/h/…' })
+  /**
+   * Texto que el agente PO/TL/QA ve como contexto del diseño.
+   *
+   * Para diseños creados con bundle ZIP es un handoff sintético compacto
+   * (slug + primary path + listing de archivos). Para diseños legacy, sigue
+   * siendo la URL del handoff de Claude Design.
+   *
+   * Cap subido a 8K para acomodar listings de bundles con muchos archivos.
+   * Sigue limitado para prevenir DoS al prompt del agente.
+   */
+  @ApiProperty({ example: 'Bundle de Claude Design — slug: facturaci-n\nPantalla principal: ...' })
   @IsString()
   @MaxLength(MAX_HANDOFF)
   handoff!: string;
+
+  /**
+   * Clave del ZIP completo en object/file storage. Solo presente para
+   * diseños creados subiendo un bundle ZIP. Permite descargar el bundle
+   * original incluyendo binarios (assets, screenshots) que no se
+   * descomprimen al vault.
+   */
+  @ApiPropertyOptional({ example: 'design-bundles/abc123-Aerovia.zip' })
+  @IsOptional()
+  @IsString()
+  @MaxLength(500)
+  bundleKey?: string;
+
+  /**
+   * Path en el vault donde están los archivos texto del bundle descomprimidos.
+   * Los agentes los leen via `vault_glob` / `vault_read`.
+   */
+  @ApiPropertyOptional({ example: 'iniciativas/x/epics/y/disenos/checkout-mobile-abc123/' })
+  @IsOptional()
+  @IsString()
+  @MaxLength(500)
+  bundleVaultPath?: string;
 
   @ApiPropertyOptional()
   @IsOptional()
@@ -104,7 +139,7 @@ export class CreateEpicDto {
    * y prompt al agente IA — 9 headings level-2 obligatorios. Reemplaza los 12
    * campos narrativos discretos del shape v1.
    */
-  @ApiPropertyOptional({ example: '## Descripción\n\nRediseño completo...' })
+  @ApiPropertyOptional({ example: '## Objetivo\n\nRediseño completo...' })
   @IsOptional()
   @IsString()
   @MaxLength(MAX_EPIC_MARKDOWN)

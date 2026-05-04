@@ -5,6 +5,7 @@ import { VaultFolderService } from '../../vault/vault-folder.service';
 import { sanitizeForLog } from '../../../common/utils/sanitize-llm-input.util';
 import {
   initiativeIndexPath,
+  initiativeDefinitionPath,
   epicIndexPath,
   epicDefinitionPath,
   epicDiagramPath,
@@ -24,7 +25,7 @@ import {
   buildQAMatrixMarkdown,
   buildEpicQAMatrixMarkdown,
 } from '../epics/epic-markdown-builders';
-import { buildFrontmatter } from '../vault-frontmatter';
+import { buildFrontmatter, type FrontmatterValue } from '../vault-frontmatter';
 import type {
   EpicDiagram,
   EpicDependency,
@@ -224,17 +225,24 @@ export class VaultMigrationService {
       return false;
     }
 
-    // Sin vaultPath legacy → crear index.md nuevo sin contenido previo
+    const newDefinicionPath = initiativeDefinitionPath(iniRef);
+
+    // Sin vaultPath legacy → crear index.md (sumario) + definicion.md (vacía/desde DB)
     if (!ini.vaultPath || !isLegacyVaultPath(ini.vaultPath)) {
       this.logger.log(
-        `[VaultMigration] initiative ${ini.id} sin vaultPath legacy, creando ${newPath}`,
+        `[VaultMigration] initiative ${ini.id} sin vaultPath legacy, creando ${newPath} + ${newDefinicionPath}`,
       );
       try {
-        const fallbackContent = this.buildInitiativeIndexMarkdown(ini);
-        await this.vault.writeNote(
+        const indexMd = this.buildInitiativeIndexMarkdown(ini);
+        const definicionMd = this.buildInitiativeDefinitionMarkdown(ini);
+        await this.writePairOrRollback(
           newPath,
-          fallbackContent,
-          `refactor(vault-migration): create initiative "${sanitizeForLog(ini.name)}" [${ini.id}]`,
+          newDefinicionPath,
+          indexMd,
+          definicionMd,
+          `refactor(vault-migration): create initiative index "${sanitizeForLog(ini.name)}" [${ini.id}]`,
+          `refactor(vault-migration): create initiative definicion "${sanitizeForLog(ini.name)}" [${ini.id}]`,
+          `initiative ${ini.id}`,
         );
         await this.prisma.initiative.update({
           where: { id: ini.id },
@@ -242,7 +250,7 @@ export class VaultMigrationService {
         });
         report.initiativesMigrated++;
         this.logger.log(
-          `[VaultMigration] initiative ${ini.id}: (sin legacy) → ${newPath} ✓`,
+          `[VaultMigration] initiative ${ini.id}: (sin legacy) → ${newPath} + ${newDefinicionPath} ✓`,
         );
         return true;
       } catch (err: any) {
@@ -251,24 +259,42 @@ export class VaultMigrationService {
       }
     }
 
-    // Existe vaultPath legacy → leer contenido, escribir en nuevo path, borrar viejo
+    // Existe vaultPath legacy → el contenido legacy es la "definición narrativa"
+    // (formato single-file pre-migration). Lo movemos a definicion.md y creamos
+    // un index.md sumario nuevo.
     this.logger.log(
-      `[VaultMigration] initiative ${ini.id}: ${ini.vaultPath} → ${newPath}`,
+      `[VaultMigration] initiative ${ini.id}: ${ini.vaultPath} → ${newPath} + ${newDefinicionPath}`,
     );
 
     try {
-      // 1. Leer contenido del legacy
+      // 1. Leer contenido del legacy (es la definición narrativa).
+      //    NOTA: el frontmatter legacy tiene `type: initiative` (incorrecto
+      //    para definicion.md, debería ser `type: initiative-definition`).
+      //    Lo reemplazamos preservando el body. Si el legacy no tiene
+      //    frontmatter (caso raro), usamos el body completo y construimos
+      //    uno nuevo.
       const legacyNote = await this.vault.readNote(ini.vaultPath);
-      const content = legacyNote?.content ?? this.buildInitiativeIndexMarkdown(ini);
+      let definicionMd: string;
+      if (legacyNote?.content) {
+        definicionMd = this.rewriteFrontmatterAsDefinition(legacyNote.content, ini);
+      } else {
+        definicionMd = this.buildInitiativeDefinitionMarkdown(ini);
+      }
 
-      // 2. Escribir en el nuevo path
-      await this.vault.writeNote(
+      // 2. Escribir definicion.md (contenido narrativo) + index.md (sumario nuevo).
+      //    Usa el helper que hace rollback parcial automáticamente.
+      const indexMd = this.buildInitiativeIndexMarkdown(ini);
+      await this.writePairOrRollback(
         newPath,
-        content,
-        `refactor(vault-migration): migrate initiative "${sanitizeForLog(ini.name)}" to nested format [${ini.id}]`,
+        newDefinicionPath,
+        indexMd,
+        definicionMd,
+        `refactor(vault-migration): create initiative index "${sanitizeForLog(ini.name)}" [${ini.id}]`,
+        `refactor(vault-migration): migrate initiative definicion "${sanitizeForLog(ini.name)}" to nested format [${ini.id}]`,
+        `initiative ${ini.id}`,
       );
 
-      // 3. Actualizar PG con el nuevo vaultPath
+      // 3. Actualizar PG con el nuevo vaultPath (apunta al index.md por convención)
       await this.prisma.initiative.update({
         where: { id: ini.id },
         data: { vaultPath: newPath },
@@ -289,7 +315,7 @@ export class VaultMigrationService {
 
       report.initiativesMigrated++;
       this.logger.log(
-        `[VaultMigration] initiative ${ini.id}: old=${ini.vaultPath} → new=${newPath} ✓`,
+        `[VaultMigration] initiative ${ini.id}: old=${ini.vaultPath} → new=${newPath} + ${newDefinicionPath} ✓`,
       );
       return true;
     } catch (err: any) {
@@ -357,18 +383,18 @@ export class VaultMigrationService {
 
       const sanitizedTitle = sanitizeForLog(epic.title);
 
-      // 2. Escribir index.md
-      await this.vault.writeNote(
+      // 2 + 3. Escribir index.md y definicion.md atómicamente. Si uno completa
+      //        y el otro falla, el helper hace best-effort delete del que sí
+      //        completó para no dejar el vault en estado parcial — paritario
+      //        con el flujo de iniciativas.
+      await this.writePairOrRollback(
         newIndexPath,
-        indexMd,
-        `refactor(vault-migration): migrate epic "${sanitizedTitle}" index [${epic.id}]`,
-      );
-
-      // 3. Escribir definicion.md
-      await this.vault.writeNote(
         newDefinitionPath,
+        indexMd,
         definicionMd,
+        `refactor(vault-migration): migrate epic "${sanitizedTitle}" index [${epic.id}]`,
         `refactor(vault-migration): migrate epic "${sanitizedTitle}" definition [${epic.id}]`,
+        `epic ${epic.id}`,
       );
 
       // 4. Actualizar PG con el nuevo vaultPath
@@ -609,12 +635,13 @@ export class VaultMigrationService {
   // ─────────────────────────────────────────────────────────────────────
 
   /**
-   * Construye un index.md mínimo para una initiative sin contenido legacy.
+   * Construye el `index.md` (sumario) de una iniciativa migrada. NO contiene
+   * la descripción narrativa — esa vive en `definicion.md`. Análogo a
+   * `buildEpicIndexMarkdown` / `InitiativesService#buildInitiativeIndexMarkdown`.
    */
   private buildInitiativeIndexMarkdown(ini: {
     id: string;
     name: string;
-    description?: string;
   }): string {
     const fm = buildFrontmatter({
       id: ini.id,
@@ -622,10 +649,127 @@ export class VaultMigrationService {
       name: ini.name,
       migratedAt: new Date().toISOString(),
     });
+    return (
+      `${fm}\n\n` +
+      `# ${ini.name}\n\n` +
+      `Contenido completo en este folder:\n\n` +
+      `- [\`definicion.md\`](./definicion.md) — descripción narrativa de la iniciativa.\n` +
+      `- [\`resumenes-ejecutivos/\`](./resumenes-ejecutivos/) — resúmenes ejecutivos.\n` +
+      `- [\`documentos/\`](./documentos/) — documentos adjuntos a la iniciativa.\n` +
+      `- [\`epics/\`](./epics/) — épicas hijas (cada una con su propio folder).\n`
+    );
+  }
+
+  /**
+   * Reemplaza el frontmatter de un contenido legacy con uno nuevo coherente
+   * para `definicion.md`. Preserva el body. Útil cuando el legacy tenía un
+   * `type` que ya no aplica al rol del archivo migrado (p.ej. `type: initiative`
+   * legacy → `type: initiative-definition` en `definicion.md`, o
+   * `type: epic` → `type: epic-definition`). Sin esto, agentes que filtran
+   * por el type target no encontrarían el contenido del legacy migrado.
+   *
+   * Genérico: el caller construye el frontmatter target con el shape exacto.
+   */
+  private rewriteFrontmatterAs(
+    legacyContent: string,
+    newFrontmatterFields: Record<string, FrontmatterValue>,
+  ): string {
+    // Strip del frontmatter legacy (si existe). Mismo regex que usan los
+    // parsers del módulo (`/^---\s*\n[\s\S]*?\n---\s*\n+/m`).
+    const body = legacyContent.replace(/^---\s*\n[\s\S]*?\n---\s*\n+/m, '');
+    const newFm = buildFrontmatter(newFrontmatterFields);
+    return `${newFm}\n\n${body}`;
+  }
+
+  /**
+   * Wrapper específico para iniciativas — preservado por legibilidad en el
+   * call site de `migrateInitiative`. Delega al genérico arriba.
+   */
+  private rewriteFrontmatterAsDefinition(
+    legacyContent: string,
+    ini: { id: string; name: string },
+  ): string {
+    return this.rewriteFrontmatterAs(legacyContent, {
+      id: ini.id,
+      type: 'initiative-definition',
+      name: ini.name,
+      migratedAt: new Date().toISOString(),
+    });
+  }
+
+  /**
+   * Escribe dos archivos del vault atómicamente: si UNO completa y el otro
+   * falla, hace best-effort delete del que sí completó para no dejar el
+   * vault en estado parcial. Propaga el error original al caller.
+   *
+   * Usado por `migrateInitiative` y `migrateEpic` para asegurar coherencia
+   * entre `index.md` y `definicion.md` durante la migración legacy → nuevo
+   * formato.
+   */
+  private async writePairOrRollback(
+    indexPath: string,
+    definicionPath: string,
+    indexMd: string,
+    definicionMd: string,
+    indexCommit: string,
+    definicionCommit: string,
+    entityRefForLog: string,
+  ): Promise<void> {
+    const indexWrite = this.vault.writeNote(indexPath, indexMd, indexCommit);
+    const definicionWrite = this.vault.writeNote(definicionPath, definicionMd, definicionCommit);
+    const [indexResult, definicionResult] = await Promise.allSettled([indexWrite, definicionWrite]);
+
+    const indexOk = indexResult.status === 'fulfilled';
+    const definicionOk = definicionResult.status === 'fulfilled';
+
+    if (indexOk && definicionOk) return;
+
+    if (indexOk && !definicionOk) {
+      await this.vault
+        .deleteNote(indexPath, `revert(vault-migration): rollback partial migration [${entityRefForLog}]`)
+        .catch((delErr: any) =>
+          this.logger.warn(
+            `[VaultMigration] ${entityRefForLog}: rollback delete de ${indexPath} fallo (best-effort): ${delErr?.message}`,
+          ),
+        );
+      throw (definicionResult as PromiseRejectedResult).reason;
+    }
+    if (!indexOk && definicionOk) {
+      await this.vault
+        .deleteNote(definicionPath, `revert(vault-migration): rollback partial migration [${entityRefForLog}]`)
+        .catch((delErr: any) =>
+          this.logger.warn(
+            `[VaultMigration] ${entityRefForLog}: rollback delete de ${definicionPath} fallo (best-effort): ${delErr?.message}`,
+          ),
+        );
+      throw (indexResult as PromiseRejectedResult).reason;
+    }
+    // Ambos fallaron: propagamos el primero (más útil para diagnóstico).
+    throw (indexResult as PromiseRejectedResult).reason;
+  }
+
+  /**
+   * Construye el `definicion.md` (contenido narrativo) cuando se migra una
+   * iniciativa sin legacy. Si hay legacy, ese contenido va directo a
+   * `definicion.md` sin pasar por aquí.
+   */
+  private buildInitiativeDefinitionMarkdown(ini: {
+    id: string;
+    name: string;
+    description?: string;
+  }): string {
+    const fm = buildFrontmatter({
+      id: ini.id,
+      type: 'initiative-definition',
+      name: ini.name,
+      migratedAt: new Date().toISOString(),
+    });
     return [
       fm,
       ``,
       `# ${ini.name}`,
+      ``,
+      `## Descripción`,
       ``,
       ini.description || '_Sin descripción._',
     ].join('\n');
@@ -669,11 +813,24 @@ export class VaultMigrationService {
     let definicionMd: string;
 
     if (legacyContent) {
-      // El legacy ya es el markdown completo: lo reutilizamos como definicion.md
-      // pero aseguramos que empiece con un encabezado claro
-      definicionMd = legacyContent.startsWith('#')
-        ? legacyContent
-        : `# Definición de épica: ${epic.title}\n\n${legacyContent}`;
+      // El legacy tiene `type: epic` en el frontmatter (incorrecto para
+      // definicion.md, debería ser `type: epic-definition`). Reescribimos el
+      // frontmatter preservando el body. Sin esto, agentes que filtran por
+      // `type: epic-definition` no encontrarían el contenido del legacy
+      // migrado — paritario con el fix de iniciativas.
+      const bodyWithNewFm = this.rewriteFrontmatterAs(legacyContent, {
+        id: epic.id,
+        type: 'epic-definition',
+        title: epic.title,
+        migratedAt: now,
+        format: 'v2',
+      });
+      // Aseguramos heading H1 claro si el body no lo trae.
+      const bodyOnly = bodyWithNewFm.replace(/^---\s*\n[\s\S]*?\n---\s*\n+/m, '');
+      const fm = bodyWithNewFm.slice(0, bodyWithNewFm.length - bodyOnly.length);
+      definicionMd = bodyOnly.startsWith('#')
+        ? bodyWithNewFm
+        : `${fm}# Definición de épica: ${epic.title}\n\n${bodyOnly}`;
     } else {
       const defFm = buildFrontmatter({
         id: epic.id,

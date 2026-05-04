@@ -1,6 +1,5 @@
 'use client';
 
-import { useEffect } from 'react';
 import {
   BaseEdge,
   EdgeLabelRenderer,
@@ -97,15 +96,6 @@ export function WaypointEdge(props: EdgeProps) {
   let edgePath: string = smoothPath;
   let labelX: number = smoothLabelX;
   let labelY: number = smoothLabelY;
-  // Tracking del path realmente usado para el log de diagnóstico. Dos
-  // estrategias posibles:
-  //   - 'elk-waypoints': ELK metió bends; los dibujamos ortogonalizados.
-  //   - 'smoothstep': ELK no metió bends útiles → L-shape simple nativo
-  //     de React Flow (`getSmoothStepPath`). NO rodea obstáculos — puede
-  //     cruzar nodos intermedios si el layout no tiene suficiente
-  //     spacing. Tradeoff consciente para evitar el efecto escalera del
-  //     A*.
-  let routingStrategy: 'elk-waypoints' | 'smoothstep' = 'smoothstep';
 
   // Tras introducir `ports` en el grafo ELK (ver elk-layout.ts), los
   // `wp.start/end` de ELK corresponden a las coords del puerto (borde
@@ -119,7 +109,6 @@ export function WaypointEdge(props: EdgeProps) {
   // las coords ELK originales (no siguen al drag). Solución: recalcular
   // layout tras drag (ya hay `resolveCollisions` post-drag) o usar
   // "Recalcular layout" desde la UI.
-  let orthogonalizeCornersAdded = 0;
   if (wp && wp.bends.length > 0) {
     // Ortogonalizamos la secuencia de puntos: si dos vértices consecutivos
     // NO están alineados horizontal ni verticalmente, insertamos un corner
@@ -134,47 +123,25 @@ export function WaypointEdge(props: EdgeProps) {
       { x: targetX, y: targetY },
     ];
     const points = orthogonalizePoints(rawPoints);
-    orthogonalizeCornersAdded = points.length - rawPoints.length;
     edgePath = buildRoundedPath(points, CORNER_RADIUS);
     const midIdx = Math.floor(points.length / 2);
     labelX = points[midIdx].x;
     labelY = points[midIdx].y;
-    routingStrategy = 'elk-waypoints';
-  } else {
-    // Cuando ELK no devolvió bends útiles, usamos `smoothstep` nativo de
-    // React Flow (calculado arriba con `borderRadius: 0`). Produce un
-    // path L-shape simple: source → 1 corner → target — limpio y legible.
-    //
-    // Anteriormente había un fallback al A* de `@tisoap/react-flow-smart-edge`
-    // que rodeaba nodos intermedios. Lo removimos porque el A* sobre grid
-    // devuelve muchos vertices (cada celda del grid cruzada), generando un
-    // path con efecto **escalera** — múltiples segmentos ortogonales
-    // alternando horizontal/vertical — que visualmente es peor que un
-    // edge L-shape simple aunque este último cruce un nodo.
-    //
-    // Tradeoff aceptado: ciertos edges pueden cruzar visualmente nodos
-    // intermedios si ELK no emitió bends para ellos. El user puede mover
-    // los nodos en modo edición si le molesta.
-    //
-    // El A* sigue disponible en la dependencia por si se necesita un día.
   }
-
-  // Debug: loguea una vez por cambio de waypoints. Marker [v5] confirma
-  // que el browser cargó esta versión del bundle (no una cacheada por
-  // Turbopack/HMR). Solo 2 estrategias ahora — el A* se removió.
-  useEffect(() => {
-    if (routingStrategy === 'elk-waypoints' && wp) {
-      console.debug(
-        `[DIAGRAM-DEBUG][WaypointEdge v6] ${id} → USA waypoints ELK ` +
-          `(bends=${wp.bends.length}, ortogonalizaciones_extra=${orthogonalizeCornersAdded})`,
-      );
-    } else {
-      console.debug(
-        `[DIAGRAM-DEBUG][WaypointEdge v6] ${id} → smoothstep L-shape ` +
-          `(${wp ? 'wp presente pero bends=0' : 'sin data.waypoints'})`,
-      );
-    }
-  }, [id, wp, routingStrategy, orthogonalizeCornersAdded]);
+  // Cuando ELK no devolvió bends útiles, queda el `smoothstep` nativo de
+  // React Flow (calculado arriba con `borderRadius: 0`). Produce un
+  // path L-shape simple: source → 1 corner → target — limpio y legible.
+  //
+  // Anteriormente había un fallback al A* de `@tisoap/react-flow-smart-edge`
+  // que rodeaba nodos intermedios. Lo removimos porque el A* sobre grid
+  // devuelve muchos vertices (cada celda del grid cruzada), generando un
+  // path con efecto **escalera** — múltiples segmentos ortogonales
+  // alternando horizontal/vertical — que visualmente es peor que un
+  // edge L-shape simple aunque este último cruce un nodo.
+  //
+  // Tradeoff aceptado: ciertos edges pueden cruzar visualmente nodos
+  // intermedios si ELK no emitió bends para ellos. El user puede mover
+  // los nodos en modo edición si le molesta.
 
   return (
     <>

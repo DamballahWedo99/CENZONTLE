@@ -1,5 +1,20 @@
-import { Controller, Get, Post, Patch, Delete, Param, Body, Query, HttpCode, HttpStatus } from '@nestjs/common';
-import { ApiTags, ApiOperation } from '@nestjs/swagger';
+import {
+  Controller,
+  Get,
+  Post,
+  Patch,
+  Delete,
+  Param,
+  Body,
+  Query,
+  HttpCode,
+  HttpStatus,
+  UploadedFile,
+  UseInterceptors,
+  BadRequestException,
+} from '@nestjs/common';
+import { FileInterceptor } from '@nestjs/platform-express';
+import { ApiTags, ApiOperation, ApiConsumes } from '@nestjs/swagger';
 import { Permission, type AuthenticatedUser } from '@cenzontle/shared';
 import { CurrentUser, Permissions } from '../../auth/decorators';
 import { EpicsService } from './epics.service';
@@ -14,15 +29,19 @@ export class EpicsController {
   constructor(private readonly epicsService: EpicsService) {}
 
   @Get()
-  @ApiOperation({ summary: 'Listar épicas con filtros opcionales' })
-  findAll(@Query() query: EpicQueryDto) {
-    return this.epicsService.findAll(query);
+  @ApiOperation({ summary: 'Listar épicas con filtros opcionales. Para no-admins, filtra por pods del usuario (CWE-639).' })
+  findAll(@Query() query: EpicQueryDto, @CurrentUser() user: AuthenticatedUser) {
+    return this.epicsService.findAll(query, user);
   }
 
   @Get(':id')
-  @ApiOperation({ summary: 'Obtener una épica por ID con iniciativa y pods. includeContent=true carga el markdown del vault.' })
-  findOne(@Param('id') id: string, @Query('includeContent') includeContent?: string) {
-    return this.epicsService.findOne(id, includeContent === 'true');
+  @ApiOperation({ summary: 'Obtener una épica por ID con iniciativa y pods. includeContent=true carga el markdown del vault (gate por pod intersection).' })
+  findOne(
+    @Param('id') id: string,
+    @Query('includeContent') includeContent: string | undefined,
+    @CurrentUser() user: AuthenticatedUser,
+  ) {
+    return this.epicsService.findOne(id, includeContent === 'true', user);
   }
 
   @Get(':id/discovered-dependencies')
@@ -52,17 +71,91 @@ export class EpicsController {
 
   @Patch(':id')
   @Permissions(Permission.EDIT_EPIC)
-  @ApiOperation({ summary: 'Actualizar una épica' })
-  update(@Param('id') id: string, @Body() dto: UpdateEpicDto) {
-    return this.epicsService.update(id, dto);
+  @ApiOperation({ summary: 'Actualizar una épica. Requiere pod intersection con el target (CWE-639).' })
+  update(
+    @Param('id') id: string,
+    @Body() dto: UpdateEpicDto,
+    @CurrentUser() user: AuthenticatedUser,
+  ) {
+    return this.epicsService.update(id, dto, user);
   }
 
   @Delete(':id')
   @Permissions(Permission.DELETE_EPIC)
   @HttpCode(HttpStatus.NO_CONTENT)
-  @ApiOperation({ summary: 'Eliminar una épica' })
-  remove(@Param('id') id: string) {
-    return this.epicsService.remove(id);
+  @ApiOperation({ summary: 'Eliminar una épica. Requiere pod intersection con el target (CWE-639).' })
+  remove(@Param('id') id: string, @CurrentUser() user: AuthenticatedUser) {
+    return this.epicsService.remove(id, user);
+  }
+
+  /**
+   * Sube un bundle ZIP de Claude Design y lo asocia como diseño de la épica.
+   *
+   * El backend:
+   *  1. Descomprime el ZIP en memoria.
+   *  2. Valida estructura (carpeta wrapper única + README.md en raíz).
+   *  3. Persiste el ZIP completo a disco como respaldo (incluye binarios).
+   *  4. Escribe los archivos texto del bundle al vault bajo
+   *     `iniciativas/<x>/epics/<y>/disenos/<wrapperSlug>-<designId6>/`.
+   *  5. Construye un handoff sintético compacto (slug + primary path +
+   *     listing) y lo guarda como `handoff` del EpicDesign en BD.
+   *  6. Devuelve el EpicDesign creado con `bundleKey` y `bundleVaultPath`.
+   *
+   * Multipart payload:
+   *  - `file` (required): el ZIP exportado de Claude Design.
+   *  - `name` (required): nombre que el user le da al diseño.
+   *  - `description` (optional): resumen para el dialog.
+   *
+   * Tamaño máximo del archivo: 10 MB. ZIPs más grandes son raros para
+   * exports de Claude Design — si alguien los necesita, ajustar.
+   */
+  @Post(':id/designs/upload')
+  @Permissions(Permission.EDIT_EPIC)
+  @ApiOperation({
+    summary: 'Sube un bundle ZIP de Claude Design como diseño de la épica.',
+  })
+  @ApiConsumes('multipart/form-data')
+  @UseInterceptors(FileInterceptor('file', { limits: { fileSize: 10 * 1024 * 1024 } }))
+  uploadDesignBundle(
+    @Param('id') epicId: string,
+    @UploadedFile() file: Express.Multer.File,
+    @Body('name') name: string,
+    @Body('description') description: string | undefined,
+    @CurrentUser() user: AuthenticatedUser,
+  ) {
+    if (!file) {
+      throw new BadRequestException('Falta el archivo ZIP en el campo `file`.');
+    }
+    if (!name || typeof name !== 'string' || name.trim().length === 0) {
+      throw new BadRequestException('El campo `name` es requerido.');
+    }
+    return this.epicsService.addDesignBundle(epicId, {
+      name: name.trim(),
+      description: typeof description === 'string' ? description.trim() : '',
+      file,
+      user,
+    });
+  }
+
+  /**
+   * Borra un diseño de la épica. Limpieza completa:
+   *  - Si era un bundle: borra todos los archivos descomprimidos del vault
+   *    bajo `disenos/<slug>/`, y borra el ZIP de respaldo de disco.
+   *  - Si era legacy (URL handoff): borra el `disenos/<slug>.md`.
+   *  - Quita el design del array `epic.designs` y persiste.
+   *
+   * Idempotente: si el design ya fue borrado, retorna 204 sin error.
+   */
+  @Delete(':id/designs/:designId')
+  @Permissions(Permission.EDIT_EPIC)
+  @HttpCode(HttpStatus.NO_CONTENT)
+  @ApiOperation({ summary: 'Borrar un diseño + limpiar vault y storage del bundle.' })
+  deleteDesign(
+    @Param('id') epicId: string,
+    @Param('designId') designId: string,
+    @CurrentUser() user: AuthenticatedUser,
+  ) {
+    return this.epicsService.deleteDesign(epicId, designId, user);
   }
 
   @Post(':id/publish-to-tracker')

@@ -15,8 +15,31 @@
  */
 import { BadRequestException, NotFoundException } from '@nestjs/common';
 import { Prisma } from '@prisma/client';
+import { AuthenticatedUser, UserRole } from '@cenzontle/shared';
 import { StoryDependenciesService } from './story-dependencies.service';
 import type { CreateStoryDependencyDto } from './dto/create-story-dependency.dto';
+
+// Para los tests no-authz usamos AltaGerencia (bypassa pod intersection
+// del helper). La cobertura de pod intersection vive en `epic-access.util.spec`.
+const ADMIN_USER: AuthenticatedUser = {
+  sub: 'user-admin',
+  email: 'admin@example.com',
+  name: 'Admin',
+  role: UserRole.AltaGerencia,
+  podIds: [],
+} as AuthenticatedUser;
+
+// Shape mínimo del story que el service espera tras agregar el authz check
+// (incluye epic.pods + podId). AltaGerencia bypassa, así que los valores
+// concretos no importan — solo que la query no rompa por shape.
+function makeStoryStub(overrides: Partial<any> = {}) {
+  return {
+    id: 'story-1',
+    podId: 'pod-1',
+    epic: { pods: [{ podId: 'pod-1' }] },
+    ...overrides,
+  };
+}
 
 // Helper: row mínimo válido para el toResponse mapper.
 function makeRow(overrides: Partial<any> = {}): any {
@@ -130,7 +153,7 @@ describe('StoryDependenciesService', () => {
       const { service, prisma } = createService();
       prisma.story.findUnique.mockResolvedValue(null);
 
-      await expect(service.create('missing-story', baseDto)).rejects.toThrow(
+      await expect(service.create('missing-story', baseDto, ADMIN_USER)).rejects.toThrow(
         NotFoundException,
       );
       expect(prisma.storyTechnicalDependency.create).not.toHaveBeenCalled();
@@ -138,10 +161,10 @@ describe('StoryDependenciesService', () => {
 
     it('persists dep with defaults applied for omitted fields', async () => {
       const { service, prisma } = createService();
-      prisma.story.findUnique.mockResolvedValue({ id: 'story-1' });
+      prisma.story.findUnique.mockResolvedValue(makeStoryStub());
       prisma.storyTechnicalDependency.create.mockResolvedValue(makeRow());
 
-      await service.create('story-1', baseDto);
+      await service.create('story-1', baseDto, ADMIN_USER);
 
       const args = prisma.storyTechnicalDependency.create.mock.calls[0]?.[0];
       expect(args.data).toMatchObject({
@@ -158,57 +181,58 @@ describe('StoryDependenciesService', () => {
 
     it('rejects when linkedSecretId points to non-existent secret', async () => {
       const { service, prisma } = createService();
-      prisma.story.findUnique.mockResolvedValue({ id: 'story-1' });
+      prisma.story.findUnique.mockResolvedValue(makeStoryStub());
       prisma.externalSecret.findUnique.mockResolvedValue(null);
 
       await expect(
-        service.create('story-1', { ...baseDto, linkedSecretId: 'fake-uuid' }),
+        service.create('story-1', { ...baseDto, linkedSecretId: 'fake-uuid' }, ADMIN_USER),
       ).rejects.toThrow(BadRequestException);
       expect(prisma.storyTechnicalDependency.create).not.toHaveBeenCalled();
     });
 
     it('accepts linkedSecretId when secret exists', async () => {
       const { service, prisma } = createService();
-      prisma.story.findUnique.mockResolvedValue({ id: 'story-1' });
+      prisma.story.findUnique.mockResolvedValue(makeStoryStub());
       prisma.externalSecret.findUnique.mockResolvedValue({ id: 'secret-1' });
       prisma.storyTechnicalDependency.create.mockResolvedValue(
         makeRow({ linkedSecretId: 'secret-1' }),
       );
 
-      const result = await service.create('story-1', {
-        ...baseDto,
-        linkedSecretId: 'secret-1',
-      });
+      const result = await service.create(
+        'story-1',
+        { ...baseDto, linkedSecretId: 'secret-1' },
+        ADMIN_USER,
+      );
 
       expect(result.linkedSecretId).toBe('secret-1');
     });
 
     it('rejects malformed dueDate (year only)', async () => {
       const { service, prisma } = createService();
-      prisma.story.findUnique.mockResolvedValue({ id: 'story-1' });
+      prisma.story.findUnique.mockResolvedValue(makeStoryStub());
 
       await expect(
-        service.create('story-1', { ...baseDto, dueDate: '2026' }),
+        service.create('story-1', { ...baseDto, dueDate: '2026' }, ADMIN_USER),
       ).rejects.toThrow(BadRequestException);
     });
 
     it('rejects garbage dueDate', async () => {
       const { service, prisma } = createService();
-      prisma.story.findUnique.mockResolvedValue({ id: 'story-1' });
+      prisma.story.findUnique.mockResolvedValue(makeStoryStub());
 
       await expect(
-        service.create('story-1', { ...baseDto, dueDate: 'garbage' }),
+        service.create('story-1', { ...baseDto, dueDate: 'garbage' }, ADMIN_USER),
       ).rejects.toThrow(BadRequestException);
     });
 
     it('accepts ISO date YYYY-MM-DD', async () => {
       const { service, prisma } = createService();
-      prisma.story.findUnique.mockResolvedValue({ id: 'story-1' });
+      prisma.story.findUnique.mockResolvedValue(makeStoryStub());
       prisma.storyTechnicalDependency.create.mockResolvedValue(
         makeRow({ dueDate: new Date('2026-06-30T00:00:00.000Z') }),
       );
 
-      await service.create('story-1', { ...baseDto, dueDate: '2026-06-30' });
+      await service.create('story-1', { ...baseDto, dueDate: '2026-06-30' }, ADMIN_USER);
 
       const args = prisma.storyTechnicalDependency.create.mock.calls[0]?.[0];
       expect(args.data.dueDate).toBeInstanceOf(Date);
@@ -224,7 +248,7 @@ describe('StoryDependenciesService', () => {
       );
 
       await expect(
-        service.update('story-1', 'dep-1', { title: 'hijack' }),
+        service.update('story-1', 'dep-1', { title: 'hijack' }, ADMIN_USER),
       ).rejects.toThrow(NotFoundException);
       expect(prisma.storyTechnicalDependency.update).not.toHaveBeenCalled();
     });
@@ -234,7 +258,7 @@ describe('StoryDependenciesService', () => {
       prisma.storyTechnicalDependency.findUnique.mockResolvedValue(null);
 
       await expect(
-        service.update('story-1', 'missing-dep', { title: 'x' }),
+        service.update('story-1', 'missing-dep', { title: 'x' }, ADMIN_USER),
       ).rejects.toThrow(NotFoundException);
     });
 
@@ -243,11 +267,12 @@ describe('StoryDependenciesService', () => {
       prisma.storyTechnicalDependency.findUnique.mockResolvedValue(
         makeRow({ id: 'dep-1', storyId: 'story-1' }),
       );
+      prisma.story.findUnique.mockResolvedValue(makeStoryStub());
       prisma.storyTechnicalDependency.update.mockResolvedValue(
         makeRow({ id: 'dep-1', storyId: 'story-1', title: 'Updated' }),
       );
 
-      await service.update('story-1', 'dep-1', { title: 'Updated' });
+      await service.update('story-1', 'dep-1', { title: 'Updated' }, ADMIN_USER);
 
       const args = prisma.storyTechnicalDependency.update.mock.calls[0]?.[0];
       expect(args.data).toEqual({ title: 'Updated' });
@@ -260,10 +285,11 @@ describe('StoryDependenciesService', () => {
       prisma.storyTechnicalDependency.findUnique.mockResolvedValue(
         makeRow({ id: 'dep-1', storyId: 'story-1' }),
       );
+      prisma.story.findUnique.mockResolvedValue(makeStoryStub());
       prisma.externalSecret.findUnique.mockResolvedValue(null);
 
       await expect(
-        service.update('story-1', 'dep-1', { linkedSecretId: 'nope' }),
+        service.update('story-1', 'dep-1', { linkedSecretId: 'nope' }, ADMIN_USER),
       ).rejects.toThrow(BadRequestException);
     });
   });
@@ -271,19 +297,22 @@ describe('StoryDependenciesService', () => {
   describe('remove — idempotency + IDOR', () => {
     it('returns 404 when dep does not exist (count=0)', async () => {
       const { service, prisma } = createService();
+      prisma.story.findUnique.mockResolvedValue(makeStoryStub());
       prisma.storyTechnicalDependency.deleteMany.mockResolvedValue({ count: 0 });
 
-      await expect(service.remove('story-1', 'missing-dep')).rejects.toThrow(
+      await expect(service.remove('story-1', 'missing-dep', ADMIN_USER)).rejects.toThrow(
         NotFoundException,
       );
     });
 
     it('returns 404 when dep belongs to different story (IDOR)', async () => {
       const { service, prisma } = createService();
-      // deleteMany filtra por id+storyId; con story incorrecta devuelve count=0.
+      // El authz check carga la story por la URL — con un id válido pasa,
+      // y luego el deleteMany con id+storyId no encuentra y devuelve count=0.
+      prisma.story.findUnique.mockResolvedValue(makeStoryStub({ id: 'wrong-story' }));
       prisma.storyTechnicalDependency.deleteMany.mockResolvedValue({ count: 0 });
 
-      await expect(service.remove('wrong-story', 'dep-1')).rejects.toThrow(
+      await expect(service.remove('wrong-story', 'dep-1', ADMIN_USER)).rejects.toThrow(
         NotFoundException,
       );
       const args = prisma.storyTechnicalDependency.deleteMany.mock.calls[0]?.[0];
@@ -292,14 +321,15 @@ describe('StoryDependenciesService', () => {
 
     it('handles concurrent double-delete idempotently', async () => {
       const { service, prisma } = createService();
+      prisma.story.findUnique.mockResolvedValue(makeStoryStub());
       prisma.storyTechnicalDependency.deleteMany
         .mockResolvedValueOnce({ count: 1 }) // primera request: borra
         .mockResolvedValueOnce({ count: 0 }); // segunda request: ya no existe
 
       await expect(
-        service.remove('story-1', 'dep-1'),
+        service.remove('story-1', 'dep-1', ADMIN_USER),
       ).resolves.toBeUndefined();
-      await expect(service.remove('story-1', 'dep-1')).rejects.toThrow(
+      await expect(service.remove('story-1', 'dep-1', ADMIN_USER)).rejects.toThrow(
         NotFoundException,
       );
     });
@@ -308,7 +338,7 @@ describe('StoryDependenciesService', () => {
   describe('linkedSecretId — Prisma malformed UUID', () => {
     it('maps Prisma P2023 to BadRequestException', async () => {
       const { service, prisma } = createService();
-      prisma.story.findUnique.mockResolvedValue({ id: 'story-1' });
+      prisma.story.findUnique.mockResolvedValue(makeStoryStub());
       const prismaError = new Prisma.PrismaClientKnownRequestError(
         'malformed UUID',
         { code: 'P2023', clientVersion: '7.0.0' },
@@ -316,10 +346,11 @@ describe('StoryDependenciesService', () => {
       prisma.externalSecret.findUnique.mockRejectedValue(prismaError);
 
       await expect(
-        service.create('story-1', {
-          ...baseDto,
-          linkedSecretId: 'not-a-uuid',
-        }),
+        service.create(
+          'story-1',
+          { ...baseDto, linkedSecretId: 'not-a-uuid' },
+          ADMIN_USER,
+        ),
       ).rejects.toThrow(BadRequestException);
     });
   });

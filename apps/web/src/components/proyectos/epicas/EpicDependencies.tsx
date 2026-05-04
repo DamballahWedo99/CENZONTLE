@@ -293,7 +293,10 @@ export function EpicDependencies({
                 const isExpanded = expandedDeps.has(dep.id);
                 const hasRichContent =
                   (dep.mdContent && dep.mdContent.trim().length > 0) ||
-                  (dep.description && dep.description.length > 100);
+                  (dep.description && dep.description.length > 100) ||
+                  // Habilita expansión cuando la dep está dedupleada en N
+                  // historias — el bloque expandido lista cada una con link.
+                  (dep.relatedStories && dep.relatedStories.length > 1);
                 // Cards no-legacy son clickables: navegan a la historia con
                 // `?dep=<id>` para que la vista destino haga scroll + focus.
                 const cardClass = `block rounded-lg border p-4 transition-colors ${
@@ -335,6 +338,16 @@ export function EpicDependencies({
                           title="Dependencia legacy de la épica (no tiene historia owner). Migra creándola en una historia para desligarla del epic."
                         >
                           📦 {storyTitle}
+                        </span>
+                      ) : dep.relatedStories && dep.relatedStories.length > 1 ? (
+                        // Dep usada en MÚLTIPLES historias del epic — colapsamos
+                        // el rollup visual y mostramos el conteo + tooltip con
+                        // los títulos. Evita el ruido de N entries duplicadas.
+                        <span
+                          className="text-[10px] text-muted-foreground shrink-0 cursor-help"
+                          title={`Usado en ${dep.relatedStories.length} historias:\n${dep.relatedStories.map((s) => `• ${s.storyTitle}`).join('\n')}`}
+                        >
+                          📖 {dep.relatedStories.length} historias
                         </span>
                       ) : (
                         <span
@@ -392,17 +405,46 @@ export function EpicDependencies({
                       )}
                     </div>
 
-                    {/* Bloque expandido: muestra el mdContent rico que el
-                        agente IA generó. Al estar dentro del Link wrapper,
-                        cualquier click adentro propaga al Link. Para que el
-                        contenido sea seleccionable sin navegar accidentalmente,
-                        wrappeamos en un onClick que stopPropagation. */}
+                    {/* Bloque expandido: muestra la lista de historias que
+                        mencionan esta credencial (si fue dedupleada en el
+                        rollup) + el mdContent rico que el agente IA generó.
+                        Click adentro hace stopPropagation para que el user
+                        pueda seleccionar texto / clickear links sin navegar
+                        accidentalmente al detalle de la historia. */}
+                    {isExpanded && dep.relatedStories && dep.relatedStories.length > 1 && (
+                      <div
+                        // BUG FIX (2026-05-04): antes usábamos `e.preventDefault()`
+                        // junto con `stopPropagation()`, lo cual cancelaba la
+                        // navegación nativa de los `<a>` internos (links del
+                        // markdown del agente). El intent era "no navegar a la
+                        // historia cuando clickees adentro" — solo `stopPropagation`
+                        // logra eso (previene bubble al Link wrapper). El
+                        // `preventDefault` era too aggressive: aplicaba a TODO
+                        // click, incluyendo los <a href="..."> internos.
+                        onClick={(e) => e.stopPropagation()}
+                        className="mt-4 pt-4 border-t border-border/40 cursor-default"
+                      >
+                        <p className="text-[11px] font-semibold uppercase tracking-wider text-muted-foreground mb-2">
+                          Usado en {dep.relatedStories.length} historias
+                        </p>
+                        <ul className="space-y-1">
+                          {dep.relatedStories.map((s) => (
+                            <li key={s.storyId} className="text-xs">
+                              <Link
+                                href={`/proyectos/historias/${s.storyId}?dep=${dep.id}`}
+                                className="text-foreground/80 hover:text-foreground hover:underline"
+                              >
+                                📖 {s.storyTitle}
+                              </Link>
+                            </li>
+                          ))}
+                        </ul>
+                      </div>
+                    )}
                     {isExpanded && dep.mdContent && dep.mdContent.trim().length > 0 && (
                       <div
-                        onClick={(e) => {
-                          e.preventDefault();
-                          e.stopPropagation();
-                        }}
+                        // Mismo fix que arriba: stopPropagation (no preventDefault).
+                        onClick={(e) => e.stopPropagation()}
                         className="mt-4 pt-4 border-t border-border/40 cursor-default"
                       >
                         <ReadOnlyMarkdown content={dep.mdContent} />
@@ -410,8 +452,25 @@ export function EpicDependencies({
                     )}
                   </>
                 );
-                return isLegacy ? (
-                  <div key={dep.id} className={cardClass}>{cardInner}</div>
+                // Si la dep está dedupleada (N>1 menciones), la card NO es
+                // navegable como un todo — el `dep.storyId` es la canónica
+                // del grupo (arbitraria), navegar ahí silenciosamente lleva
+                // al user a UNA historia particular sin contexto. En su
+                // lugar, el user expande la card y clickea la historia
+                // específica que quiera ver. Misma rama que legacy.
+                const isMultiMention =
+                  !!dep.relatedStories && dep.relatedStories.length > 1;
+                return isLegacy || isMultiMention ? (
+                  <div
+                    key={dep.id}
+                    className={
+                      isMultiMention
+                        ? cardClass.replace('cursor-pointer', 'cursor-default').replace('hover:border-foreground/30', '').replace('hover:bg-muted/30', '')
+                        : cardClass
+                    }
+                  >
+                    {cardInner}
+                  </div>
                 ) : (
                   <Link
                     key={dep.id}

@@ -33,13 +33,6 @@ import {
   SelectValue,
 } from '@/components/ui/select';
 import {
-  Dialog,
-  DialogContent,
-  DialogHeader,
-  DialogTitle,
-  DialogFooter,
-} from '@/components/ui/dialog';
-import {
   getStoryDependencies,
   createStoryDependency,
   updateStoryDependency,
@@ -49,7 +42,7 @@ import {
   type StoryTechnicalDependencySeverity,
   type CreateStoryDependencyInput,
 } from '@/lib/api/story-dependencies';
-import { CreateExternalSecretDialog } from '@/components/secrets/CreateExternalSecretDialog';
+import { CreateExternalSecretInlineForm } from '@/components/secrets/CreateExternalSecretInlineForm';
 
 /**
  * Convierte un título humano (ej "Stripe API Key") al name UPPER_SNAKE_CASE
@@ -152,7 +145,7 @@ interface Props {
 export function StoryDependencies({ storyId }: Props) {
   const [deps, setDeps] = useState<StoryTechnicalDependency[]>([]);
   const [loading, setLoading] = useState(true);
-  const [dialogOpen, setDialogOpen] = useState(false);
+  const [isCreating, setIsCreating] = useState(false);
   const [editingId, setEditingId] = useState<string | null>(null);
   const [form, setForm] = useState<CreateStoryDependencyInput>(emptyForm);
   const [saving, setSaving] = useState(false);
@@ -213,7 +206,7 @@ export function StoryDependencies({ storyId }: Props) {
   const openCreate = () => {
     setEditingId(null);
     setForm(emptyForm);
-    setDialogOpen(true);
+    setIsCreating(true);
   };
 
   // Edit inline (no dialog): activa el modo edit en la card y popula el form
@@ -257,7 +250,8 @@ export function StoryDependencies({ storyId }: Props) {
       } else {
         await createStoryDependency(storyId, form);
         toast.success('Dependencia creada');
-        setDialogOpen(false);
+        setIsCreating(false);
+        setForm(emptyForm);
       }
       await refresh();
     } catch (err) {
@@ -309,15 +303,39 @@ export function StoryDependencies({ storyId }: Props) {
             Estas dependencias se sincronizan a Linear como contexto del Issue.
           </p>
         </div>
-        <Button size="sm" variant="outline" onClick={openCreate} className="gap-1.5">
+        <Button
+          size="sm"
+          variant="outline"
+          onClick={openCreate}
+          disabled={isCreating || editingId !== null}
+          className="gap-1.5"
+        >
           <Plus className="h-3.5 w-3.5" />
           Agregar
         </Button>
       </div>
 
+      {/* Form inline para crear nueva dep — UX paritaria al edit inline.
+          Aparece debajo del header y se cierra al guardar/cancelar. Mientras
+          está abierto, el botón "Agregar" del header se deshabilita para
+          evitar que el user abra dos forms simultáneamente. */}
+      {isCreating && (
+        <DependencyForm
+          mode="create"
+          form={form}
+          setForm={setForm}
+          onSave={handleSave}
+          onCancel={() => {
+            setIsCreating(false);
+            setForm(emptyForm);
+          }}
+          saving={saving}
+        />
+      )}
+
       {loading ? (
         <p className="text-sm text-muted-foreground py-8 text-center">Cargando...</p>
-      ) : deps.length === 0 ? (
+      ) : deps.length === 0 && !isCreating ? (
         <div className="rounded-xl border-2 border-dashed py-12 flex flex-col items-center gap-3 text-center">
           <GitBranch className="h-8 w-8 text-muted-foreground" />
           <p className="text-sm text-muted-foreground">
@@ -328,7 +346,7 @@ export function StoryDependencies({ storyId }: Props) {
             Agregar la primera
           </Button>
         </div>
-      ) : (
+      ) : deps.length === 0 ? null : (
         <div className="space-y-8">
           {visibleCategories.map((cat) => {
             const cfg = CATEGORY_CONFIG[cat];
@@ -363,120 +381,15 @@ export function StoryDependencies({ storyId }: Props) {
                     // todos los campos directamente en la card sin abrir dialog.
                     if (isEditingThis) {
                       return (
-                        <div
-                          key={dep.id}
-                          id={`dep-${dep.id}`}
-                          className="rounded-lg border-2 border-primary/40 p-4 space-y-3 bg-card shadow-sm"
-                        >
-                          <div className="space-y-1.5">
-                            <label className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
-                              Título
-                            </label>
-                            <Input
-                              value={form.title}
-                              onChange={(e) => setForm({ ...form, title: e.target.value })}
-                              placeholder="Stripe API Key"
-                              className="text-sm"
-                            />
-                          </div>
-                          <div className="space-y-1.5">
-                            <label className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
-                              Descripción corta
-                            </label>
-                            <Input
-                              value={form.description ?? ''}
-                              onChange={(e) => setForm({ ...form, description: e.target.value })}
-                              placeholder="Subtítulo de 1-2 líneas que aparece en la card"
-                              className="text-sm"
-                            />
-                          </div>
-                          <div className="grid grid-cols-2 gap-2">
-                            <div className="space-y-1.5">
-                              <label className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
-                                Categoría
-                              </label>
-                              <Select
-                                value={form.category}
-                                onValueChange={(v) => setForm({ ...form, category: v as CreateStoryDependencyInput['category'] })}
-                              >
-                                <SelectTrigger className="text-sm h-9">
-                                  <SelectValue />
-                                </SelectTrigger>
-                                <SelectContent>
-                                  {CATEGORY_ORDER.map((c) => (
-                                    <SelectItem key={c} value={c}>
-                                      {CATEGORY_CONFIG[c].label}
-                                    </SelectItem>
-                                  ))}
-                                </SelectContent>
-                              </Select>
-                            </div>
-                            <div className="space-y-1.5">
-                              <label className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
-                                Severidad
-                              </label>
-                              <Select
-                                value={form.severity}
-                                onValueChange={(v) => setForm({ ...form, severity: v as CreateStoryDependencyInput['severity'] })}
-                              >
-                                <SelectTrigger className="text-sm h-9">
-                                  <SelectValue />
-                                </SelectTrigger>
-                                <SelectContent>
-                                  <SelectItem value="critical">Critical</SelectItem>
-                                  <SelectItem value="high">High</SelectItem>
-                                  <SelectItem value="medium">Medium</SelectItem>
-                                  <SelectItem value="low">Low</SelectItem>
-                                </SelectContent>
-                              </Select>
-                            </div>
-                          </div>
-                          <div className="space-y-1.5">
-                            <label className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
-                              Vendor (opcional)
-                            </label>
-                            <Input
-                              value={form.vendor ?? ''}
-                              onChange={(e) => setForm({ ...form, vendor: e.target.value })}
-                              placeholder="Stripe, Twilio, OpenAI..."
-                              className="text-sm"
-                            />
-                          </div>
-                          <div className="flex flex-wrap gap-4 text-sm">
-                            <label className="flex items-center gap-2 cursor-pointer">
-                              <Checkbox
-                                checked={form.requiresCredential ?? false}
-                                onCheckedChange={(v) => setForm({ ...form, requiresCredential: v === true })}
-                              />
-                              <span className="text-xs">Requiere credencial</span>
-                            </label>
-                            <label className="flex items-center gap-2 cursor-pointer">
-                              <Checkbox
-                                checked={form.isBlocking ?? false}
-                                onCheckedChange={(v) => setForm({ ...form, isBlocking: v === true })}
-                              />
-                              <span className="text-xs">Bloqueante</span>
-                            </label>
-                          </div>
-                          <div className="space-y-1.5">
-                            <label className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
-                              Detalle (markdown rico)
-                            </label>
-                            <SectionTiptapEditor
-                              initialMarkdown={form.mdContent ?? ''}
-                              onChange={(md) => setForm({ ...form, mdContent: md })}
-                              placeholder="## Naturaleza&#10;Qué es exactamente, qué proveedor...&#10;&#10;## Impacto&#10;&#10;## Owner sugerido&#10;&#10;## Links"
-                              variant="paragraph"
-                            />
-                          </div>
-                          <div className="flex items-center justify-end gap-2 pt-2 border-t border-border/40">
-                            <Button variant="ghost" size="sm" onClick={cancelEdit} disabled={saving}>
-                              Cancelar
-                            </Button>
-                            <Button size="sm" onClick={handleSave} disabled={saving || !form.title.trim()}>
-                              {saving ? 'Guardando...' : 'Guardar cambios'}
-                            </Button>
-                          </div>
+                        <div key={dep.id} id={`dep-${dep.id}`}>
+                          <DependencyForm
+                            mode="edit"
+                            form={form}
+                            setForm={setForm}
+                            onSave={handleSave}
+                            onCancel={cancelEdit}
+                            saving={saving}
+                          />
                         </div>
                       );
                     }
@@ -592,6 +505,29 @@ export function StoryDependencies({ storyId }: Props) {
                           <ReadOnlyMarkdown content={dep.mdContent} />
                         </div>
                       )}
+
+                      {/* Inline form para guardar credencial externa, expandida
+                          dentro de la dep card que originó el flujo. Reemplaza
+                          al CreateExternalSecretDialog (modal) — paridad UX
+                          con el DependencyForm inline. */}
+                      {secretDialogContext?.id === dep.id && (
+                        <div className="mt-4 pt-4 border-t border-border/40">
+                          <CreateExternalSecretInlineForm
+                            defaultName={titleToSecretName(dep.title)}
+                            defaultVendor={dep.vendor ?? ''}
+                            defaultDescription={dep.description ?? ''}
+                            sourceDependencyId={dep.id}
+                            onCreated={() => {
+                              setSecretDialogContext(null);
+                              // Refresh para que el badge cambie a "Secret provisto"
+                              // — el backend hace bulk-update de todas las deps con
+                              // mismo vendor en `resolveAllStoryDependenciesByVendor`.
+                              void refresh();
+                            }}
+                            onCancel={() => setSecretDialogContext(null)}
+                          />
+                        </div>
+                      )}
                     </div>
                     );
                   })}
@@ -602,134 +538,150 @@ export function StoryDependencies({ storyId }: Props) {
         </div>
       )}
 
-      {/* Create/Edit Dialog */}
-      <Dialog open={dialogOpen} onOpenChange={setDialogOpen}>
-        <DialogContent className="max-w-lg">
-          <DialogHeader>
-            <DialogTitle>{editingId ? 'Editar dependencia' : 'Nueva dependencia técnica'}</DialogTitle>
-          </DialogHeader>
-          <div className="space-y-4 py-2">
-            <div className="space-y-1.5">
-              <label className="text-xs font-medium text-muted-foreground">Título *</label>
-              <Input
-                value={form.title}
-                onChange={(e) => setForm({ ...form, title: e.target.value })}
-                placeholder="Ej: Stripe API key para checkout"
-              />
-            </div>
-            <div className="space-y-1.5">
-              <label className="text-xs font-medium text-muted-foreground">Descripción</label>
-              <textarea
-                value={form.description ?? ''}
-                onChange={(e) => setForm({ ...form, description: e.target.value })}
-                rows={3}
-                className="w-full rounded-md border border-input bg-transparent px-3 py-2 text-sm shadow-xs outline-none resize-none focus-visible:border-ring focus-visible:ring-ring/50 focus-visible:ring-[3px] dark:bg-input/30"
-                placeholder="Detalle de la dependencia"
-              />
-            </div>
-            <div className="grid grid-cols-2 gap-3">
-              <div className="space-y-1.5">
-                <label className="text-xs font-medium text-muted-foreground">Categoría *</label>
-                <Select
-                  value={form.category}
-                  onValueChange={(v) => setForm({ ...form, category: v as StoryTechnicalDependencyCategory })}
-                >
-                  <SelectTrigger><SelectValue /></SelectTrigger>
-                  <SelectContent>
-                    {CATEGORY_ORDER.map((c) => (
-                      <SelectItem key={c} value={c}>{CATEGORY_CONFIG[c].label}</SelectItem>
-                    ))}
-                  </SelectContent>
-                </Select>
-              </div>
-              <div className="space-y-1.5">
-                <label className="text-xs font-medium text-muted-foreground">Severidad</label>
-                <Select
-                  value={form.severity ?? 'medium'}
-                  onValueChange={(v) => setForm({ ...form, severity: v as StoryTechnicalDependencySeverity })}
-                >
-                  <SelectTrigger><SelectValue /></SelectTrigger>
-                  <SelectContent>
-                    <SelectItem value="critical">Crítica</SelectItem>
-                    <SelectItem value="high">Alta</SelectItem>
-                    <SelectItem value="medium">Media</SelectItem>
-                    <SelectItem value="low">Baja</SelectItem>
-                  </SelectContent>
-                </Select>
-              </div>
-            </div>
-            <div className="space-y-1.5">
-              <label className="text-xs font-medium text-muted-foreground">Vendor (opcional)</label>
-              <Input
-                value={form.vendor ?? ''}
-                onChange={(e) => setForm({ ...form, vendor: e.target.value })}
-                placeholder="Ej: Stripe, Twilio, Equipo X"
-              />
-            </div>
-            <div className="flex items-center gap-4">
-              <label className="flex items-center gap-2 text-sm cursor-pointer">
-                <input
-                  type="checkbox"
-                  checked={form.requiresCredential ?? false}
-                  onChange={(e) => setForm({ ...form, requiresCredential: e.target.checked })}
-                  className="rounded"
-                />
-                Requiere credencial
-              </label>
-              <label className="flex items-center gap-2 text-sm cursor-pointer">
-                <input
-                  type="checkbox"
-                  checked={form.isBlocking ?? false}
-                  onChange={(e) => setForm({ ...form, isBlocking: e.target.checked })}
-                  className="rounded"
-                />
-                Bloqueante
-              </label>
-            </div>
-            <div className="space-y-1.5">
-              <label className="text-xs font-medium text-muted-foreground">
-                Detalle (markdown rico)
-              </label>
-              <SectionTiptapEditor
-                initialMarkdown={form.mdContent ?? ''}
-                onChange={(md) => setForm({ ...form, mdContent: md })}
-                placeholder="## Naturaleza&#10;Qué es exactamente, qué proveedor...&#10;&#10;## Impacto&#10;&#10;## Owner sugerido&#10;&#10;## Links"
-                variant="paragraph"
-              />
-            </div>
-          </div>
-          <DialogFooter>
-            <Button variant="ghost" onClick={() => setDialogOpen(false)} disabled={saving}>
-              Cancelar
-            </Button>
-            <Button onClick={handleSave} disabled={saving}>
-              {saving ? 'Guardando...' : editingId ? 'Actualizar' : 'Crear'}
-            </Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
+      {/* La inline form para guardar el secret externo se renderiza DENTRO
+          de la dep card que la originó (ver bloque arriba con
+          `secretDialogContext?.id === dep.id`). Esto preserva el contexto
+          visual y reemplaza al Dialog modal previo. */}
+    </div>
+  );
+}
 
-      {/* Dialog compartido para crear secret externo desde una dep concreta.
-          Se abre cuando el usuario click en "Requiere credencial — resolver".
-          El backend usa `sourceDependencyId` para auto-resolver la dep
-          marcándola con `linkedSecretId` (status='resolved'). */}
-      <CreateExternalSecretDialog
-        open={secretDialogContext !== null}
-        onOpenChange={(open) => {
-          if (!open) setSecretDialogContext(null);
-        }}
-        defaultName={secretDialogContext ? titleToSecretName(secretDialogContext.title) : ''}
-        defaultVendor={secretDialogContext?.vendor ?? ''}
-        defaultDescription={secretDialogContext?.description ?? ''}
-        sourceDependencyId={secretDialogContext?.id}
-        onCreated={() => {
-          setSecretDialogContext(null);
-          // Refresh para que el badge cambie a "Secret provisto" — el backend
-          // hace bulk-update de todas las deps con mismo vendor (incluyendo
-          // ésta) en `resolveAllStoryDependenciesByVendor`.
-          void refresh();
-        }}
-      />
+// ─────────────────────────────────────────────────────────────────
+// Sub-componente local — formulario reutilizable para crear y editar
+// dependencias inline. UX paritaria entre los dos modos: el create
+// vive arriba de la lista, el edit reemplaza la card de la dep que
+// se está editando. La única diferencia entre modos es el copy del
+// header opcional y del CTA del footer.
+// ─────────────────────────────────────────────────────────────────
+
+interface DependencyFormProps {
+  mode: 'create' | 'edit';
+  form: CreateStoryDependencyInput;
+  setForm: React.Dispatch<React.SetStateAction<CreateStoryDependencyInput>>;
+  onSave: () => void;
+  onCancel: () => void;
+  saving: boolean;
+}
+
+function DependencyForm({ mode, form, setForm, onSave, onCancel, saving }: DependencyFormProps) {
+  return (
+    <div className="rounded-lg border-2 border-primary/40 p-4 space-y-3 bg-card shadow-sm">
+      {mode === 'create' && (
+        <div className="flex items-center gap-2 pb-1">
+          <Sparkles className="h-3.5 w-3.5 text-primary" />
+          <h4 className="text-sm font-semibold">Nueva dependencia técnica</h4>
+        </div>
+      )}
+      <div className="space-y-1.5">
+        <label className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
+          Título
+        </label>
+        <Input
+          value={form.title}
+          onChange={(e) => setForm({ ...form, title: e.target.value })}
+          placeholder="Stripe API Key"
+          className="text-sm"
+          autoFocus={mode === 'create'}
+        />
+      </div>
+      <div className="space-y-1.5">
+        <label className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
+          Descripción corta
+        </label>
+        <Input
+          value={form.description ?? ''}
+          onChange={(e) => setForm({ ...form, description: e.target.value })}
+          placeholder="Subtítulo de 1-2 líneas que aparece en la card"
+          className="text-sm"
+        />
+      </div>
+      <div className="grid grid-cols-2 gap-2">
+        <div className="space-y-1.5">
+          <label className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
+            Categoría
+          </label>
+          <Select
+            value={form.category}
+            onValueChange={(v) => setForm({ ...form, category: v as CreateStoryDependencyInput['category'] })}
+          >
+            <SelectTrigger className="text-sm h-9">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              {CATEGORY_ORDER.map((c) => (
+                <SelectItem key={c} value={c}>
+                  {CATEGORY_CONFIG[c].label}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+        </div>
+        <div className="space-y-1.5">
+          <label className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
+            Severidad
+          </label>
+          <Select
+            value={form.severity}
+            onValueChange={(v) => setForm({ ...form, severity: v as CreateStoryDependencyInput['severity'] })}
+          >
+            <SelectTrigger className="text-sm h-9">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="critical">Critical</SelectItem>
+              <SelectItem value="high">High</SelectItem>
+              <SelectItem value="medium">Medium</SelectItem>
+              <SelectItem value="low">Low</SelectItem>
+            </SelectContent>
+          </Select>
+        </div>
+      </div>
+      <div className="space-y-1.5">
+        <label className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
+          Vendor (opcional)
+        </label>
+        <Input
+          value={form.vendor ?? ''}
+          onChange={(e) => setForm({ ...form, vendor: e.target.value })}
+          placeholder="Stripe, Twilio, OpenAI..."
+          className="text-sm"
+        />
+      </div>
+      <div className="flex flex-wrap gap-4 text-sm">
+        <label className="flex items-center gap-2 cursor-pointer">
+          <Checkbox
+            checked={form.requiresCredential ?? false}
+            onCheckedChange={(v) => setForm({ ...form, requiresCredential: v === true })}
+          />
+          <span className="text-xs">Requiere credencial</span>
+        </label>
+        <label className="flex items-center gap-2 cursor-pointer">
+          <Checkbox
+            checked={form.isBlocking ?? false}
+            onCheckedChange={(v) => setForm({ ...form, isBlocking: v === true })}
+          />
+          <span className="text-xs">Bloqueante</span>
+        </label>
+      </div>
+      <div className="space-y-1.5">
+        <label className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
+          Detalle (markdown rico)
+        </label>
+        <SectionTiptapEditor
+          initialMarkdown={form.mdContent ?? ''}
+          onChange={(md) => setForm({ ...form, mdContent: md })}
+          placeholder="## Naturaleza&#10;Qué es exactamente, qué proveedor...&#10;&#10;## Impacto&#10;&#10;## Owner sugerido&#10;&#10;## Links"
+          variant="paragraph"
+        />
+      </div>
+      <div className="flex items-center justify-end gap-2 pt-2 border-t border-border/40">
+        <Button variant="ghost" size="sm" onClick={onCancel} disabled={saving}>
+          Cancelar
+        </Button>
+        <Button size="sm" onClick={onSave} disabled={saving || !form.title.trim()}>
+          {saving ? 'Guardando...' : mode === 'create' ? 'Crear dependencia' : 'Guardar cambios'}
+        </Button>
+      </div>
     </div>
   );
 }

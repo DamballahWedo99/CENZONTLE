@@ -10,8 +10,8 @@ import {
   Post,
 } from '@nestjs/common';
 import { ApiOperation, ApiTags } from '@nestjs/swagger';
-import { Permission } from '@cenzontle/shared';
-import { Permissions } from '../../../auth/decorators';
+import { Permission, type AuthenticatedUser } from '@cenzontle/shared';
+import { CurrentUser, Permissions } from '../../../auth/decorators';
 import { StoryDependenciesService } from './story-dependencies.service';
 import { CreateStoryDependencyDto } from './dto/create-story-dependency.dto';
 import { UpdateStoryDependencyDto } from './dto/update-story-dependency.dto';
@@ -32,27 +32,36 @@ export class StoryDependenciesController {
 
   @Post()
   @Permissions(Permission.EDIT_STORY)
-  @ApiOperation({ summary: 'Crear una dependencia técnica para una historia.' })
-  create(@Param('storyId') storyId: string, @Body() dto: CreateStoryDependencyDto) {
-    return this.service.create(storyId, dto);
+  @ApiOperation({ summary: 'Crear una dependencia técnica para una historia. Requiere pod intersection con la historia (CWE-639).' })
+  create(
+    @Param('storyId') storyId: string,
+    @Body() dto: CreateStoryDependencyDto,
+    @CurrentUser() user: AuthenticatedUser,
+  ) {
+    return this.service.create(storyId, dto, user);
   }
 
   @Patch(':depId')
   @Permissions(Permission.EDIT_STORY)
-  @ApiOperation({ summary: 'Actualizar una dependencia técnica.' })
+  @ApiOperation({ summary: 'Actualizar una dependencia técnica. Requiere pod intersection con la historia (CWE-639).' })
   update(
     @Param('storyId') storyId: string,
     @Param('depId') depId: string,
     @Body() dto: UpdateStoryDependencyDto,
+    @CurrentUser() user: AuthenticatedUser,
   ) {
-    return this.service.update(storyId, depId, dto);
+    return this.service.update(storyId, depId, dto, user);
   }
 
   @Delete(':depId')
   @Permissions(Permission.EDIT_STORY)
   @HttpCode(HttpStatus.NO_CONTENT)
-  @ApiOperation({ summary: 'Eliminar una dependencia técnica.' })
-  remove(@Param('storyId') storyId: string, @Param('depId') depId: string) {
-    return this.service.remove(storyId, depId);
+  @ApiOperation({ summary: 'Eliminar una dependencia técnica. Requiere pod intersection con la historia (CWE-639).' })
+  remove(
+    @Param('storyId') storyId: string,
+    @Param('depId') depId: string,
+    @CurrentUser() user: AuthenticatedUser,
+  ) {
+    return this.service.remove(storyId, depId, user);
   }
 }

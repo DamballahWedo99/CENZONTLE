@@ -319,17 +319,32 @@ function humanizeFilename(filename: string): string {
  *
  * Filtrado:
  * - `.gitkeep` se omite (marcador para folders vacíos, no debe aparecer en UI)
- * - Archivos no-markdown se omiten
- * - Folders vacíos se conservan (sin children después del filtrado)
+ * - Archivos ocultos (empiezan con `.`) se omiten
+ * - Archivos texto soportados se MUESTRAN: markdown + assets de bundles de
+ *   diseño (HTML, CSS, JS, JSON, SVG, TXT, YAML, XML). Antes solo
+ *   mostrábamos `.md`, lo que ocultaba los archivos descomprimidos de
+ *   bundles de Claude Design — el user veía las carpetas `project/` vacías
+ *   aunque los HTMLs sí estaban commiteados al repo.
+ * - Otros archivos (binarios, extensiones desconocidas) se ocultan.
+ * - Folders vacíos se conservan (sin children después del filtrado).
  */
+const SHOWN_FILE_EXTENSIONS = [
+  '.md', '.html', '.htm', '.css', '.js', '.jsx', '.ts', '.tsx',
+  '.json', '.txt', '.svg', '.xml', '.yaml', '.yml',
+];
+
 function vaultTreeToDefinicionNodes(vaultNodes: VaultTreeNode[]): DefinicionNode[] {
   const out: DefinicionNode[] = [];
   const now = new Date().toISOString();
 
   for (const v of vaultNodes) {
-    // Ocultar archivos/folders ocultos (empiezan con .) y no-markdown
+    // Ocultar archivos/folders ocultos (empiezan con .)
     if (v.name.startsWith('.')) continue;
-    if (v.type === 'file' && !v.name.endsWith('.md')) continue;
+    if (v.type === 'file') {
+      const lowerName = v.name.toLowerCase();
+      const hasShownExt = SHOWN_FILE_EXTENSIONS.some((ext) => lowerName.endsWith(ext));
+      if (!hasShownExt) continue;
+    }
 
     const displayName = v.type === 'file' ? humanizeFilename(v.name) : v.name;
 
@@ -1058,8 +1073,8 @@ export function DefinicionesProvider({ children }: { children: ReactNode }) {
     try {
       const data = await getAccessibleVaultConfigs();
       setAllVaults(data);
-    } catch (err: any) {
-      console.error('[DefinicionesContext] Failed to load vault configs', err);
+    } catch {
+      /* fail-soft: el state vacío activa el empty-state legítimo de la UI */
     } finally {
       setVaultsLoaded(true);
     }
@@ -1157,9 +1172,7 @@ export function DefinicionesProvider({ children }: { children: ReactNode }) {
         // REPLACE, no merge — cada vault tiene su propio historial de commits
         dispatch({ type: 'LOAD_CHANGELOG', entries });
       })
-      .catch((err) => {
-        console.error('[DefinicionesContext] Failed to load changelog', err);
-      });
+      .catch(() => {});
   }, [effectiveVaultId, browseVaultId]);
 
   // === Per-folder access config persistence ===
@@ -1200,9 +1213,7 @@ export function DefinicionesProvider({ children }: { children: ReactNode }) {
         JSON.stringify(config, null, 2),
         'config(vault): update folder access permissions',
         browseVaultIdRef.current,
-      ).catch((err) => {
-        console.error('[DefinicionesContext] Failed to save access config', err);
-      });
+      ).catch(() => {});
     }, 1500); // Debounce 1.5s para no hacer un commit por cada click de radio button
   }, []);
 
@@ -1272,7 +1283,6 @@ export function DefinicionesProvider({ children }: { children: ReactNode }) {
         })
         .catch((err) => {
           contentCache.current.delete(doc.id);
-          console.error('[DefinicionesContext] Failed to load file content', err);
           toast.error(`No se pudo cargar el archivo: ${err?.message ?? 'error desconocido'}`);
         });
     }
@@ -1436,9 +1446,7 @@ export function DefinicionesProvider({ children }: { children: ReactNode }) {
         // Folder: recursive delete of all descendant files
         const descendantFiles = collectDescendantFilePaths(node);
         for (const filePath of descendantFiles) {
-          await deleteVaultFile(filePath, `chore(vault): delete ${filePath}`, browseId).catch((err) => {
-            console.warn(`[deleteNode] Failed to delete ${filePath}`, err);
-          });
+          await deleteVaultFile(filePath, `chore(vault): delete ${filePath}`, browseId).catch(() => {});
         }
         // También borrar el .gitkeep si existía
         await deleteVaultFile(`${id}/.gitkeep`, `chore(vault): delete folder marker ${id}`, browseId).catch(() => {});

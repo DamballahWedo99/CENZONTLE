@@ -292,7 +292,7 @@ export function MiniToolbar({ editor, variant, showSource, onToggleSource }: Min
 
   return (
     <TooltipProvider delayDuration={300}>
-      <div className="flex items-center gap-0.5 px-3 py-1.5 border-b border-border/50 bg-muted/40 overflow-x-auto shrink-0 rounded-t-md">
+      <div className="sticky top-0 z-10 flex items-center gap-0.5 px-3 py-1.5 border-b border-border/50 bg-muted/95 backdrop-blur-sm overflow-x-auto shrink-0 rounded-t-md">
         {items.map((item, i) => {
           if (item === 'sep') {
             // Div explícito con bg-foreground/20 — el componente Separator de

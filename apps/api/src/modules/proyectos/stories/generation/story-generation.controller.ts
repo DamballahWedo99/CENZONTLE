@@ -12,6 +12,7 @@ import {
   NotFoundException,
 } from '@nestjs/common';
 import { ApiTags, ApiOperation } from '@nestjs/swagger';
+import { Throttle } from '@nestjs/throttler';
 import { Permission, UserRole } from '@cenzontle/shared';
 import type { StoryGenerationEvent, ProposedStory, AuthenticatedUser } from '@cenzontle/shared';
 import { Permissions, CurrentUser } from '../../../auth/decorators';
@@ -20,6 +21,8 @@ import { StoryGenerationService } from './story-generation.service';
 import { StoryProposalCacheService } from './story-proposal-cache.service';
 import { GenerateStoriesQueryDto } from './dto/generate-stories.dto';
 import { scrubSecrets } from '../../../../common/utils/scrub-secrets.util';
+import { setupSseHeartbeat } from '../../../../common/utils/sse-heartbeat.util';
+import { AgentRunRegistryService } from '../../../../common/services/agent-run-registry.service';
 import type { Request, Response } from 'express';
 
 /**
@@ -41,6 +44,7 @@ export class StoryGenerationController {
     private readonly generation: StoryGenerationService,
     private readonly cache: StoryProposalCacheService,
     private readonly prisma: PrismaService,
+    private readonly registry: AgentRunRegistryService,
   ) {}
 
   /**
@@ -137,6 +141,14 @@ export class StoryGenerationController {
 
   // ── SSE streaming (LAST — :epicId es catch-all) ──
 
+  /**
+   * Throttle estricto: 5 SSE generate-requests por minuto por IP.
+   * Es independiente del cap por usuario que hace el registry. Esto
+   * protege contra script kiddies con un solo token reusando IP, mientras
+   * que el cap de registry protege contra users autorizados intentando
+   * fan-out cross-epic.
+   */
+  @Throttle({ default: { ttl: 60_000, limit: 5 } })
   @Get(':epicId')
   @Permissions(Permission.CREATE_STORY)
   @ApiOperation({ summary: 'Generar historias con IA via SSE (agentes PO + TL + QA)' })
@@ -158,26 +170,61 @@ export class StoryGenerationController {
       `[SSE:story-gen] ═══ CONNECT user=${user.sub} role=${user.role} epic=${epicId} prompt="${promptForLog}" count=${query.count ?? 'auto'} webSearch=${webSearchEnabled}`,
     );
 
+    // Registramos el run ANTES de flushHeaders. Si ya hay run activo o el
+    // user excede su cap, ConflictException sale como 409 JSON real (no
+    // SSE-as-200). El registry valida ambas condiciones atómicamente.
+    //
+    // Hard timeout 30min (override del default 10min): el flujo de stories
+    // ejecuta 3 sub-agentes secuenciales (PO + TL + QA), cada uno con
+    // exploración de vault y razonamiento extendido. Cabezas de ~10min ya
+    // no son suficientes — el TL o QA terminaba el thinking y, justo
+    // cuando estaba estructurando la entrega, el timer disparaba con
+    // proposals=0 (todo el trabajo desperdiciado).
+    // Hard timeout: 45 min. El flujo completo (PO + TL + QA secuenciales)
+    // puede acercarse a este rango cuando QA o TL se topan con
+    // `stop_reason='max_tokens'` y el sistema fuerza retries — observamos
+    // abortos con `events=1699 proposals=0` cuando el cap era 30 min, el
+    // agente nunca convergía. Subir a 45 min da margen para 3-4 iteraciones
+    // sin ser excesivo. Mantener alineado con el `timeout` del cliente
+    // Anthropic en story-generation.service.ts.
+    const STORIES_HARD_TIMEOUT_MS = 45 * 60 * 1000;
+    const abortController = new AbortController();
+    this.registry.register(user.sub, epicId, abortController, STORIES_HARD_TIMEOUT_MS);
+
     res.setHeader('Content-Type', 'text/event-stream');
     res.setHeader('Cache-Control', 'no-cache');
     res.setHeader('Connection', 'keep-alive');
+    // X-Accel-Buffering: no — desactiva el buffering de proxies tipo nginx
+    // para que cada heartbeat/event se entregue al cliente inmediatamente.
+    res.setHeader('X-Accel-Buffering', 'no');
     res.flushHeaders();
 
-    const abortController = new AbortController();
-    let clientAborted = false;
-    // Flag que distingue "cliente cierra mid-stream" (real abort) vs "cliente
-    // cierra tras recibir done" (cierre normal del SSE). Sin esto, req.on('close')
-    // siempre dispara el WARN aunque haya sido un cierre limpio.
+    // Heartbeat SSE: previene `UND_ERR_BODY_TIMEOUT` (undici default 5min)
+    // cuando los agentes IA tardan mucho entre eventos significativos
+    // (ej. deep research con webSearch puede tener gaps de >5min). Sin
+    // esto, corridas largas se cortan aunque el agente siga trabajando.
+    const stopHeartbeat = setupSseHeartbeat(res);
+
+    let clientDisconnected = false;
     let streamCompleted = false;
 
+    // CRÍTICO: el cierre del cliente NO aborta al agente. El agente sigue
+    // corriendo en background, escribiendo al cache. El user puede:
+    //   - Recargar la página → la hidratación lee del cache + polling le da
+    //     los events nuevos.
+    //   - Cancelar explícitamente → DELETE /:epicId/session/active aborta
+    //     el AbortController.
+    // Esto es lo que arregla el comportamiento donde refrescar mataba al
+    // agente. Solo seteamos un flag para dejar de escribir al socket muerto.
     req.on('close', () => {
       if (streamCompleted) {
-        // Cierre normal post-done: nada que hacer.
         return;
       }
-      this.logger.warn(`[SSE:story-gen] ✗ client disconnected mid-stream, aborting agent epic=${epicId}`);
-      clientAborted = true;
-      abortController.abort();
+      clientDisconnected = true;
+      // Detener heartbeat al socket muerto — el agente sigue en background
+      // pero no necesitamos seguir intentando pings al cliente desconectado.
+      stopHeartbeat();
+      this.logger.log(`[SSE:story-gen] client disconnected — agent continues in background epic=${epicId}`);
     });
 
     const subject = this.generation.generate(
@@ -195,7 +242,15 @@ export class StoryGenerationController {
 
     subject.subscribe({
       next: (event) => {
-        res.write(`data: ${JSON.stringify(event.data)}\n\n`);
+        // Si el cliente ya cerró, no escribimos al socket pero SÍ seguimos
+        // acumulando al cache para que el cliente que vuelva pueda leer.
+        if (!clientDisconnected) {
+          try {
+            res.write(`data: ${JSON.stringify(event.data)}\n\n`);
+          } catch {
+            clientDisconnected = true;
+          }
+        }
 
         const data = event.data as StoryGenerationEvent;
         collectedEvents.push(data);
@@ -203,19 +258,38 @@ export class StoryGenerationController {
         if (data.type === 'proposal_ready') {
           collectedProposals.push((data as StoryGenerationEvent & { type: 'proposal_ready' }).story);
         }
+
+        // Persistencia incremental sin race condition: writeSession reescribe
+        // el state COMPLETO desde memoria local (sin read-modify-write como el
+        // patrón legacy `appendEvent`/`appendProposal`).
+        this.cache.writeSession(epicId, collectedEvents, collectedProposals).catch(() => {});
       },
       complete: () => {
         this.logger.log(
-          `[SSE:story-gen] ═══ DISCONNECT epic=${epicId} events=${collectedEvents.length} proposals=${collectedProposals.length} clientAborted=${clientAborted}`,
+          `[SSE:story-gen] ═══ DISCONNECT epic=${epicId} events=${collectedEvents.length} proposals=${collectedProposals.length} clientDisconnected=${clientDisconnected}`,
         );
-        // Marcar antes de res.end() — el cierre del socket dispara req.on('close')
-        // sincronicamente despues, y queremos que detecte cierre normal y skipee el WARN.
         streamCompleted = true;
-        res.end();
+        stopHeartbeat();
+        // unregister hace compare-and-swap por identidad: solo libera el
+        // slot si el activeRun sigue siendo el nuestro. Idempotente.
+        this.registry.unregister(user.sub, epicId, abortController);
 
-        if (clientAborted) {
-          this.logger.warn(`[SSE:story-gen] skipping cache save due to client abort — invalidating partial session`);
+        if (!clientDisconnected) {
+          try { res.end(); } catch { /* socket ya cerrado */ }
+        }
+
+        // Identidad por AbortController — un cancel sobre otro controller
+        // del mismo epic no afecta este persist.
+        if (this.registry.wasCancelled(abortController)) {
+          this.logger.log(`[SSE:story-gen] skipping cache save — run was explicitly cancelled`);
+          return;
+        }
+
+        // Si terminó sin proposals, invalidamos la sesión en lugar de
+        // persistir un staging vacío que confunde la hidratación futura.
+        if (collectedProposals.length === 0) {
           this.cache.invalidateSession(epicId).catch(() => {});
+          this.logger.log(`[SSE:story-gen] no proposals — invalidating session`);
           return;
         }
 
@@ -225,13 +299,25 @@ export class StoryGenerationController {
       },
       error: (err) => {
         this.logger.error(`[SSE:story-gen] ✗ stream error: ${err?.message}`);
-        if (!clientAborted) {
-          res.write(`data: ${JSON.stringify({ type: 'error', message: 'Error interno' })}\n\n`);
-        }
         streamCompleted = true;
-        res.end();
+        stopHeartbeat();
+        this.registry.unregister(user.sub, epicId, abortController);
 
-        if (clientAborted) {
+        if (!clientDisconnected) {
+          try {
+            res.write(`data: ${JSON.stringify({ type: 'error', message: 'Error interno' })}\n\n`);
+            res.end();
+          } catch { /* socket ya cerrado */ }
+        }
+
+        if (this.registry.wasCancelled(abortController)) {
+          this.cache.invalidateSession(epicId).catch(() => {});
+          return;
+        }
+
+        // Errores no-cancelados con 0 propuestas: invalidar en lugar
+        // de persistir un staging huérfano.
+        if (collectedProposals.length === 0) {
           this.cache.invalidateSession(epicId).catch(() => {});
           return;
         }
@@ -240,5 +326,63 @@ export class StoryGenerationController {
           .catch(() => {});
       },
     });
+  }
+
+  // ── Session endpoints (para hidratación + cancel explícito) ──
+
+  @Get(':epicId/session')
+  @Permissions(Permission.CREATE_STORY)
+  @ApiOperation({ summary: 'Recuperar sesión actual (incluye streaming activo)' })
+  async getSession(
+    @Param('epicId', ParseUUIDPipe) epicId: string,
+    @CurrentUser() user: AuthenticatedUser,
+  ) {
+    await this.assertUserCanAccessEpic(user, epicId);
+    const session = await this.cache.getSession(epicId);
+    if (!session) return { session: null, isActive: false };
+    return {
+      session,
+      isActive: this.registry.isActive(epicId),
+    };
+  }
+
+  @Delete(':epicId/session/active')
+  @Permissions(Permission.CREATE_STORY)
+  @ApiOperation({ summary: 'Cancelar el agente activo (abort + invalidar cache). Solo el usuario que inició el run o AltaGerencia pueden cancelarlo.' })
+  async cancelActiveRun(
+    @Param('epicId', ParseUUIDPipe) epicId: string,
+    @CurrentUser() user: AuthenticatedUser,
+  ) {
+    await this.assertUserCanAccessEpic(user, epicId);
+    const run = this.registry.getController(epicId);
+    if (!run) {
+      // No hay run activo: aún así limpiamos cualquier cache de sesión que
+      // pueda haber quedado de un run anterior. Idempotente. No requiere
+      // ownership check — no hay run que ownear.
+      await this.cache.invalidateSession(epicId).catch(() => {});
+      return { cancelled: false, reason: 'no-active-run' };
+    }
+    // Ownership: solo el usuario que arrancó el run puede cancelarlo.
+    // AltaGerencia mantiene override admin.
+    if (user.role !== UserRole.AltaGerencia && !this.registry.isOwner(epicId, user.sub)) {
+      throw new ForbiddenException('Solo el usuario que inició la generación puede cancelarla.');
+    }
+    // Marca el AbortController específico como cancelado por identidad.
+    // El subject.complete del run verifica esto antes de regrabar al cache.
+    // Cleanup completo (mapas + timeout) lo hace el complete callback al
+    // recibir la señal de abort.
+    this.registry.markCancelled(run);
+    run.abort();
+    await this.cache.invalidateSession(epicId).catch(() => {});
+    // Belt-and-suspenders: por si alguna escritura al cache estaba in-flight
+    // entre el abort y la invalidación, re-invalida 500ms después. NO borra
+    // cache de un nuevo run iniciado tras el cancel.
+    setTimeout(() => {
+      if (!this.registry.isActive(epicId)) {
+        this.cache.invalidateSession(epicId).catch(() => {});
+      }
+    }, 500);
+    this.logger.log(`[SSE:story-gen] ✗ run cancelled by user=${user.sub} epic=${epicId}`);
+    return { cancelled: true };
   }
 }

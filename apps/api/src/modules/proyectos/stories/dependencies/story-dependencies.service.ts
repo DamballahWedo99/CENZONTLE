@@ -5,8 +5,9 @@ import {
   NotFoundException,
 } from '@nestjs/common';
 import { Prisma } from '@prisma/client';
-import type { StoryTechnicalDependency } from '@cenzontle/shared';
+import type { AuthenticatedUser, StoryTechnicalDependency } from '@cenzontle/shared';
 import { PrismaService } from '../../../prisma/prisma.service';
+import { assertUserCanAccessStoryByEpic } from '../../epics/epic-access.util';
 import type { CreateStoryDependencyDto } from './dto/create-story-dependency.dto';
 import type { UpdateStoryDependencyDto } from './dto/update-story-dependency.dto';
 
@@ -50,14 +51,29 @@ export class StoryDependenciesService {
   async create(
     storyId: string,
     dto: CreateStoryDependencyDto,
+    user: AuthenticatedUser,
   ): Promise<StoryTechnicalDependency> {
     // Validar que la story exista para fail-fast con mensaje útil
     // (sin esto, FK violation lanza error genérico de Prisma).
+    // Cargamos epic.pods + podId para el check de pod intersection (CWE-639).
     const story = await this.prisma.story.findUnique({
       where: { id: storyId },
-      select: { id: true },
+      select: {
+        id: true,
+        podId: true,
+        epic: { select: { pods: { select: { podId: true } } } },
+      },
     });
     if (!story) throw new NotFoundException('Historia no encontrada');
+
+    // CWE-639 BOLA — fix de security-reviewer MEDIUM 2026-05-04. Sin este
+    // check, cualquier user con EDIT_STORY podía POSTear deps en historias
+    // de otros pods, polucionando el rollup cross-pod consumido por
+    // EpicsService.publishToTracker.
+    assertUserCanAccessStoryByEpic(user, {
+      epicPodIds: story.epic?.pods?.map((p) => p.podId) ?? [],
+      storyPodId: story.podId ?? null,
+    });
 
     // Si trae linkedSecretId, validar que el secret existe — sin esto el
     // frontend muestra "Secret provisto" para un UUID inventado y leakea
@@ -100,6 +116,7 @@ export class StoryDependenciesService {
     storyId: string,
     depId: string,
     dto: UpdateStoryDependencyDto,
+    user: AuthenticatedUser,
   ): Promise<StoryTechnicalDependency> {
     const existing = await this.prisma.storyTechnicalDependency.findUnique({
       where: { id: depId },
@@ -111,6 +128,22 @@ export class StoryDependenciesService {
     if (existing.storyId !== storyId) {
       throw new NotFoundException('Dependencia no encontrada');
     }
+
+    // CWE-639 BOLA — pod intersection contra la story padre. Mismo patrón
+    // que `create`. Cargamos epic.pods solo después del scope check para
+    // evitar la query si el dep no pertenece a la story.
+    const story = await this.prisma.story.findUnique({
+      where: { id: storyId },
+      select: {
+        podId: true,
+        epic: { select: { pods: { select: { podId: true } } } },
+      },
+    });
+    if (!story) throw new NotFoundException('Historia no encontrada');
+    assertUserCanAccessStoryByEpic(user, {
+      epicPodIds: story.epic?.pods?.map((p) => p.podId) ?? [],
+      storyPodId: story.podId ?? null,
+    });
 
     if (dto.linkedSecretId) {
       await this.assertSecretExists(dto.linkedSecretId);
@@ -140,7 +173,23 @@ export class StoryDependenciesService {
     return this.toResponse(updated);
   }
 
-  async remove(storyId: string, depId: string): Promise<void> {
+  async remove(storyId: string, depId: string, user: AuthenticatedUser): Promise<void> {
+    // CWE-639 BOLA — pod intersection contra la story padre. Hacemos el check
+    // antes del deleteMany porque queremos 403 explícito (no 404) cuando el
+    // user no tiene acceso. Si la story no existe → 404 normal.
+    const story = await this.prisma.story.findUnique({
+      where: { id: storyId },
+      select: {
+        podId: true,
+        epic: { select: { pods: { select: { podId: true } } } },
+      },
+    });
+    if (!story) throw new NotFoundException('Historia no encontrada');
+    assertUserCanAccessStoryByEpic(user, {
+      epicPodIds: story.epic?.pods?.map((p) => p.podId) ?? [],
+      storyPodId: story.podId ?? null,
+    });
+
     // deleteMany permite TOCTOU-safe idempotency — si dos requests llegan en
     // paralelo, ambas pasan a delete pero solo una afecta filas; la otra
     // recibe count=0 que mapeamos a 404 en vez de explotar con P2025 (500).

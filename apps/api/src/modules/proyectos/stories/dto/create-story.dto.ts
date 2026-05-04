@@ -59,6 +59,15 @@ export class DiscoveredDependencyDto {
   @ApiPropertyOptional() @IsOptional() @IsString() @MaxLength(200) vendor?: string;
   @ApiPropertyOptional() @IsOptional() @IsBoolean() requiresCredential?: boolean;
   @ApiPropertyOptional() @IsOptional() @IsBoolean() isBlocking?: boolean;
+  /**
+   * `linkedSecretId` poblado en `emitProposals` cuando la dep matchea con un
+   * secret YA provisto en `external_secrets` (registry global cross-iniciativa).
+   * Llega del frontend al aceptar la propuesta — debe persistirse intacto en
+   * `story_technical_dependencies` con `status='resolved'`. Sin este campo,
+   * el auto-link cross-org se pierde al persistir y la dep aparece como
+   * pendiente aunque el secret ya exista.
+   */
+  @ApiPropertyOptional() @IsOptional() @IsString() @MaxLength(60) linkedSecretId?: string;
 }
 
 export class CreateStoryDto {

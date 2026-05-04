@@ -93,3 +93,53 @@ export interface StoryDependencyItem {
 export function getStoryDependencies(epicId: string) {
   return apiFetch<StoryDependencyItem[]>(`/proyectos/epicas/${epicId}/story-dependencies`);
 }
+
+/**
+ * Borra un diseño de la épica. El backend hace cleanup completo:
+ *  - Bundle: borra todos los archivos del vault bajo `disenos/<slug>/`
+ *    + el ZIP de respaldo en disco.
+ *  - Legacy (URL): borra el `.md` independiente.
+ *  - Quita el design del array y persiste.
+ * Idempotente.
+ */
+export async function deleteDesign(epicId: string, designId: string): Promise<void> {
+  await apiFetch<void>(`/proyectos/epicas/${epicId}/designs/${designId}`, {
+    method: 'DELETE',
+  });
+}
+
+/**
+ * Sube un bundle ZIP de Claude Design al backend para asociarlo como
+ * diseño de la épica. Usa multipart/form-data — NO `apiFetch` porque
+ * éste fuerza `Content-Type: application/json` y rompe los boundaries
+ * que el browser genera automáticamente para FormData.
+ *
+ * El proxy BFF reenvía el body multipart intacto al backend NestJS
+ * (`FileInterceptor('file')` lo procesa con multer).
+ */
+export async function uploadDesignBundle(
+  epicId: string,
+  input: { name: string; description: string; file: File },
+): Promise<import('@cenzontle/shared').EpicDesign> {
+  const fd = new FormData();
+  fd.append('name', input.name);
+  fd.append('description', input.description);
+  fd.append('file', input.file);
+
+  const res = await fetch(`/api/proxy/proyectos/epicas/${epicId}/designs/upload`, {
+    method: 'POST',
+    body: fd,
+    // NO seteamos Content-Type — el browser lo construye con el boundary
+    // correcto al detectar el body como FormData.
+  });
+
+  if (!res.ok) {
+    if (res.status === 401 && typeof window !== 'undefined') {
+      window.location.href = '/auth/login';
+      return new Promise<never>(() => {});
+    }
+    const body = await res.json().catch(() => ({ message: res.statusText }));
+    throw new Error(body.message || `Error ${res.status} al subir el bundle.`);
+  }
+  return res.json();
+}

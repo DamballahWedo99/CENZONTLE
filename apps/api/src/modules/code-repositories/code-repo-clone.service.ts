@@ -100,11 +100,13 @@ export class CodeRepoCloneService implements OnModuleInit {
    * Wrapped en withLock para evitar race si otro thread dispara clone simultáneo.
    */
   scheduleClone(repoId: string): void {
+    this.logger.log(`[scheduleClone] triggered repo=${repoId}`);
     void this.withLock(repoId, async () => {
       try {
         await this.doCloneOrPull(repoId);
+        this.logger.log(`[scheduleClone] completed repo=${repoId}`);
       } catch (err: any) {
-        this.logger.warn(`[scheduleClone] failed for ${repoId}: ${scrubSecrets(err.message ?? String(err))}`);
+        this.logger.warn(`[scheduleClone] failed repo=${repoId} error="${scrubSecrets(err.message ?? String(err))}"`);
       }
     });
   }
@@ -119,9 +121,20 @@ export class CodeRepoCloneService implements OnModuleInit {
     if (!repo) throw new Error(`Code repository ${repoId} not found`);
 
     const needsClone = repo.cloneStatus !== 'ready';
-    const isStale = !needsClone && (!repo.lastPulledAt || Date.now() - repo.lastPulledAt.getTime() > maxAgeMs);
+    const ageMs = repo.lastPulledAt ? Date.now() - repo.lastPulledAt.getTime() : Infinity;
+    const isStale = !needsClone && ageMs > maxAgeMs;
 
-    if (!needsClone && !isStale) return;
+    if (!needsClone && !isStale) {
+      this.logger.debug(
+        `[ensureFresh] skip repo=${repoId} status=ready age=${Math.round(ageMs / 1000)}s`,
+      );
+      return;
+    }
+
+    const reason = needsClone
+      ? `status=${repo.cloneStatus}`
+      : `stale (age=${Math.round(ageMs / 1000)}s > maxAge=${Math.round(maxAgeMs / 1000)}s)`;
+    this.logger.log(`[ensureFresh] pulling repo=${repoId} reason="${reason}"`);
 
     await this.withLock(repoId, () => this.doCloneOrPull(repoId));
   }
@@ -229,6 +242,19 @@ export class CodeRepoCloneService implements OnModuleInit {
       const authUrl = this.authUrl(config.owner, config.repo, token);
       const cleanUrl = this.cleanUrl(config.owner, config.repo);
 
+      // Capturar SHA actual antes del fetch para diagnosticar si el pull avanzó.
+      let oldSha: string | null = null;
+      if (hasGitDir) {
+        try {
+          oldSha = (await simpleGit(dest).revparse(['HEAD'])).trim();
+        } catch {
+          // .git existe pero corrupto — el fetch/reset abajo lo recuperará
+        }
+      }
+      this.logger.log(
+        `[doCloneOrPull] start repo=${repoId} mode=${hasGitDir ? `pull (current=${oldSha?.slice(0, 7) ?? 'unknown'})` : 'fresh-clone'} branch=${config.branch}`,
+      );
+
       if (hasGitDir) {
         // Existing clone: fetch + reset to origin branch (más robusto que pull si hubo historia divergente).
         // Pasamos authUrl como primer argumento de fetch() para que git use las credenciales
@@ -236,7 +262,13 @@ export class CodeRepoCloneService implements OnModuleInit {
         // origin a cleanUrl antes del fetch por si un clone previo hubiera dejado el PAT filtrado.
         const git = simpleGit(dest);
         await git.remote(['set-url', 'origin', cleanUrl]);
-        await git.fetch(authUrl, config.branch);
+        // Refspec explícito: sin él, `git fetch <url> <branch>` es anónimo —
+        // solo actualiza FETCH_HEAD, NO refs/remotes/origin/<branch>. Eso
+        // hacía que el siguiente `git reset --hard origin/<branch>` reseteara
+        // contra un origin/<branch> stale, dejando el clone permanentemente
+        // en el commit inicial sin importar cuántas veces se llamara pull.
+        const refspec = `+refs/heads/${config.branch}:refs/remotes/origin/${config.branch}`;
+        await git.raw(['fetch', authUrl, refspec]);
         await git.checkout(config.branch);
         await git.reset(['--hard', `origin/${config.branch}`]);
       } else {
@@ -273,6 +305,17 @@ export class CodeRepoCloneService implements OnModuleInit {
 
       const sha = (await simpleGit(dest).revparse(['HEAD'])).trim();
 
+      // Conteo de archivos commiteados — verifica que el reset --hard trajo
+      // el árbol esperado. `git ls-tree -r HEAD --name-only` lee del index,
+      // no del filesystem.
+      let fileCount = 0;
+      try {
+        const lsTree = await simpleGit(dest).raw(['ls-tree', '-r', 'HEAD', '--name-only']);
+        fileCount = lsTree.split('\n').filter(Boolean).length;
+      } catch {
+        // best-effort — el conteo es solo diagnóstico
+      }
+
       await this.prisma.codeRepository.update({
         where: { id: repoId },
         data: {
@@ -284,7 +327,11 @@ export class CodeRepoCloneService implements OnModuleInit {
         },
       });
 
-      this.logger.log(`[doCloneOrPull] ${repoId} ready at ${sha.slice(0, 7)}`);
+      const changed = oldSha && oldSha !== sha;
+      const transition = oldSha
+        ? `${oldSha.slice(0, 7)} → ${sha.slice(0, 7)} ${changed ? '(updated)' : '(no changes)'}`
+        : sha.slice(0, 7);
+      this.logger.log(`[doCloneOrPull] success repo=${repoId} ${transition} files=${fileCount}`);
       return { sha };
     } catch (err: any) {
       const scrubbed = scrubSecrets(String(err?.message ?? err));
@@ -295,6 +342,7 @@ export class CodeRepoCloneService implements OnModuleInit {
           lastSyncError: scrubbed.slice(0, 500),
         },
       });
+      this.logger.error(`[doCloneOrPull] FAILED repo=${repoId} error="${scrubbed}"`);
       throw new Error(scrubbed);
     }
   }

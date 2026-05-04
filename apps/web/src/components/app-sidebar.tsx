@@ -67,10 +67,10 @@ const proyectosItems = [
     description: "Matriz de proyectos",
   },
   {
-    title: "Definiciones",
+    title: "Vault",
     url: "/proyectos/definiciones",
     icon: BookMarked,
-    description: "Definiciones de negocio",
+    description: "Vault de definiciones de negocio",
   },
 ]
 
