@@ -1,5 +1,6 @@
 import { readFileSync } from 'fs';
 import { extname } from 'path';
+import { Logger } from '@nestjs/common';
 import type { MultimodalToolResult } from '../agent-tool.interface';
 import { readPdf } from './pdf-reader';
 import { readImage } from './image-reader';
@@ -65,7 +66,9 @@ export async function readDocument(
   } catch (err: unknown) {
     // Log server-side pero NO exponer err.message al cliente: puede contener
     // paths absolutos, info de libvips/sharp, o metadatos del sistema.
-    console.warn(`[document-reader] Failed to read "${name}" (${ext}):`, err);
+    new Logger('DocumentReader').warn(
+      `Failed to read "${name}" (${ext}): ${err instanceof Error ? err.message : String(err)}`,
+    );
     return {
       text: JSON.stringify({
         error: 'No se pudo leer el documento',

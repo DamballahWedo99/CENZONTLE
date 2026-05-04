@@ -471,10 +471,25 @@ export class StoryGenerationService {
     //
     // Alineado con `STORIES_HARD_TIMEOUT_MS` del controller (45 min) —
     // si bajas uno, baja el otro.
+    // `defaultHeaders.anthropic-beta: extended-cache-ttl-2025-04-11`:
+    // habilita TTL de 1 hora en cache_control (vs 5 min por default).
+    //
+    // Justificación (2026-05-04): runs reales de stories pueden tomar 15-20
+    // minutos (3 stories × 4-5 iters TL × 2-3 iters QA + agentes 4 y 5). Con
+    // TTL=5min, el cache se renueva 3-4 veces durante el run, pagando
+    // cache_create varias veces por el mismo contenido. Con TTL=1h, una
+    // sola escritura cubre todo el run.
+    //
+    // Trade-off: cache_create con TTL=1h cuesta 2× input (vs 1.25× del 5min),
+    // pero solo se paga 1 vez. Costo neto: 2× × 1 = 2× vs 1.25× × 4 = 5× —
+    // ahorro de ~60% en cache_create para runs largos.
     this.client = new Anthropic({
       apiKey: apiKey || undefined,
       timeout: 45 * 60 * 1000,
       fetch: anthropicFetch,
+      defaultHeaders: {
+        'anthropic-beta': 'extended-cache-ttl-2025-04-11',
+      },
     });
 
     // PO lee contexto de negocio (docs de iniciativa + vault de definiciones).
@@ -3401,9 +3416,35 @@ Reglas:
       forceTerminalOnLastIter,
     } = params;
 
+    // Diagnóstico de cache: el cache_control de Anthropic activa por breakpoint
+    // INDEPENDIENTE — solo cachea los bloques que individualmente superan 1024
+    // tokens (~4096 chars). Tenemos 2 breakpoints (system[0]=commonContextBlock,
+    // system[1]=roleSystemPrompt); puede activar uno, el otro, ambos, o ninguno.
+    // Loggeamos AMBOS tamaños para no mentir sobre cuál activó.
+    //
+    // NOTA STORY-GEN: a diferencia de epic/diagram, aquí el commonContextBlock
+    // es ESTABLE entre los 3 agentes (PO/TL/QA) — la idea original era que el
+    // cache se reusara entre agentes. Sin embargo, los toolsets cambian por
+    // rol, lo cual invalida el cache key entre agentes (Fix #1 pendiente).
+    // Dentro del MISMO agente, el cache sí se reusa entre iters.
+    const commonContextChars = commonContextBlock.length;
+    const commonContextEstTokens = Math.ceil(commonContextChars / 4);
+    const roleSystemChars = roleSystemPrompt.length;
+    const roleSystemEstTokens = Math.ceil(roleSystemChars / 4);
+    const activeBreakpoints: string[] = [];
+    if (commonContextChars >= 4096) activeBreakpoints.push('commonContext');
+    if (roleSystemChars >= 4096) activeBreakpoints.push('roleSystemPrompt');
     this.logger.log(
-      `[StoryGen:${role.toUpperCase()}] ▶ loop start: maxIter=${maxIterations} maxTokens=${maxTokens} tools=${agentToolset.length}+terminal thinking=${thinkingEnabled ? `adaptive(${effort})` : 'off'}`,
+      `[StoryGen:${role.toUpperCase()}] ▶ loop start: maxIter=${maxIterations} maxTokens=${maxTokens} tools=${agentToolset.length}+terminal thinking=${thinkingEnabled ? `adaptive(${effort})` : 'off'} ` +
+        `commonContext=${commonContextChars} chars (~${commonContextEstTokens} tokens), roleSystemPrompt=${roleSystemChars} chars (~${roleSystemEstTokens} tokens). ` +
+        `Cache ${activeBreakpoints.length > 0 ? `✅ activará en: [${activeBreakpoints.join(', ')}]` : '⚠️ NO activará (ambos < 1024 tokens)'}.`,
     );
+
+    // Acumuladores para el resumen total al final del run.
+    let totalInputTokens = 0;
+    let totalOutputTokens = 0;
+    let totalCacheRead = 0;
+    let totalCacheCreate = 0;
 
     const messages: Anthropic.Messages.MessageParam[] = [
       { role: 'user', content: initialUserContent },
@@ -3453,11 +3494,11 @@ Reglas:
           system: [
             // El bloque comun se cachea (ephemeral, TTL 5 min) para que los
             // 3 agentes consecutivos lo reutilicen sin re-pagar los input tokens.
-            { type: 'text', text: commonContextBlock, cache_control: { type: 'ephemeral' } },
+            { type: 'text', text: commonContextBlock, cache_control: { type: 'ephemeral', ttl: '1h' } },
             // Cacheamos también el role prompt — Anthropic permite hasta 4
             // cache breakpoints. Esto reduce el costo del 2do/3er agente cuando
             // su prompt no cambia entre iters de su propio loop.
-            { type: 'text', text: roleSystemPrompt, cache_control: { type: 'ephemeral' } },
+            { type: 'text', text: roleSystemPrompt, cache_control: { type: 'ephemeral', ttl: '1h' } },
           ],
           // Adaptive thinking + effort (Sonnet 4.6+). Auto-enables interleaved
           // thinking entre tool_use calls, sin beta header. `output_config.effort`
@@ -3553,6 +3594,50 @@ Reglas:
           `thinking_blocks=${thinkingBlocksCount} tool_calls=${toolUseBlocksCount}` +
           `${thinkingActive ? ' 🧠' : ''}${isForcedTerminalTurn ? ' 🎯FORCED' : ''}${cacheRead > 0 ? ' 💾CACHE_HIT' : ''}`,
       );
+
+      // Acumular para resumen final.
+      totalInputTokens += inputTokens;
+      totalOutputTokens += outputTokens;
+      totalCacheRead += cacheRead;
+      totalCacheCreate += cacheCreate;
+
+      // Detección de regresión silenciosa.
+      //
+      // CALIBRACIÓN (2026-05-04): el guard original `cache_create > 0` era
+      // FALSE POSITIVE. Anthropic emite cache_create > 0 en iter > 0 cuando
+      // el messages array crece (assistant + tool_results) — eso es ~500-1000
+      // tokens por iter y NO es invalidación. La regresión REAL es cuando
+      // cache_create supera una fracción significativa del cache_read.
+      // Heurística: warning si cache_create > cache_read * 0.5.
+      //
+      // NOTA STORY-GEN: en iter 0 de TL y QA, cache_create > 0 es ESPERADO
+      // — los tools cambiaron vs el agente anterior, lo cual invalida el
+      // cache (Fix #1 pendiente). El warning solo dispara en iter > 0 del
+      // mismo agente.
+      const cacheRatio = cacheRead > 0 ? cacheCreate / cacheRead : (cacheCreate > 0 ? Infinity : 0);
+      if (iteration > 0 && cacheRatio > 0.5) {
+        this.logger.warn(
+          `[StoryGen:${role.toUpperCase()}] ⚠️ POSIBLE REGRESIÓN at iter ${iteration}: cache_create=${cacheCreate} alto vs cache_read=${cacheRead} (ratio create/read=${cacheRatio.toFixed(2)}, threshold 0.5). ` +
+            `Posibles causas: (1) tools[] mutaron entre iters, (2) system prompt cambió, (3) commonContextBlock se modificó. ` +
+            `Si el ratio se mantiene alto en >2 iters consecutivas, hay un problema — investigar.`,
+        );
+      }
+
+      // Resumen al terminar el loop natural (último iter del cap).
+      // Los `return` tempranos por terminal tool exitoso salen ANTES y NO
+      // emiten este resumen — para esos casos, los logs per-iter ya tienen
+      // la info necesaria.
+      const isLastIter = iteration === maxIterations - 1;
+      if (isLastIter) {
+        const ratio = totalCacheCreate > 0
+          ? (totalCacheRead / totalCacheCreate).toFixed(1)
+          : '∞';
+        this.logger.log(
+          `[StoryGen:${role.toUpperCase()}] ▣ run summary: iters=${iteration + 1} ` +
+            `totals(in=${totalInputTokens} out=${totalOutputTokens} cache_read=${totalCacheRead} cache_create=${totalCacheCreate}) ` +
+            `ratio_read_to_write=${ratio}:1 — target ≥4:1 (anti-thrashing OK).`,
+        );
+      }
 
       const assistantContent = response.content;
       messages.push({ role: 'assistant', content: assistantContent });

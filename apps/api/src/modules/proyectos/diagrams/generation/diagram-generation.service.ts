@@ -275,10 +275,18 @@ export class DiagramGenerationService {
     // ~5 min). Pasamos `fetch: anthropicFetch` para que el SDK use un
     // dispatcher con `bodyTimeout: 0`. Ver
     // `apps/api/src/lib/anthropic-fetch.ts`.
+    // `defaultHeaders.anthropic-beta: extended-cache-ttl-2025-04-11`:
+    // habilita TTL de 1 hora en cache_control. Crítico aquí porque iters
+    // de diagram pueden tomar 5-6 min cada una (output de 20K+ tokens con
+    // thinking extendido), excediendo el TTL default de 5min y forzando
+    // cache_create mid-iter. Ver doc completa en story-generation.
     this.client = new Anthropic({
       apiKey: apiKey || undefined,
       timeout: 30 * 60 * 1000,
       fetch: anthropicFetch,
+      defaultHeaders: {
+        'anthropic-beta': 'extended-cache-ttl-2025-04-11',
+      },
     });
     this.tools = [initDocsTool, codeGlob, codeGrep, codeRead, vaultGlob, vaultGrep, vaultRead];
   }
@@ -750,9 +758,40 @@ export class DiagramGenerationService {
     ];
 
     const ctx: AgentToolContext = { initiativeId: epicContext.initiative.id };
+    // El `contextBlock` (epic + repos + designs) viaja en el `system` array
+    // (NO en `messages[0]`) para que se cachee con `cache_control: ephemeral`.
+    // Sin esto, cada iteración del loop re-paga el contextBlock como
+    // `input_no_cache`. Ver `system: [...]` abajo.
+    //
+    // El kickoff message MENCIONA explícitamente la ubicación del contexto
+    // (system) para que un futuro refactor que mueva el contextBlock fuera del
+    // system rompa de forma visible (no silenciosa).
     const messages: Anthropic.Messages.MessageParam[] = [
-      { role: 'user', content: contextBlock },
+      { role: 'user', content: 'El contexto completo (épica, iniciativa, repos, diseños) está en el system prompt. Comienza el análisis del diagrama siguiendo el flujo obligatorio (outline_flow → draft_diagram → submit_diagram).' },
     ];
+
+    // Diagnóstico de cache: el cache_control de Anthropic activa por breakpoint
+    // INDEPENDIENTE — solo cachea los bloques que individualmente superan 1024
+    // tokens (~4096 chars). Tenemos 2 breakpoints (system[0]=systemPrompt,
+    // system[1]=contextBlock); puede activar uno, el otro, ambos, o ninguno.
+    // Loggeamos AMBOS tamaños para no mentir sobre cuál activó.
+    const systemPromptChars = systemPrompt.length;
+    const systemPromptEstTokens = Math.ceil(systemPromptChars / 4);
+    const contextBlockChars = contextBlock.length;
+    const contextBlockEstTokens = Math.ceil(contextBlockChars / 4);
+    const activeBreakpoints: string[] = [];
+    if (systemPromptChars >= 4096) activeBreakpoints.push('systemPrompt');
+    if (contextBlockChars >= 4096) activeBreakpoints.push('contextBlock');
+    this.logger.log(
+      `[DiagramAgent] ▶ loop start: systemPrompt=${systemPromptChars} chars (~${systemPromptEstTokens} tokens), contextBlock=${contextBlockChars} chars (~${contextBlockEstTokens} tokens). ` +
+        `Cache ${activeBreakpoints.length > 0 ? `✅ activará en: [${activeBreakpoints.join(', ')}]` : '⚠️ NO activará (ambos < 1024 tokens)'}.`,
+    );
+
+    // Acumuladores para el resumen total al final del run.
+    let totalInputTokens = 0;
+    let totalOutputTokens = 0;
+    let totalCacheRead = 0;
+    let totalCacheCreate = 0;
 
     let currentPhase: 'researching' | 'analyzing' | 'composing' = 'researching';
     // Gate per-session que fuerza al agente a invocar `outline_flow` antes de
@@ -826,7 +865,15 @@ export class DiagramGenerationService {
           model: MODEL,
           // max_tokens INCLUYE thinking_budget + output.
           max_tokens: diagramMaxTokens,
-          system: [{ type: 'text', text: systemPrompt, cache_control: { type: 'ephemeral' } }],
+          // 2 cache breakpoints (Anthropic permite hasta 4):
+          //  - [0] systemPrompt: estable entre runs del mismo `type` de diagrama.
+          //  - [1] contextBlock: estable durante TODO el loop del agente
+          //    (epic + repos + designs no cambian entre iters). Cachear esto
+          //    convierte 5-10 iteraciones de input_no_cache en cache_reads.
+          system: [
+            { type: 'text', text: systemPrompt, cache_control: { type: 'ephemeral', ttl: '1h' } },
+            { type: 'text', text: contextBlock, cache_control: { type: 'ephemeral', ttl: '1h' } },
+          ],
           // Branching de configuración por turno:
           //   - Si shouldForceOutlineTool: fuerza outline_flow a nivel API,
           //     desactiva thinking (incompatible con tool_choice: tool).
@@ -862,12 +909,6 @@ export class DiagramGenerationService {
       let totalThinkingChars = 0;
       for await (const evt of stream) {
         evtCount++;
-        const elapsed = Date.now() - iterStart;
-        // Log TODOS los tipos de events (no solo content_block_delta) para
-        // detectar gaps largos sin events.
-        this.logger.log(
-          `[DiagramAgent.iter${iteration}] raw event #${evtCount} type=${evt.type} elapsed=${elapsed}ms`,
-        );
         // Tool_use TERMINAL (submit_*): emite aviso al user para que vea
         // que el agente sigue trabajando mientras construye el JSON final.
         if (evt.type === 'content_block_start') {
@@ -884,25 +925,21 @@ export class DiagramGenerationService {
         if (delta.type === 'text_delta' && delta.text?.trim()) {
           textDeltaCount++;
           totalTextChars += delta.text.length;
-          this.logger.log(
-            `[DiagramAgent.iter${iteration}] ⬆ text_delta #${textDeltaCount} (${delta.text.length} chars, total=${totalTextChars}): "${delta.text.slice(0, 80)}${delta.text.length > 80 ? '…' : ''}"`,
-          );
           subject.next({
             data: { type: 'thinking', delta: scrubSecrets(delta.text), timestamp: new Date().toISOString() },
           });
         } else if (delta.type === 'thinking_delta' && delta.thinking?.trim()) {
           thinkingDeltaCount++;
           totalThinkingChars += delta.thinking.length;
-          this.logger.log(
-            `[DiagramAgent.iter${iteration}] 🧠 thinking_delta #${thinkingDeltaCount} (${delta.thinking.length} chars, total=${totalThinkingChars}): "${delta.thinking.slice(0, 80)}${delta.thinking.length > 80 ? '…' : ''}"`,
-          );
           subject.next({
             data: { type: 'thinking', delta: scrubSecrets(delta.thinking), timestamp: new Date().toISOString() },
           });
         }
       }
+      // Resumen agregado del stream: 1 línea por iter con totales (vs 5000+
+      // líneas per-event que tenía antes). Suficiente para diagnóstico.
       this.logger.log(
-        `[DiagramAgent.iter${iteration}] 🏁 raw iterator done — total events=${evtCount} text_deltas=${textDeltaCount} (${totalTextChars} chars) thinking_deltas=${thinkingDeltaCount} (${totalThinkingChars} chars) duration=${Date.now() - iterStart}ms`,
+        `[DiagramAgent.iter${iteration}] 🏁 stream done — events=${evtCount} text_deltas=${textDeltaCount}(${totalTextChars}c) thinking_deltas=${thinkingDeltaCount}(${totalThinkingChars}c) duration=${Date.now() - iterStart}ms`,
       );
       // El SDK acumula los blocks internamente — finalMessage() los reconstruye
       // como Message tras iterar el stream completo.
@@ -949,6 +986,44 @@ export class DiagramGenerationService {
           `thinking_blocks=${thinkingBlocksCount} tool_calls=${toolUseBlocksCount}` +
           `${thinkingActive ? ' 🧠' : ''}${shouldForceOutlineTool ? ' 🎯FORCED' : ''}${cacheRead > 0 ? ' 💾CACHE_HIT' : ''}`,
       );
+
+      // Acumular para resumen final.
+      totalInputTokens += inputTokens;
+      totalOutputTokens += outputTokens;
+      totalCacheRead += cacheRead;
+      totalCacheCreate += cacheCreate;
+
+      // Detección de regresión silenciosa.
+      //
+      // CALIBRACIÓN (2026-05-04): el warning original `cache_create > 0` era
+      // FALSE POSITIVE. Anthropic emite cache_create > 0 en iter > 0 cuando
+      // el messages array crece (assistant + tool_results) — eso es ~500-1000
+      // tokens por iter y NO es invalidación. La regresión REAL es cuando
+      // cache_create supera una fracción significativa del cache_read.
+      // Heurística: warning si cache_create > cache_read * 0.5.
+      const cacheRatio = cacheRead > 0 ? cacheCreate / cacheRead : (cacheCreate > 0 ? Infinity : 0);
+      if (iteration > 0 && cacheRatio > 0.5) {
+        this.logger.warn(
+          `[DiagramAgent] ⚠️ POSIBLE REGRESIÓN at iter ${iteration}: cache_create=${cacheCreate} alto vs cache_read=${cacheRead} (ratio create/read=${cacheRatio.toFixed(2)}, threshold 0.5). ` +
+            `Posibles causas: (1) tools[] mutaron entre iters, (2) system prompt cambió, (3) contextBlock se modificó. ` +
+            `Si el ratio se mantiene alto en >2 iters consecutivas, el fix anti-thrashing está roto — investigar.`,
+        );
+      }
+
+      // Resumen al terminar el loop natural (último iter del cap).
+      // Los `return` tempranos por submit_diagram exitoso salen ANTES y se
+      // logguean en su propio sitio. Aquí cubrimos el caso timeout/cap.
+      const isLastIter = iteration === MAX_TOOL_ITERATIONS - 1;
+      if (isLastIter) {
+        const ratio = totalCacheCreate > 0
+          ? (totalCacheRead / totalCacheCreate).toFixed(1)
+          : '∞';
+        this.logger.log(
+          `[DiagramAgent] ▣ run summary: iters=${iteration + 1} ` +
+            `totals(in=${totalInputTokens} out=${totalOutputTokens} cache_read=${totalCacheRead} cache_create=${totalCacheCreate}) ` +
+            `ratio_read_to_write=${ratio}:1 — target ≥4:1 (anti-thrashing OK).`,
+        );
+      }
 
       // `assistantContent` puede contener `thinking`, `redacted_thinking`,
       // `text` y `tool_use` blocks. Los pasamos tal cual al siguiente turno
@@ -1557,9 +1632,39 @@ export class DiagramGenerationService {
     ];
 
     const ctx: AgentToolContext = { initiativeId: epicContext.initiative.id };
+    // El `contextBlock` (epic + diagrama existente + repos) viaja en el `system`
+    // array (NO en `messages[0]`) para que se cachee con `cache_control:
+    // ephemeral`. Sin esto, cada iteración del loop re-paga el contextBlock
+    // como `input_no_cache`. Ver `system: [...]` abajo.
+    //
+    // El kickoff message MENCIONA explícitamente la ubicación del contexto
+    // para que un futuro refactor que mueva el contextBlock rompa de forma
+    // visible (no silenciosa).
     const messages: Anthropic.Messages.MessageParam[] = [
-      { role: 'user', content: contextBlock },
+      { role: 'user', content: 'El contexto completo (épica, iniciativa, diagrama existente, repos) está en el system prompt. Redacta el documento de integración (`integration_flow.md`) basándote en ese contexto y emite el resultado vía submit_integration_doc.' },
     ];
+
+    // Diagnóstico de cache: el cache_control de Anthropic activa por breakpoint
+    // INDEPENDIENTE — solo cachea los bloques que individualmente superan 1024
+    // tokens. Loggeamos systemPrompt + contextBlock para no mentir sobre cuál
+    // activó (el systemPrompt típicamente es grande y activa solo).
+    const systemPromptChars = systemPrompt.length;
+    const systemPromptEstTokens = Math.ceil(systemPromptChars / 4);
+    const contextBlockChars = contextBlock.length;
+    const contextBlockEstTokens = Math.ceil(contextBlockChars / 4);
+    const activeBreakpoints: string[] = [];
+    if (systemPromptChars >= 4096) activeBreakpoints.push('systemPrompt');
+    if (contextBlockChars >= 4096) activeBreakpoints.push('contextBlock');
+    this.logger.log(
+      `[DiagramDoc] ▶ loop start: systemPrompt=${systemPromptChars} chars (~${systemPromptEstTokens} tokens), contextBlock=${contextBlockChars} chars (~${contextBlockEstTokens} tokens). ` +
+        `Cache ${activeBreakpoints.length > 0 ? `✅ activará en: [${activeBreakpoints.join(', ')}]` : '⚠️ NO activará (ambos < 1024 tokens)'}.`,
+    );
+
+    // Acumuladores para el resumen total al final del run.
+    let totalInputTokens = 0;
+    let totalOutputTokens = 0;
+    let totalCacheRead = 0;
+    let totalCacheCreate = 0;
 
     let currentPhase: 'researching' | 'analyzing' | 'composing' = 'researching';
 
@@ -1611,7 +1716,13 @@ export class DiagramGenerationService {
         {
           model: MODEL,
           max_tokens: diagramMaxTokens,
-          system: [{ type: 'text', text: systemPrompt, cache_control: { type: 'ephemeral' } }],
+          // 2 cache breakpoints: systemPrompt + contextBlock. El segundo
+          // captura el `epicContext + existingDiagram + repos` que es estable
+          // durante todo el loop — convierte iteraciones en cache_reads.
+          system: [
+            { type: 'text', text: systemPrompt, cache_control: { type: 'ephemeral', ttl: '1h' } },
+            { type: 'text', text: contextBlock, cache_control: { type: 'ephemeral', ttl: '1h' } },
+          ],
           ...(diagramEnabled
             ? {
                 thinking: { type: 'adaptive' as const },
@@ -1692,6 +1803,36 @@ export class DiagramGenerationService {
           `thinking_blocks=${thinkingBlocksCount} tool_calls=${toolUseBlocksCount}` +
           `${diagramEnabled ? ' 🧠' : ''}${cacheRead > 0 ? ' 💾CACHE_HIT' : ''}`,
       );
+
+      // Acumular para resumen final.
+      totalInputTokens += inputTokens;
+      totalOutputTokens += outputTokens;
+      totalCacheRead += cacheRead;
+      totalCacheCreate += cacheCreate;
+
+      // Detección de regresión silenciosa: ver doc completo en agente principal.
+      // Heurística: warning si cache_create > cache_read * 0.5 (threshold 0.5).
+      const cacheRatio = cacheRead > 0 ? cacheCreate / cacheRead : (cacheCreate > 0 ? Infinity : 0);
+      if (iteration > 0 && cacheRatio > 0.5) {
+        this.logger.warn(
+          `[DiagramDoc] ⚠️ POSIBLE REGRESIÓN at iter ${iteration}: cache_create=${cacheCreate} alto vs cache_read=${cacheRead} (ratio create/read=${cacheRatio.toFixed(2)}, threshold 0.5). ` +
+            `Posibles causas: (1) tools[] mutaron entre iters, (2) system prompt cambió, (3) contextBlock se modificó. ` +
+            `Si el ratio se mantiene alto en >2 iters consecutivas, el fix anti-thrashing está roto — investigar.`,
+        );
+      }
+
+      // Resumen al terminar el loop natural (último iter del cap).
+      const isLastIter = iteration === MAX_DOC_ITERATIONS - 1;
+      if (isLastIter) {
+        const ratio = totalCacheCreate > 0
+          ? (totalCacheRead / totalCacheCreate).toFixed(1)
+          : '∞';
+        this.logger.log(
+          `[DiagramDoc] ▣ run summary: iters=${iteration + 1} ` +
+            `totals(in=${totalInputTokens} out=${totalOutputTokens} cache_read=${totalCacheRead} cache_create=${totalCacheCreate}) ` +
+            `ratio_read_to_write=${ratio}:1 — target ≥4:1 (anti-thrashing OK).`,
+        );
+      }
 
       const assistantContent = response.content;
       messages.push({ role: 'assistant', content: assistantContent });
@@ -2218,7 +2359,7 @@ ${availableNodeIds}
 ## Proceso obligatorio
 
 ### Fase A — INVESTIGAR (research sobre el diagrama existente)
-1. **Lee la épica y su iniciativa** (contexto en el primer mensaje).
+1. **Lee la épica y su iniciativa** (contexto en el system prompt).
 2. **Lee documentos adjuntos**: usa \`read_initiative_documents\` para ver PDFs/imágenes/markdowns de la iniciativa.
 3. **Explora código REAL**: usa \`code_glob\`, \`code_grep\`, \`code_read\`.
 4. **Consulta el Vault**: usa \`vault_glob\`, \`vault_grep\`, \`vault_read\`.
@@ -3299,7 +3440,7 @@ Básate en vault_grep (Vault de definiciones y conocimiento de negocio) y en los
 ANTES de emitir el diagrama final sigues un flujo de TRES fases con auto-revisión en medio. Esto imita el Chain-of-Thought + Self-Reflection que los equipos de arquitectura usan en reviews.
 
 ### Fase A — INVESTIGAR
-1. **Lee la épica y su iniciativa** (ya tienes el contexto completo en el primer mensaje: título, descripción, alcance, criterios, impactos, dependencias, sistemas afectados).
+1. **Lee la épica y su iniciativa** (ya tienes el contexto completo en el system prompt: título, descripción, alcance, criterios, impactos, dependencias, sistemas afectados).
 2. **Lee documentos adjuntos**: usa \`read_initiative_documents\` para ver PDFs/imágenes/markdowns de la iniciativa. Los PDFs e imágenes vienen como adjuntos multimodales — los ves directamente.
 3. **Explora código REAL**: usa \`code_glob\`, \`code_grep\`, \`code_read\` para inspeccionar los repos conectados. Confirma que los componentes EXISTEN o DEBEN EXISTIR según la épica.
 4. **Consulta el Vault**: usa \`vault_glob\`, \`vault_grep\`, \`vault_read\` para leer definiciones de negocio, terminología (ej: "PNR", "antifraude", "Sabre DC") con precisión.

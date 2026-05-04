@@ -1,11 +1,13 @@
-import { ArgumentsHost, Catch, ExceptionFilter, HttpStatus } from '@nestjs/common';
+import { ArgumentsHost, Catch, ExceptionFilter, HttpStatus, Logger } from '@nestjs/common';
 import { Prisma } from '@prisma/client';
 import type { Response } from 'express';
 
 @Catch(Prisma.PrismaClientKnownRequestError)
 export class PrismaExceptionFilter implements ExceptionFilter {
+  private readonly logger = new Logger(PrismaExceptionFilter.name);
+
   catch(exception: Prisma.PrismaClientKnownRequestError & { code: string }, host: ArgumentsHost) {
-    console.error(`[PrismaException] Code: ${exception.code}`, exception.message);
+    this.logger.error(`[PrismaException] Code: ${exception.code} ${exception.message}`);
     const ctx = host.switchToHttp();
     const response = ctx.getResponse<Response>();
 
