@@ -72,19 +72,19 @@ export interface AgentTokenSettings {
 
 /** Defaults coincidentes con los `@default(...)` del schema Prisma. */
 export const DEFAULT_AGENT_TOKEN_SETTINGS: Omit<AgentTokenSettings, 'updatedAt' | 'updatedBy'> = {
-  storyPoEffort: 'high',
+  storyPoEffort: 'medium',
   storyPoMaxTokens: 28_000,
   storyPoThinkingEnabled: true,
-  storyTlEffort: 'high',
+  storyTlEffort: 'medium',
   storyTlMaxTokens: 64_000,
   storyTlThinkingEnabled: true,
-  storyQaEffort: 'high',
+  storyQaEffort: 'medium',
   storyQaMaxTokens: 64_000,
   storyQaThinkingEnabled: true,
-  epicEffort: 'high',
+  epicEffort: 'medium',
   epicMaxTokens: 64_000,
   epicThinkingEnabled: true,
-  diagramEffort: 'high',
+  diagramEffort: 'medium',
   diagramMaxTokens: 64_000,
   diagramThinkingEnabled: true,
 };

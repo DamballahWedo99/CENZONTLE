@@ -370,14 +370,6 @@ export class DiagramGenerationController {
       next: (event) => {
         emitCount++;
         const data = event.data as DiagramGenerationEvent;
-        const elapsed = Date.now() - subscribeStart;
-        const preview =
-          data.type === 'thinking' && 'delta' in data
-            ? `delta="${(data.delta || '').slice(0, 60)}${(data.delta || '').length > 60 ? '…' : ''}"`
-            : '';
-        this.logger.log(
-          `[SSE.emit] #${emitCount} type=${data.type} elapsed=${elapsed}ms writableEnded=${res.writableEnded} clientDisconnected=${clientDisconnected} ${preview}`,
-        );
         safeWrite(`data: ${JSON.stringify(event.data)}\n\n`);
         collectedEvents.push(data);
 

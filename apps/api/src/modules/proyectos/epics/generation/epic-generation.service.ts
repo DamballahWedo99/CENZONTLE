@@ -93,10 +93,25 @@ export class EpicGenerationService {
     // silencios largos entre chunks, usamos `fetch: anthropicFetch` que
     // configura un dispatcher con `bodyTimeout: 0`. Ver
     // `apps/api/src/lib/anthropic-fetch.ts`.
+    // `defaultHeaders.anthropic-beta: extended-cache-ttl-2025-04-11`:
+    // habilita TTL de 1 hora en cache_control. Para runs largos (>5min) el
+    // TTL default de 5min expira mid-run, forzando cache_create múltiples
+    // veces por el mismo contenido. Ver doc completa en story-generation.
+    //
+    // NOTA HISTÓRICA (2026-05-04): se intentó habilitar el advisor tool
+    // (Opus consultor) en este agente, pero el smoke test mostró que Sonnet
+    // nunca lo invocaba — los prompts típicos de generación de épicas son
+    // suficientemente directos para que Sonnet maneje sin necesidad de
+    // consulta. El setup quedaba como overhead inútil. Removido y se queda
+    // pendiente decidir si Fase 2 aplica para otros agentes con más
+    // ambigüedad inherente (e.g., TL en story-generation).
     this.client = new Anthropic({
       apiKey: apiKey || undefined,
       timeout: 30 * 60 * 1000,
       fetch: anthropicFetch,
+      defaultHeaders: {
+        'anthropic-beta': 'extended-cache-ttl-2025-04-11',
+      },
     });
     this.tools = [initDocsTool, codeGlob, codeGrep, codeRead, vaultGlob, vaultGrep, vaultRead];
   }
@@ -280,9 +295,45 @@ REGLAS DUROS:
 
     // 4. Tool-use loop
     const ctx: AgentToolContext = { initiativeId };
+    // El `contextBlock` (initiative + épicas existentes + pods + repos) viaja
+    // en el `system` array (NO en `messages[0]`) para que se cachee con
+    // `cache_control: ephemeral`. Sin esto, cada iteración del loop re-paga
+    // el contextBlock como `input_no_cache`. Ver `system: [...]` abajo.
+    //
+    // El kickoff message MENCIONA explícitamente la ubicación del contexto
+    // para que un futuro refactor que mueva el contextBlock rompa de forma
+    // visible (no silenciosa).
     const messages: Anthropic.Messages.MessageParam[] = [
-      { role: 'user', content: contextBlock },
+      { role: 'user', content: 'El contexto completo (iniciativa, pods asignados, épicas existentes, repos) está en el system prompt. Comienza el análisis y propón épicas vía submit_proposals.' },
     ];
+
+    // Diagnóstico de cache: el cache_control de Anthropic activa por breakpoint
+    // INDEPENDIENTE — solo cachea los bloques que individualmente superan 1024
+    // tokens (~4096 chars). Tenemos 2 breakpoints (system[0]=systemPrompt,
+    // system[1]=contextBlock); puede activar uno, el otro, ambos, o ninguno.
+    //
+    // Smoke test (2026-05-04) reveló que con un prompt muy corto, el contextBlock
+    // queda < 1024 tokens pero el systemPrompt sí supera el piso — y el cache SÍ
+    // activa por el systemPrompt. Por eso loggeamos AMBOS para no mentir.
+    const systemPromptChars = systemPrompt.length;
+    const systemPromptEstTokens = Math.ceil(systemPromptChars / 4);
+    const contextBlockChars = contextBlock.length;
+    const contextBlockEstTokens = Math.ceil(contextBlockChars / 4);
+    const activeBreakpoints: string[] = [];
+    if (systemPromptChars >= 4096) activeBreakpoints.push('systemPrompt');
+    if (contextBlockChars >= 4096) activeBreakpoints.push('contextBlock');
+    this.logger.log(
+      `[EpicGen] ▶ loop start: systemPrompt=${systemPromptChars} chars (~${systemPromptEstTokens} tokens), contextBlock=${contextBlockChars} chars (~${contextBlockEstTokens} tokens). ` +
+        `Cache ${activeBreakpoints.length > 0 ? `✅ activará en: [${activeBreakpoints.join(', ')}]` : '⚠️ NO activará (ambos < 1024 tokens)'}.`,
+    );
+
+    // Acumuladores para el resumen total al final del run. El log per-iter
+    // muestra el detalle; el resumen permite ver el ratio agregado de un
+    // vistazo (clave para validar que el fix anti-thrashing funciona).
+    let totalInputTokens = 0;
+    let totalOutputTokens = 0;
+    let totalCacheRead = 0;
+    let totalCacheCreate = 0;
 
     for (let iteration = 0; iteration < MAX_TOOL_ITERATIONS; iteration++) {
       if (signal?.aborted) {
@@ -332,7 +383,14 @@ REGLAS DUROS:
         {
           model: MODEL,
           max_tokens: maxTokens,
-          system: [{ type: 'text', text: systemPrompt, cache_control: { type: 'ephemeral' } }],
+          // 2 cache breakpoints: systemPrompt + contextBlock. El segundo captura
+          // el contexto pesado (initiative + epics existentes + pods + repos)
+          // estable durante todo el loop — convierte 5-15 iteraciones de
+          // `input_no_cache` en `cache_reads` (10× más barato).
+          system: [
+            { type: 'text', text: systemPrompt, cache_control: { type: 'ephemeral', ttl: '1h' } },
+            { type: 'text', text: contextBlock, cache_control: { type: 'ephemeral', ttl: '1h' } },
+          ],
           // Adaptive thinking + effort (Sonnet 4.6+).
           ...(thinkingActive
             ? {
@@ -417,12 +475,58 @@ REGLAS DUROS:
       const toolUseBlocksCount = response.content.filter(
         (b: any) => b.type === 'tool_use',
       ).length;
+
       this.logger.log(
         `[EpicGen] iter ${iteration} stop=${response.stop_reason} dur=${Date.now() - callStart}ms ` +
           `tokens(in=${inputTokens} out=${outputTokens} cache_read=${cacheRead} cache_create=${cacheCreate}) ` +
           `thinking_blocks=${thinkingBlocksCount} tool_calls=${toolUseBlocksCount}` +
           `${thinkingActive ? ' 🧠' : ''}${cacheRead > 0 ? ' 💾CACHE_HIT' : ''}`,
       );
+
+      // Acumular para resumen final.
+      totalInputTokens += inputTokens;
+      totalOutputTokens += outputTokens;
+      totalCacheRead += cacheRead;
+      totalCacheCreate += cacheCreate;
+
+      // Detección de regresión silenciosa.
+      //
+      // CALIBRACIÓN (2026-05-04): el warning original `cache_create > 0` era un
+      // FALSE POSITIVE. Anthropic emite cache_create > 0 en iter > 0 cuando el
+      // messages array crece (assistant + tool_results) — eso es ~500-1000
+      // tokens por iter, esperado y NO es invalidación.
+      //
+      // La regresión REAL es cuando cache_create supera una fracción
+      // significativa del cache_read: el cache se está reescribiendo más de lo
+      // que se reutiliza. Heurística: warning si cache_create > cache_read * 0.5.
+      //
+      // Casos:
+      //   - cache_read=8455, cache_create=715 → ratio 0.08 → ✅ normal
+      //   - cache_read=8455, cache_create=5000 → ratio 0.59 → ⚠️ regresión
+      //   - cache_read=0, cache_create=8455 → ratio ∞ → 🚨 invalidación total
+      const cacheRatio = cacheRead > 0 ? cacheCreate / cacheRead : (cacheCreate > 0 ? Infinity : 0);
+      if (iteration > 0 && cacheRatio > 0.5) {
+        this.logger.warn(
+          `[EpicGen] ⚠️ POSIBLE REGRESIÓN at iter ${iteration}: cache_create=${cacheCreate} alto vs cache_read=${cacheRead} (ratio create/read=${cacheRatio.toFixed(2)}, threshold 0.5). ` +
+            `Posibles causas: (1) tools[] mutaron entre iters, (2) system prompt cambió, (3) contextBlock se modificó. ` +
+            `Si el ratio se mantiene alto en >2 iters consecutivas, el fix anti-thrashing está roto — investigar.`,
+        );
+      }
+
+      // Resumen al terminar (último iter exitoso o cap de iteraciones).
+      // Se emite al final del loop natural — los `return` tempranos por
+      // submit_proposals salen ANTES y se logguean en su propio sitio abajo.
+      const isLastIter = iteration === MAX_TOOL_ITERATIONS - 1;
+      if (isLastIter) {
+        const ratio = totalCacheCreate > 0
+          ? (totalCacheRead / totalCacheCreate).toFixed(1)
+          : '∞';
+        this.logger.log(
+          `[EpicGen] ▣ run summary: iters=${iteration + 1} ` +
+            `totals(in=${totalInputTokens} out=${totalOutputTokens} cache_read=${totalCacheRead} cache_create=${totalCacheCreate}) ` +
+            `ratio_read_to_write=${ratio}:1 — target ≥4:1 (anti-thrashing OK).`,
+        );
+      }
 
       // Collect text and tool-use blocks
       const assistantContent = response.content;

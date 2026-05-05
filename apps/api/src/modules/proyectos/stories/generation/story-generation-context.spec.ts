@@ -300,58 +300,70 @@ describe('Integración — handoff llega al request HTTP de Anthropic', () => {
     // (hace push del assistant después de stream()). Sin clonar, la captura
     // queda con el estado post-mutación y las aserciones del primer turn
     // fallarían espuriamente.
+    //
+    // Desde 2026-05-04 (fix del advisor) `runAgentLoop` llama a
+    // `client.beta.messages.stream()` (no el namespace standard) para
+    // habilitar el `advisor_20260301` tool. El mock expone AMBOS paths
+    // apuntando al mismo handler — esto deja al test agnóstico al namespace
+    // y evita que un futuro pivot de vuelta al standard rompa otra vez.
+    const streamHandler = (args: any) => {
+      streamCalls.push(JSON.parse(JSON.stringify(args)));
+      return {
+        // Mock de stream.on() — defensa por si el service vuelve a usar
+        // el helper en el futuro.
+        on: (_event: string, _handler: (delta: string) => void) => {},
+        // Async-iterable: el service ahora itera el stream con
+        // `for await (const evt of stream)` para capturar text_delta y
+        // thinking_delta en vivo. En tests no emitimos deltas — el
+        // iterator se cierra inmediatamente y el flujo continúa con
+        // finalMessage().
+        [Symbol.asyncIterator]: async function* () {
+          // No-op: 0 events.
+        },
+        finalMessage: async () => ({
+          id: 'msg_test_1',
+          type: 'message',
+          role: 'assistant',
+          model: 'claude-sonnet-4-test',
+          content: [
+            {
+              type: 'tool_use',
+              id: 'toolu_test_1',
+              name: 'submit_po_outline',
+              input: {
+                stories: [
+                  {
+                    title: 'Test story',
+                    description: 'Descripción breve',
+                    storyPoints: 3,
+                    podId: 'pod-1',
+                    labels: ['frontend'],
+                    po: {
+                      background: 'bg',
+                      objective: 'obj',
+                      userStory: 'Como PO quiero Y para Z',
+                      whatHowWhen: { what: 'w', how: 'h', when: 'sprint 1' },
+                      acceptanceCriteria: ['c1', 'c2', 'c3'],
+                      additionalNotes: '',
+                    },
+                  },
+                ],
+                relatedDocuments: [],
+              },
+            },
+          ],
+          stop_reason: 'tool_use',
+          usage: { input_tokens: 100, output_tokens: 50 },
+        }),
+      };
+    };
     (service as any).client = {
       messages: {
-        stream: (args: any) => {
-          streamCalls.push(JSON.parse(JSON.stringify(args)));
-          return {
-            // Mock de stream.on() — defensa por si el service vuelve a usar
-            // el helper en el futuro.
-            on: (_event: string, _handler: (delta: string) => void) => {},
-            // Async-iterable: el service ahora itera el stream con
-            // `for await (const evt of stream)` para capturar text_delta y
-            // thinking_delta en vivo. En tests no emitimos deltas — el
-            // iterator se cierra inmediatamente y el flujo continúa con
-            // finalMessage().
-            [Symbol.asyncIterator]: async function* () {
-              // No-op: 0 events.
-            },
-            finalMessage: async () => ({
-              id: 'msg_test_1',
-              type: 'message',
-              role: 'assistant',
-              model: 'claude-sonnet-4-test',
-              content: [
-                {
-                  type: 'tool_use',
-                  id: 'toolu_test_1',
-                  name: 'submit_po_outline',
-                  input: {
-                    stories: [
-                      {
-                        title: 'Test story',
-                        description: 'Descripción breve',
-                        storyPoints: 3,
-                        podId: 'pod-1',
-                        labels: ['frontend'],
-                        po: {
-                          background: 'bg',
-                          objective: 'obj',
-                          userStory: 'Como PO quiero Y para Z',
-                          whatHowWhen: { what: 'w', how: 'h', when: 'sprint 1' },
-                          acceptanceCriteria: ['c1', 'c2', 'c3'],
-                          additionalNotes: '',
-                        },
-                      },
-                    ],
-                    relatedDocuments: [],
-                  },
-                },
-              ],
-              stop_reason: 'tool_use',
-              usage: { input_tokens: 100, output_tokens: 50 },
-            }),
-          };
+        stream: streamHandler,
+      },
+      beta: {
+        messages: {
+          stream: streamHandler,
         },
       },
     };
@@ -416,7 +428,9 @@ describe('Integración — handoff llega al request HTTP de Anthropic', () => {
     // El primer bloque del system es el commonContextBlock (cacheado ephemeral).
     const commonBlock = firstCall.system[0];
     expect(commonBlock.type).toBe('text');
-    expect(commonBlock.cache_control).toEqual({ type: 'ephemeral' });
+    // TTL extendido a 1h habilitado 2026-05-04 (beta `extended-cache-ttl-2025-04-11`)
+    // para cubrir runs largos (15-20 min) sin re-pagar cache_create al expirar.
+    expect(commonBlock.cache_control).toEqual({ type: 'ephemeral', ttl: '1h' });
     // El handoff completo debe estar en el texto que va por la red al LLM.
     expect(commonBlock.text).toContain(handoffText);
     expect(commonBlock.text).toContain('Landing Ecommerce');

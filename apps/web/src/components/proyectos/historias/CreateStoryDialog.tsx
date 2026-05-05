@@ -69,6 +69,10 @@ export function CreateStoryDialog({ open, onOpenChange, defaultEpicId }: CreateS
 
     setErrors({});
     setSaving(true);
+    // Loader pendiente — se reemplaza por success/error con el mismo
+    // `toastId` cuando termina la operación, evitando que queden 2 toasts
+    // simultáneos en pantalla.
+    const toastId = toast.loading(`Guardando historia "${title.trim()}"…`);
     try {
       // El backend persiste 3 markdowns (po/technical/qa). El user llenará
       // los detalles en la story page; aquí solo armamos el PO mínimo con la
@@ -123,11 +127,11 @@ export function CreateStoryDialog({ open, onOpenChange, defaultEpicId }: CreateS
 
       dispatch({ type: 'CREATE_STORY', payload: newStory });
 
-      toast.success('Historia creada correctamente');
+      toast.success('Historia creada correctamente', { id: toastId });
       resetForm();
       onOpenChange(false);
     } catch (err: any) {
-      toast.error(err.message || 'Error al crear la historia');
+      toast.error(err.message || 'Error al crear la historia', { id: toastId });
     } finally {
       setSaving(false);
     }

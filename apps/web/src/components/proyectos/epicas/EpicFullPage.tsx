@@ -708,6 +708,12 @@ function EpicFullPageInner({ epicId }: { epicId: string }) {
     if (!rawEpic) return;
     const silent = options?.silent === true;
     setAcceptingStoryId(proposal.clientId);
+    // Loader solo en accept individual. En modo `silent` (durante bulk),
+    // `handleAcceptAllStories` ya muestra UN loader único para todo el batch
+    // — los loaders por historia inundarían la pantalla.
+    const toastId = silent
+      ? undefined
+      : toast.loading(`Guardando historia "${proposal.title}"…`);
     try {
       const created = await apiCreateStory({
         title: proposal.title,
@@ -751,7 +757,7 @@ function EpicFullPageInner({ epicId }: { epicId: string }) {
       // El loader del botón "Aceptar todas" + el toast resumen al final son
       // suficiente feedback — los toasts por historia inundaban la pantalla.
       if (!silent) {
-        toast.success(`Historia "${proposal.title}" creada`);
+        toast.success(`Historia "${proposal.title}" creada`, { id: toastId });
       }
     } catch (err: any) {
       // Errors también se suprimen en silent — el toast resumen al final
@@ -759,7 +765,7 @@ function EpicFullPageInner({ epicId }: { epicId: string }) {
       // informativo (`successCount=0, failureCount=N`) sin spam de toasts
       // individuales.
       if (!silent) {
-        toast.error(err?.message || 'Error al crear la historia');
+        toast.error(err?.message || 'Error al crear la historia', { id: toastId });
       }
       // Re-throw para que `Promise.allSettled` / `runSequentiallySettled`
       // detecten el rejection en el batch caller. Sin esto, fallidas se
@@ -775,6 +781,14 @@ function EpicFullPageInner({ epicId }: { epicId: string }) {
     setAcceptingAllStories(true);
     const snapshot = [...storyProposals];
     const startMs = Date.now();
+    // Loader único para todo el batch — sonner muestra el spinner durante el
+    // accept secuencial/paralelo y se reemplaza por success/warning/error
+    // cuando termina. El `toastId` se reusa en cada toast final.
+    const toastId = toast.loading(
+      snapshot.length === 1
+        ? 'Guardando 1 historia…'
+        : `Guardando ${snapshot.length} historias…`,
+    );
 
     // Orden topológico de las historias por su DAG de `blockedBy`:
     // garantiza que las bloqueantes se acepten antes que las bloqueadas,
@@ -804,12 +818,16 @@ function EpicFullPageInner({ epicId }: { epicId: string }) {
       //    individual ahora se suprimió porque pasamos silent=true, así
       //    que necesitamos confirmar al user que se creó).
       if (failureCount > 0 && successCount === 0) {
-        toast.error(`Las ${failureCount} historias fallaron al crear. Intenta de nuevo.`);
+        toast.error(`Las ${failureCount} historias fallaron al crear. Intenta de nuevo.`, { id: toastId });
       } else if (failureCount > 0) {
-        toast.warning(`${successCount} historias creadas, ${failureCount} fallaron. Las fallidas siguen en staging.`);
+        toast.warning(`${successCount} historias creadas, ${failureCount} fallaron. Las fallidas siguen en staging.`, { id: toastId });
       } else if (successCount > 0) {
         const label = successCount === 1 ? 'Historia creada' : `${successCount} historias creadas`;
-        toast.success(`${label} en ${(durMs / 1000).toFixed(1)}s`);
+        toast.success(`${label} en ${(durMs / 1000).toFixed(1)}s`, { id: toastId });
+      } else {
+        // Fallback: ningún success ni failure (snapshot vacío). Cierra el
+        // loader explícitamente para no dejarlo colgado en pantalla.
+        toast.dismiss(toastId);
       }
     } finally {
       setAcceptingAllStories(false);
@@ -839,10 +857,6 @@ function EpicFullPageInner({ epicId }: { epicId: string }) {
     setStoryAgentEvents([]);
     setStoryAgentMode('idle');
   }, [rawEpic]);
-
-  const handleRefineStoryPrompt = useCallback(() => {
-    setStoryAgentMode('prompting');
-  }, []);
 
   // Recuperar sesion cacheada al montar / cambiar de epica.
   // - status='staging' → run terminado con propuestas: mostrar para revisar.
@@ -1474,7 +1488,6 @@ function EpicFullPageInner({ epicId }: { epicId: string }) {
                     onAcceptAll={handleAcceptAllStories}
                     onDiscard={handleDiscardStoryProposal}
                     onDiscardAll={handleDiscardAllStories}
-                    onRefinePrompt={handleRefineStoryPrompt}
                   />
                 )}
 
@@ -1501,7 +1514,6 @@ function EpicFullPageInner({ epicId }: { epicId: string }) {
                       onAcceptAll={() => toast.info('Mock: usa un batch real para persistir')}
                       onDiscard={() => toast.info('Mock: descarta solo funciona en staging real')}
                       onDiscardAll={() => toast.info('Mock: usa un batch real para descartar')}
-                      onRefinePrompt={() => toast.info('Mock: usa un batch real para refinar')}
                     />
                   </div>
                 )}
@@ -1513,6 +1525,7 @@ function EpicFullPageInner({ epicId }: { epicId: string }) {
                   pods={state.pods}
                   onGenerateWithAI={storyAgentMode === 'idle' ? handleOpenStoryPrompt : undefined}
                   onCreateStory={async (story) => {
+                    const toastId = toast.loading(`Guardando historia "${story.title}"…`);
                     try {
                       const po = story.po ?? { markdown: '' };
                       const technical = story.technical ?? { markdown: '' };
@@ -1530,12 +1543,13 @@ function EpicFullPageInner({ epicId }: { epicId: string }) {
                         qa: { markdown: qa.markdown ?? '' },
                       });
                       dispatch({ type: 'CREATE_STORY', payload: { ...story, id: created.id } });
-                      toast.success('Historia creada');
+                      toast.success('Historia creada', { id: toastId });
                     } catch (err: any) {
-                      toast.error(err.message || 'Error al crear historia');
+                      toast.error(err.message || 'Error al crear historia', { id: toastId });
                     }
                   }}
                   onUpdateStory={async (id, changes) => {
+                    const toastId = toast.loading('Guardando cambios…');
                     try {
                       const po = changes.po;
                       const technical = changes.technical;
@@ -1552,9 +1566,9 @@ function EpicFullPageInner({ epicId }: { epicId: string }) {
                         qa: qa ? { markdown: qa.markdown ?? '' } : undefined,
                       });
                       dispatch({ type: 'UPDATE_STORY', payload: { id, changes } });
-                      toast.success('Historia actualizada');
+                      toast.success('Historia actualizada', { id: toastId });
                     } catch (err: any) {
-                      toast.error(err.message || 'Error al actualizar historia');
+                      toast.error(err.message || 'Error al actualizar historia', { id: toastId });
                     }
                   }}
                   onDeleteStory={async (id) => {

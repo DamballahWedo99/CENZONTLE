@@ -2,7 +2,7 @@
 
 import { useCallback } from 'react';
 import { Button } from '@/components/ui/button';
-import { Check, Trash2, RefreshCw, Sparkles } from 'lucide-react';
+import { Check, Trash2, Sparkles } from 'lucide-react';
 import { StoryProposalCard } from './StoryProposalCard';
 import { ProposalTtlCountdown } from '../overview/ProposalTtlCountdown';
 import { getStoryCacheTtl } from '@/lib/api/story-generation';
@@ -17,7 +17,6 @@ interface StoryProposalListProps {
   onAcceptAll: () => void;
   onDiscard: (clientId: string) => void;
   onDiscardAll: () => void;
-  onRefinePrompt: () => void;
 }
 
 export function StoryProposalList({
@@ -29,7 +28,6 @@ export function StoryProposalList({
   onAcceptAll,
   onDiscard,
   onDiscardAll,
-  onRefinePrompt,
 }: StoryProposalListProps) {
   const fetchTtl = useCallback(() => getStoryCacheTtl(epicId), [epicId]);
 
@@ -51,15 +49,6 @@ export function StoryProposalList({
           <ProposalTtlCountdown fetchTtl={fetchTtl} onExpired={onDiscardAll} />
         </div>
         <div className="flex items-center gap-1.5">
-          <Button
-            variant="ghost"
-            size="sm"
-            className="h-6 text-[10px] gap-1 text-muted-foreground"
-            onClick={onRefinePrompt}
-          >
-            <RefreshCw className="h-3 w-3" />
-            Refinar prompt
-          </Button>
           <Button
             variant="ghost"
             size="sm"

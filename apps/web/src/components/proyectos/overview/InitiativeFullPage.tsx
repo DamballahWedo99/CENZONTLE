@@ -662,7 +662,7 @@ function InitiativeFullPageInner({ initiativeId }: InitiativeFullPageProps) {
 
       setProposals((prev) => prev.filter((p) => p.clientId !== proposal.clientId));
       removeCachedProposal(initiative.id, proposal.clientId).catch(() => {});
-      toast.success(`Épica "${proposal.title}" creada`);
+      toast.success('Épica creada');
     } catch (err: any) {
       toast.error(err.message || 'Error creando épica');
     } finally {
@@ -705,10 +705,6 @@ function InitiativeFullPageInner({ initiativeId }: InitiativeFullPageProps) {
 
   const handleRegenerateProposal = (proposal: ProposedEpic) => {
     handleDiscardProposal(proposal.clientId);
-    setAgentMode('prompting');
-  };
-
-  const handleRefinePrompt = () => {
     setAgentMode('prompting');
   };
 
@@ -1118,7 +1114,6 @@ function InitiativeFullPageInner({ initiativeId }: InitiativeFullPageProps) {
                   onRegenerate={handleRegenerateProposal}
                   onDiscard={handleDiscardProposal}
                   onDiscardAll={handleDiscardAll}
-                  onRefinePrompt={handleRefinePrompt}
                 />
               )}
 

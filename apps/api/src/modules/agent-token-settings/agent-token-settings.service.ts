@@ -141,10 +141,11 @@ export class AgentTokenSettingsService {
     updatedBy: string | null;
   }): AgentTokenSettingsPublic {
     // Cast de string→AgentEffortLevel: el DTO ya valida, así que el row solo
-    // contiene valores válidos. Defense in depth: si hay basura legacy en BD
-    // (no debería tras la migration), defaulteamos a 'high'.
+    // contiene valores válidos. Defense in depth: si hay basura legacy en BD,
+    // defaulteamos a 'medium' (cambio 2026-05-04: antes era 'high', ahora
+    // medium balancea calidad vs costo — high duplica thinking tokens).
     const effort = (s: string): AgentEffortLevel =>
-      s === 'low' || s === 'medium' || s === 'high' ? s : 'high';
+      s === 'low' || s === 'medium' || s === 'high' ? s : 'medium';
 
     return {
       storyPoEffort: effort(row.storyPoEffort),

@@ -61,12 +61,14 @@ describe('AgentTokenSettingsService', () => {
       expect(a.diagramMaxTokens).toBe(64000);
     });
 
-    it('defaults legacy/inválidos en BD se sanean a "high"', async () => {
+    it('defaults legacy/inválidos en BD se sanean a "medium"', async () => {
+      // Cambio 2026-05-04: el fallback default cambió de 'high' a 'medium'
+      // para balancear calidad vs costo de thinking tokens.
       const prisma = makeMockPrisma({ storyPoEffort: 'invalid_value' });
       const service = new AgentTokenSettingsService(prisma);
 
       const settings = await service.get();
-      expect(settings.storyPoEffort).toBe('high');
+      expect(settings.storyPoEffort).toBe('medium');
     });
   });
 
