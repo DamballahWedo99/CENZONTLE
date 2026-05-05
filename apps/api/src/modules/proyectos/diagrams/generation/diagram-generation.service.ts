@@ -45,6 +45,16 @@ import { AgentTokenSettingsService } from '../../../agent-token-settings/agent-t
 const MAX_TOOL_ITERATIONS = 20;
 // Sonnet 4.6 — soporta adaptive thinking + effort levels.
 const MODEL = 'claude-sonnet-4-6';
+
+// Nota histórica (2026-05-04): se intentó el advisor strategy
+// (advisor_20260301 + Opus 4.7) en los 2 agentes de diagrama. El smoke test
+// mostró que Sonnet NUNCA invocó al advisor en 7 iteraciones de un run real
+// — los diagramas son tareas estructurales (outline → draft → submit) sin
+// suficiente espacio de decisión para amerite consultar a Opus. Aligned
+// con doc oficial: "weaker fit for workloads where every turn genuinely
+// requires the advisor model's full capability."
+// Removido para evitar overhead del namespace beta sin ganancia real.
+// Se conserva la optimización de cache + TTL 1h (Fase 1) que SÍ aporta.
 const MAX_ATTACHMENT_BYTES_TOTAL = 60 * 1024 * 1024;
 
 // Extended thinking + max_tokens de los agentes de diagramas se leen ahora
@@ -285,6 +295,10 @@ export class DiagramGenerationService {
       timeout: 30 * 60 * 1000,
       fetch: anthropicFetch,
       defaultHeaders: {
+        // `extended-cache-ttl-2025-04-11`: TTL 1h en cache_control (vs 5min
+        // default). Crítico para iters de diagram que pueden tomar 5-6 min
+        // cada una con thinking extendido. Ver doc completa en
+        // story-generation.service.ts.
         'anthropic-beta': 'extended-cache-ttl-2025-04-11',
       },
     });
@@ -855,11 +869,9 @@ export class DiagramGenerationService {
 
       const callStart = Date.now();
       const thinkingActive = diagramEnabled && !shouldForceOutlineTool;
-      // `messages.stream()` en lugar de `create()` — Anthropic exige stream
-      // cuando el tiempo estimado puede superar 10min, lo cual ocurre con
-      // `max_tokens` grande + thinking activo configurable hasta 64K desde
-      // /factory/settings. `finalMessage()` es drop-in con la response de
-      // create — el resto del loop no cambia.
+      // `messages.stream()` (vs create) porque Anthropic exige stream cuando
+      // el tiempo estimado puede superar 10min — caso común con max_tokens
+      // grande + thinking adaptive. `finalMessage()` es drop-in.
       const stream = this.client.messages.stream(
         {
           model: MODEL,
@@ -1710,8 +1722,9 @@ export class DiagramGenerationService {
         maxTokens: diagramMaxTokens,
         enabled: diagramEnabled,
       } = await this.tokenSettings.getDiagram();
-      // `messages.stream()` por la misma razón que el agente principal:
-      // Anthropic exige stream cuando el tiempo estimado puede superar 10min.
+      // `messages.stream()` (vs create) porque Anthropic exige stream para
+      // runs > 10min — caso común con max_tokens grande + thinking adaptive.
+      // `finalMessage()` es drop-in con la response de create.
       const stream = this.client.messages.stream(
         {
           model: MODEL,

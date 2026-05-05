@@ -2,7 +2,7 @@
 
 import { useCallback } from 'react';
 import { Button } from '@/components/ui/button';
-import { Check, Trash2, RefreshCw, Sparkles } from 'lucide-react';
+import { Check, Trash2, Sparkles } from 'lucide-react';
 import { EpicProposalCard } from './EpicProposalCard';
 import { ProposalTtlCountdown } from './ProposalTtlCountdown';
 import { getCacheTtl } from '@/lib/api/epic-generation';
@@ -19,7 +19,6 @@ interface EpicProposalListProps {
   onRegenerate: (proposal: ProposedEpic) => void;
   onDiscard: (clientId: string) => void;
   onDiscardAll: () => void;
-  onRefinePrompt: () => void;
 }
 
 export function EpicProposalList({
@@ -33,7 +32,6 @@ export function EpicProposalList({
   onRegenerate,
   onDiscard,
   onDiscardAll,
-  onRefinePrompt,
 }: EpicProposalListProps) {
   const fetchTtl = useCallback(() => getCacheTtl(initiativeId), [initiativeId]);
 
@@ -51,15 +49,6 @@ export function EpicProposalList({
           <ProposalTtlCountdown fetchTtl={fetchTtl} onExpired={onDiscardAll} />
         </div>
         <div className="flex items-center gap-1.5">
-          <Button
-            variant="ghost"
-            size="sm"
-            className="h-6 text-[10px] gap-1 text-muted-foreground"
-            onClick={onRefinePrompt}
-          >
-            <RefreshCw className="h-3 w-3" />
-            Refinar prompt
-          </Button>
           <Button
             variant="ghost"
             size="sm"

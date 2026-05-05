@@ -97,6 +97,14 @@ export class EpicGenerationService {
     // habilita TTL de 1 hora en cache_control. Para runs largos (>5min) el
     // TTL default de 5min expira mid-run, forzando cache_create múltiples
     // veces por el mismo contenido. Ver doc completa en story-generation.
+    //
+    // NOTA HISTÓRICA (2026-05-04): se intentó habilitar el advisor tool
+    // (Opus consultor) en este agente, pero el smoke test mostró que Sonnet
+    // nunca lo invocaba — los prompts típicos de generación de épicas son
+    // suficientemente directos para que Sonnet maneje sin necesidad de
+    // consulta. El setup quedaba como overhead inútil. Removido y se queda
+    // pendiente decidir si Fase 2 aplica para otros agentes con más
+    // ambigüedad inherente (e.g., TL en story-generation).
     this.client = new Anthropic({
       apiKey: apiKey || undefined,
       timeout: 30 * 60 * 1000,
@@ -467,6 +475,7 @@ REGLAS DUROS:
       const toolUseBlocksCount = response.content.filter(
         (b: any) => b.type === 'tool_use',
       ).length;
+
       this.logger.log(
         `[EpicGen] iter ${iteration} stop=${response.stop_reason} dur=${Date.now() - callStart}ms ` +
           `tokens(in=${inputTokens} out=${outputTokens} cache_read=${cacheRead} cache_create=${cacheCreate}) ` +

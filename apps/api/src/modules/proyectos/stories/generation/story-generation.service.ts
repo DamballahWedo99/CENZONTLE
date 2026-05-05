@@ -50,6 +50,99 @@ import { AgentTokenSettingsService } from '../../../agent-token-settings/agent-t
 // con dynamic filtering. Migrado desde claude-sonnet-4-20250514 (Sonnet 4.0)
 // que solo soportaba thinking modo `enabled` con budget_tokens fijo.
 const MODEL = 'claude-sonnet-4-6';
+// Haiku 4.5 como executor para agentes puramente mecánicos:
+//   - DEPS_AUDITOR: audit boolean de vendors externos vs env vars declaradas
+//   - STORY_ORDER: extracción determinista de edges (lee tech designs, emite
+//     dependencias hard/soft entre stories)
+//
+// PO migró de Haiku → Sonnet (2026-05-04): aunque el flujo es estructural
+// (extraer info de iniciativa), el OUTPUT es prosa narrativa rica (Antecedentes,
+// Objetivo, Historia de usuario, Qué/Cómo/Cuándo, Criterios). Smoke test mostró
+// que Haiku quedaba inferior en calidad de prose. PO ahora usa MODEL (Sonnet).
+//
+// TL y QA siempre fueron Sonnet — toman decisiones arquitectónicas reales con
+// thinking adaptive medium, donde el gap Haiku→Sonnet importa más.
+const HAIKU_MODEL = 'claude-haiku-4-5';
+// Modelo del advisor (consultado vía advisor_20260301 tool).
+//
+// IMPORTANTE: la tabla oficial de modelos válidos para el advisor SOLO acepta
+// `claude-opus-4-7` (ver platform.claude.com/docs/en/agents-and-tools/tool-use/
+// advisor-tool#supported-models). Pasar `claude-opus-4-6` resulta en que el
+// API ignore silenciosamente la invocación — el run completa, pero el advisor
+// nunca se invoca y `response.content` no contiene blocks `advisor_*`.
+//
+// Esto fue el bug raíz que mantuvo el advisor inactivo en 7+ runs durante
+// 2026-05-04 antes de ser diagnosticado.
+const ADVISOR_MODEL = 'claude-opus-4-7';
+
+/**
+ * Construye el advisor tool (Opus consultor) para inyectar en el `tools`
+ * array de cualquier agente. Cuando se invoca, el executor (Haiku/Sonnet)
+ * delega una decisión difícil al advisor (Opus) que retorna guidance breve
+ * (~400-700 tokens). El advisor NO ejecuta tools propias.
+ *
+ * `max_uses=2` es el cap conservador inicial — community feedback recomienda
+ * empezar bajo y subir si el ratio de invocaciones lo justifica.
+ *
+ * Cast `as unknown` porque el SDK 0.88.0 tipa `advisor_20260301` en
+ * `Anthropic.Beta.*`, no en `Anthropic.Messages.Tool`. Cuando suba a GA,
+ * se quita el cast en los callers.
+ */
+function buildAdvisorTool(maxUses: number = 2): unknown {
+  return {
+    type: 'advisor_20260301',
+    name: 'advisor',
+    model: ADVISOR_MODEL,
+    max_uses: maxUses,
+  };
+}
+
+/**
+ * Guidance común sobre cuándo invocar el `advisor` tool. Se inyecta al final
+ * de cada `buildXSystemPrompt`.
+ *
+ * Patrón oficial de Anthropic (verificado 2026-05-04 en
+ * https://platform.claude.com/docs/en/agents-and-tools/tool-use/advisor-tool):
+ *
+ * El advisor tool YA viene con una `description` interna que nudgea al
+ * executor a llamarlo near-start de tareas complejas. Nuestro guidance NO
+ * debe restringir invocación ("usa SOLO en decisiones difíciles") porque
+ * eso DETER al executor de invocarlo — exactamente lo opuesto al objetivo.
+ *
+ * En su lugar, el doc recomienda 3 bloques (orden importa):
+ *   1. **Conciseness instruction** PRIMERO → corta tokens del advisor 35-45%.
+ *   2. **Timing block** → cuándo invocar (siempre antes de "substantive work",
+ *      orientation no cuenta como work).
+ *   3. **Treatment block** → cómo tratar el advice (peso serio, surface conflicts
+ *      en vez de switch silencioso).
+ *
+ * Evaluado por Anthropic como "highest intelligence at near-Sonnet cost"
+ * en tareas de coding/agents (~2-3 calls/task con max_uses=2).
+ */
+const ADVISOR_GUIDANCE = `
+The advisor should respond in under 100 words and use enumerated steps, not explanations.
+
+## Advisor tool — timing
+
+You have access to an \`advisor\` tool backed by a stronger reviewer model (Claude Opus 4.7). It takes NO parameters — when you call advisor(), your entire conversation history is automatically forwarded. The advisor sees the task, every tool call you've made, every result you've seen.
+
+Call advisor BEFORE substantive work — before writing the final output (submit_*), before committing to an interpretation, before building on an assumption. If the task requires orientation first (reading vault docs, fetching code, listing files), do that, then call advisor. Orientation is not substantive work. Writing the deliverable, asserting a story breakdown, or declaring the order are.
+
+Also call advisor:
+- When you believe the task is complete. BEFORE this call, structure your draft mentally. The advisor call takes time; if it fails on rate-limit, your draft persists.
+- When stuck — repeated tool errors, conflicting evidence between code/docs, or an approach that doesn't converge.
+- When considering a change of approach mid-loop.
+
+For this task (multi-iteration story/diagram generation), call advisor at least once before committing to your output structure and once before the terminal submit_* tool. On short tasks where the next action is dictated by tool output you just read, you don't need to keep calling — most value is in the first and last call.
+
+## How to treat the advice
+
+Give the advice serious weight. If you follow a step and it fails empirically, or you have primary-source evidence that contradicts a specific claim (the code says X, the doc says Y), adapt. A passing self-test is not evidence the advice is wrong — it's evidence your test doesn't check what the advice is checking.
+
+If you've already retrieved data pointing one way and the advisor points another, do NOT silently switch. Surface the conflict in one more advisor call: "I found X via tool_call, you suggest Y, which constraint breaks the tie?" The advisor saw your evidence but may have underweighted it; a reconcile call is cheaper than committing to the wrong branch.
+
+You have \`max_uses=2\` per run.
+`;
 const MAX_ATTACHMENT_BYTES_TOTAL = 60 * 1024 * 1024;
 const VALID_STORY_POINTS = [1, 2, 3, 5, 8, 13] as const;
 
@@ -345,6 +438,13 @@ interface QAResult {
 
 interface AgentLoopParams {
   role: StoryAgentRole;
+  /**
+   * Modelo executor (Sonnet 4.6 o Haiku 4.5). Decisión por agente:
+   *   - PO, DEPS_AUDITOR, STORY_ORDER → Haiku 4.5 (mecánicos/estructurales)
+   *   - TL, QA → Sonnet 4.6 (decisiones arquitectónicas profundas)
+   * El advisor (Opus 4.7) se invoca a demanda en TODOS — no afecta el modelo.
+   */
+  model: string;
   commonContextBlock: string; // va en system[0] con cache_control
   roleSystemPrompt: string;   // va en system[1]
   tools: (Anthropic.Messages.Tool | Anthropic.Messages.WebSearchTool20250305)[];
@@ -488,6 +588,15 @@ export class StoryGenerationService {
       timeout: 45 * 60 * 1000,
       fetch: anthropicFetch,
       defaultHeaders: {
+        // `extended-cache-ttl-2025-04-11`: TTL 1h en cache_control (vs 5min
+        // default). Aplica a CUALQUIER llamada (standard o beta).
+        //
+        // El header `advisor-tool-2026-03-01` NO va aquí — debe pasarse
+        // como parámetro `betas: [...]` por request en cada llamada a
+        // `client.beta.messages.stream()`. Mantenerlo en `defaultHeaders`
+        // junto con el namespace standard `client.messages.stream()`
+        // hace que el API ignore silenciosamente la invocación al
+        // advisor tool. Ver runAgentLoop más abajo para el patrón correcto.
         'anthropic-beta': 'extended-cache-ttl-2025-04-11',
       },
     });
@@ -1493,7 +1602,7 @@ Esta epica no tiene folder en el nuevo formato del vault (legacy o sin migrar). 
     subject: Subject<{ data: StoryGenerationEvent }>,
     runStartTime: number,
   ): Promise<POResult | null> {
-    const roleSystemPrompt = this.buildPOSystemPrompt(count, webSearch);
+    const roleSystemPrompt = this.buildPOSystemPrompt(count, webSearch) + ADVISOR_GUIDANCE;
     const docs = await this.getInitiativeDocumentsMeta(common.epic.initiative.id);
 
     const terminalTool: Anthropic.Messages.Tool = {
@@ -1590,6 +1699,8 @@ REGLAS DUROS:
         description: t.description,
         input_schema: t.schema as Anthropic.Messages.Tool.InputSchema,
       })),
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      buildAdvisorTool() as any,
       terminalTool,
     );
 
@@ -1619,6 +1730,12 @@ NO disenes tecnicamente ni propongas tests — eso es trabajo del Tech Lead y de
     const poTokens = await this.tokenSettings.getStoryPo();
     const output = await this.runAgentLoop({
       role: 'po',
+      // Sonnet 4.6 — revertido desde Haiku 4.5 (2026-05-04). El user observó
+      // que el texto del PO con Haiku quedaba inferior en calidad narrativa.
+      // Sonnet entrega mejor prosa para los 5 headings (Antecedentes, Objetivo,
+      // Historia de usuario, Qué/Cómo/Cuándo, Criterios) — más rico en
+      // contexto del dominio y lenguaje natural de PO real.
+      model: MODEL,
       commonContextBlock,
       roleSystemPrompt,
       tools: claudeTools,
@@ -1727,7 +1844,7 @@ NO disenes tecnicamente ni propongas tests — eso es trabajo del Tech Lead y de
     subject: Subject<{ data: StoryGenerationEvent }>,
     runStartTime: number,
   ): Promise<TLResult | null> {
-    const roleSystemPrompt = this.buildTLSystemPrompt(webSearch);
+    const roleSystemPrompt = this.buildTLSystemPrompt(webSearch) + ADVISOR_GUIDANCE;
 
     const terminalTool: Anthropic.Messages.Tool = {
       name: 'submit_technical_designs',
@@ -1870,6 +1987,8 @@ REGLAS DUROS:
         description: t.description,
         input_schema: t.schema as Anthropic.Messages.Tool.InputSchema,
       })),
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      buildAdvisorTool() as any,
       terminalTool,
     );
 
@@ -1904,6 +2023,7 @@ NO cambies titles, descriptions, acceptanceCriteria — esos estan congelados. S
     const tlTokens = await this.tokenSettings.getStoryTl();
     const output = await this.runAgentLoop({
       role: 'technical',
+      model: MODEL, // Sonnet 4.6 — agente arquitectónico (decisiones técnicas profundas)
       commonContextBlock,
       roleSystemPrompt,
       tools: claudeTools,
@@ -2207,7 +2327,7 @@ NO cambies titles, descriptions, acceptanceCriteria — esos estan congelados. S
     subject: Subject<{ data: StoryGenerationEvent }>,
     runStartTime: number,
   ): Promise<QAResult | null> {
-    const roleSystemPrompt = this.buildQASystemPrompt(webSearch);
+    const roleSystemPrompt = this.buildQASystemPrompt(webSearch) + ADVISOR_GUIDANCE;
 
     const terminalTool: Anthropic.Messages.Tool = {
       name: 'submit_qa_strategies',
@@ -2322,6 +2442,8 @@ REGLAS DUROS:
         description: t.description,
         input_schema: t.schema as Anthropic.Messages.Tool.InputSchema,
       })),
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      buildAdvisorTool() as any,
       terminalTool,
     );
 
@@ -2349,6 +2471,7 @@ ${fullStoriesBlock}
 </stories_with_po_and_tl>
 
 ⚠️ CONTRATO DURO — LEER ANTES DE PROCEDER:
+- \`strategies\` DEBE ser un **array literal nativo de objetos**, NO un string JSON-encoded ni envuelto en comillas. Ejemplo correcto del tool_use input: \`{ "strategies": [{ "outlineIndex": 0, ... }] }\` (array directo). Ejemplo INCORRECTO que dispara retry: \`{ "strategies": "[{\\"outlineIndex\\": 0, ...}]" }\` (string serializado). Sonnet a veces serializa arrays grandes bajo presión de output — emite el array nativo aunque sea largo, el budget de tokens es suficiente.
 - \`strategies.length\` DEBE ser exactamente ${poResult.outlines.length} (una entry por historia, indexada por outlineIndex 0..${poResult.outlines.length - 1}).
 - NUNCA emitas \`strategies:[]\` ni array incompleto. Emitir un array vacio es una FALLA del agente — siempre hay algo que estrategizar basado en las acceptance criteria.
 - Si no hay repos de codigo conectados, o si \`code_grep\` no encuentra frameworks de testing: NO es excusa para devolver vacio. Infiere el framework del stack de la epica/iniciativa:
@@ -2378,6 +2501,7 @@ NO cambies PO ni technical. Si una historia es dificil de testear, dilo en \`qa.
     const qaTokens = await this.tokenSettings.getStoryQa();
     const output = await this.runAgentLoop({
       role: 'qa',
+      model: MODEL, // Sonnet 4.6 — QA toma decisiones sobre testing strategy + edge cases
       commonContextBlock,
       roleSystemPrompt,
       tools: claudeTools,
@@ -2387,11 +2511,37 @@ NO cambies PO ni technical. Si una historia es dificil de testear, dilo en \`qa.
       initialUserContent: userContent,
       terminalToolName: 'submit_qa_strategies',
       validateTerminal: (input) => {
-        const strategies = (input as { strategies?: unknown }).strategies;
+        const inputObj = input as { strategies?: unknown };
+        let strategies = inputObj.strategies;
+
+        // Recovery automática (2026-05-04): Sonnet 4.6 a veces emite el array
+        // como un JSON-encoded string cuando el output se aproxima al budget
+        // (qa.markdown ~3K chars × N + dependencies.mdContent ~500 palabras
+        // c/u presiona el output). Antes esto disparaba retry → 2-3 iters
+        // extra (~$0.27/run desperdiciado). Ahora intentamos JSON.parse:
+        // si recupera un array válido, lo aceptamos sin reintentar. Si el
+        // parse falla o no produce array, caemos al error path original.
+        if (typeof strategies === 'string') {
+          try {
+            const parsed = JSON.parse(strategies);
+            if (Array.isArray(parsed)) {
+              this.logger.warn(
+                `[StoryGen:QA] ⚠ recuperado strategies-as-string via JSON.parse (${strategies.length} chars → array de ${parsed.length}). El modelo serializó el array en lugar de emitirlo nativo — bug conocido de Sonnet bajo presión de output. Recovery exitoso, sin retry.`,
+              );
+              inputObj.strategies = parsed;
+              strategies = parsed;
+            }
+          } catch {
+            // Parse falló — caerá al !Array.isArray check abajo con el error
+            // original, lo cual es correcto: el modelo emitió algo que no es
+            // ni array ni string-de-array.
+          }
+        }
+
         if (!Array.isArray(strategies)) {
           return {
             valid: false,
-            errorMessage: `El campo strategies debe ser un array, no ${typeof strategies}. Emite exactamente ${expectedStrategyCount} entries.`,
+            errorMessage: `El campo strategies DEBE ser un array literal de objetos, NO un JSON-encoded string ni ningún otro tipo (recibido: ${typeof strategies}). Ejemplo VÁLIDO: \`"strategies": [{"outlineIndex": 0, "qa": {...}, "dependencies": [...]}]\`. Ejemplo INVÁLIDO: \`"strategies": "[{\\"outlineIndex\\": 0, ...}]"\` (escaped string). Emite exactamente ${expectedStrategyCount} entries.`,
           };
         }
         if (strategies.length === 0) {
@@ -2957,6 +3107,12 @@ NO cambies PO ni technical. Si una historia es dificil de testear, dilo en \`qa.
     subject: Subject<{ data: StoryGenerationEvent }>,
     runStartTime: number,
   ): Promise<Map<number, DiscoveredDependency[]> | null> {
+    // DEPS_AUDITOR NO usa advisor (removido 2026-05-04 tras smoke test).
+    // La tarea es mecánica (audit de vendors externos vs env vars declaradas)
+    // — el advisor se invocaba pero no aportaba lift de calidad proporcional
+    // al costo. El advisor recibía 100K+ tokens de transcripción (toda la
+    // épica + 3 stories + tech designs + qa strategies) por una decisión
+    // boolean ("¿faltó algún vendor?"). Ver story-generation.spec para guard.
     const roleSystemPrompt = this.buildDepsAuditorSystemPrompt();
 
     // Bloque con TODAS las stories + secciones PO/TL/QA + deps ya declaradas.
@@ -3091,6 +3247,7 @@ Si todas las deps están completas, retorna \`additions: []\` — está OK.`;
     const tokenSettings = await this.tokenSettings.getStoryQa();
     const output = await this.runAgentLoop({
       role: 'deps_auditor',
+      model: HAIKU_MODEL, // Haiku 4.5 — auditoría mecánica con web_search (no razonamiento profundo)
       commonContextBlock,
       roleSystemPrompt,
       tools: claudeTools,
@@ -3228,6 +3385,10 @@ Si todas las deps están completas, retorna \`additions: []\` — está OK.`;
       return [];
     }
 
+    // STORY_ORDER NO usa advisor (removido 2026-05-04). Igual que DEPS_AUDITOR,
+    // ordenar dependencias entre 3-15 stories es una tarea estructural
+    // determinista (lee tech designs, identifica contratos shared, emite edges
+    // hard/soft). No hay decisión ambigua que requiera Opus.
     const roleSystemPrompt = this.buildStoryOrderSystemPrompt();
 
     // Bloque de input: titles + descripción del PO + technical_markdown
@@ -3298,7 +3459,9 @@ ${techMd}
       },
     };
 
-    const claudeTools: Anthropic.Messages.Tool[] = [terminalTool];
+    const claudeTools: Anthropic.Messages.Tool[] = [
+      terminalTool,
+    ];
 
     const userContent = `Analiza estas ${poResult.outlines.length} historias del batch e identifica el orden de implementación entre ellas.
 
@@ -3323,6 +3486,7 @@ Reglas:
     const tokenSettings = await this.tokenSettings.getStoryTl();
     const output = await this.runAgentLoop({
       role: 'story_order',
+      model: HAIKU_MODEL, // Haiku 4.5 — DAG cross-story es razonamiento estructurado (sin tools)
       commonContextBlock,
       roleSystemPrompt,
       tools: claudeTools,
@@ -3398,6 +3562,7 @@ Reglas:
   private async runAgentLoop(params: AgentLoopParams): Promise<Record<string, unknown> | null> {
     const {
       role,
+      model,
       commonContextBlock,
       roleSystemPrompt,
       tools,
@@ -3434,8 +3599,18 @@ Reglas:
     const activeBreakpoints: string[] = [];
     if (commonContextChars >= 4096) activeBreakpoints.push('commonContext');
     if (roleSystemChars >= 4096) activeBreakpoints.push('roleSystemPrompt');
+    // Adaptive thinking soportado solo en Sonnet/Opus. Para Haiku, el log
+    // muestra 'unsupported(haiku)' para evitar confusión cuando thinkingEnabled=true
+    // pero el modelo no soporta esa feature.
+    const modelSupportsAdaptiveThinkingOuter =
+      model.startsWith('claude-sonnet') || model.startsWith('claude-opus');
+    const thinkingDisplay = !modelSupportsAdaptiveThinkingOuter
+      ? `unsupported(${model.replace('claude-', '')})`
+      : thinkingEnabled
+        ? `adaptive(${effort})`
+        : 'off';
     this.logger.log(
-      `[StoryGen:${role.toUpperCase()}] ▶ loop start: maxIter=${maxIterations} maxTokens=${maxTokens} tools=${agentToolset.length}+terminal thinking=${thinkingEnabled ? `adaptive(${effort})` : 'off'} ` +
+      `[StoryGen:${role.toUpperCase()}] ▶ loop start: model=${model} maxIter=${maxIterations} maxTokens=${maxTokens} tools=${agentToolset.length}+terminal thinking=${thinkingDisplay} ` +
         `commonContext=${commonContextChars} chars (~${commonContextEstTokens} tokens), roleSystemPrompt=${roleSystemChars} chars (~${roleSystemEstTokens} tokens). ` +
         `Cache ${activeBreakpoints.length > 0 ? `✅ activará en: [${activeBreakpoints.join(', ')}]` : '⚠️ NO activará (ambos < 1024 tokens)'}.`,
     );
@@ -3445,8 +3620,20 @@ Reglas:
     let totalOutputTokens = 0;
     let totalCacheRead = 0;
     let totalCacheCreate = 0;
+    // Advisor totals (Fase 2 — 2026-05-04): tracking del costo diferencial
+    // del Opus consultor. Si totalAdvisorCount=0 al final, el executor
+    // (Haiku/Sonnet) decidió que sus iteraciones eran suficientemente
+    // claras como para no necesitar consulta — comportamiento esperado
+    // en runs simples.
+    let totalAdvisorCount = 0;
+    let totalAdvisorInputTokens = 0;
+    let totalAdvisorOutputTokens = 0;
 
-    const messages: Anthropic.Messages.MessageParam[] = [
+    // Tipo `Beta.BetaMessageParam[]` (no Messages.MessageParam[]) porque
+    // runAgentLoop usa `client.beta.messages.stream()` con advisor tool —
+    // los `BetaContentBlock` retornados incluyen `BetaServerToolUseBlock`
+    // con `name: "advisor"` que NO existe en el shape standard.
+    const messages: Anthropic.Beta.BetaMessageParam[] = [
       { role: 'user', content: initialUserContent },
     ];
 
@@ -3485,14 +3672,32 @@ Reglas:
       //    adaptive thinking activo si el caller lo pidió.
       const isForcedTerminalTurn =
         !!forceTerminalOnLastIter && iteration === maxIterations - 1;
-      const thinkingActive = thinkingEnabled && !isForcedTerminalTurn;
+      // Adaptive thinking SOLO está soportado por Sonnet 4.6, Opus 4.6/4.7,
+      // y Mythos Preview. Haiku 4.5 NO lo soporta — la API responde 400 con
+      // "adaptive thinking is not supported on this model" si lo enviamos.
+      // Detectamos por prefijo del modelo. Para Haiku, thinkingActive=false
+      // independientemente de lo que pida el caller.
+      const modelSupportsAdaptiveThinking =
+        model.startsWith('claude-sonnet') || model.startsWith('claude-opus');
+      const thinkingActive = thinkingEnabled && !isForcedTerminalTurn && modelSupportsAdaptiveThinking;
 
-      const stream = this.client.messages.stream(
+      // Namespace `beta` (no `client.messages.stream()`) porque el `advisor`
+      // tool requiere el header `advisor-tool-2026-03-01` y SOLO se acepta
+      // pasado vía `betas: [...]` en cada llamada beta. Si lo pones en
+      // `defaultHeaders` y llamas `client.messages.stream()`, el API ignora
+      // el tool silenciosamente — el run completa pero `response.content`
+      // nunca contiene blocks `advisor_*`. Ese fue el bug raíz 2026-05-04.
+      //
+      // El `extended-cache-ttl-2025-04-11` lo pasamos también acá (aunque
+      // está en defaultHeaders) para que la composición sea explícita y no
+      // dependa del orden de combinación que el SDK aplique.
+      const stream = this.client.beta.messages.stream(
         {
-          model: MODEL,
+          model,
           max_tokens: maxTokens,
+          betas: ['extended-cache-ttl-2025-04-11', 'advisor-tool-2026-03-01'],
           system: [
-            // El bloque comun se cachea (ephemeral, TTL 5 min) para que los
+            // El bloque comun se cachea (ephemeral, TTL 1h) para que los
             // 3 agentes consecutivos lo reutilicen sin re-pagar los input tokens.
             { type: 'text', text: commonContextBlock, cache_control: { type: 'ephemeral', ttl: '1h' } },
             // Cacheamos también el role prompt — Anthropic permite hasta 4
@@ -3588,10 +3793,76 @@ Reglas:
       const toolUseBlocksCount = response.content.filter(
         (b: any) => b.type === 'tool_use',
       ).length;
+
+      // Advisor tokens detection — alineado con docs oficiales (verificado 2026-05-04):
+      //   https://platform.claude.com/docs/en/agents-and-tools/tool-use/advisor-tool
+      //
+      // 1) Conteo de INVOCACIONES. Cada invocación del advisor produce 2 blocks:
+      //      - `server_tool_use` con `name === 'advisor'` y `input: {}` (la llamada)
+      //      - `advisor_tool_result` con `content.type === 'advisor_result'` (éxito)
+      //        o `content.type === 'advisor_tool_result_error'` (rate-limit, max_uses_exceeded, etc.)
+      //
+      //    Para no doblar el conteo, contamos SOLO los `server_tool_use` (1:1
+      //    con invocaciones). Detectamos errores via `advisor_tool_result.content.type`
+      //    para reportarlos por separado.
+      //
+      //    NOTA CRÍTICA: el doc dice `server_tool_use`, NO `tool_use`. Filtrar
+      //    por `tool_use` (como hacía el código anterior) cuenta SIEMPRE 0
+      //    invocaciones aunque el advisor sí se invoque — falso negativo.
+      //
+      // 2) Tokens via `usage.iterations[]`. Array discriminado por `type`:
+      //      - `type: 'message'` → tokens del executor (este modelo)
+      //      - `type: 'advisor_message'` con `model: 'claude-opus-4-7'` → tokens del advisor
+      //
+      //    SOLO sumamos las iterations con `type === 'advisor_message'` para
+      //    el costo del advisor — sumar todas dobletea los tokens del executor.
+      const advisorInvocations = response.content.filter(
+        (b: any) => b?.type === 'server_tool_use' && b?.name === 'advisor',
+      );
+      const advisorResults = response.content.filter(
+        (b: any) => b?.type === 'advisor_tool_result',
+      );
+      const advisorErrors = advisorResults.filter(
+        (b: any) => b?.content?.type === 'advisor_tool_result_error',
+      );
+      const advisorCount = advisorInvocations.length;
+      const advisorErrorCount = advisorErrors.length;
+      const allIterations = Array.isArray((usage as any)?.iterations)
+        ? ((usage as any).iterations as Array<{
+            type?: string;
+            model?: string;
+            input_tokens?: number;
+            output_tokens?: number;
+          }>)
+        : [];
+      const advisorIterations = allIterations.filter((it) => it?.type === 'advisor_message');
+      const advisorInputTokens = advisorIterations.reduce(
+        (acc, it) => acc + (it.input_tokens ?? 0),
+        0,
+      );
+      const advisorOutputTokens = advisorIterations.reduce(
+        (acc, it) => acc + (it.output_tokens ?? 0),
+        0,
+      );
+      // pause_turn detection (defensivo, ver docs/handling-stop-reasons):
+      // ocurre cuando el server-side sampling loop alcanza su iter limit
+      // (default 10) — típicamente por dangling advisor o web_search.
+      // Nuestro `continue` lo maneja por el path "no client tool_use", pero
+      // sin este log quedaríamos ciegos. La doc dice: "Simply add the
+      // assistant's response to your messages array and make another API
+      // request to let Claude continue" — exactamente lo que hace el push
+      // de assistantContent + continue del loop.
+      if (response.stop_reason === 'pause_turn') {
+        this.logger.log(
+          `[StoryGen:${role.toUpperCase()}] ⏸ pause_turn at iter ${iteration} — server-side loop hit limit (likely advisor or web_search dangling). Continuing on next iter.`,
+        );
+      }
+
       this.logger.log(
         `[StoryGen:${role.toUpperCase()}] iter ${iteration} stop=${response.stop_reason} dur=${Date.now() - callStart}ms ` +
           `tokens(in=${inputTokens} out=${outputTokens} cache_read=${cacheRead} cache_create=${cacheCreate}) ` +
           `thinking_blocks=${thinkingBlocksCount} tool_calls=${toolUseBlocksCount}` +
+          `${advisorCount > 0 ? ` advisor(uses=${advisorCount} tokens=in/out=${advisorInputTokens}/${advisorOutputTokens}${advisorErrorCount > 0 ? ` errors=${advisorErrorCount}⚠` : ''}) 🦉` : ''}` +
           `${thinkingActive ? ' 🧠' : ''}${isForcedTerminalTurn ? ' 🎯FORCED' : ''}${cacheRead > 0 ? ' 💾CACHE_HIT' : ''}`,
       );
 
@@ -3600,6 +3871,9 @@ Reglas:
       totalOutputTokens += outputTokens;
       totalCacheRead += cacheRead;
       totalCacheCreate += cacheCreate;
+      totalAdvisorCount += advisorCount;
+      totalAdvisorInputTokens += advisorInputTokens;
+      totalAdvisorOutputTokens += advisorOutputTokens;
 
       // Detección de regresión silenciosa.
       //
@@ -3632,10 +3906,13 @@ Reglas:
         const ratio = totalCacheCreate > 0
           ? (totalCacheRead / totalCacheCreate).toFixed(1)
           : '∞';
+        const advisorSummary = totalAdvisorCount > 0
+          ? ` advisor(uses=${totalAdvisorCount} in=${totalAdvisorInputTokens} out=${totalAdvisorOutputTokens}) 🦉`
+          : ' advisor(uses=0)';
         this.logger.log(
-          `[StoryGen:${role.toUpperCase()}] ▣ run summary: iters=${iteration + 1} ` +
+          `[StoryGen:${role.toUpperCase()}] ▣ run summary: iters=${iteration + 1} model=${model} ` +
             `totals(in=${totalInputTokens} out=${totalOutputTokens} cache_read=${totalCacheRead} cache_create=${totalCacheCreate}) ` +
-            `ratio_read_to_write=${ratio}:1 — target ≥4:1 (anti-thrashing OK).`,
+            `ratio_read_to_write=${ratio}:1 — target ≥4:1 (anti-thrashing OK).${advisorSummary}`,
         );
       }
 

@@ -77,16 +77,23 @@ const TWO_CACHE_BREAKPOINTS_PATTERN =
  * Tolera whitespace, comentarios, y propiedades intermedias entre la
  * declaración del array y el primer `content` (los servicios reales tienen
  * comentarios extensos del fix entre la firma y el primer elemento).
+ *
+ * Acepta los 2 shapes válidos para el tipo del array:
+ *   - `Anthropic.Messages.MessageParam[]` (namespace standard — layout pass,
+ *     epic-generation)
+ *   - `Anthropic.Beta.BetaMessageParam[]` (namespace beta — story-generation
+ *     y diagram-generation tras la migración del advisor 2026-05-04)
  */
 const KICKOFF_MESSAGE_PATTERN =
-  /messages:\s*Anthropic\.Messages\.MessageParam\[\]\s*=\s*\[[\s\S]{0,500}role:\s*'user',\s*content:\s*'[^']*system prompt[^']*'/;
+  /messages:\s*Anthropic\.(?:Messages\.MessageParam|Beta\.BetaMessageParam)\[\]\s*=\s*\[[\s\S]{0,500}role:\s*'user',\s*content:\s*'[^']*system prompt[^']*'/;
 
 /**
  * Regex que detecta la regresión: contextBlock viajando en messages[0]
- * en vez del system. Si esto matchea, el fix se rompió.
+ * en vez del system. Si esto matchea, el fix se rompió. Acepta los 2 shapes
+ * de tipo (standard y beta).
  */
 const CONTEXT_BLOCK_IN_MESSAGES_REGRESSION =
-  /messages:\s*Anthropic\.Messages\.MessageParam\[\]\s*=\s*\[\s*\{\s*role:\s*'user',\s*content:\s*contextBlock\s*\}/;
+  /messages:\s*Anthropic\.(?:Messages\.MessageParam|Beta\.BetaMessageParam)\[\]\s*=\s*\[\s*\{\s*role:\s*'user',\s*content:\s*contextBlock\s*\}/;
 
 // ---------------------------------------------------------------------------
 // Suite
@@ -385,9 +392,11 @@ describe('Prompt cache anti-thrashing fix — source-level regression', () => {
     it('story-generation acumuladores en outer scope sobreviven el for loop', () => {
       // En story-generation el loop está en runAgentLoop. Los acumuladores
       // van DENTRO de la función pero FUERA del for. Verificamos que estén
-      // declarados antes del for con `for (let iteration`.
+      // declarados antes del for con `for (let iteration`. Rango {0,1500}
+      // tolera los acumuladores de advisor (totalAdvisor*) agregados en
+      // Fase 2 (2026-05-04).
       expect(STORY_SERVICE).toMatch(
-        /let totalInputTokens = 0;\s*\n\s*let totalOutputTokens = 0;\s*\n\s*let totalCacheRead = 0;\s*\n\s*let totalCacheCreate = 0;\s*\n[\s\S]{0,500}for\s*\(let iteration/,
+        /let totalInputTokens = 0;\s*\n\s*let totalOutputTokens = 0;\s*\n\s*let totalCacheRead = 0;\s*\n\s*let totalCacheCreate = 0;\s*\n[\s\S]{0,1500}for\s*\(let iteration/,
       );
     });
 
@@ -417,22 +426,50 @@ describe('Prompt cache anti-thrashing fix — source-level regression', () => {
   describe('TTL extendido (1h) — beta header + ttl en cache_control', () => {
     it('los 3 servicios incluyen el beta header "extended-cache-ttl-2025-04-11"', () => {
       // Sin este header en `defaultHeaders`, Anthropic ignora el `ttl: '1h'`
-      // y aplica el TTL default de 5min. La regresión sería SILENCIOSA — no
-      // hay error, solo el cache expira más rápido y los costos suben.
-      const betaHeaderPattern = /'anthropic-beta':\s*'extended-cache-ttl-2025-04-11'/;
+      // y aplica el TTL default de 5min. La regresión sería SILENCIOSA.
+      // El header puede aparecer solo o concatenado con otros betas (e.g.
+      // ',advisor-tool-2026-03-01' agregado en Fase 2).
+      const betaHeaderPattern = /'anthropic-beta':\s*'[^']*extended-cache-ttl-2025-04-11[^']*'/;
       expect(DIAGRAM_SERVICE).toMatch(betaHeaderPattern);
       expect(EPIC_SERVICE).toMatch(betaHeaderPattern);
       expect(STORY_SERVICE).toMatch(betaHeaderPattern);
+    });
+
+    it('epic-generation Y diagram-generation NO incluyen el advisor tool (removido 2026-05-04 — no aportaba valor)', () => {
+      // Decisión histórica: se intentó el advisor en epic-generation
+      // (piloto Fase 2) y luego en diagram-generation. Smoke tests reales
+      // mostraron que Sonnet NUNCA lo invocaba en ambos contextos:
+      //   - Épicas: prompts directos sin espacio de decisión.
+      //   - Diagramas: 7 iters, 0 invocaciones — tareas estructurales
+      //     (outline → draft → submit) sin decisiones que ameriten Opus.
+      //
+      // Alineado con doc oficial: "weaker fit for workloads where every
+      // turn genuinely requires the advisor model's full capability."
+      //
+      // En story-generation el advisor se conserva SOLO en PO/TL/QA (3
+      // agentes con decisiones reales). DEPS_AUDITOR y STORY_ORDER son
+      // mecánicos y se removieron en el mismo commit. Ver el otro test
+      // ("story-generation: advisor SOLO en PO/TL/QA, NO en DEPS_AUDITOR/STORY_ORDER").
+      expect(EPIC_SERVICE).not.toMatch(/type:\s*'advisor_20260301'/);
+      expect(EPIC_SERVICE).not.toMatch(/'anthropic-beta':\s*'[^']*advisor-tool-2026-03-01/);
+      expect(DIAGRAM_SERVICE).not.toMatch(/type:\s*'advisor_20260301'/);
+      expect(DIAGRAM_SERVICE).not.toMatch(/'anthropic-beta':\s*'[^']*advisor-tool-2026-03-01/);
+      // Tampoco debe usar el namespace beta (sin advisor no hace falta).
+      expect(DIAGRAM_SERVICE).not.toMatch(/this\.client\.beta\.messages\.stream\(/);
     });
 
     it('los 3 servicios pasan defaultHeaders al constructor de Anthropic', () => {
       // El header debe estar dentro del `defaultHeaders` del cliente, no
       // como request override per-call. Si alguien lo movió a `extra_headers`
       // de un call específico, perdería cobertura para los demás calls.
-      const constructorPattern = /new Anthropic\(\s*\{[\s\S]{0,500}defaultHeaders:\s*\{[\s\S]{0,200}'anthropic-beta'/;
-      expect(DIAGRAM_SERVICE).toMatch(constructorPattern);
-      expect(EPIC_SERVICE).toMatch(constructorPattern);
-      expect(STORY_SERVICE).toMatch(constructorPattern);
+      // Validamos por presencia de `defaultHeaders` cerca de `new Anthropic`
+      // y luego presencia de `'anthropic-beta'` en cualquier parte cercana —
+      // las regex multilínea con rangos amplios son frágiles a comentarios
+      // largos de doc, así que descomponemos en 2 assertions más simples.
+      const isInConstructor = /new Anthropic\([\s\S]{0,3000}defaultHeaders:\s*\{[\s\S]{0,1000}'anthropic-beta'/;
+      expect(DIAGRAM_SERVICE).toMatch(isInConstructor);
+      expect(EPIC_SERVICE).toMatch(isInConstructor);
+      expect(STORY_SERVICE).toMatch(isInConstructor);
     });
 
     it('TODOS los cache_control breakpoints usan ttl 1h (no 5m default)', () => {
@@ -504,6 +541,300 @@ describe('Prompt cache anti-thrashing fix — source-level regression', () => {
       );
       expect(EPIC_SERVICE).toMatch(
         /let totalInputTokens = 0;\s*\n\s*let totalOutputTokens = 0;\s*\n\s*let totalCacheRead = 0;\s*\n\s*let totalCacheCreate = 0;\s*\n[\s\S]{0,500}for\s*\(let iteration/,
+      );
+    });
+  });
+
+  // =========================================================================
+  // Advisor strategy — wiring crítico (3 errores corregidos 2026-05-04):
+  //
+  //   1. Modelo del advisor: SOLO `claude-opus-4-7` (la tabla oficial no
+  //      acepta 4-6 — bug raíz que mantuvo el advisor inactivo en 7+ runs).
+  //   2. Namespace beta: `client.beta.messages.stream()` con `betas: [...]`
+  //      pasados por request, NO `client.messages.stream()` standard con el
+  //      header en `defaultHeaders` (el standard ignora el tool en silencio).
+  //   3. Header del advisor SOLO en el array `betas`, NO en `defaultHeaders`.
+  //
+  // Estos tests guardan que la regresión sea ruidosa: si alguien revierte a
+  // 4-6 o vuelve al namespace standard, los tests fallan al instante.
+  // =========================================================================
+
+  describe('Advisor strategy — wiring beta + modelo correcto', () => {
+    it('story-generation declara ADVISOR_MODEL = claude-opus-4-7 (NO 4-6)', () => {
+      // El advisor SOLO acepta opus-4-7 según la tabla oficial. 4-6 es
+      // ignorado silenciosamente y el run no invoca al advisor.
+      expect(STORY_SERVICE).toMatch(/const ADVISOR_MODEL = 'claude-opus-4-7';/);
+      expect(STORY_SERVICE).not.toMatch(/const ADVISOR_MODEL = 'claude-opus-4-6';/);
+    });
+
+    it('story-generation usa client.beta.messages.stream() (NO el namespace standard)', () => {
+      // Sin el namespace beta, el header `advisor-tool-2026-03-01` se ignora
+      // y el advisor nunca se invoca aunque esté declarado en `tools`.
+      expect(STORY_SERVICE).toMatch(/this\.client\.beta\.messages\.stream\(/);
+    });
+
+    it('story-generation pasa betas con extended-cache-ttl + advisor-tool en cada llamada beta', () => {
+      // El header debe estar en el array `betas: [...]` por request, no
+      // en `defaultHeaders`.
+      expect(STORY_SERVICE).toMatch(
+        /betas:\s*\[\s*'extended-cache-ttl-2025-04-11',\s*'advisor-tool-2026-03-01'\s*\]/,
+      );
+    });
+
+    it('story-generation NO tiene advisor-tool en defaultHeaders (debe ir en betas[])', () => {
+      // Si alguien revierte y vuelve a poner el advisor en defaultHeaders,
+      // el namespace beta sigue funcionando pero el código duplica el
+      // header en 2 lugares — y peor, si alguien borra el `betas` del
+      // request específico pensando que el defaultHeaders cubre, el
+      // advisor se desactiva. Mejor un único punto de verdad: en betas[].
+      expect(STORY_SERVICE).not.toMatch(
+        /defaultHeaders:\s*\{[\s\S]{0,500}'anthropic-beta':\s*'[^']*advisor-tool-2026-03-01[^']*'/,
+      );
+    });
+
+    it('buildAdvisorTool() emite shape correcto (type=advisor_20260301, model=ADVISOR_MODEL) — solo en story', () => {
+      // Sanity check: el tool emitido debe tener el `type` correcto y
+      // referenciar la constante `ADVISOR_MODEL` (no un literal hardcoded).
+      // Solo aplica a story-generation desde 2026-05-04 (advisor removido
+      // de epic y diagram).
+      const toolShapePattern =
+        /type:\s*'advisor_20260301',\s*name:\s*'advisor',\s*model:\s*ADVISOR_MODEL,\s*max_uses:/;
+      expect(STORY_SERVICE).toMatch(toolShapePattern);
+    });
+
+    it('story-generation acumula advisor tokens desde usage.iterations (BetaUsage shape)', () => {
+      // Con el namespace beta, `usage.iterations` contiene los tokens del
+      // advisor por separado. El fix 2026-05-04 los suma en
+      // `advisorInputTokens` / `advisorOutputTokens` — sin esto, los logs
+      // siempre reportarían 0 aunque el advisor sí se invoque.
+      expect(STORY_SERVICE).toMatch(/usage as any\)\?\.iterations/);
+      expect(STORY_SERVICE).toMatch(/advisorInputTokens\s*=\s*advisorIterations\.reduce/);
+      expect(STORY_SERVICE).toMatch(/advisorOutputTokens\s*=\s*advisorIterations\.reduce/);
+    });
+  });
+
+  // =========================================================================
+  // Advisor wiring — fixes derivados del segundo deep-dive de docs (2026-05-04)
+  //
+  // Doc:
+  //   https://platform.claude.com/docs/en/agents-and-tools/tool-use/advisor-tool
+  //
+  //   1. La invocación produce `server_tool_use` (NO `tool_use`). Filtrar por
+  //      el tipo erróneo siempre cuenta 0 invocaciones.
+  //   2. `usage.iterations[]` discrimina por `type`: 'advisor_message' (Opus)
+  //      vs 'message' (executor). Sumar todas las iterations duplica los
+  //      tokens del executor en la métrica del advisor.
+  //   3. ADVISOR_GUIDANCE debe seguir el patrón prescriptivo evaluado por
+  //      Anthropic: conciseness primero (corta tokens 35-45%), timing,
+  //      treatment. El patrón anterior ("usa SOLO en decisiones difíciles")
+  //      DETER al executor de invocar.
+  // =========================================================================
+
+  describe('Advisor wiring — alineado con docs oficiales', () => {
+    it('story-generation filtra advisor blocks por server_tool_use (NO tool_use)', () => {
+      // Doc: "The executor emits a `server_tool_use` block with `name: 'advisor'`".
+      // Filtrar por `tool_use` (regular) siempre da 0 falsamente.
+      expect(STORY_SERVICE).toMatch(
+        /b\?\.type\s*===\s*'server_tool_use'\s*&&\s*b\?\.name\s*===\s*'advisor'/,
+      );
+      // El antipatrón viejo NO debe estar.
+      expect(STORY_SERVICE).not.toMatch(
+        /b\?\.type\s*===\s*'tool_use'\s*&&\s*b\?\.name\s*===\s*'advisor'/,
+      );
+    });
+
+    it('story-generation filtra usage.iterations por type === "advisor_message"', () => {
+      // Doc: "Iterations with `type: 'advisor_message'` are billed at the
+      // advisor model's rates; iterations with `type: 'message'` are billed
+      // at the executor model's rates." Sumar todas dobletea el executor.
+      expect(STORY_SERVICE).toMatch(
+        /allIterations\.filter\(\(it\)\s*=>\s*it\?\.type\s*===\s*'advisor_message'\)/,
+      );
+    });
+
+    it('ADVISOR_GUIDANCE empieza con la conciseness instruction (corta tokens 35-45%) — solo en story', () => {
+      // Doc: "prepend a single conciseness instruction to the system prompt
+      // before any other sentence that mentions the advisor." La instrucción
+      // exacta que evalúa Anthropic. Solo en story (advisor removido de diagram).
+      const concisenessLine = /The advisor should respond in under 100 words and use enumerated steps, not explanations\./;
+      expect(STORY_SERVICE).toMatch(concisenessLine);
+    });
+
+    it('ADVISOR_GUIDANCE incluye el timing block ("Call advisor BEFORE substantive work") — solo en story', () => {
+      // Patrón oficial: nudgea al executor a invocar advisor antes de
+      // commits a un approach o submit. Sin esto, el executor lo invocaba
+      // raramente o nunca.
+      const timingPattern = /Call advisor BEFORE substantive work/;
+      expect(STORY_SERVICE).toMatch(timingPattern);
+    });
+
+    it('ADVISOR_GUIDANCE incluye el treatment block ("Give the advice serious weight") — solo en story', () => {
+      // Sin este bloque, el executor podía ignorar las recomendaciones del
+      // advisor o switchear silenciosamente sin reconciliar conflictos.
+      const treatmentPattern = /Give the advice serious weight/;
+      expect(STORY_SERVICE).toMatch(treatmentPattern);
+    });
+
+    it('story-generation NO contiene el patrón viejo restrictivo "usa SOLO en decisiones difíciles"', () => {
+      // El patrón viejo deteraba la invocación. Si alguien lo restaura, el
+      // smoke test bajará invocaciones a 0 — este test atrapa la regresión.
+      expect(STORY_SERVICE).not.toMatch(/Úsalo SOLO en decisiones genuinamente difíciles/);
+    });
+
+    it('story-generation log usa el formato nuevo "advisor(uses=N tokens=in/out=...)" — no el viejo "blocks="', () => {
+      // El log viejo (`blocks=N types=[...]`) no expone tokens reales del
+      // advisor. El log nuevo lo hace para que el smoke test confirme
+      // costo del Opus por separado.
+      expect(STORY_SERVICE).toMatch(/advisor\(uses=\$\{advisorCount\} tokens=in\/out=/);
+      expect(STORY_SERVICE).not.toMatch(/advisor\(blocks=\$\{advisorCount\} types=/);
+    });
+  });
+
+  // =========================================================================
+  // Refinamientos del tercer deep-dive (verificado contra docs 2026-05-04):
+  //
+  //   1. Cada invocación del advisor produce 2 blocks: server_tool_use +
+  //      advisor_tool_result. Contar ambos doblea el conteo. Filtramos solo
+  //      server_tool_use (1:1 con invocaciones reales).
+  //   2. `advisor_tool_result.content.type === 'advisor_tool_result_error'`
+  //      identifica errores (max_uses_exceeded, overloaded, etc.) — los
+  //      reportamos por separado para no esconder problemas operativos.
+  //   3. `stop_reason === 'pause_turn'` puede ocurrir cuando el server-side
+  //      loop hit su iter limit con un dangling advisor o web_search. El
+  //      doc dice "Simply add the assistant's response to your messages array
+  //      and make another API request" — exactamente lo que hace nuestro
+  //      `messages.push + continue`. Logueamos para detectarlo, no para
+  //      cambiar el manejo.
+  // =========================================================================
+
+  describe('Advisor refinements — conteo exacto + error tracking + pause_turn', () => {
+    it('story-generation cuenta SOLO server_tool_use para advisorCount (1:1 con invocaciones)', () => {
+      // Cada invocación produce 1 server_tool_use + 1 advisor_tool_result.
+      // El antipatrón anterior contaba ambos → reportaba uses=4 cuando max_uses=2.
+      expect(STORY_SERVICE).toMatch(
+        /advisorInvocations\s*=\s*response\.content\.filter\(\s*\([^)]*\)\s*=>\s*b\?\.type\s*===\s*'server_tool_use'\s*&&\s*b\?\.name\s*===\s*'advisor'/,
+      );
+      expect(STORY_SERVICE).toMatch(/advisorCount\s*=\s*advisorInvocations\.length/);
+    });
+
+    it('story-generation detecta advisor errors via content.type === advisor_tool_result_error', () => {
+      expect(STORY_SERVICE).toMatch(
+        /advisorErrors\s*=\s*advisorResults\.filter\(\s*\([^)]*\)\s*=>\s*b\?\.content\?\.type\s*===\s*'advisor_tool_result_error'/,
+      );
+      expect(STORY_SERVICE).toMatch(/advisorErrorCount\s*=\s*advisorErrors\.length/);
+    });
+
+    it('story-generation detecta y loguea pause_turn explícitamente (defensivo)', () => {
+      // Doc: "Your application should handle `pause_turn` in any agent loop
+      // that uses server tools." Nuestro continue lo maneja, este log lo
+      // hace visible en smoke tests.
+      expect(STORY_SERVICE).toMatch(
+        /response\.stop_reason\s*===\s*'pause_turn'/,
+      );
+      expect(STORY_SERVICE).toMatch(/⏸ pause_turn at iter/);
+    });
+
+    it('story-generation log per-iter incluye errors=N⚠ cuando advisorErrorCount > 0', () => {
+      // Cuando hay errores del advisor (rate-limit, max_uses_exceeded), el
+      // log debe mostrar `errors=N⚠` para distinguir invocaciones exitosas
+      // de fallidas — un advisor que cae 100% en errors igual cuenta para
+      // max_uses pero NO entrega advice útil.
+      const errorLogPattern = /errors=\$\{advisorErrorCount\}⚠/;
+      expect(STORY_SERVICE).toMatch(errorLogPattern);
+    });
+  });
+
+  // =========================================================================
+  // Decisiones tras smoke test real de historias (2026-05-04):
+  //
+  //   1. ADVISOR removido de DEPS_AUDITOR y STORY_ORDER. Run de prueba mostró
+  //      que invocaban al advisor 1 vez cada uno por tareas mecánicas (audit
+  //      vendors / extracción de edges). Costo: ~$2.13/run del Opus para 0
+  //      decisión real. Conservado solo en PO/TL/QA donde sí toman decisión.
+  //
+  //   2. PO migrado de Haiku 4.5 → Sonnet 4.6. Smoke test mostró calidad
+  //      narrativa inferior con Haiku en los 5 headings del PO. Sonnet
+  //      entrega prosa más rica en lenguaje de PO real.
+  //
+  //   3. QA bug fix: Sonnet a veces emite `strategies` como JSON-encoded
+  //      string bajo presión de output (qa.markdown grande + dependencies
+  //      con mdContent hyper-rico). Antes: 3 retries × $0.09 = $0.27/run.
+  //      Ahora: validateTerminal intenta JSON.parse y recupera in-place.
+  // =========================================================================
+
+  describe('Story-generation refinements post smoke test (2026-05-04)', () => {
+    it('story-generation: advisor SOLO en PO/TL/QA, NO en DEPS_AUDITOR/STORY_ORDER', () => {
+      // El advisor es costoso ($15/M Opus). Solo justifica donde el agente
+      // toma decisiones de criterio (división de stories, arquitectura, edge
+      // cases). DEPS_AUDITOR y STORY_ORDER son mecánicos — Haiku basta.
+      //
+      // Conteo esperado: `buildAdvisorTool() as any` aparece 3 veces (PO+TL+QA),
+      // NO 5 como en la versión inicial.
+      const advisorCalls = STORY_SERVICE.match(/buildAdvisorTool\(\)\s+as\s+any/g);
+      expect(advisorCalls).not.toBeNull();
+      expect(advisorCalls!.length).toBe(3);
+
+      // Verificación complementaria: ADVISOR_GUIDANCE se concatena en
+      // EXACTAMENTE 3 system prompts (no 5).
+      const guidanceInjections = STORY_SERVICE.match(/\+\s*ADVISOR_GUIDANCE/g);
+      expect(guidanceInjections).not.toBeNull();
+      expect(guidanceInjections!.length).toBe(3);
+    });
+
+    it('story-generation: runDepsAuditorAgent NO inyecta ADVISOR_GUIDANCE', () => {
+      // Guard contra regresión: si alguien añade `+ ADVISOR_GUIDANCE` al
+      // roleSystemPrompt del DEPS_AUDITOR, este test falla. El comentario
+      // en el código explica el porqué del removal.
+      const depsBlock = STORY_SERVICE.match(
+        /buildDepsAuditorSystemPrompt\(\)[^;\n]*/,
+      );
+      expect(depsBlock).not.toBeNull();
+      expect(depsBlock![0]).not.toMatch(/ADVISOR_GUIDANCE/);
+    });
+
+    it('story-generation: runStoryOrderAgent NO inyecta ADVISOR_GUIDANCE', () => {
+      const orderBlock = STORY_SERVICE.match(
+        /buildStoryOrderSystemPrompt\(\)[^;\n]*/,
+      );
+      expect(orderBlock).not.toBeNull();
+      expect(orderBlock![0]).not.toMatch(/ADVISOR_GUIDANCE/);
+    });
+
+    it('PO usa MODEL (Sonnet 4.6), NO HAIKU_MODEL — revertido tras smoke test', () => {
+      // El user observó que el PO con Haiku quedaba inferior en calidad
+      // narrativa. Sonnet entrega mejor prosa para los 5 headings.
+      // Pattern: el caller del PO en runAgentLoop pasa `model: MODEL` con
+      // un comentario que menciona el revert desde Haiku.
+      expect(STORY_SERVICE).toMatch(
+        /role:\s*'po',\s*\n[\s\S]{0,500}revertido desde Haiku[\s\S]{0,500}model:\s*MODEL,/,
+      );
+    });
+
+    it('runQAAgent valida con recovery automática para strategies-as-string (Sonnet bug)', () => {
+      // Sonnet bajo presión de output a veces serializa el array como JSON
+      // string. El validator lo recupera con JSON.parse antes de fallar.
+      // Sin esto, cada run pierde 2-3 iters en retries (~$0.27).
+      expect(STORY_SERVICE).toMatch(/typeof strategies\s*===\s*'string'/);
+      expect(STORY_SERVICE).toMatch(/JSON\.parse\(strategies\)/);
+      expect(STORY_SERVICE).toMatch(/recuperado strategies-as-string via JSON\.parse/);
+      expect(STORY_SERVICE).toMatch(/inputObj\.strategies\s*=\s*parsed/);
+    });
+
+    it('runQAAgent error message refuerza "array literal NO JSON-encoded string"', () => {
+      // El nuevo errorMessage en el validator distingue array literal vs
+      // string serializado, con ejemplos de ambos. Sin esta claridad, el
+      // modelo puede repetir el mismo error en el retry.
+      expect(STORY_SERVICE).toMatch(
+        /array literal de objetos, NO un JSON-encoded string/,
+      );
+    });
+
+    it('user content del QA advierte explícitamente sobre el shape del array', () => {
+      // Refuerzo en el USER content (no solo en el validator): el modelo
+      // ve esta nota antes de emitir, así puede evitar el error desde la
+      // primera iteración.
+      expect(STORY_SERVICE).toMatch(
+        /strategies.{1,200}DEBE ser un \*\*array literal nativo de objetos\*\*, NO un string JSON-encoded/,
       );
     });
   });

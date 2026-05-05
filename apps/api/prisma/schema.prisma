@@ -446,22 +446,22 @@ model AgentTokenSettings {
   // Stories — Product Owner agent
   // effort ∈ 'low' | 'medium' | 'high' (validado en service/DTO).
   // 'max' solo soportado en modelos Opus; agregar cuando se haga upgrade.
-  storyPoEffort          String  @default("high")
+  storyPoEffort          String  @default("medium")
   storyPoMaxTokens       Int     @default(28000)
   storyPoThinkingEnabled Boolean @default(true)
 
   // Stories — Tech Lead agent
-  storyTlEffort          String  @default("high")
+  storyTlEffort          String  @default("medium")
   storyTlMaxTokens       Int     @default(64000)
   storyTlThinkingEnabled Boolean @default(true)
 
   // Stories — QA agent
-  storyQaEffort          String  @default("high")
+  storyQaEffort          String  @default("medium")
   storyQaMaxTokens       Int     @default(64000)
   storyQaThinkingEnabled Boolean @default(true)
 
   // Epics agent (max_tokens dinámico → este valor es el cap superior)
-  epicEffort          String  @default("high")
+  epicEffort          String  @default("medium")
   epicMaxTokens       Int     @default(64000)
   epicThinkingEnabled Boolean @default(true)
 
@@ -470,7 +470,7 @@ model AgentTokenSettings {
   // diagrama gasta MUCHO budget en thinking validando estructura (ciclos,
   // layer assignments, edge labels), y se quedaba sin tokens antes de
   // estructurar el submit_diagram. Subir a 64000 lo alinea con epicMaxTokens.
-  diagramEffort          String  @default("high")
+  diagramEffort          String  @default("medium")
   diagramMaxTokens       Int     @default(64000)
   diagramThinkingEnabled Boolean @default(true)
 
