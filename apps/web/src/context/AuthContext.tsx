@@ -21,6 +21,7 @@ import {
   getTeamMembers,
   inviteMember,
   changeMemberRole,
+  changeMemberPods,
   deactivateMember as deactivateAction,
   reactivateMember as reactivateAction,
   removeMember as removeAction,
@@ -46,6 +47,7 @@ type AuthAction =
   | { type: 'UPDATE_MEMBER'; payload: { id: string; changes: Partial<TeamMember> } }
   | { type: 'REMOVE_MEMBER'; payload: string }
   | { type: 'CHANGE_ROLE'; payload: { userId: string; role: UserRole } }
+  | { type: 'CHANGE_PODS'; payload: { userId: string; podIds: string[] } }
   | { type: 'DEACTIVATE_MEMBER'; payload: string }
   | { type: 'REACTIVATE_MEMBER'; payload: string }
   | { type: 'SET_ROLE_PERMISSIONS'; payload: { role: UserRole; permissions: Permission[] } }
@@ -77,6 +79,15 @@ function authReducer(state: AuthState, action: AuthAction): AuthState {
         ...state,
         members: state.members.map((m) =>
           m.id === userId ? { ...m, role } : m,
+        ),
+      };
+    }
+    case 'CHANGE_PODS': {
+      const { userId, podIds } = action.payload;
+      return {
+        ...state,
+        members: state.members.map((m) =>
+          m.id === userId ? { ...m, podIds } : m,
         ),
       };
     }
@@ -122,6 +133,7 @@ interface AuthContextValue {
   // Auth0-backed operations
   handleInvite: (email: string, name: string, role: UserRole, podIds?: string[]) => Promise<TeamMember>;
   handleChangeRole: (userId: string, role: UserRole) => Promise<void>;
+  handleChangePods: (userId: string, podIds: string[]) => Promise<void>;
   handleDeactivate: (userId: string) => Promise<void>;
   handleReactivate: (userId: string) => Promise<void>;
   handleRemove: (userId: string) => Promise<void>;
@@ -200,6 +212,14 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     [],
   );
 
+  const handleChangePods = useCallback(
+    async (userId: string, podIds: string[]) => {
+      await changeMemberPods(userId, podIds);
+      dispatch({ type: 'CHANGE_PODS', payload: { userId, podIds } });
+    },
+    [],
+  );
+
   const handleDeactivate = useCallback(async (userId: string) => {
     await deactivateAction(userId);
     dispatch({ type: 'DEACTIVATE_MEMBER', payload: userId });
@@ -270,6 +290,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       dispatch,
       handleInvite,
       handleChangeRole,
+      handleChangePods,
       handleDeactivate,
       handleReactivate,
       handleRemove,
@@ -289,6 +310,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       dispatch,
       handleInvite,
       handleChangeRole,
+      handleChangePods,
       handleDeactivate,
       handleReactivate,
       handleRemove,

@@ -13,6 +13,7 @@ import {
   UseInterceptors,
   BadRequestException,
 } from '@nestjs/common';
+import { Throttle } from '@nestjs/throttler';
 import { FileInterceptor } from '@nestjs/platform-express';
 import { ApiTags, ApiOperation, ApiConsumes } from '@nestjs/swagger';
 import { Permission, type AuthenticatedUser } from '@cenzontle/shared';
@@ -22,6 +23,7 @@ import { CreateEpicDto } from './dto/create-epic.dto';
 import { UpdateEpicDto } from './dto/update-epic.dto';
 import { EpicQueryDto } from './dto/epic-query.dto';
 import { PublishToTrackerDto } from './dto/publish-to-tracker.dto';
+import { ApproveEpicDto } from './dto/approve-epic.dto';
 
 @ApiTags('Épicas')
 @Controller('proyectos/epicas')
@@ -171,5 +173,61 @@ export class EpicsController {
     @CurrentUser() user: AuthenticatedUser,
   ) {
     return this.epicsService.publishToTracker(id, dto.provider, user);
+  }
+
+  // ──────────────────────────────────────────────────────────────────────
+  // Visto Bueno (VoBo) — Protocolo de aprobación por rol
+  // ──────────────────────────────────────────────────────────────────────
+
+  // Throttle estricto: estos endpoints reenvían la password a Auth0
+  // (step-up auth). Sin límite, un atacante con un JWT comprometido puede
+  // brute-force la password del aprobador (CWE-307) y bloquear su cuenta
+  // en Auth0 (DoS lateral). 5 intentos/min por sub del JWT.
+  @Throttle({ default: { ttl: 60_000, limit: 5 } })
+  @Post(':id/approvals/po')
+  @Permissions(Permission.APPROVE_EPIC_PO)
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({
+    summary:
+      'VoBo del Product Owner. Requiere rol ProductOwner + contraseña actual + definición/diagrama/historias completas. Límite 5/min.',
+  })
+  approveAsPO(
+    @Param('id') id: string,
+    @Body() dto: ApproveEpicDto,
+    @CurrentUser() user: AuthenticatedUser,
+  ) {
+    return this.epicsService.approve(id, 'po', dto, user);
+  }
+
+  @Throttle({ default: { ttl: 60_000, limit: 5 } })
+  @Post(':id/approvals/tl')
+  @Permissions(Permission.APPROVE_EPIC_TL)
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({
+    summary:
+      'VoBo del Tech Lead. Requiere rol TechLead + contraseña + VoBo PO previo. Límite 5/min.',
+  })
+  approveAsTL(
+    @Param('id') id: string,
+    @Body() dto: ApproveEpicDto,
+    @CurrentUser() user: AuthenticatedUser,
+  ) {
+    return this.epicsService.approve(id, 'tl', dto, user);
+  }
+
+  @Throttle({ default: { ttl: 60_000, limit: 5 } })
+  @Post(':id/approvals/qa')
+  @Permissions(Permission.APPROVE_QA)
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({
+    summary:
+      'VoBo de QA. Requiere rol QA + contraseña + VoBo PO y TL previos. Límite 5/min.',
+  })
+  approveAsQA(
+    @Param('id') id: string,
+    @Body() dto: ApproveEpicDto,
+    @CurrentUser() user: AuthenticatedUser,
+  ) {
+    return this.epicsService.approve(id, 'qa', dto, user);
   }
 }

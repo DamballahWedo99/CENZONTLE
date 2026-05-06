@@ -178,6 +178,29 @@ export async function updateUserRole(
   });
 }
 
+/**
+ * Asigna las células (pods) del usuario en Auth0. Auth0 Management API hace
+ * MERGE en `app_metadata`, así que enviar `{ pod_ids }` no toca `role` ni
+ * otros campos — sólo reescribe la lista de pod IDs.
+ *
+ * Si quieres "quitar la célula", pasa array vacío. Si pasas N IDs, el usuario
+ * queda con esa membresía exacta (no se acumula con la previa).
+ *
+ * El siguiente login del usuario emitirá un JWT con la nueva claim
+ * `https://cenzontle.app/pod_ids` vía el Post-Login Action. Para tokens
+ * vivos, los guards backend (assertUserCanAccessEpicPods) leen del JWT, así
+ * que el efecto sólo se materializa en el próximo refresh del access token.
+ */
+export async function updateUserPods(
+  userId: string,
+  podIds: string[],
+): Promise<void> {
+  await mgmtFetch(`/users/${encodeURIComponent(userId)}`, {
+    method: 'PATCH',
+    body: JSON.stringify({ app_metadata: { pod_ids: podIds } }),
+  });
+}
+
 export async function blockUser(userId: string): Promise<void> {
   const encoded = encodeURIComponent(userId);
 

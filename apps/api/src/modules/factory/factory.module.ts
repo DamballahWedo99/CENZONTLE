@@ -3,10 +3,14 @@ import { FactoryController } from "./factory.controller";
 import { FactoryService } from "./factory.service";
 import { TerminalController } from "./terminal.controller";
 import { TerminalService } from "./terminal.service";
+import { FactoryQueueController } from "./queue/factory-queue.controller";
+import { FactoryQueueService } from "./queue/factory-queue.service";
+import { ProyectosModule } from "../proyectos/proyectos.module";
 
 @Module({
-  controllers: [FactoryController, TerminalController],
-  providers: [FactoryService, TerminalService],
-  exports: [FactoryService, TerminalService],
+  imports: [ProyectosModule],
+  controllers: [FactoryController, TerminalController, FactoryQueueController],
+  providers: [FactoryService, TerminalService, FactoryQueueService],
+  exports: [FactoryService, TerminalService, FactoryQueueService],
 })
 export class FactoryModule {}

@@ -217,7 +217,7 @@ export class InitiativesService {
     return { kind: 'timeout' };
   }
 
-  async findAll(query: InitiativeQueryDto) {
+  async findAll(query: InitiativeQueryDto, user?: AuthenticatedUser) {
     const where: Prisma.InitiativeWhereInput = {};
     if (query.status) where.status = query.status;
     if (query.search) {
@@ -227,6 +227,30 @@ export class InitiativesService {
       ];
     }
 
+    // Filtrado por pods — el usuario sólo ve iniciativas que tienen al menos
+    // UNA épica con AL MENOS UN pod en común con su `user.podIds`. Las
+    // iniciativas no tienen pods directos (la asociación es transitiva
+    // Initiative → Epic → Pod), por eso el filtro es anidado.
+    //
+    // Reglas:
+    //  - AltaGerencia ve todas las iniciativas.
+    //  - Caller interno (sin user, ej. agentes batch) ve todas.
+    //  - Usuario sin pods → no ve nada (fail-closed, mismo patrón que épicas).
+    //  - Iniciativa sin épicas → invisible para no-admins (sin canal de acceso).
+    //
+    // Patrón consistente con epics.service.ts:450-468 (CWE-639 fix MEDIUM).
+    if (user && user.role !== UserRole.AltaGerencia) {
+      const userPodIds = user.podIds ?? [];
+      if (userPodIds.length === 0) return [];
+      where.epics = {
+        some: {
+          pods: {
+            some: { podId: { in: userPodIds } },
+          },
+        },
+      };
+    }
+
     return this.prisma.initiative.findMany({
       where,
       include: INITIATIVE_INCLUDE,
@@ -234,12 +258,29 @@ export class InitiativesService {
     });
   }
 
-  async findOne(id: string, includeContent = false) {
+  async findOne(id: string, includeContent = false, user?: AuthenticatedUser) {
     const initiative = await this.prisma.initiative.findUnique({
       where: { id },
       include: INITIATIVE_INCLUDE,
     });
     if (!initiative) throw new NotFoundException('Iniciativa no encontrada');
+
+    // Pod intersection — para no-AltaGerencia, la iniciativa debe tener al
+    // menos una épica en algún pod del usuario. Equivalente al filtro de
+    // findAll pero aplicado al resource individual (defense in depth contra
+    // direct ID access — alguien podría descubrir un ID por API y pegarle
+    // a /iniciativas/:id sin haber pasado por findAll).
+    if (user && user.role !== UserRole.AltaGerencia) {
+      const userPodIds = user.podIds ?? [];
+      const initiativePodIds = new Set<string>();
+      for (const epic of initiative.epics) {
+        for (const ep of epic.pods) initiativePodIds.add(ep.podId);
+      }
+      const sharesPod = userPodIds.some((p) => initiativePodIds.has(p));
+      if (!sharesPod) {
+        throw new NotFoundException('Iniciativa no encontrada');
+      }
+    }
 
     if (includeContent && initiative.vaultPath) {
       // En formato nuevo (folder), el contenido narrativo vive en `definicion.md`

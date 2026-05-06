@@ -5,6 +5,7 @@ import { useRouter, usePathname, useSearchParams } from 'next/navigation';
 import Link from 'next/link';
 import { toast } from 'sonner';
 import { useProyectos } from '@/context/ProyectosContext';
+import { useIntegrations } from '@/context/IntegrationsContext';
 import { useBreadcrumb } from '@/context/BreadcrumbContext';
 import { updateInitiative as apiUpdateInitiative, deleteInitiative as apiDeleteInitiative } from '@/lib/api/initiatives';
 import { deleteEpic as apiDeleteEpic, getEpic } from '@/lib/api/epics';
@@ -86,6 +87,7 @@ import {
   FileJson,
 } from 'lucide-react';
 import { LinearIcon } from '@/components/icons/LinearIcon';
+import { getShortId } from '@/lib/short-id';
 import { Tooltip, TooltipTrigger, TooltipContent, TooltipProvider } from '@/components/ui/tooltip';
 import { useScreenWakeLock } from '@/hooks/use-screen-wake-lock';
 
@@ -117,6 +119,7 @@ interface InitiativeFullPageProps {
 function InitiativeFullPageInner({ initiativeId }: InitiativeFullPageProps) {
   const router = useRouter();
   const { state, dispatch } = useProyectos();
+  const { isLinearConfigured } = useIntegrations();
   const { setBreadcrumb } = useBreadcrumb();
 
   const initiative = state.initiatives.find((i) => i.id === initiativeId);
@@ -770,7 +773,7 @@ function InitiativeFullPageInner({ initiativeId }: InitiativeFullPageProps) {
                           </TooltipTrigger>
                           <TooltipContent>Abrir iniciativa en Linear</TooltipContent>
                         </Tooltip>
-                      ) : (
+                      ) : isLinearConfigured ? (
                         <Tooltip>
                           <TooltipTrigger asChild>
                             <Button
@@ -789,7 +792,7 @@ function InitiativeFullPageInner({ initiativeId }: InitiativeFullPageProps) {
                           </TooltipTrigger>
                           <TooltipContent>Publicar como Linear Initiative</TooltipContent>
                         </Tooltip>
-                      )}
+                      ) : null}
                       <Tooltip>
                         <TooltipTrigger asChild>
                           <Button variant="ghost" size="icon" onClick={handleStartEdit} className="text-muted-foreground hover:text-foreground">
@@ -1165,7 +1168,7 @@ function InitiativeFullPageInner({ initiativeId }: InitiativeFullPageProps) {
                                 aria-label={`Seleccionar épica ${epic.title}`}
                               />
                             </div>
-                            <span className="font-mono text-xs text-muted-foreground w-20 shrink-0">{epic.tracker?.externalKey ?? '—'}</span>
+                            <span className="font-mono text-xs text-muted-foreground w-20 shrink-0">{epic.tracker?.externalKey ?? getShortId(epic.id)}</span>
                             <span className="truncate flex-1 text-sm font-medium">{epic.title}</span>
                             <div className="flex gap-1 shrink-0 w-28 justify-center">
                               {epicPods.slice(0, 2).map((pod) => (
@@ -1316,7 +1319,7 @@ function InitiativeFullPageInner({ initiativeId }: InitiativeFullPageProps) {
 
                       return (
                         <div key={epic.id} className="flex items-center gap-3">
-                          <span className="font-mono text-xs text-muted-foreground w-16 shrink-0">{epic.tracker?.externalKey ?? '—'}</span>
+                          <span className="font-mono text-xs text-muted-foreground w-16 shrink-0">{epic.tracker?.externalKey ?? getShortId(epic.id)}</span>
                           <span className="text-sm truncate flex-1 min-w-0">{epic.title}</span>
                           <div className="w-32 shrink-0">
                             <ProgressBar progress={epicProgress} size="sm" />

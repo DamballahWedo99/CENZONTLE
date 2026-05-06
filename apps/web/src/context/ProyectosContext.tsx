@@ -410,6 +410,7 @@ function proyectosReducer(state: ProyectosState, action: ProyectosAction): Proye
       const approval = {
         status: 'approved' as const,
         approvedBy: poName,
+        approvedByName: poName,
         approvedAt: new Date().toISOString(),
         comment: null,
       };
@@ -430,6 +431,7 @@ function proyectosReducer(state: ProyectosState, action: ProyectosAction): Proye
       const rejection = {
         status: 'rejected' as const,
         approvedBy: poName,
+        approvedByName: poName,
         approvedAt: new Date().toISOString(),
         comment,
       };
@@ -450,6 +452,7 @@ function proyectosReducer(state: ProyectosState, action: ProyectosAction): Proye
       const approval = {
         status: 'approved' as const,
         approvedBy: tlName,
+        approvedByName: tlName,
         approvedAt: new Date().toISOString(),
         comment: null,
       };
@@ -470,6 +473,7 @@ function proyectosReducer(state: ProyectosState, action: ProyectosAction): Proye
       const rejection = {
         status: 'rejected' as const,
         approvedBy: tlName,
+        approvedByName: tlName,
         approvedAt: new Date().toISOString(),
         comment,
       };
@@ -519,6 +523,7 @@ function proyectosReducer(state: ProyectosState, action: ProyectosAction): Proye
       const approval = {
         status: 'approved' as const,
         approvedBy: qaName,
+        approvedByName: qaName,
         approvedAt: new Date().toISOString(),
         comment: null,
       };
@@ -539,6 +544,7 @@ function proyectosReducer(state: ProyectosState, action: ProyectosAction): Proye
       const rejection = {
         status: 'rejected' as const,
         approvedBy: qaName,
+        approvedByName: qaName,
         approvedAt: new Date().toISOString(),
         comment,
       };

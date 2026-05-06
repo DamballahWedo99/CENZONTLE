@@ -17,18 +17,28 @@ export class StoriesController {
   constructor(private readonly storiesService: StoriesService) {}
 
   @Get()
-  @ApiOperation({ summary: 'Listar historias de usuario' })
-  findAll(@Query() query: StoryQueryDto) {
-    return this.storiesService.findAll(query);
+  @ApiOperation({
+    summary:
+      'Listar historias de usuario. Para no-AltaGerencia, filtra por intersección de pods entre el usuario y (story.podId ∪ epic.pods) — CWE-639.',
+  })
+  findAll(
+    @Query() query: StoryQueryDto,
+    @CurrentUser() user: AuthenticatedUser,
+  ) {
+    return this.storiesService.findAll(query, user);
   }
 
   @Get(':id')
-  @ApiOperation({ summary: 'Obtener una historia por ID' })
+  @ApiOperation({
+    summary:
+      'Obtener una historia por ID. Pod intersection requerida (epic.pods ∪ story.podId) para no-AltaGerencia.',
+  })
   findOne(
     @Param('id') id: string,
-    @Query('includeContent') includeContent?: string,
+    @Query('includeContent') includeContent: string | undefined,
+    @CurrentUser() user: AuthenticatedUser,
   ) {
-    return this.storiesService.findOne(id, includeContent === 'true');
+    return this.storiesService.findOne(id, includeContent === 'true', user);
   }
 
   @Post()

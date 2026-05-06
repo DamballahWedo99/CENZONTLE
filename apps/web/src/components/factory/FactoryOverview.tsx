@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import Link from 'next/link';
+import { useRouter } from 'next/navigation';
 import {
   Layers,
   Clock,
@@ -21,6 +22,7 @@ import {
 import { cn } from '@/lib/utils';
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip';
 import { useFactory } from '@/context/FactoryContext';
+import { getShortId } from '@/lib/short-id';
 import type { SprintBatch, QueuedBatch, ComputeNode, ResourcePool, HumanGate } from '@cenzontle/shared';
 import { PipelineLayer, AgentStatus, GateDecision } from '@cenzontle/shared';
 
@@ -245,7 +247,9 @@ function BatchCard({ batch, allStories, gates }: { batch: SprintBatch; allStorie
           <h3 className="text-[15px] font-bold text-foreground truncate group-hover:text-foreground transition-colors">
             {batch.epicTitle}
           </h3>
-          <span className="text-xs font-mono text-muted-foreground mt-0.5 block">{batch.tracker.externalKey}</span>
+          <span className="text-xs font-mono text-muted-foreground mt-0.5 block">
+            {batch.tracker?.externalKey ?? (batch.epicId ? getShortId(batch.epicId) : getShortId(batch.id))}
+          </span>
         </div>
         <ChevronRight className="w-4 h-4 text-muted-foreground/70 group-hover:text-muted-foreground transition-colors flex-shrink-0 mt-1" />
       </div>
@@ -330,15 +334,39 @@ function BatchCard({ batch, allStories, gates }: { batch: SprintBatch; allStorie
 
 function QueueRow({ batch, position }: { batch: QueuedBatch; position: number }) {
   const [storiesOpen, setStoriesOpen] = useState(false);
+  const router = useRouter();
   const hasStories = batch.storyDetails && batch.storyDetails.length > 0;
   const totalSP = hasStories ? batch.storyDetails!.reduce((s, d) => s + d.storyPoints, 0) : 0;
 
+  // Navegación al detalle de la épica al click. Solo cuando hay epicId
+  // (épicas del Forge interno). Para mocks legacy sin epicId, el row no
+  // navega — degrada graciosamente. Los elementos interactivos internos
+  // (toggle stories, link externo) hacen e.stopPropagation() para no
+  // disparar la navegación.
+  const handleRowClick = batch.epicId
+    ? () => router.push(`/proyectos/epicas/${batch.epicId}`)
+    : undefined;
+
   return (
     <div
+      onClick={handleRowClick}
       className={cn(
         'rounded-lg bg-card border border-border overflow-hidden transition-colors',
         'hover:border-[#3A3A48]',
+        handleRowClick && 'cursor-pointer hover:bg-muted/30',
       )}
+      role={handleRowClick ? 'button' : undefined}
+      tabIndex={handleRowClick ? 0 : undefined}
+      onKeyDown={
+        handleRowClick
+          ? (e) => {
+              if (e.key === 'Enter' || e.key === ' ') {
+                e.preventDefault();
+                handleRowClick();
+              }
+            }
+          : undefined
+      }
     >
       {/* Main row — grid for vertical alignment across rows */}
       <div className="grid grid-cols-[32px_1fr_32px_auto_72px_100px_56px] items-center gap-3 px-4 py-3">
@@ -350,31 +378,42 @@ function QueueRow({ batch, position }: { batch: QueuedBatch; position: number })
         {/* Title + Key */}
         <div className="flex items-center gap-2 min-w-0">
           <span className="text-sm font-semibold text-foreground truncate">{batch.epicTitle}</span>
-          <span className="text-[11px] font-mono text-muted-foreground shrink-0">{batch.tracker.externalKey}</span>
+          <span className="text-[11px] font-mono text-muted-foreground shrink-0">
+            {batch.tracker?.externalKey ?? (batch.epicId ? getShortId(batch.epicId) : getShortId(batch.id))}
+          </span>
         </div>
 
-        {/* Open in tracker — hardcoded URL while backend is not ready */}
-        <TooltipProvider delayDuration={200}>
-          <Tooltip>
-            <TooltipTrigger asChild>
-              <a
-                href={batch.tracker.externalUrl}
-                target="_blank"
-                rel="noopener noreferrer"
-                className="flex items-center justify-center rounded-md p-1 text-muted-foreground hover:text-foreground hover:bg-muted transition-colors"
-              >
-                <ExternalLink className="h-3.5 w-3.5" />
-              </a>
-            </TooltipTrigger>
-            <TooltipContent side="top" className="text-xs">
-              Open in Linear
-            </TooltipContent>
-          </Tooltip>
-        </TooltipProvider>
+        {/* Open in tracker — solo si la épica fue publicada en Linear/Jira.
+            Las épicas del Forge interno (tracker null) no tienen URL externa. */}
+        {batch.tracker?.externalUrl ? (
+          <TooltipProvider delayDuration={200}>
+            <Tooltip>
+              <TooltipTrigger asChild>
+                <a
+                  href={batch.tracker.externalUrl}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  onClick={(e) => e.stopPropagation()}
+                  className="flex items-center justify-center rounded-md p-1 text-muted-foreground hover:text-foreground hover:bg-muted transition-colors"
+                >
+                  <ExternalLink className="h-3.5 w-3.5" />
+                </a>
+              </TooltipTrigger>
+              <TooltipContent side="top" className="text-xs">
+                Open in Linear
+              </TooltipContent>
+            </Tooltip>
+          </TooltipProvider>
+        ) : (
+          <span className="w-[26px]" aria-hidden="true" />
+        )}
 
         {/* Story count — expandable toggle */}
         <button
-          onClick={() => hasStories && setStoriesOpen(!storiesOpen)}
+          onClick={(e) => {
+            e.stopPropagation();
+            if (hasStories) setStoriesOpen(!storiesOpen);
+          }}
           className={cn(
             'flex items-center gap-1.5 rounded-md px-2 py-1 text-xs transition-colors',
             hasStories
@@ -643,14 +682,39 @@ function KanbanBatchCard({ batch, gates }: { batch: SprintBatch; gates: HumanGat
 
 /** Compact card for queued batches */
 function KanbanQueueCard({ batch }: { batch: QueuedBatch }) {
+  const router = useRouter();
+  const handleClick = batch.epicId
+    ? () => router.push(`/proyectos/epicas/${batch.epicId}`)
+    : undefined;
+
   return (
-    <div className="flex flex-col rounded-lg border border-border bg-card p-3.5 transition-all hover:bg-muted/50 hover:border-[#3A3A48]">
+    <div
+      onClick={handleClick}
+      className={cn(
+        'flex flex-col rounded-lg border border-border bg-card p-3.5 transition-all hover:bg-muted/50 hover:border-[#3A3A48]',
+        handleClick && 'cursor-pointer',
+      )}
+      role={handleClick ? 'button' : undefined}
+      tabIndex={handleClick ? 0 : undefined}
+      onKeyDown={
+        handleClick
+          ? (e) => {
+              if (e.key === 'Enter' || e.key === ' ') {
+                e.preventDefault();
+                handleClick();
+              }
+            }
+          : undefined
+      }
+    >
       {/* Title */}
       <h4 className="text-sm font-semibold text-foreground truncate leading-snug mb-2">{batch.epicTitle}</h4>
 
       {/* Key + Priority */}
       <div className="flex items-center gap-2 mb-2">
-        <span className="font-mono text-[10px] text-muted-foreground/70">{batch.tracker.externalKey}</span>
+        <span className="font-mono text-[10px] text-muted-foreground/70">
+          {batch.tracker?.externalKey ?? (batch.epicId ? getShortId(batch.epicId) : getShortId(batch.id))}
+        </span>
         <PriorityBadge priority={batch.priority} />
       </div>
 
@@ -662,8 +726,8 @@ function KanbanQueueCard({ batch }: { batch: QueuedBatch }) {
         </span>
       </div>
 
-      {/* External link */}
-      {batch.tracker.externalUrl && (
+      {/* External link — solo si está publicada en Linear/Jira */}
+      {batch.tracker?.externalUrl && (
         <a
           href={batch.tracker.externalUrl}
           target="_blank"

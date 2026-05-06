@@ -105,8 +105,20 @@ export interface QueuedStory {
 
 export interface QueuedBatch {
   id: string;
+  /**
+   * Epic ID interno — usado para navegación al detail page (`/proyectos/epicas/:id`)
+   * cuando el batch viene de la cola interna del Forge (no del legacy mock con
+   * tracker Linear). Opcional para retrocompat con mocks antiguos que solo
+   * tenían `tracker.externalKey`.
+   */
+  epicId?: string;
   epicTitle: string;
-  tracker: TrackerReference;
+  /**
+   * Tracker externo (Linear/Jira). Opcional — desde el Forge interno (Mes 0
+   * del roadmap) muchas épicas se envían a la cola sin estar publicadas en
+   * un tracker externo. UI debe usar fallback (epicId/getShortId) cuando es null.
+   */
+  tracker?: TrackerReference | null;
   stories: number;
   storyDetails?: QueuedStory[];
   priority: 'critical' | 'high' | 'medium' | 'low';

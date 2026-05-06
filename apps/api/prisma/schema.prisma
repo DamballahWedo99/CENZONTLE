@@ -89,6 +89,12 @@ model Epic {
   epicQAMatrix              Json?
   tracker                   Json?
 
+  // Forge queue — set cuando el usuario hace click en "Subir al Forge" tras
+  // los 3 VoBos. Modelo KISS para Mes 0 del roadmap; en Mes 1 migrará a
+  // tabla `SprintBatch` con `EpicBatchRun` para wave planning + retries.
+  enqueuedAt                DateTime?
+  enqueuedBatchId           String?
+
   // Path to the markdown file in the vault (GitHub repo)
   vaultPath                 String?
 
@@ -100,6 +106,7 @@ model Epic {
   createdAt                 DateTime   @default(now())
   updatedAt                 DateTime   @updatedAt
 
+  @@index([enqueuedAt])
   @@map("epics")
 }
 

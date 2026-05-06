@@ -161,6 +161,7 @@ export function TeamSection() {
     hasPermission,
     handleInvite: ctxInvite,
     handleChangeRole: ctxChangeRole,
+    handleChangePods: ctxChangePods,
     handleDeactivate: ctxDeactivate,
     handleReactivate: ctxReactivate,
     handleRemove: ctxRemove,
@@ -287,6 +288,24 @@ export function TeamSection() {
       toast.success(`Rol actualizado a ${USER_ROLE_LABELS[role]}`);
     } catch {
       toast.error('Error al cambiar rol');
+    }
+  };
+
+  // Sentinel value para el SelectItem "Sin célula". El componente Select de
+  // Radix no acepta value="" — necesita un string truthy. Usamos este token
+  // y lo traducimos a array vacío al llamar al backend (= unset pod).
+  const NO_POD_VALUE = '__none__';
+
+  const handleChangePod = async (userId: string, podValue: string) => {
+    const podIds = podValue === NO_POD_VALUE ? [] : [podValue];
+    const podLabel = podValue === NO_POD_VALUE
+      ? 'sin célula'
+      : pods.find((p) => p.id === podValue)?.name ?? 'célula desconocida';
+    try {
+      await ctxChangePods(userId, podIds);
+      toast.success(`Usuario asignado a ${podLabel}`);
+    } catch {
+      toast.error('Error al asignar célula');
     }
   };
 
@@ -483,17 +502,41 @@ export function TeamSection() {
                   )}
                 </TableCell>
                 <TableCell>
-                  {(() => {
-                    const pod = pods.find((p) => member.podIds.includes(p.id));
-                    return pod ? (
-                      <div className="flex items-center gap-2 text-sm">
-                        <span className="h-2 w-2 rounded-full" style={{ backgroundColor: pod.color }} />
-                        {pod.name}
-                      </div>
-                    ) : (
-                      <span className="text-xs text-muted-foreground">—</span>
-                    );
-                  })()}
+                  {canManageUsers && member.id !== currentUser?.id ? (
+                    <Select
+                      value={member.podIds[0] ?? NO_POD_VALUE}
+                      onValueChange={(v) => handleChangePod(member.id, v)}
+                    >
+                      <SelectTrigger className="w-[180px] h-8 text-xs">
+                        <SelectValue placeholder="Sin célula" />
+                      </SelectTrigger>
+                      <SelectContent>
+                        <SelectItem value={NO_POD_VALUE}>
+                          <span className="text-muted-foreground">Sin célula</span>
+                        </SelectItem>
+                        {pods.map((pod) => (
+                          <SelectItem key={pod.id} value={pod.id}>
+                            <div className="flex items-center gap-2">
+                              <span className="h-2 w-2 rounded-full" style={{ backgroundColor: pod.color }} />
+                              {pod.name}
+                            </div>
+                          </SelectItem>
+                        ))}
+                      </SelectContent>
+                    </Select>
+                  ) : (
+                    (() => {
+                      const pod = pods.find((p) => member.podIds.includes(p.id));
+                      return pod ? (
+                        <div className="flex items-center gap-2 text-sm">
+                          <span className="h-2 w-2 rounded-full" style={{ backgroundColor: pod.color }} />
+                          {pod.name}
+                        </div>
+                      ) : (
+                        <span className="text-xs text-muted-foreground">—</span>
+                      );
+                    })()
+                  )}
                 </TableCell>
                 <TableCell>{getStatusBadge(member.status)}</TableCell>
                 <TableCell className="text-xs text-muted-foreground">{formatRelativeTime(member.lastActiveAt)}</TableCell>

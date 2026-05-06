@@ -259,11 +259,28 @@ export class StoriesService {
     return { kind: 'timeout' };
   }
 
-  async findAll(query: StoryQueryDto) {
+  async findAll(query: StoryQueryDto, user?: AuthenticatedUser) {
     const where: Prisma.StoryWhereInput = {};
     if (query.epicId) where.epicId = query.epicId;
     if (query.podId) where.podId = query.podId;
     if (query.status) where.status = query.status;
+
+    // CWE-639 — restringir listing a historias con pod intersection.
+    // Semántica idéntica al check individual de update()/remove() (líneas
+    // 112-114 de este service): una historia es visible si el user comparte
+    // pod con la épica padre O con el pod propio de la historia.
+    //
+    // El uso de Story.podId directo y Epic.pods (relación) requiere OR
+    // anidado en Prisma. AltaGerencia y callers internos sin user ven todo.
+    // Usuario sin pods → array vacío fail-closed.
+    if (user && user.role !== UserRole.AltaGerencia) {
+      const userPodIds = user.podIds ?? [];
+      if (userPodIds.length === 0) return [];
+      where.OR = [
+        { podId: { in: userPodIds } },
+        { epic: { pods: { some: { podId: { in: userPodIds } } } } },
+      ];
+    }
 
     return this.prisma.story.findMany({
       where,
@@ -271,9 +288,27 @@ export class StoriesService {
     });
   }
 
-  async findOne(id: string, includeContent = false) {
-    const story = await this.prisma.story.findUnique({ where: { id } });
+  async findOne(id: string, includeContent = false, user?: AuthenticatedUser) {
+    const story = await this.prisma.story.findUnique({
+      where: { id },
+      include: {
+        epic: { select: { pods: { select: { podId: true } } } },
+      },
+    });
     if (!story) throw new NotFoundException('Historia no encontrada');
+
+    // Pod intersection — defense in depth contra acceso directo por ID.
+    // Devolvemos 404 (no 403) para no confirmar la existencia del recurso
+    // a usuarios sin acceso (information disclosure mitigation).
+    if (user && user.role !== UserRole.AltaGerencia) {
+      const userPodIds = user.podIds ?? [];
+      const epicPodIds = story.epic?.pods?.map((p) => p.podId) ?? [];
+      const allowedPods = new Set<string>([...epicPodIds, story.podId]);
+      const sharesPod = userPodIds.some((p) => allowedPods.has(p));
+      if (!sharesPod) {
+        throw new NotFoundException('Historia no encontrada');
+      }
+    }
 
     if (includeContent && story.vaultPath) {
       const parsed = await this.readStoryContent(story.vaultPath);

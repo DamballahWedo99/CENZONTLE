@@ -5,6 +5,7 @@ import { useRouter, usePathname, useSearchParams } from 'next/navigation';
 import Link from 'next/link';
 import { toast } from 'sonner';
 import { useProyectos } from '@/context/ProyectosContext';
+import { useIntegrations } from '@/context/IntegrationsContext';
 import { useBreadcrumb } from '@/context/BreadcrumbContext';
 import { updateStory as apiUpdateStory, deleteStory as apiDeleteStory, getStory as apiGetStory } from '@/lib/api/stories';
 import { TypeToConfirmDialog } from '@/components/ui/type-to-confirm-dialog';
@@ -234,6 +235,7 @@ function StoryFullPageInner({ storyId }: StoryFullPageProps) {
   const router = useRouter();
   const { state, dispatch } = useProyectos();
   const { setBreadcrumb } = useBreadcrumb();
+  const { isLinearConfigured } = useIntegrations();
 
   const baseStory = useMemo(() => state.stories.find((s) => s.id === storyId) ?? null, [storyId, state.stories]);
 
@@ -579,7 +581,7 @@ function StoryFullPageInner({ storyId }: StoryFullPageProps) {
                             Abrir {(story.tracker as TrackerReference).externalKey} en Linear
                           </TooltipContent>
                         </Tooltip>
-                      ) : (
+                      ) : isLinearConfigured ? (
                         <Tooltip>
                           <TooltipTrigger asChild>
                             <Button
@@ -602,7 +604,7 @@ function StoryFullPageInner({ storyId }: StoryFullPageProps) {
                               : 'Publicar historia en Linear'}
                           </TooltipContent>
                         </Tooltip>
-                      )}
+                      ) : null}
                       <Tooltip>
                         <TooltipTrigger asChild>
                           <Button variant="ghost" size="icon" onClick={handleStartEdit} className="text-muted-foreground hover:text-foreground">

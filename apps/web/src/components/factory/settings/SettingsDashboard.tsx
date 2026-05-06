@@ -2201,17 +2201,27 @@ function SectionContent({ section }: { section: SettingsSection }) {
 export function SettingsDashboard() {
   const router = useRouter();
   const searchParams = useSearchParams();
-  const { hasRole } = useAuthContext();
+  const { hasRole, isLoading } = useAuthContext();
   const initialSection = (searchParams.get('section') as SettingsSection) || 'repository';
   const [activeSection, setActiveSection] = useState<SettingsSection>(initialSection);
 
   // Redirect como efecto, no durante render — evita ReferenceError: location is not defined
   // en SSR cuando el contexto aún no está hidratado.
+  //
+  // CRÍTICO: esperar a que `isLoading=false` antes de evaluar autorización.
+  // Si refrescamos la página, durante la hidratación de Auth0 el currentUser
+  // es null y `hasRole(AltaGerencia)` retorna false → el effect dispararía
+  // el redirect a /factory antes de que la auth termine de cargar. El gate
+  // de `isLoading` previene esa race condition (bug 2026-05-06).
   const authorized = hasRole(UserRole.AltaGerencia);
   useEffect(() => {
+    if (isLoading) return;
     if (!authorized) router.replace('/factory');
-  }, [authorized, router]);
+  }, [authorized, isLoading, router]);
 
+  // Durante loading: render null (sin redirect aún). Solo bloqueamos cuando
+  // ya sabemos con certeza que el user no está autorizado.
+  if (isLoading) return null;
   if (!authorized) return null;
 
   return (
