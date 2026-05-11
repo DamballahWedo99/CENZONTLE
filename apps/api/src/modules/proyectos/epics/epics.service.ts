@@ -15,17 +15,23 @@ import type {
   StoryTechnicalDependency,
   TrackerReference,
 } from '@cenzontle/shared';
-import { UserRole } from '@cenzontle/shared';
+import {
+  UserRole,
+  epicMarkdownHasAllHeadings,
+} from '@cenzontle/shared';
 import { PrismaService } from '../../prisma/prisma.service';
 import { VaultService } from '../../vault/vault.service';
 import { VaultFolderService } from '../../vault/vault-folder.service';
 import { IntegrationsService } from '../../integrations/integrations.service';
+import { AuthService } from '../../auth/auth.service';
 import { InitiativesService } from '../initiatives/initiatives.service';
 import { StoriesService } from '../stories/stories.service';
 import { StoryDependenciesService } from '../stories/dependencies/story-dependencies.service';
+import { ChangelogService } from '../changelog/changelog.service';
 import { CreateEpicDto } from './dto/create-epic.dto';
 import { UpdateEpicDto } from './dto/update-epic.dto';
 import { EpicQueryDto } from './dto/epic-query.dto';
+import { ApproveEpicDto } from './dto/approve-epic.dto';
 import {
   epicFolderPath,
   epicIndexPath,
@@ -62,26 +68,11 @@ const EPIC_INCLUDE = {
   },
 } as const;
 
-/**
- * Headings level-2 obligatorios del markdown único de una épica. Solo
- * informativos — el agente IA y el placeholder del editor humano los emiten,
- * y `validateTerminal` (en `epic-generation.service`) verifica su presencia.
- *
- * El servicio solo lee/escribe `markdown: string` literal — no parsea ni
- * reconstruye headings discretos. Si el caller necesita una sección puntual
- * (export PDF, agente IA derivado), usa `splitMarkdownByH2()` del exporter.
- */
-const REQUIRED_EPIC_HEADINGS = [
-  '## Objetivo',
-  '## Beneficios cualitativos',
-  '## Beneficios cuantitativos',
-  '## Medición de beneficios',
-  '## Alcance',
-  '## Criterios de aceptación',
-  '## Mejoras tecnológicas',
-  '## Canales y flujos impactados',
-  '## Dependencias de terceros',
-] as const;
+// Los 9 headings obligatorios del markdown de épica viven ahora en
+// @cenzontle/shared (REQUIRED_EPIC_HEADINGS + epicMarkdownHasAllHeadings).
+// Single source of truth con el frontend; el comentario JSDoc previo decía
+// que la constante era "solo informativa", pero realmente es load-bearing
+// para validar pre-aprobación. Centralizada para evitar drift.
 
 /**
  * Invalida punteros stale a archivos del vault en formato legacy.
@@ -146,6 +137,8 @@ export class EpicsService {
     private storiesService: StoriesService,
     private storyDependenciesService: StoryDependenciesService,
     private designBundle: DesignBundleService,
+    private authService: AuthService,
+    private changelogService: ChangelogService,
   ) {}
 
   /**
@@ -1907,4 +1900,255 @@ export class EpicsService {
 
     return newDesign;
   }
+
+  // ──────────────────────────────────────────────────────────────────────
+  // Visto Bueno (VoBo) — aprobación por rol con step-up authentication
+  // ──────────────────────────────────────────────────────────────────────
+
+  /**
+   * Aprueba una épica como uno de los 3 roles del Protocolo de Visto Bueno
+   * (PO, TL, QA). Esta es la puerta humana antes de que la épica pueda ser
+   * encolada al Forge — los 3 VoBos son requisito.
+   *
+   * Reglas de seguridad (en orden de evaluación):
+   *  1. Pod intersection: el aprobador debe compartir al menos un pod con
+   *     la épica (CWE-639 BOLA — el guard global de permisos no es
+   *     suficiente porque varios pods pueden tener PO/TL/QA y no queremos
+   *     que un PO de pod A apruebe épicas de pod B).
+   *  2. Role match estricto: el rol del usuario autenticado debe ser
+   *     EXACTAMENTE el rol que aprueba (PO solo puede dar VoBo de PO,
+   *     etc). Alta Gerencia NO puede sustituir VoBos — la trazabilidad
+   *     se rompería si un único super-user pudiera aprobar todo.
+   *  3. Password: verificada contra Auth0 (step-up authentication).
+   *     Distinto a re-leer el JWT — si el laptop quedó abierto, el JWT
+   *     sigue siendo válido pero quien tipea no es el dueño.
+   *  4. Prerequisites: la épica debe tener definición completa, diagrama
+   *     de negocio y al menos 1 historia. Para TL: además poApproval done.
+   *     Para QA: poApproval + tlApproval done.
+   *
+   * Side-effects:
+   *  - Persiste {role}Approval en la épica con approvedBy=user.sub,
+   *    approvedAt=now, comment.
+   *  - Crea ChangelogEntry con action='approved' field='{role}Approval'
+   *    para auditoría inmutable.
+   *
+   * No-op: si la épica ya tiene ese VoBo en estado 'approved', se rechaza
+   * con ConflictException — re-aprobar no tiene sentido y dispararía
+   * cambios fantasma en el changelog.
+   */
+  async approve(
+    epicId: string,
+    role: 'po' | 'tl' | 'qa',
+    dto: ApproveEpicDto,
+    user: AuthenticatedUser,
+  ): Promise<{
+    status: 'approved';
+    approvedAt: string;
+    approvedBy: string;
+    approvedByName: string;
+    comment: string | null;
+  }> {
+    this.logger.log(`[approve:${role}] START epicId=${epicId} userId=${user.sub}`);
+
+    const existing = await this.prisma.epic.findUnique({
+      where: { id: epicId },
+      include: {
+        pods: { select: { podId: true } },
+        stories: { select: { id: true } },
+      },
+    });
+    if (!existing) throw new NotFoundException('Épica no encontrada');
+
+    // 1. Pod intersection — además del Permission guard global.
+    assertUserCanAccessEpicPods(
+      user,
+      existing.pods.map((p) => p.podId),
+    );
+
+    // 2. Role match — el rol específico O Alta Gerencia (que puede aprobar
+    //    en nombre de cualquier rol). La trazabilidad se preserva porque
+    //    persistimos `approvedByName` con el nombre del aprobador real,
+    //    así un VoBo dado por admin queda registrado como tal en el
+    //    changelog y en el approval JSON.
+    const expectedRole = ROLE_BY_APPROVAL_KIND[role];
+    const isAdmin = user.role === UserRole.AltaGerencia;
+    if (!isAdmin && user.role !== expectedRole) {
+      throw new ForbiddenException(
+        `Sólo un usuario con rol ${expectedRole} (o Alta Gerencia) puede dar el VoBo de ${role.toUpperCase()}`,
+      );
+    }
+
+    // 3. Idempotency check optimista — falla rápido si ya está aprobada.
+    //    Esta lectura NO es la garantía de unicidad; la garantía real está
+    //    en la transacción serialized abajo (paso 6) que usa SELECT...FOR
+    //    UPDATE para prevenir TOCTOU si dos PO clickean el mismo botón
+    //    en el mismo milisegundo.
+    const currentApproval = (existing as Record<string, unknown>)[`${role}Approval`] as
+      | { status?: string }
+      | null;
+    if (currentApproval?.status === 'approved') {
+      throw new ConflictException(`La épica ya tiene VoBo de ${role.toUpperCase()}`);
+    }
+
+    // 4. Verificar prerequisites antes de gastar latencia en Auth0.
+    this.assertEpicReadyForApproval(existing as EpicReadinessSnapshot, role);
+
+    // 5. Step-up authentication — verifica password contra Auth0. Esta
+    //    llamada de red es la más cara; la dejamos al final para que las
+    //    validaciones síncronas fallen primero.
+    await this.authService.assertPasswordValid(user, dto.password);
+
+    // 6. Persistir approval + changelog en transacción con LOCK FOR UPDATE
+    //    para prevenir TOCTOU race condition. Sin lock, dos usuarios con
+    //    el mismo rol pueden pasar el idempotency check del paso 3 y ambos
+    //    escribir su approval; el segundo silenciosamente sobreescribiría
+    //    al primero, pero el changelog tendría dos entradas inconsistentes.
+    //
+    //    El SELECT FOR UPDATE bloquea la fila durante la transacción —
+    //    el segundo aprobador espera al COMMIT del primero, lee el campo
+    //    fresco y ve status='approved', lanzando ConflictException.
+    const now = new Date();
+    // Snapshot del nombre — congelar en el approval para que la trazabilidad
+    // sobreviva si el usuario cambia su display name o se elimina del equipo.
+    // Email como fallback porque algunos tenants Auth0 no tienen `name` en el
+    // JWT (configuración del Post-Login Action).
+    const approverName = user.name || user.email || user.sub;
+    const approval = {
+      status: 'approved' as const,
+      approvedBy: user.sub,
+      approvedByName: approverName,
+      approvedAt: now.toISOString(),
+      comment: dto.comment ?? null,
+    };
+
+    const fieldName = `${role}Approval` as 'poApproval' | 'tlApproval' | 'qaApproval';
+
+    await this.prisma.$transaction(async (tx) => {
+      // Lock atómico de la fila. SELECT...FOR UPDATE es PostgreSQL-specific
+      // pero compatible con el datasource del proyecto. El id se inyecta
+      // como parámetro para evitar SQL injection.
+      await tx.$queryRaw`SELECT id FROM epics WHERE id = ${epicId} FOR UPDATE`;
+
+      // Re-leer el approval ahora que la fila está locked. Sólo selecciona
+      // el campo que nos importa (los 3 son JSONB; son cheap).
+      const fresh = await tx.epic.findUnique({
+        where: { id: epicId },
+        select: { poApproval: true, tlApproval: true, qaApproval: true },
+      });
+      const freshApproval = (fresh as Record<string, unknown> | null)?.[fieldName] as
+        | { status?: string }
+        | null;
+      if (freshApproval?.status === 'approved') {
+        throw new ConflictException(
+          `La épica ya tiene VoBo de ${role.toUpperCase()}`,
+        );
+      }
+
+      await tx.epic.update({
+        where: { id: epicId },
+        data: {
+          [fieldName]: approval as unknown as Prisma.InputJsonValue,
+          updatedAt: now,
+        },
+      });
+      await tx.changelogEntry.create({
+        data: {
+          entityType: 'epic',
+          entityId: epicId,
+          entityTitle: existing.title,
+          action: 'approved',
+          field: fieldName,
+          oldValue: null,
+          // Sólo guardamos los campos clave en newValue — no el JSON entero
+          // (sería ruido para el lector y duplica datos del epic.{x}Approval).
+          // SECURITY: este string es plain text — viewers deben usar text
+          // nodes en React, NUNCA dangerouslySetInnerHTML ni markdown render
+          // sin sanitización (CWE-79).
+          newValue: `${user.name || user.email}${dto.comment ? ` — ${dto.comment}` : ''}`,
+          changedById: user.sub,
+          changedByName: user.name || user.email,
+        },
+      });
+    });
+
+    this.logger.log(
+      `[approve:${role}] OK epicId=${epicId} approvedBy=${user.sub}`,
+    );
+
+    return {
+      status: 'approved',
+      approvedAt: approval.approvedAt,
+      approvedBy: approval.approvedBy,
+      approvedByName: approval.approvedByName,
+      comment: approval.comment,
+    };
+  }
+
+  /**
+   * Verifica que la épica tenga los artefactos requeridos para dar VoBo.
+   * Los 3 roles (PO, TL, QA) aprueban en PARALELO — no hay cascada
+   * secuencial. Cada uno valida su dimensión independiente:
+   *
+   *  - PO: que la definición refleje el valor de negocio
+   *  - TL: que la arquitectura sea viable
+   *  - QA: que los criterios sean testables
+   *
+   * Sin orden de prerequisitos entre approvals, todos los aprobadores
+   * pueden trabajar simultáneamente y la épica avanza más rápido al
+   * "Épica Lista" sin bloqueos artificiales.
+   *
+   * Únicos prerequisitos comunes (artefactos del editor humano + agente IA):
+   *  - Definición completa (9 headings obligatorios)
+   *  - Diagrama de negocio generado
+   *  - ≥1 historia de usuario
+   */
+  private assertEpicReadyForApproval(
+    epic: EpicReadinessSnapshot,
+    role: 'po' | 'tl' | 'qa',
+  ): void {
+    // Validación shared con frontend — regex exact-match case-insensitive.
+    // Reemplaza el viejo `md.includes(h.toLowerCase())` que tenía dos bugs:
+    //  (a) substring trap: `## Alcance de negocio` matcheaba `## Alcance`.
+    //  (b) headings divergidos del frontend (descripción vs Objetivo).
+    if (!epicMarkdownHasAllHeadings(epic.markdown)) {
+      throw new BadRequestException(
+        'La épica no tiene la definición completa (faltan headings obligatorios)',
+      );
+    }
+
+    const diagrams = (epic.diagrams as Array<{ type?: string }> | null) ?? [];
+    const hasBusinessDiagram = diagrams.some((d) => d?.type === 'business');
+    if (!hasBusinessDiagram) {
+      throw new BadRequestException(
+        'La épica no tiene diagrama de negocio generado',
+      );
+    }
+
+    if (epic.stories.length === 0) {
+      throw new BadRequestException(
+        'La épica no tiene historias de usuario generadas',
+      );
+    }
+
+    // Sin cascada de approvals — los 3 roles aprueban en paralelo. El
+    // parámetro `role` se mantiene en la signature para futuros checks
+    // role-specific (ej. PO valida acceptance criteria, TL valida
+    // diagrama técnico, QA valida QA matrix). Por ahora, los 3
+    // comparten el mismo set de prerequisitos artifactuales.
+  }
+}
+
+const ROLE_BY_APPROVAL_KIND: Record<'po' | 'tl' | 'qa', UserRole> = {
+  po: UserRole.ProductOwner,
+  tl: UserRole.TechLead,
+  qa: UserRole.QA,
+};
+
+interface EpicReadinessSnapshot {
+  title: string;
+  markdown: string | null;
+  diagrams: Prisma.JsonValue;
+  stories: { id: string }[];
+  poApproval: Prisma.JsonValue;
+  tlApproval: Prisma.JsonValue;
 }

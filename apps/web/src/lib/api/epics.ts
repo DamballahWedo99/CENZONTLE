@@ -1,6 +1,30 @@
 import type { DiscoveredDependency, EpicDesign } from '@cenzontle/shared';
 import { apiFetch } from './client';
 
+/**
+ * Estructura canónica de un VoBo (Visto Bueno) sobre una épica. Coincide
+ * con el shape que el backend persiste en `Epic.{po|tl|qa}Approval` (Json)
+ * y con la respuesta de `POST /proyectos/epicas/:id/approvals/{role}`.
+ *
+ * El campo `status` permite extender a flujos de rejection en el futuro
+ * sin romper consumers; hoy solo se persiste 'approved' (el rejection no
+ * se escribe — se borra el approval entero).
+ */
+export interface ApprovalRecord {
+  status: 'approved' | 'pending' | 'rejected';
+  /** Sub del JWT del aprobador (auth0|...). Identificador estable. */
+  approvedBy: string | null;
+  /**
+   * Snapshot del nombre del aprobador en el momento del VoBo. Persiste
+   * aunque el usuario cambie de nombre o sea eliminado posteriormente.
+   * Nullable para approvals creados antes de este campo (fallback en UI:
+   * lookup en `state.members` por `approvedBy`).
+   */
+  approvedByName: string | null;
+  approvedAt: string | null;
+  comment: string | null;
+}
+
 export interface EpicResponse {
   id: string;
   title: string;
@@ -23,12 +47,16 @@ export interface EpicResponse {
   dependencies: any[];
   designs: EpicDesign[];
   designSkipped: boolean;
-  poApproval: any;
-  tlApproval: any;
-  qaApproval: any;
+  poApproval: ApprovalRecord | null;
+  tlApproval: ApprovalRecord | null;
+  qaApproval: ApprovalRecord | null;
   qaMatrix: any;
   epicQAMatrix: any;
   tracker: any;
+  /** ISO timestamp de cuándo la épica fue enviada al Forge. Null si nunca. */
+  enqueuedAt: string | null;
+  /** UUID del batch en la cola del Forge. Null si nunca encolada. */
+  enqueuedBatchId: string | null;
   createdAt: string;
   updatedAt: string;
 }
@@ -105,6 +133,86 @@ export function getStoryDependencies(epicId: string) {
 export async function deleteDesign(epicId: string, designId: string): Promise<void> {
   await apiFetch<void>(`/proyectos/epicas/${epicId}/designs/${designId}`, {
     method: 'DELETE',
+  });
+}
+
+// ──────────────────────────────────────────────────────────────────────
+// Visto Bueno (VoBo) — aprobaciones por rol con step-up authentication
+// ──────────────────────────────────────────────────────────────────────
+
+export type ApprovalRole = 'po' | 'tl' | 'qa';
+
+export interface ApproveEpicInput {
+  password: string;
+  comment?: string;
+}
+
+export interface ApproveEpicResponse {
+  status: 'approved';
+  approvedAt: string;
+  approvedBy: string;
+  /** Display name del aprobador snapshot al momento del VoBo. */
+  approvedByName: string;
+  /** Comentario opcional del aprobador, persistido en el ChangelogEntry. */
+  comment: string | null;
+}
+
+/**
+ * Da el VoBo de una épica para un rol específico (PO/TL/QA). Backend valida:
+ *  - Pod intersection del aprobador con la épica.
+ *  - Rol exacto del aprobador (no AltaGerencia substitution).
+ *  - Contraseña actual contra Auth0 (step-up auth).
+ *  - Prerequisites (definición/diagrama/historias + VoBos previos en orden).
+ *
+ * Errores tipados:
+ *  - 400: épica no lista (faltan headings, diagrama, historias, o VoBo previo).
+ *  - 401: contraseña incorrecta.
+ *  - 403: rol del aprobador no coincide con el VoBo solicitado.
+ *  - 409: la épica ya tiene ese VoBo en estado approved.
+ *  - 503: Auth0 no configurado para verify-password.
+ */
+export function approveEpic(
+  epicId: string,
+  role: ApprovalRole,
+  input: ApproveEpicInput,
+) {
+  return apiFetch<ApproveEpicResponse>(
+    `/proyectos/epicas/${epicId}/approvals/${role}`,
+    {
+      method: 'POST',
+      body: JSON.stringify(input),
+    },
+  );
+}
+
+// ──────────────────────────────────────────────────────────────────────
+// Forge Queue — enviar épicas al pipeline "in queue" del Factory
+// ──────────────────────────────────────────────────────────────────────
+
+export interface EnqueueEpicResponse {
+  batchId: string;
+  epicId: string;
+  epicTitle: string;
+  storiesCount: number;
+  totalStoryPoints: number;
+  enqueuedAt: string;
+  enqueuedBy: string;
+  enqueuedByName: string;
+}
+
+/**
+ * Envía una épica al Forge ("in queue"). Backend valida:
+ *  - Pod intersection (CWE-639).
+ *  - Definición completa (9 headings) + diagrama negocio + ≥1 historia.
+ *  - Los 3 VoBos approved (PO, TL, QA).
+ *  - Idempotency: 409 si ya está encolada.
+ *
+ * Una vez enviada, `epic.enqueuedAt` queda set en DB y el banner cambia
+ * a "Épica enviada al Forge".
+ */
+export function enqueueEpicToForge(epicId: string) {
+  return apiFetch<EnqueueEpicResponse>(`/factory/queue/enqueue/${epicId}`, {
+    method: 'POST',
   });
 }
 

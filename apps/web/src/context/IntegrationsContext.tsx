@@ -117,6 +117,19 @@ function integrationsReducer(state: IntegrationsState, action: IntegrationsActio
 const IntegrationsContext = createContext<{
   state: IntegrationsState;
   dispatch: React.Dispatch<IntegrationsAction>;
+  /**
+   * Linear está "configurado" si el provider activo es 'linear' Y existe
+   * la config persistida (linear !== null). Usado por las vistas de
+   * Iniciativas/Épicas/Historias para ocultar el botón "Publicar a Linear"
+   * cuando la integración no está conectada — evita confundir al usuario
+   * con un CTA que fallaría si lo clickea.
+   *
+   * Nota: NO requerimos `status === 'connected'` aquí porque puede estar
+   * temporalmente en 'error' (ej. apiKey expirada) y el botón debe seguir
+   * visible para que el user pueda intentar reconectar — el publish call
+   * fallará con mensaje claro si la API key no funciona.
+   */
+  isLinearConfigured: boolean;
 } | null>(null);
 
 export function IntegrationsProvider({ children }: { children: ReactNode }) {
@@ -157,8 +170,11 @@ export function IntegrationsProvider({ children }: { children: ReactNode }) {
     };
   }, []);
 
+  const isLinearConfigured =
+    state.config.provider === 'linear' && state.config.linear !== null;
+
   return (
-    <IntegrationsContext.Provider value={{ state, dispatch }}>
+    <IntegrationsContext.Provider value={{ state, dispatch, isLinearConfigured }}>
       {children}
     </IntegrationsContext.Provider>
   );

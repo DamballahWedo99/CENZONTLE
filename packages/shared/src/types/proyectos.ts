@@ -55,6 +55,70 @@ export enum ChangelogEntityType {
   Story = 'story',
 }
 
+// === EPIC MARKDOWN STRUCTURE ===
+
+/**
+ * Headings level-2 obligatorios en el markdown único de una épica.
+ * Single source of truth para:
+ *  - Backend: validación pre-aprobación en `epics.service.ts → assertEpicReadyForApproval`.
+ *  - Frontend: cálculo del checklist (Definición completa N/9) en `EpicFullPage.tsx`.
+ *  - Editor: placeholder de la épica nueva (EPIC_MARKDOWN_PLACEHOLDER reusa estos).
+ *  - Agente IA: prompt al generador exige emitir estos headings.
+ *
+ * Si añades/quitas un heading, los 4 callsites se actualizan automáticamente.
+ *
+ * Comparación recomendada: usar `epicMarkdownHasAllHeadings()` que aplica
+ * regex exact-match — `markdown.includes(heading)` produce falsos positivos
+ * (`## Alcance de negocio` matchea `## Alcance`).
+ */
+export const REQUIRED_EPIC_HEADINGS: readonly string[] = [
+  '## Objetivo',
+  '## Beneficios cualitativos',
+  '## Beneficios cuantitativos',
+  '## Medición de beneficios',
+  '## Alcance',
+  '## Criterios de aceptación',
+  '## Mejoras tecnológicas',
+  '## Canales y flujos impactados',
+  '## Dependencias de terceros',
+];
+
+/**
+ * Cuenta cuántos headings obligatorios están presentes en el markdown.
+ * Usado por el frontend para mostrar progreso (N/9). El backend sólo
+ * necesita el predicado boolean — usa `epicMarkdownHasAllHeadings()`.
+ *
+ * Match exact-line: el heading debe aparecer al inicio de línea seguido
+ * por whitespace o fin de string. Esto rechaza:
+ *  - `## Alcance de negocio` matcheando `## Alcance` (substring trap).
+ *  - `Subheader: ## Alcance` matcheando (anchor de inicio de línea).
+ *
+ * Case-insensitive porque el editor humano puede tipear con capitalización
+ * libre. Los headings emitidos por el agente IA respetan la capitalización
+ * canónica, pero la validación no debe ser frágil a eso.
+ */
+export function epicMarkdownHeadingsPresent(
+  markdown: string | null | undefined,
+): readonly string[] {
+  if (!markdown) return [];
+  return REQUIRED_EPIC_HEADINGS.filter((heading) => {
+    const escaped = heading.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const re = new RegExp(`(^|\\n)${escaped}(\\s|$)`, 'i');
+    return re.test(markdown);
+  });
+}
+
+/**
+ * Predicate boolean — épica está "definicionalmente completa" si tiene
+ * los 9 headings obligatorios. NO valida contenido bajo cada heading
+ * (eso es responsabilidad del agente generador y del editor humano).
+ */
+export function epicMarkdownHasAllHeadings(
+  markdown: string | null | undefined,
+): boolean {
+  return epicMarkdownHeadingsPresent(markdown).length === REQUIRED_EPIC_HEADINGS.length;
+}
+
 // === DIAGRAM TYPES ===
 
 export type DiagramNodeType =
@@ -489,7 +553,15 @@ export interface EpicQAMatrix {
 
 export type QAApproval = {
   status: 'pending' | 'approved' | 'rejected';
+  /** Sub del JWT del aprobador (`auth0|...`) — identificador estable. */
   approvedBy: string | null;
+  /**
+   * Nombre humano del aprobador en el momento del VoBo. Snapshot inmutable
+   * — si el usuario cambia su nombre o se elimina, el approval conserva
+   * el nombre con que fue dado para preservar la trazabilidad histórica.
+   * Nullable para retro-compat con approvals creados antes de este campo.
+   */
+  approvedByName: string | null;
   approvedAt: string | null;
   comment: string | null;
 };
@@ -651,19 +723,29 @@ export interface Epic {
   designSkipped: boolean;
   poApproval: {
     status: 'pending' | 'approved' | 'rejected';
-    approvedBy: string | null; // PO id
+    approvedBy: string | null; // PO sub (auth0|...)
+    approvedByName: string | null; // PO display name snapshot
     approvedAt: string | null; // ISO date
     comment: string | null;
   } | null;
   tlApproval: {
     status: 'pending' | 'approved' | 'rejected';
-    approvedBy: string | null; // TL name
+    approvedBy: string | null; // TL sub (auth0|...)
+    approvedByName: string | null; // TL display name snapshot
     approvedAt: string | null; // ISO date
     comment: string | null;
   } | null;
   qaMatrix: QAMatrix | null;
   qaApproval: QAApproval | null;
   epicQAMatrix: EpicQAMatrix | null;
+  /**
+   * Timestamp ISO de cuándo la épica fue enviada al Forge ("in queue").
+   * Null hasta que el usuario hace click en "Subir al Forge" tras los 3
+   * VoBos. Modelo KISS Mes 0 — en Mes 1 migrará a tabla SprintBatch.
+   */
+  enqueuedAt?: string | null;
+  /** UUID del batch en la cola del Forge. Null si la épica no fue encolada. */
+  enqueuedBatchId?: string | null;
   createdAt: string;
   updatedAt: string;
 }

@@ -149,6 +149,10 @@ export const DEFAULT_ROLE_PERMISSIONS: Record<UserRole, Permission[]> = {
   [UserRole.AltaGerencia]: [
     Permission.CREATE_INITIATIVE, Permission.EDIT_INITIATIVE, Permission.DELETE_INITIATIVE,
     Permission.CREATE_EPIC, Permission.EDIT_EPIC, Permission.DELETE_EPIC,
+    // Alta Gerencia puede dar VoBo de cualquier rol — útil para desbloquear
+    // épicas cuando un PO/TL/QA no está disponible. La trazabilidad se
+    // preserva porque `approvedByName` queda con el nombre del admin.
+    Permission.APPROVE_EPIC_PO, Permission.APPROVE_EPIC_TL, Permission.APPROVE_QA,
     Permission.CREATE_STORY, Permission.EDIT_STORY, Permission.DELETE_STORY,
     Permission.CREATE_DIAGRAM, Permission.EDIT_DIAGRAM,
     Permission.CREATE_QA_MATRIX, Permission.EDIT_QA_MATRIX,
@@ -190,6 +194,7 @@ export const ROLE_PERMISSIONS: Record<UserRole, Permission[]> = {
   [UserRole.AltaGerencia]: [
     Permission.CREATE_INITIATIVE, Permission.EDIT_INITIATIVE, Permission.DELETE_INITIATIVE,
     Permission.CREATE_EPIC, Permission.EDIT_EPIC, Permission.DELETE_EPIC,
+    Permission.APPROVE_EPIC_PO, Permission.APPROVE_EPIC_TL, Permission.APPROVE_QA,
     Permission.CREATE_STORY, Permission.EDIT_STORY, Permission.DELETE_STORY,
     Permission.CREATE_DIAGRAM, Permission.EDIT_DIAGRAM,
     Permission.CREATE_QA_MATRIX, Permission.EDIT_QA_MATRIX,

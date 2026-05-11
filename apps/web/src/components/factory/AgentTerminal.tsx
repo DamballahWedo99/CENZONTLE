@@ -29,6 +29,23 @@ async function authFetch(path: string, options?: RequestInit): Promise<Response>
 interface AgentTerminalProps {
   agent: FactoryAgent;
   onClose: () => void;
+  /**
+   * Override opcional para runs reales del backend (HITO 1.5/1.6).
+   * Cuando se provee, el componente NO llama `useAgentTerminal` legacy
+   * (que arrancaría una nueva sesión ttyd contra el backend dashboard).
+   * En su lugar usa los valores aquí — `ttydUrl` apunta al ttyd que el
+   * worker del Forge ya arrancó, y `dod`/`milestones` vienen del run real.
+   *
+   * Cuando `runOverride` es undefined → comportamiento legacy del agent mock.
+   */
+  runOverride?: {
+    ttydUrl: string | null;
+    dod: { text: string; done: boolean }[];
+    milestones: { text: string; done: boolean }[];
+    prNumber: number | null;
+    loading: boolean;
+    error: string | null;
+  };
 }
 
 const statusColors: Record<AgentStatus, string> = {
@@ -53,8 +70,22 @@ const statusLabels: Record<AgentStatus, string> = {
   [AgentStatus.Error]: 'Error',
 };
 
-export function AgentTerminal({ agent, onClose }: AgentTerminalProps) {
-  const { ttydUrl, sessionActive, loading, error, worktreePath, startSession, sendKeys } = useAgentTerminal(agent.id);
+export function AgentTerminal({ agent, onClose, runOverride }: AgentTerminalProps) {
+  // Hook legacy SIEMPRE se llama (rules of hooks) pero sus efectos se
+  // anulan cuando hay runOverride: el `startSession` no se dispara, el
+  // copy-mode polling no corre, y los valores expuestos se sobrescriben
+  // con los del run real abajo.
+  const legacyHook = useAgentTerminal(agent.id);
+  const isRunMode = !!runOverride;
+
+  // Valores efectivos: si hay runOverride → del backend real; si no → legacy.
+  const ttydUrl = isRunMode ? runOverride!.ttydUrl : legacyHook.ttydUrl;
+  const sessionActive = isRunMode ? !!runOverride!.ttydUrl : legacyHook.sessionActive;
+  const loading = isRunMode ? runOverride!.loading : legacyHook.loading;
+  const error = isRunMode ? runOverride!.error : legacyHook.error;
+  const worktreePath = isRunMode ? null : legacyHook.worktreePath;
+  const startSession = isRunMode ? async () => {} : legacyHook.startSession;
+  const sendKeys = isRunMode ? () => {} : legacyHook.sendKeys;
   const { state, getStoryById } = useFactory();
 
   // Lookup related data for the detail drawer
@@ -75,6 +106,10 @@ export function AgentTerminal({ agent, onClose }: AgentTerminalProps) {
 
   useEffect(() => {
     if (!ttydUrl) return;
+    // En modo run real, el backend no tiene endpoint de copy-mode contra
+    // el agent.id — el ttyd lo arrancó el worker, no el backend dashboard.
+    // Skip el polling para evitar 404 spam.
+    if (isRunMode) return;
     const interval = setInterval(async () => {
       try {
         const res = await authFetch(`/api/factory/terminal/copy-mode/${agent.id}`);
@@ -85,7 +120,7 @@ export function AgentTerminal({ agent, onClose }: AgentTerminalProps) {
       } catch { /* ignore */ }
     }, 2000);
     return () => clearInterval(interval);
-  }, [ttydUrl, agent.id]);
+  }, [ttydUrl, agent.id, isRunMode]);
 
   async function scrollToBottom() {
     try {
@@ -176,6 +211,10 @@ export function AgentTerminal({ agent, onClose }: AgentTerminalProps) {
   const agentBranch = agent.storyKey ? `feat/${agent.storyKey}` : undefined;
 
   useEffect(() => {
+    // En modo run real, el ttyd ya está arrancado por el worker — no
+    // queremos llamar al endpoint /factory/terminal/start del backend
+    // dashboard porque eso arrancaría OTRO ttyd encima del que ya existe.
+    if (isRunMode) return;
     if (!sessionActive && !loading && !ttydUrl) {
       startSession(defaultWorkdir, undefined, agentBranch);
     }
@@ -223,7 +262,11 @@ export function AgentTerminal({ agent, onClose }: AgentTerminalProps) {
             )}
             {/* DoD pill */}
             {(() => {
-              const dod = deriveDod(agent);
+              // En modo run real, los criterios DoD vienen del backend
+              // (HITO 2.5 cuando esté implementado, mientras tanto derivados
+              // del status del run en page.tsx). En mock, derivamos del
+              // status del FactoryAgent.
+              const dod = isRunMode ? runOverride!.dod : deriveDod(agent);
               const dodDone = dod.filter((c) => c.done).length;
               return (
                 <button
@@ -242,7 +285,12 @@ export function AgentTerminal({ agent, onClose }: AgentTerminalProps) {
             })()}
             {/* Milestones pill */}
             {(() => {
-              const milestones = deriveMilestones(story, agent);
+              // En modo run real, milestones vienen del worker via
+              // criteriaProgress (worker milestones + agente custom).
+              // En mock, son la heurística derivada del FactoryAgent.
+              const milestones = isRunMode
+                ? runOverride!.milestones
+                : deriveMilestones(story, agent);
               const msDone = milestones.filter((c) => c.done).length;
               return (
                 <button
@@ -284,7 +332,7 @@ export function AgentTerminal({ agent, onClose }: AgentTerminalProps) {
                       const file = Array.from(e.dataTransfer.files).find((f) => f.type.startsWith('image/'));
                       if (file) handleImageUpload(file);
                     }}
-                    disabled={uploading || !ttydUrl}
+                    disabled={uploading || !ttydUrl || isRunMode}
                   >
                     {uploading ? (
                       <Loader2 className="h-3.5 w-3.5 animate-spin" />
@@ -352,8 +400,8 @@ export function AgentTerminal({ agent, onClose }: AgentTerminalProps) {
           {/* Bottom bar — DoD or Milestones (mutually exclusive) */}
           {activeBar && (() => {
             const items = activeBar === 'dod'
-              ? deriveDod(agent)
-              : deriveMilestones(story, agent);
+              ? (isRunMode ? runOverride!.dod : deriveDod(agent))
+              : (isRunMode ? runOverride!.milestones : deriveMilestones(story, agent));
             const doneCount = items.filter((c) => c.done).length;
             const label = activeBar === 'dod' ? 'Definition of Done' : 'Milestones';
             const accentColor = activeBar === 'dod' ? 'text-cyan-400' : 'text-blue-400';

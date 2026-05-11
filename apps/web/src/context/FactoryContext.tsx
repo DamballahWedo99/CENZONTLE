@@ -1,6 +1,7 @@
 'use client';
 
-import React, { createContext, useContext, useReducer, useMemo, useCallback, ReactNode } from 'react';
+import React, { createContext, useContext, useReducer, useMemo, useCallback, useEffect, ReactNode } from 'react';
+import { getForgeQueue, type ForgeQueueItem } from '@/lib/api/factory';
 import type {
   FactoryAgent,
   FactoryState,
@@ -239,39 +240,42 @@ const initialState: FactoryContextState = {
       { id: 'batch-48', name: 'Sprint Batch #48', epicTitle: 'Soporte Multi-procesador de Pagos', epicId: 'epic-5', tracker: { provider: 'linear', externalId: 'proj-2', externalKey: 'CZ-EP-15', externalUrl: 'https://linear.app/cenzontle/project/api-gateway-v2' }, stories: mockStories.filter((s) => ['s-7', 's-8'].includes(s.id)), waves: [], branch: 'forge/sprint-batch-48', status: 'in-progress', currentLayer: PipelineLayer.Forge, agentCount: 2, priority: 'medium' as const, startedAt: '2026-03-23T09:00:00Z', completedAt: null, totalCost: 8.20, totalTokens: 1_360_000 },
       { id: 'batch-46', name: 'Sprint Batch #46', epicTitle: 'App Móvil Checkout Nativo', epicId: 'epic-3', tracker: { provider: 'linear', externalId: 'proj-3', externalKey: 'CZ-EP-13', externalUrl: 'https://linear.app/cenzontle/project/mobile-checkout' }, stories: mockStories.filter((s) => ['s-1', 's-2'].includes(s.id)), waves: [], branch: 'forge/sprint-batch-46', status: 'in-progress', currentLayer: PipelineLayer.Staging, agentCount: 0, priority: 'high' as const, startedAt: '2026-03-22T10:00:00Z', completedAt: null, totalCost: 12.40, totalTokens: 2_060_000 },
     ],
-    queuedBatches: [
-      {
-        id: 'q-1', epicTitle: 'Auth System Overhaul',
-        tracker: { provider: 'linear', externalId: 'proj-auth-overhaul', externalKey: 'CZ-EP-16', externalUrl: 'https://linear.app/cenzontle/project/auth-system-overhaul' },
-        stories: 5,
-        storyDetails: [
-          { key: 'CZ-148', title: 'JWT token refresh flow', pod: 'Platform Backend', productOwner: 'Ana García', storyPoints: 5 },
-          { key: 'CZ-149', title: 'OAuth2 provider integration', pod: 'Platform Backend', productOwner: 'Ana García', storyPoints: 8 },
-          { key: 'CZ-150', title: 'Session management service', pod: 'Platform Backend', productOwner: 'Carlos López', storyPoints: 5 },
-          { key: 'CZ-151', title: 'RBAC middleware', pod: 'Security', productOwner: 'Ana García', storyPoints: 3 },
-          { key: 'CZ-152', title: 'Auth error handling', pod: 'Security', productOwner: null, storyPoints: 2 },
-        ],
-        priority: 'high', queuedAt: '2026-03-23T14:00:00Z', estimatedStartAt: '2026-03-23T18:00:00Z',
-      },
-      {
-        id: 'q-2', epicTitle: 'Analytics Dashboard',
-        tracker: { provider: 'linear', externalId: 'proj-analytics-dash', externalKey: 'CZ-EP-17', externalUrl: 'https://linear.app/cenzontle/project/analytics-dashboard' },
-        stories: 3,
-        storyDetails: [
-          { key: 'CZ-153', title: 'Metrics aggregation API', pod: 'Data Engineering', productOwner: 'Diego Ramírez', storyPoints: 8 },
-          { key: 'CZ-154', title: 'Dashboard chart components', pod: 'Frontend Digital', productOwner: 'Diego Ramírez', storyPoints: 5 },
-          { key: 'CZ-155', title: 'Real-time data pipeline', pod: 'Data Engineering', productOwner: 'Carlos López', storyPoints: 13 },
-        ],
-        priority: 'medium', queuedAt: '2026-03-23T15:00:00Z', estimatedStartAt: '2026-03-23T19:30:00Z',
-      },
-    ],
+    // Cola del Forge — vacía al inicio, se hidrata desde GET /factory/queue
+    // cuando el FactoryProvider monta. Mocks anteriores eliminados — la cola
+    // ahora muestra solo épicas reales que pasaron por el Protocolo de Visto
+    // Bueno y fueron enviadas al Forge.
+    queuedBatches: [],
+    // ResourcePool — la UI real (`ComputeNodesSection` en /factory/settings)
+    // hidrata desde `GET /factory/nodes` con polling 5s. Aquí se mantiene
+    // UN nodo MOCK temporal porque las vistas `/factory/agents` (Fleet
+    // Monitor con cards de agents activos) aún consumen del FactoryContext
+    // y necesitan al menos 1 nodo con agents para no quedarse vacías.
+    //
+    // TODO (Sprint 4): cuando `/factory/agents` se conecte al backend real
+    // (consumiendo `GET /factory/nodes` + `GET /factory/runs`), eliminar
+    // este mock y poner `nodes: []`.
     resourcePool: {
       nodes: [
-        { id: 'node-local', name: 'My MacBook Pro', type: 'local' as const, os: 'macOS 15.3 (Apple M3 Pro)', location: 'Local', ip: '127.0.0.1', status: 'online' as const, totalSlots: 3, agents: [{ agentId: 'agent-1', batchId: 'batch-47', batchName: 'Checkout Redesign' }, { agentId: 'agent-2', batchId: 'batch-47', batchName: 'Checkout Redesign' }, { agentId: 'agent-3', batchId: 'batch-47', batchName: 'Checkout Redesign' }], addedAt: '2026-03-20T10:00:00Z', lastHeartbeat: '2026-03-24T04:50:00Z' },
-        { id: 'node-mm1', name: 'Mac Mini Office 1', type: 'mac-mini' as const, os: 'macOS 15.3 (Apple M2)', location: 'CDMX Office', ip: '100.64.0.2', status: 'online' as const, totalSlots: 6, agents: [{ agentId: 'agent-4', batchId: 'batch-48', batchName: 'API Gateway v2' }, { agentId: 'agent-5', batchId: 'batch-48', batchName: 'API Gateway v2' }], addedAt: '2026-03-21T09:00:00Z', lastHeartbeat: '2026-03-24T04:50:00Z' },
+        {
+          id: 'node-local',
+          name: 'My MacBook Pro',
+          type: 'local' as const,
+          os: 'macOS 15.3 (Apple M3 Pro)',
+          location: 'Local',
+          ip: '127.0.0.1',
+          status: 'online' as const,
+          totalSlots: 3,
+          agents: [
+            { agentId: 'agent-1', batchId: 'batch-47', batchName: 'Checkout Redesign' },
+            { agentId: 'agent-2', batchId: 'batch-47', batchName: 'Checkout Redesign' },
+            { agentId: 'agent-3', batchId: 'batch-47', batchName: 'Checkout Redesign' },
+          ],
+          addedAt: '2026-03-20T10:00:00Z',
+          lastHeartbeat: '2026-03-24T04:50:00Z',
+        },
       ],
-      totalSlots: 9,
-      usedSlots: 5,
+      totalSlots: 3,
+      usedSlots: 3,
     },
     activeLayers: [PipelineLayer.Forge, PipelineLayer.Staging],
     totalCost: 35.47,
@@ -470,9 +474,79 @@ interface FactoryContextValue {
 
 const FactoryContext = createContext<FactoryContextValue | null>(null);
 
+// === MAPPERS ===
+
+/**
+ * Mapea el shape del backend (`ForgeQueueItem`) al `QueuedBatch` shared
+ * que el FactoryOverview consume. Diferencias clave:
+ *
+ *  - `id` ← `batchId` del backend
+ *  - `epicId` ← propagado para navegación al detail
+ *  - `tracker` ← null porque el Forge interno no usa Linear/Jira
+ *  - `priority` ← default 'medium' (el backend no lo retorna; se hidratará
+ *    cuando agreguemos Sprint/SprintBatch en Mes 1)
+ *  - `estimatedStartAt` ← null hasta que tengamos el orquestador real
+ *
+ * Cuando `tracker` es null, los componentes del FactoryOverview deben hacer
+ * fallback a `epicId` (con `getShortId`) para mostrar identificador legible.
+ */
+function mapForgeQueueItemToQueuedBatch(item: ForgeQueueItem): QueuedBatch {
+  return {
+    id: item.batchId,
+    epicId: item.epicId,
+    epicTitle: item.epicTitle,
+    tracker: null,
+    stories: item.storiesCount,
+    storyDetails: undefined,
+    // Priority real desde el backend (antes hardcoded 'medium').
+    priority: item.priority,
+    queuedAt: item.enqueuedAt,
+    estimatedStartAt: null,
+    // Runtime data — propagado al frontend para que `FactoryOverview`
+    // pueda mover la épica de "queue" a "forge" cuando agentCount > 0.
+    storiesDone: item.storiesDone,
+    storiesInProgress: item.storiesInProgress,
+    agentCount: item.agentCount,
+    runStartedAt: item.runStartedAt,
+    forgeBranch: item.forgeBranch,
+  };
+}
+
 // === PROVIDER ===
 export function FactoryProvider({ children }: { children: ReactNode }) {
   const [state, dispatch] = useReducer(factoryReducer, initialState);
+
+  // Hidrata `queuedBatches` desde el endpoint real con polling 5s para
+  // que los runtime fields (`storiesDone`, `agentCount`, `runStartedAt`)
+  // se actualicen cuando los workers reclaman/completan stories. Sin
+  // polling, el dashboard mostraría datos congelados hasta que el user
+  // recargue la página.
+  //
+  // Best-effort: si falla (no autenticado, network), el state queda como
+  // estaba y el dashboard sigue funcional. Sprint 5+ podemos migrar a
+  // SSE/WebSocket para evitar polling y reducir latencia.
+  useEffect(() => {
+    let cancelled = false;
+    const fetchAndUpdate = async () => {
+      try {
+        const items = await getForgeQueue();
+        if (cancelled) return;
+        const queuedBatches = items.map(mapForgeQueueItemToQueuedBatch);
+        dispatch({
+          type: 'UPDATE_FACTORY',
+          payload: { queuedBatches },
+        });
+      } catch {
+        // Silencio — el state queda como estaba.
+      }
+    };
+    void fetchAndUpdate();
+    const interval = setInterval(() => void fetchAndUpdate(), 5_000);
+    return () => {
+      cancelled = true;
+      clearInterval(interval);
+    };
+  }, []);
 
   // --- Helper selectors (stable callbacks) ---
 

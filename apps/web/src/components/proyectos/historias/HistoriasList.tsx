@@ -5,6 +5,7 @@ import { useRouter } from 'next/navigation';
 import { toast } from 'sonner';
 import { useProyectos } from '@/context/ProyectosContext';
 import { updateStory as apiUpdateStory, deleteStory as apiDeleteStory, getStory as apiGetStory } from '@/lib/api/stories';
+import { getShortId } from '@/lib/short-id';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import {
@@ -532,11 +533,9 @@ export function HistoriasList() {
                   }}
                 >
                   <div className="flex items-center gap-1.5">
-                    {story.tracker?.externalKey ? (
-                      <span className="font-mono text-xs text-muted-foreground">{story.tracker.externalKey}</span>
-                    ) : (
-                      <span className="text-xs text-muted-foreground/50">{'—'}</span>
-                    )}
+                    <span className="font-mono text-xs text-muted-foreground">
+                      {story.tracker?.externalKey ?? getShortId(story.id)}
+                    </span>
                   </div>
                   <span className="truncate font-medium">{story.title}</span>
                   <span className="text-xs text-muted-foreground truncate">{epic?.title}</span>

@@ -1,6 +1,15 @@
 {
   "$schema": "https://turbo.build/schema.json",
   "globalDependencies": ["**/.env.*local"],
+  "globalPassThroughEnv": [
+    "FORGE_PAUSED",
+    "FORGE_EXECUTION_MODE",
+    "FACTORY_WORKER_ALLOW_INSECURE",
+    "FACTORY_WORKER_ALLOW_NO_SANDBOX",
+    "FACTORY_WORKER_SANDBOX_MODE",
+    "CLAUDE_BIN",
+    "PUBLIC_API_URL"
+  ],
   "tasks": {
     "build": {
       "dependsOn": ["^build"],

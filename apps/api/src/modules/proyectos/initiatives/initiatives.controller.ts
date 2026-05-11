@@ -14,15 +14,28 @@ export class InitiativesController {
   constructor(private readonly initiativesService: InitiativesService) {}
 
   @Get()
-  @ApiOperation({ summary: 'Listar iniciativas con filtros opcionales' })
-  findAll(@Query() query: InitiativeQueryDto) {
-    return this.initiativesService.findAll(query);
+  @ApiOperation({
+    summary:
+      'Listar iniciativas con filtros opcionales. Para no-AltaGerencia, filtra por iniciativas que tienen al menos una épica en un pod del usuario (CWE-639).',
+  })
+  findAll(
+    @Query() query: InitiativeQueryDto,
+    @CurrentUser() user: AuthenticatedUser,
+  ) {
+    return this.initiativesService.findAll(query, user);
   }
 
   @Get(':id')
-  @ApiOperation({ summary: 'Obtener una iniciativa por ID con sus épicas. includeContent=true carga description desde el vault.' })
-  findOne(@Param('id') id: string, @Query('includeContent') includeContent?: string) {
-    return this.initiativesService.findOne(id, includeContent === 'true');
+  @ApiOperation({
+    summary:
+      'Obtener una iniciativa por ID con sus épicas. includeContent=true carga description desde el vault. Pod intersection requerida para no-AltaGerencia.',
+  })
+  findOne(
+    @Param('id') id: string,
+    @Query('includeContent') includeContent: string | undefined,
+    @CurrentUser() user: AuthenticatedUser,
+  ) {
+    return this.initiativesService.findOne(id, includeContent === 'true', user);
   }
 
   @Post()

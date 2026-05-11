@@ -9,6 +9,9 @@ export interface CodeRepository {
   repo: string;
   branch: string;
   isActive: boolean;
+  /** Cuando true, el Forge puede clonar+commitear+pushear+abrir PRs en este repo.
+   *  Independiente de `isActive` (que solo da acceso de lectura a agentes). */
+  forgeWritable: boolean;
   hasToken: boolean;
   tokenPreview: string;
   cloneStatus: CodeRepoCloneStatus;
@@ -95,6 +98,21 @@ export function enableCodeRepository(id: string) {
 
 export function disableCodeRepository(id: string) {
   return apiFetch<CodeRepository>(`/code-repositories/${id}/disable`, { method: 'POST' });
+}
+
+/** Activa "el Forge puede ESCRIBIR en este repo" (clone+commit+push+PR).
+ *  Requiere que `isActive=true`. Opt-in defensivo. */
+export function enableForgeWritable(id: string) {
+  return apiFetch<CodeRepository>(`/code-repositories/${id}/forge-writable/enable`, {
+    method: 'POST',
+  });
+}
+
+/** Quita permiso de escritura del Forge (vuelve a read-only). */
+export function disableForgeWritable(id: string) {
+  return apiFetch<CodeRepository>(`/code-repositories/${id}/forge-writable/disable`, {
+    method: 'POST',
+  });
 }
 
 export function testCodeRepository(id: string) {

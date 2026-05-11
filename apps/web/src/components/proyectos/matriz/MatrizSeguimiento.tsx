@@ -6,6 +6,7 @@ import type { MatrizCell as MatrizCellType } from '@cenzontle/shared';
 import { StatusBadge } from '../shared/StatusBadge';
 import { StoryPointsBadge } from '../shared/StoryPointsBadge';
 import { ChevronDown, ChevronRight } from 'lucide-react';
+import { getShortId } from '@/lib/short-id';
 
 export function MatrizSeguimiento() {
   const { matrizRows, state } = useProyectos();
@@ -90,7 +91,7 @@ export function MatrizSeguimiento() {
                       <td className="p-3 sticky left-0 bg-background z-10">
                         <div className="flex flex-col">
                           <span className="font-mono text-xs text-muted-foreground">
-                            {row.epic.tracker?.externalKey ?? '—'}
+                            {row.epic.tracker?.externalKey ?? getShortId(row.epic.id)}
                           </span>
                           <span className="font-medium text-sm truncate max-w-[220px]">
                             {row.epic.title}
@@ -174,7 +175,7 @@ export function MatrizSeguimiento() {
                                     role="listitem"
                                   >
                                     <span className="font-mono text-muted-foreground shrink-0">
-                                      {story.tracker?.externalKey ?? '—'}
+                                      {story.tracker?.externalKey ?? getShortId(story.id)}
                                     </span>
                                     <span className="truncate flex-1">{story.title}</span>
                                     <StoryPointsBadge points={story.storyPoints} />

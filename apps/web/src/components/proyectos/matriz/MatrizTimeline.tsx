@@ -3,6 +3,7 @@
 import { useState, useMemo, useRef, useCallback, useEffect, Fragment, forwardRef, useImperativeHandle } from 'react';
 import { useRouter } from 'next/navigation';
 import { useProyectos } from '@/context/ProyectosContext';
+import { getShortId } from '@/lib/short-id';
 import type {
   TimelineConfig,
   SprintRange,
@@ -873,7 +874,7 @@ export const MatrizTimeline = forwardRef<MatrizTimelineHandle, MatrizTimelinePro
                             : <ChevronDown className="h-3.5 w-3.5 text-muted-foreground shrink-0" aria-hidden="true" />
                           }
                           <span className="font-mono text-[10px] text-muted-foreground shrink-0">
-                            {epic.tracker?.externalKey ?? '\u2014'}
+                            {epic.tracker?.externalKey ?? getShortId(epic.id)}
                           </span>
                           <span className="text-xs font-medium truncate flex-1 text-left">
                             {epic.title}
@@ -959,7 +960,7 @@ export const MatrizTimeline = forwardRef<MatrizTimelineHandle, MatrizTimelinePro
                             >
                               <span className={`h-1.5 w-1.5 rounded-full shrink-0 ${barColors.dot}`} aria-hidden="true" />
                               <span className="font-mono text-[10px] text-muted-foreground/70 shrink-0 w-[60px]">
-                                {story.tracker?.externalKey ?? '\u2014'}
+                                {story.tracker?.externalKey ?? getShortId(story.id)}
                               </span>
                               <span className="text-xs truncate flex-1 text-foreground/80">{story.title}</span>
                               <StoryPointsBadge points={story.storyPoints} className="shrink-0 h-4 min-w-4 text-[9px]" />

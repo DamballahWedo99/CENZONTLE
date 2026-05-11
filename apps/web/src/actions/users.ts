@@ -8,6 +8,7 @@ import {
   fetchUserRole,
   createUser,
   updateUserRole,
+  updateUserPods,
   blockUser,
   unblockUser,
   deleteUser,
@@ -60,6 +61,12 @@ const roleSchema = z.object({
   role: z.nativeEnum(UserRole),
 });
 
+const podsSchema = z.object({
+  userId: z.string().min(1),
+  // Array vacío = quitar célula. Hasta 10 pods (consistente con inviteSchema).
+  podIds: z.array(z.string().min(1)).max(10),
+});
+
 const userIdSchema = z.string().min(1);
 
 // === Actions ===
@@ -92,6 +99,27 @@ export async function changeMemberRole(
   }
 
   return updateUserRole(data.userId, data.role);
+}
+
+/**
+ * Asigna las células (pods) del usuario. Para "quitar la célula" pasar
+ * array vacío. Permitido auto-asignarse (a diferencia de cambiar el propio
+ * rol) — un usuario puede unirse o salir de pods donde participa sin
+ * comprometer la separación de privilegios.
+ *
+ * NOTA: este endpoint NO valida que los podIds existan en la BD. Auth0
+ * sólo guarda strings opacos. El frontend ya muestra solo opciones válidas
+ * (de getPods()), así que el riesgo es bajo. El backend NestJS valida
+ * pod intersection en cada query/operation contra la lista real de pods,
+ * descartando IDs huérfanos.
+ */
+export async function changeMemberPods(
+  userId: string,
+  podIds: string[],
+): Promise<void> {
+  await requirePermission(Permission.MANAGE_USERS);
+  const data = podsSchema.parse({ userId, podIds });
+  return updateUserPods(data.userId, data.podIds);
 }
 
 export async function deactivateMember(userId: string): Promise<void> {

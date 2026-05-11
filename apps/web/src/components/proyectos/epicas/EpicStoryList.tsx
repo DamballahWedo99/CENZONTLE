@@ -29,6 +29,7 @@ import { StoryPOTab } from '../historias/editor/StoryPOTab';
 import { StoryTechnicalTab } from '../historias/editor/StoryTechnicalTab';
 import { StoryQATab } from '../historias/editor/StoryQATab';
 import { ReadOnlyMarkdown } from '@/components/shared/tiptap/ReadOnlyMarkdown';
+import { getShortId } from '@/lib/short-id';
 import {
   Plus,
   Pencil,
@@ -770,7 +771,7 @@ export function EpicStoryList({
                   />
                 </div>
                 <span className="font-mono text-xs text-muted-foreground w-20 shrink-0">
-                  {story.tracker?.externalKey ?? '—'}
+                  {story.tracker?.externalKey ?? getShortId(story.id)}
                 </span>
                 <span className="truncate flex-1">{story.title}</span>
                 <StoryPointsBadge points={story.storyPoints} />

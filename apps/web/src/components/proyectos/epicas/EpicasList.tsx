@@ -7,6 +7,7 @@ import { PriorityIndicator } from '../shared/PriorityIndicator';
 import { PodBadge } from '../shared/PodBadge';
 import { ProgressBar } from '../shared/ProgressBar';
 import { ChevronRight } from 'lucide-react';
+import { getShortId } from '@/lib/short-id';
 
 const gridCols = 'grid-cols-[60px_1fr_260px_100px_80px_200px_120px_60px_28px]';
 
@@ -51,11 +52,9 @@ export function EpicasList() {
                 onClick={() => router.push(`/proyectos/epicas/${epic.id}`)}
               >
                 <div className="flex items-center gap-1.5">
-                  {epic.tracker?.externalKey ? (
-                    <span className="font-mono text-xs text-muted-foreground">{epic.tracker.externalKey}</span>
-                  ) : (
-                    <span className="text-xs text-muted-foreground/50">{'\u2014'}</span>
-                  )}
+                  <span className="font-mono text-xs text-muted-foreground">
+                    {epic.tracker?.externalKey ?? getShortId(epic.id)}
+                  </span>
                 </div>
                 <span className="truncate font-medium">{epic.title}</span>
                 <span

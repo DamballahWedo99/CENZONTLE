@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useRef } from 'react';
 import { useRouter, useSearchParams } from 'next/navigation';
 import Link from 'next/link';
 import { toast } from 'sonner';
@@ -9,6 +9,14 @@ import { Input } from '@/components/ui/input';
 import { Button } from '@/components/ui/button';
 import { Checkbox } from '@/components/ui/checkbox';
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip';
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from '@/components/ui/dialog';
 import { ConfirmDialog } from '@/components/ui/confirm-dialog';
 import {
   Select,
@@ -57,6 +65,9 @@ import {
   Code,
   RefreshCw,
   KeyRound,
+  AlertOctagon,
+  GitPullRequest,
+  PencilLine,
 } from 'lucide-react';
 import { LinearIcon } from '@/components/icons/LinearIcon';
 import { TeamSection } from './TeamSection';
@@ -64,6 +75,25 @@ import { RolesPermissionsSection } from './RolesPermissionsSection';
 import { PodsSection } from './PodsSection';
 import { ExternalSecretsSection } from './ExternalSecretsSection';
 import { AgentTokensSection } from './AgentTokensSection';
+import { AnthropicApiKeySection } from './AnthropicApiKeySection';
+import { ForgeKillSwitchSection } from './ForgeKillSwitchSection';
+import { GenerateTokenDialog } from './GenerateTokenDialog';
+import {
+  getComputeNodes,
+  createComputeNode,
+  updateComputeNode,
+  deleteComputeNode,
+  getBranchStrategy,
+  updateBranchStrategy,
+  type ComputeNodeResponse,
+  type ComputeNodeType,
+} from '@/lib/api/factory';
+import { ApiError } from '@/lib/api/client';
+import {
+  listDodCriteria,
+  resetDodCriteriaDefaults,
+  upsertDodCriteria,
+} from '@/lib/api/dod';
 import { UserRole, AccessLevel, USER_ROLE_LABELS, DEFAULT_ROLE_ACCESS, USER_ROLE_COLORS } from '@cenzontle/shared';
 import { useAuthContext } from '@/context/AuthContext';
 import {
@@ -77,7 +107,7 @@ import {
 // Types
 // ---------------------------------------------------------------------------
 
-type SettingsSection = 'repository' | 'branches' | 'linear' | 'vault' | 'codigo' | 'external-secrets' | 'nodes' | 'agents' | 'agent-tokens' | 'dod' | 'pods' | 'team' | 'roles';
+type SettingsSection = 'branches' | 'linear' | 'vault' | 'codigo' | 'external-secrets' | 'nodes' | 'kill-switch' | 'agents' | 'agent-tokens' | 'anthropic-key' | 'dod' | 'pods' | 'team' | 'roles';
 
 interface SidebarItem {
   id: SettingsSection;
@@ -89,15 +119,19 @@ interface SidebarItem {
 }
 
 const SIDEBAR_ITEMS: SidebarItem[] = [
-  { id: 'repository', label: 'Repositorio', icon: Github, group: 'Control de código' },
+  // "Código" vive aquí (NO en Integraciones) porque es el control real del
+  // repositorio destino del Forge: read-only por default + opt-in
+  // forgeWritable para escritura. Reemplazó la tarjeta "Repositorio" mockeada.
+  { id: 'codigo', label: 'Código', icon: Code, group: 'Control de código' },
   { id: 'branches', label: 'Estrategia de ramas', icon: GitBranch, group: 'Control de código' },
   { id: 'linear', label: 'Linear', icon: LinearIcon, group: 'Integraciones' },
   { id: 'vault', label: 'Vault', icon: BookMarked, group: 'Integraciones' },
-  { id: 'codigo', label: 'Código', icon: Code, group: 'Integraciones' },
   { id: 'external-secrets', label: 'Secretos externos', icon: KeyRound, group: 'Integraciones' },
   { id: 'nodes', label: 'Nodos de cómputo', icon: Server, group: 'Infraestructura' },
+  { id: 'kill-switch', label: 'Kill Switch del Forge', icon: AlertOctagon, group: 'Infraestructura' },
   { id: 'agents', label: 'Agentes', icon: Bot, group: 'Automatización' },
   { id: 'agent-tokens', label: 'Tokens IA', icon: Brain, group: 'Automatización' },
+  { id: 'anthropic-key', label: 'Anthropic API Key', icon: Brain, group: 'Automatización' },
   { id: 'dod', label: 'Definition of Done', icon: ClipboardCheck, group: 'Automatización' },
   { id: 'pods', label: 'Células', icon: Boxes, group: 'Ecosistema' },
   { id: 'team', label: 'Equipo', icon: Users, group: 'Ecosistema' },
@@ -328,71 +362,132 @@ function BranchStrategySection() {
   const [mainBranch, setMainBranch] = useState(DEFAULT_BRANCH_STRATEGY.mainBranch);
   const [prefix, setPrefix] = useState(DEFAULT_BRANCH_STRATEGY.forgeBranchPrefix);
   const [autoDelete, setAutoDelete] = useState(DEFAULT_BRANCH_STRATEGY.autoDeleteForgeBranch);
+  const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
 
-  const handleSave = () => {
+  // Hidrata desde el backend al montar. Si NO existe la fila aún (primer
+  // arranque), el endpoint hace auto-seed con defaults — siempre devuelve
+  // valores válidos, nunca null.
+  useEffect(() => {
+    let cancelled = false;
+    getBranchStrategy()
+      .then((config) => {
+        if (cancelled) return;
+        setDevBranch(config.devBranch);
+        setMainBranch(config.mainBranch);
+        setPrefix(config.forgeBranchPrefix);
+        setAutoDelete(config.autoDeleteForgeBranch);
+      })
+      .catch((err: unknown) => {
+        if (err instanceof ApiError && err.status === 403) {
+          toast.error('Solo Alta Gerencia puede ver la estrategia de ramas');
+        } else if (err instanceof ApiError && err.status !== 401) {
+          toast.error(err.message);
+        }
+      })
+      .finally(() => {
+        if (!cancelled) setLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  const handleSave = async () => {
     setSaving(true);
-    setTimeout(() => setSaving(false), 1000);
+    try {
+      const updated = await updateBranchStrategy({
+        devBranch,
+        mainBranch,
+        forgeBranchPrefix: prefix,
+        autoDeleteForgeBranch: autoDelete,
+      });
+      // El backend valida y normaliza — actualiza el state local con la
+      // versión persistida (puede haber trim u otras transformaciones).
+      setDevBranch(updated.devBranch);
+      setMainBranch(updated.mainBranch);
+      setPrefix(updated.forgeBranchPrefix);
+      setAutoDelete(updated.autoDeleteForgeBranch);
+      toast.success('Estrategia de ramas guardada');
+    } catch (err) {
+      const message = err instanceof ApiError ? err.message : 'Error al guardar';
+      toast.error(message);
+    } finally {
+      setSaving(false);
+    }
   };
 
   return (
     <SettingsCard
       title="Configuración de ramas"
-      description="Configura cómo la factory crea y gestiona las ramas de Git para los sprint batches."
+      description="Configura cómo la factory crea y gestiona las ramas de Git para los sprint batches. Modelo de 3 niveles: main ← DEV ← forge/sprint-batch-{epicId}."
     >
-      <div className="grid gap-4 sm:grid-cols-2">
-        <LabeledInput label="DEV Branch">
-          <Input
-            value={devBranch}
-            onChange={(e) => setDevBranch(e.target.value)}
-            placeholder="dev"
-            className={inputClasses}
-          />
-        </LabeledInput>
+      {loading ? (
+        <div className="flex items-center gap-2 py-8 justify-center text-xs text-muted-foreground">
+          <Loader2 className="h-3.5 w-3.5 animate-spin" />
+          Cargando configuración...
+        </div>
+      ) : (
+        <>
+          <div className="grid gap-4 sm:grid-cols-2">
+            <LabeledInput label="DEV Branch">
+              <Input
+                value={devBranch}
+                onChange={(e) => setDevBranch(e.target.value)}
+                placeholder="dev"
+                disabled={saving}
+                className={inputClasses}
+              />
+            </LabeledInput>
 
-        <LabeledInput label="Main / Production Branch">
-          <Input
-            value={mainBranch}
-            onChange={(e) => setMainBranch(e.target.value)}
-            placeholder="main"
-            className={inputClasses}
-          />
-        </LabeledInput>
-      </div>
+            <LabeledInput label="Main / Production Branch">
+              <Input
+                value={mainBranch}
+                onChange={(e) => setMainBranch(e.target.value)}
+                placeholder="main"
+                disabled={saving}
+                className={inputClasses}
+              />
+            </LabeledInput>
+          </div>
 
-      <div className="mt-4">
-        <LabeledInput label="Forge Branch Prefix">
-          <Input
-            value={prefix}
-            onChange={(e) => setPrefix(e.target.value)}
-            placeholder="forge/sprint-batch-"
-            className={inputClasses}
-          />
-        </LabeledInput>
-        <p className="mt-1.5 text-[10px] text-muted-foreground/50">
-          Batch branches will be named: {prefix || 'forge/sprint-batch-'}
-          <span className="text-indigo-400">{'<batch-id>'}</span>
-        </p>
-      </div>
+          <div className="mt-4">
+            <LabeledInput label="Forge Branch Prefix">
+              <Input
+                value={prefix}
+                onChange={(e) => setPrefix(e.target.value)}
+                placeholder="forge/sprint-batch-"
+                disabled={saving}
+                className={inputClasses}
+              />
+            </LabeledInput>
+            <p className="mt-1.5 text-[10px] text-muted-foreground/50">
+              Batch branches will be named: {prefix || 'forge/sprint-batch-'}
+              <span className="text-indigo-400">{'<batch-id>'}</span>
+            </p>
+          </div>
 
-      <div className="mt-5 flex items-center gap-3">
-        <Checkbox
-          id="auto-delete"
-          checked={autoDelete}
-          onCheckedChange={(checked) => setAutoDelete(checked === true)}
-          className="border-border data-[state=checked]:bg-indigo-600 data-[state=checked]:border-indigo-600"
-        />
-        <label
-          htmlFor="auto-delete"
-          className="text-xs text-muted-foreground cursor-pointer select-none"
-        >
-          Auto-delete forge branches after merge to DEV
-        </label>
-      </div>
+          <div className="mt-5 flex items-center gap-3">
+            <Checkbox
+              id="auto-delete"
+              checked={autoDelete}
+              onCheckedChange={(checked) => setAutoDelete(checked === true)}
+              disabled={saving}
+              className="border-border data-[state=checked]:bg-indigo-600 data-[state=checked]:border-indigo-600"
+            />
+            <label
+              htmlFor="auto-delete"
+              className="text-xs text-muted-foreground cursor-pointer select-none"
+            >
+              Auto-delete forge branches after merge to DEV
+            </label>
+          </div>
 
-      <div className="mt-5 flex justify-end">
-        <SaveButton saving={saving} onClick={handleSave} />
-      </div>
+          <div className="mt-5 flex justify-end">
+            <SaveButton saving={saving} onClick={() => void handleSave()} />
+          </div>
+        </>
+      )}
     </SettingsCard>
   );
 }
@@ -1428,6 +1523,29 @@ function CodigoSection() {
     }
   };
 
+  /**
+   * Toggle del flag forgeWritable. Cuando activado, el Forge puede clonar,
+   * commitear, pushear y abrir PRs en este repo. Opt-in defensivo: por
+   * default los repos son read-only para los agentes.
+   */
+  const handleToggleForgeWritable = async (id: string, name: string, currentlyWritable: boolean) => {
+    try {
+      const { enableForgeWritable, disableForgeWritable } = await import('@/lib/api/code-repositories');
+      if (currentlyWritable) {
+        await disableForgeWritable(id);
+        toast.success(`Escritura del Forge deshabilitada en "${name}"`);
+      } else {
+        await enableForgeWritable(id);
+        toast.success(
+          `Escritura del Forge habilitada en "${name}". El Forge ahora puede abrir PRs aquí.`,
+        );
+      }
+      await loadRepos();
+    } catch (err: any) {
+      toast.error(err?.message ?? 'Error cambiando permiso de escritura');
+    }
+  };
+
   const handleTest = async (id: string) => {
     setTesting(id);
     try {
@@ -1501,6 +1619,12 @@ function CodigoSection() {
                         Deshabilitado
                       </span>
                     )}
+                    {r.forgeWritable && (
+                      <span className="inline-flex items-center gap-1 text-[10px] px-1.5 py-0.5 rounded-full bg-amber-500/15 text-amber-700 dark:text-amber-400 border border-amber-500/30">
+                        <PencilLine className="h-2.5 w-2.5" />
+                        Forge escribe
+                      </span>
+                    )}
                     <CloneStatusBadge repo={r} />
                   </div>
                   <div className="text-xs text-muted-foreground font-mono mt-0.5">
@@ -1525,6 +1649,28 @@ function CodigoSection() {
                   >
                     <Zap className="h-3.5 w-3.5" />
                     {r.isActive ? 'Deshabilitar' : 'Habilitar'}
+                  </Button>
+                  <Button
+                    size="sm"
+                    variant={r.forgeWritable ? 'ghost' : 'outline'}
+                    disabled={!r.isActive}
+                    onClick={() => handleToggleForgeWritable(r.id, r.name, r.forgeWritable)}
+                    className={cn(
+                      'gap-1 text-xs',
+                      r.forgeWritable
+                        ? 'text-amber-700 dark:text-amber-400'
+                        : 'border-amber-500/40 text-amber-700 dark:text-amber-400 hover:bg-amber-500/10',
+                    )}
+                    title={
+                      !r.isActive
+                        ? 'Habilita primero el repo (botón a la izquierda)'
+                        : r.forgeWritable
+                          ? 'El Forge puede commitear y abrir PRs aquí. Click para deshabilitar.'
+                          : 'Click para permitir que el Forge commitee y abra PRs en este repo'
+                    }
+                  >
+                    <GitPullRequest className="h-3.5 w-3.5" />
+                    {r.forgeWritable ? 'Forge: write ✓' : 'Activar Forge write'}
                   </Button>
                   <Button
                     size="sm"
@@ -1699,198 +1845,349 @@ function CodeRepositoryForm({
 // Section: Compute Nodes
 // ---------------------------------------------------------------------------
 
-interface NodeRow {
-  id: string;
-  name: string;
-  type: ComputeNode['type'];
-  slots: number;
-  status: 'online' | 'offline';
-}
-
+/**
+ * Sección "Gestión de flota" — conectada al backend real.
+ *
+ * Polling cada 5s desde `GET /factory/nodes` para mostrar status live de
+ * los nodos. Cuando el user crea un nodo nuevo, se persiste inmediatamente
+ * vía POST /factory/nodes (no batch save). Eliminar nodo es soft delete
+ * en el backend (preserva histórico para auditoría).
+ *
+ * El comando hardcodeado ya no muestra `<YOUR_TOKEN>` placeholder — ahora
+ * cada nodo tiene su botón "Token" que abre `GenerateTokenDialog` y muestra
+ * el comando completo con plaintext one-time.
+ */
 function ComputeNodesSection() {
-  const [nodes, setNodes] = useState<NodeRow[]>([
-    { id: 'node-1', name: 'MacBook Pro (local)', type: 'local', slots: 6, status: 'online' },
-    { id: 'node-2', name: 'Mac Mini Office', type: 'mac-mini', slots: 8, status: 'online' },
-    { id: 'node-3', name: 'AWS GPU Spot', type: 'gpu-instance', slots: 4, status: 'offline' },
-  ]);
-  const [saving, setSaving] = useState(false);
-  const [copied, setCopied] = useState(false);
+  const [nodes, setNodes] = useState<ComputeNodeResponse[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [creating, setCreating] = useState(false);
+  const [newNodeName, setNewNodeName] = useState('');
+  const [newNodeType, setNewNodeType] = useState<ComputeNodeType>('mac_mini');
+  const [newNodeSlots, setNewNodeSlots] = useState(2);
+  const [tokenDialogNode, setTokenDialogNode] = useState<{ id: string; name: string } | null>(null);
+  // Estado de edición inline de `totalSlots`. Solo UN nodo en edit a la vez —
+  // si el user hace click en otra celda mientras edita, descartamos el edit
+  // anterior y abrimos el nuevo (UX simple, sin "draft state" persistente).
+  const [editingSlots, setEditingSlots] = useState<{ id: string; value: string } | null>(null);
+  const [savingSlots, setSavingSlots] = useState(false);
 
-  const dashboardUrl = typeof window !== 'undefined' ? window.location.origin : 'http://localhost:3000';
-  const workerCommand = `npx factory-worker --dashboard ${dashboardUrl} --token <YOUR_TOKEN>`;
+  const fetchNodes = useCallback(async () => {
+    try {
+      const result = await getComputeNodes();
+      setNodes(result);
+    } catch (err) {
+      if (!(err instanceof ApiError) || err.status !== 401) {
+        // 401 lo maneja el client wrapper redirigiendo al login. Otros
+        // errores los logueamos pero no rompemos el dashboard.
+        console.warn('[Fleet] failed to fetch nodes', err);
+      }
+    } finally {
+      setLoading(false);
+    }
+  }, []);
 
-  const handleCopy = () => {
-    navigator.clipboard.writeText(workerCommand);
-    setCopied(true);
-    setTimeout(() => setCopied(false), 2000);
+  // Hidratación inicial + polling 5s para refresh de heartbeat status.
+  useEffect(() => {
+    void fetchNodes();
+    const interval = setInterval(() => void fetchNodes(), 5_000);
+    return () => clearInterval(interval);
+  }, [fetchNodes]);
+
+  const handleCreate = async () => {
+    if (!newNodeName.trim() || creating) return;
+    setCreating(true);
+    try {
+      const created = await createComputeNode({
+        name: newNodeName.trim(),
+        type: newNodeType,
+        totalSlots: newNodeSlots,
+      });
+      setNodes((prev) => [created, ...prev]);
+      setNewNodeName('');
+      setNewNodeType('mac_mini');
+      setNewNodeSlots(2);
+      toast.success(`Nodo "${created.name}" creado. Genera un token para conectarlo.`);
+      // Auto-abre el dialog de token para que el user no tenga que hacer
+      // un click adicional — flow más fluido.
+      setTokenDialogNode({ id: created.id, name: created.name });
+    } catch (err) {
+      const message = err instanceof ApiError ? err.message : 'Error al crear nodo';
+      toast.error(message);
+    } finally {
+      setCreating(false);
+    }
   };
 
-  const addNode = () => {
-    setNodes((prev) => [
-      ...prev,
-      {
-        id: `node-${Date.now()}`,
-        name: '',
-        type: 'mac-mini' as ComputeNode['type'],
-        slots: 6,
-        status: 'offline' as const,
-      },
-    ]);
+  /**
+   * Guarda el nuevo `totalSlots` para un nodo. Validación: 1-32 (mismo
+   * rango que el form de creación). Si el valor no cambió, evitamos el
+   * round-trip al backend. Si falla, restauramos el estado previo y
+   * mostramos un toast.
+   */
+  const handleSaveSlots = async (nodeId: string) => {
+    if (!editingSlots || editingSlots.id !== nodeId) return;
+    const parsed = parseInt(editingSlots.value, 10);
+    const node = nodes.find((n) => n.id === nodeId);
+    if (!node) {
+      setEditingSlots(null);
+      return;
+    }
+    // Validación: rango [1, 32] como el form de creación
+    if (Number.isNaN(parsed) || parsed < 1 || parsed > 32) {
+      toast.error('Slots debe ser un número entre 1 y 32');
+      return;
+    }
+    // No-op si el valor no cambió
+    if (parsed === node.totalSlots) {
+      setEditingSlots(null);
+      return;
+    }
+    setSavingSlots(true);
+    try {
+      const updated = await updateComputeNode(nodeId, { totalSlots: parsed });
+      setNodes((prev) => prev.map((n) => (n.id === nodeId ? updated : n)));
+      toast.success(`Slots de "${node.name}" actualizado a ${parsed}`);
+      setEditingSlots(null);
+    } catch (err) {
+      const message = err instanceof ApiError ? err.message : 'Error al actualizar slots';
+      toast.error(message);
+    } finally {
+      setSavingSlots(false);
+    }
   };
 
-  const removeNode = (id: string) => {
-    setNodes((prev) => prev.filter((n) => n.id !== id));
+  const handleDelete = async (node: ComputeNodeResponse) => {
+    try {
+      await deleteComputeNode(node.id);
+      setNodes((prev) => prev.filter((n) => n.id !== node.id));
+      toast.success(`Nodo "${node.name}" retirado`);
+    } catch (err) {
+      const message = err instanceof ApiError ? err.message : 'Error al retirar nodo';
+      toast.error(message);
+    }
   };
 
-  const updateNode = (id: string, field: keyof NodeRow, value: string | number) => {
-    setNodes((prev) =>
-      prev.map((n) => (n.id === id ? { ...n, [field]: value } : n)),
-    );
-  };
-
-  const handleSave = () => {
-    setSaving(true);
-    setTimeout(() => setSaving(false), 1000);
-  };
-
-  const typeOptions: { value: ComputeNode['type']; label: string }[] = [
+  const typeOptions: { value: ComputeNodeType; label: string }[] = [
     { value: 'local', label: 'Local' },
-    { value: 'mac-mini', label: 'Mac Mini' },
-    { value: 'cloud-vm', label: 'Cloud VM' },
-    { value: 'gpu-instance', label: 'GPU Instance' },
+    { value: 'mac_mini', label: 'Mac Mini' },
+    { value: 'cloud_vm', label: 'Cloud VM' },
+    { value: 'gpu_instance', label: 'GPU Instance' },
+    { value: 'other', label: 'Other' },
   ];
 
   return (
     <SettingsCard
       title="Gestión de flota"
-      description="Administra los nodos de cómputo de tu factory. Cada nodo puede ejecutar múltiples agentes concurrentes."
+      description="Administra los nodos de cómputo de tu factory. Cada nodo puede ejecutar múltiples agentes concurrentes. Status se refresca cada 5s."
     >
-      {/* Column headers */}
-      <div className="mb-3 grid grid-cols-[1fr_140px_80px_60px_40px] items-center gap-3 px-1">
-        <span className="text-[10px] uppercase tracking-wider text-muted-foreground/70">Name</span>
-        <span className="text-[10px] uppercase tracking-wider text-muted-foreground/70">Type</span>
-        <span className="text-[10px] uppercase tracking-wider text-muted-foreground/70">Slots</span>
-        <span className="text-[10px] uppercase tracking-wider text-muted-foreground/70">Status</span>
-        <span />
-      </div>
-
-      <div className="space-y-2">
-        {nodes.map((node) => (
-          <div
-            key={node.id}
-            className="grid grid-cols-[1fr_140px_80px_60px_40px] items-center gap-3 rounded-lg border border-border bg-background px-3 py-2"
-          >
-            <Input
-              value={node.name}
-              onChange={(e) => updateNode(node.id, 'name', e.target.value)}
-              placeholder="Node name"
-              className={cn(inputClasses, 'h-8 text-xs')}
-            />
-
-            <Select
-              value={node.type}
-              onValueChange={(v) => updateNode(node.id, 'type', v)}
-            >
-              <SelectTrigger className={cn(inputClasses, 'h-8 text-xs')}>
-                <SelectValue />
-              </SelectTrigger>
-              <SelectContent>
-                {typeOptions.map((opt) => (
-                  <SelectItem key={opt.value} value={opt.value}>
-                    {opt.label}
-                  </SelectItem>
-                ))}
-              </SelectContent>
-            </Select>
-
-            <Input
-              type="number"
-              min={1}
-              max={20}
-              value={node.slots}
-              onChange={(e) => updateNode(node.id, 'slots', parseInt(e.target.value) || 1)}
-              className={cn(inputClasses, 'h-8 text-xs')}
-            />
-
-            <span
-              className={cn(
-                'flex items-center justify-center gap-1 rounded-full px-2 py-0.5 text-[10px] font-medium',
-                node.status === 'online'
-                  ? 'bg-[#22C55E]/10 text-[#22C55E]'
-                  : 'bg-[#5A5A6E]/10 text-muted-foreground/70',
-              )}
-            >
-              <span
-                className={cn(
-                  'h-1.5 w-1.5 rounded-full',
-                  node.status === 'online' ? 'bg-[#22C55E]' : 'bg-[#5A5A6E]',
-                )}
-              />
-              {node.status}
-            </span>
-
-            <Button
-              variant="ghost"
-              size="sm"
-              onClick={() => removeNode(node.id)}
-              className="h-8 w-8 p-0 text-muted-foreground/70 hover:text-red-400 hover:bg-red-500/10"
-              aria-label={`Remove ${node.name}`}
-            >
-              <Trash2 className="h-3.5 w-3.5" />
-            </Button>
-          </div>
-        ))}
-      </div>
-
-      {nodes.length === 0 && (
-        <div className="rounded-lg border border-dashed border-border bg-background p-8 text-center">
-          <Server className="mx-auto mb-2 h-8 w-8 text-muted-foreground/50" />
-          <p className="text-xs text-muted-foreground/70">No hay nodos de cómputo configurados</p>
+      {loading && nodes.length === 0 ? (
+        <div className="flex items-center gap-2 py-8 justify-center text-xs text-muted-foreground">
+          <Loader2 className="h-3.5 w-3.5 animate-spin" />
+          Cargando nodos...
         </div>
+      ) : (
+        <>
+          {/* Column headers — alineación pixel-perfect con las filas.
+              Las filas tienen `border` (1px) + `px-3` (12px) = offset 13px.
+              El header replica EXACTAMENTE eso con `border border-transparent`
+              + `px-3` para que el box-model sea idéntico — sin esto, el
+              padding numérico nunca alinea por la diferencia del border. */}
+          <div className="mb-3 grid grid-cols-[1fr_140px_80px_80px_90px_40px] items-center gap-3 border border-transparent px-3">
+            <span className="text-[10px] uppercase tracking-wider text-muted-foreground/70">Name</span>
+            <span className="text-[10px] uppercase tracking-wider text-muted-foreground/70">Type</span>
+            <span className="text-[10px] uppercase tracking-wider text-muted-foreground/70">Slots</span>
+            <span className="text-[10px] uppercase tracking-wider text-muted-foreground/70 text-center">Status</span>
+            {/* Header TOKEN: replicamos la estructura visual del botón
+                "Generar" de cada fila (ml-auto + flex + gap-1 + px-2 +
+                placeholder del icon) para que el texto del header se
+                alinee EXACTAMENTE con el texto del botón debajo. */}
+            <span className="ml-auto inline-flex items-center gap-1 px-2 text-[10px] uppercase tracking-wider text-muted-foreground/70">
+              <span aria-hidden="true" className="inline-block h-3 w-3" />
+              Token
+            </span>
+            <span />
+          </div>
+
+          <div className="space-y-2">
+            {nodes.map((node) => (
+              <div
+                key={node.id}
+                className="grid grid-cols-[1fr_140px_80px_80px_90px_40px] items-center gap-3 rounded-lg border border-border bg-background px-3 py-2"
+              >
+                <div className="flex flex-col gap-0.5 min-w-0">
+                  <span className="text-xs font-medium truncate">{node.name}</span>
+                  {node.os && (
+                    <span className="text-[10px] text-muted-foreground/60 truncate">
+                      {node.os}
+                    </span>
+                  )}
+                </div>
+
+                <span className="text-xs text-muted-foreground capitalize">
+                  {node.type.replace('_', ' ')}
+                </span>
+
+                {/* Slots editable inline. Click en el número → input;
+                    Enter o blur → save vía PATCH /factory/nodes/:id;
+                    Escape → cancela sin save. */}
+                {editingSlots?.id === node.id ? (
+                  <Input
+                    type="number"
+                    min={1}
+                    max={32}
+                    autoFocus
+                    value={editingSlots.value}
+                    onChange={(e) => setEditingSlots({ id: node.id, value: e.target.value })}
+                    onBlur={() => void handleSaveSlots(node.id)}
+                    onKeyDown={(e) => {
+                      if (e.key === 'Enter') {
+                        void handleSaveSlots(node.id);
+                      } else if (e.key === 'Escape') {
+                        setEditingSlots(null);
+                      }
+                    }}
+                    disabled={savingSlots}
+                    className={cn(inputClasses, 'h-7 w-14 text-xs tabular-nums')}
+                  />
+                ) : (
+                  <button
+                    type="button"
+                    onClick={() => setEditingSlots({ id: node.id, value: String(node.totalSlots) })}
+                    className="text-xs tabular-nums text-left hover:bg-muted/50 rounded px-1 py-0.5 -mx-1 transition-colors"
+                    aria-label={`Editar slots de ${node.name}`}
+                  >
+                    {node.totalSlots}
+                  </button>
+                )}
+
+                <span
+                  className={cn(
+                    'flex items-center justify-center gap-1 rounded-full px-2 py-0.5 text-[10px] font-medium',
+                    node.effectiveStatus === 'online'
+                      ? 'bg-[#22C55E]/10 text-[#22C55E]'
+                      : node.effectiveStatus === 'degraded'
+                        ? 'bg-amber-500/10 text-amber-500'
+                        : 'bg-[#5A5A6E]/10 text-muted-foreground/70',
+                  )}
+                >
+                  <span
+                    className={cn(
+                      'h-1.5 w-1.5 rounded-full',
+                      node.effectiveStatus === 'online'
+                        ? 'bg-[#22C55E]'
+                        : node.effectiveStatus === 'degraded'
+                          ? 'bg-amber-500'
+                          : 'bg-[#5A5A6E]',
+                    )}
+                  />
+                  {node.effectiveStatus}
+                </span>
+
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  onClick={() => setTokenDialogNode({ id: node.id, name: node.name })}
+                  className="h-7 px-2 text-[11px] gap-1 ml-auto text-muted-foreground hover:text-foreground"
+                >
+                  <Terminal className="h-3 w-3" />
+                  Generar
+                </Button>
+
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  onClick={() => void handleDelete(node)}
+                  className="h-8 w-8 p-0 text-muted-foreground/70 hover:text-red-400 hover:bg-red-500/10"
+                  aria-label={`Retirar ${node.name}`}
+                >
+                  <Trash2 className="h-3.5 w-3.5" />
+                </Button>
+              </div>
+            ))}
+          </div>
+
+          {nodes.length === 0 && (
+            <div className="rounded-lg border border-dashed border-border bg-background p-8 text-center">
+              <Server className="mx-auto mb-2 h-8 w-8 text-muted-foreground/50" />
+              <p className="text-xs text-muted-foreground/70">
+                No hay nodos de cómputo configurados. Crea el primero abajo.
+              </p>
+            </div>
+          )}
+
+          {/* Crear nuevo nodo — formulario inline alineado a las mismas
+              columnas que las filas de nodos (1fr / 140 / 80 / 80 / 90 / 40).
+              El botón "Crear nodo" abarca las últimas 2 columnas (status +
+              token + delete) para tener espacio cómodo sin texto cortado. */}
+          <div className="mt-5 pt-5 border-t border-border">
+            <div className="grid grid-cols-[1fr_140px_80px_80px_90px_40px] items-center gap-3 border border-transparent px-3">
+              <Input
+                value={newNodeName}
+                onChange={(e) => setNewNodeName(e.target.value)}
+                placeholder="Nombre del nodo (ej: MacBook Pro Sala Pods)"
+                className={cn(inputClasses, 'h-8 text-xs')}
+                disabled={creating}
+              />
+              <Select
+                value={newNodeType}
+                onValueChange={(v) => setNewNodeType(v as ComputeNodeType)}
+                disabled={creating}
+              >
+                <SelectTrigger className={cn(inputClasses, 'h-8 w-full text-xs')}>
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  {typeOptions.map((opt) => (
+                    <SelectItem key={opt.value} value={opt.value}>
+                      {opt.label}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+              <Input
+                type="number"
+                min={1}
+                max={32}
+                value={newNodeSlots}
+                onChange={(e) => setNewNodeSlots(Math.max(1, Math.min(32, parseInt(e.target.value) || 1)))}
+                className={cn(inputClasses, 'h-8 text-xs')}
+                disabled={creating}
+              />
+              <Button
+                size="sm"
+                onClick={() => void handleCreate()}
+                disabled={!newNodeName.trim() || creating}
+                className="col-span-3 gap-1.5"
+              >
+                {creating ? (
+                  <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                ) : (
+                  <Plus className="h-3.5 w-3.5" />
+                )}
+                Crear nodo
+              </Button>
+            </div>
+            <p className="text-[10px] text-muted-foreground/50 mt-2 px-4">
+              Después de crear el nodo, genera un token y ejecuta{' '}
+              <code className="font-mono text-foreground/70">factory-worker register</code> en la
+              máquina destino para conectarla.
+            </p>
+          </div>
+        </>
       )}
 
-      <div className="mt-4 flex items-center justify-between">
-        <Button
-          variant="ghost"
-          size="sm"
-          onClick={addNode}
-          className="text-muted-foreground hover:text-foreground gap-2"
-        >
-          <Plus className="h-3.5 w-3.5" />
-          Agregar nodo
-        </Button>
-        <SaveButton saving={saving} onClick={handleSave} />
-      </div>
-
-      {/* Connect remote node command */}
-      <div className="mt-5 pt-5 border-t border-border">
-        <div className="flex items-center gap-2 mb-2">
-          <Terminal className="h-3.5 w-3.5 text-muted-foreground/70" />
-          <span className="text-[10px] text-muted-foreground uppercase tracking-wider">
-            Ejecuta esto en la máquina destino para conectarla
-          </span>
-        </div>
-        <div className="flex items-center gap-2 bg-background rounded-lg px-3 py-2.5 border border-border">
-          <code className="text-xs text-green-400 font-mono flex-1 truncate">
-            {workerCommand}
-          </code>
-          <Button
-            variant="ghost"
-            size="sm"
-            className="h-7 w-7 p-0 shrink-0 text-muted-foreground/70 hover:text-foreground"
-            onClick={handleCopy}
-          >
-            {copied ? (
-              <Check className="h-3.5 w-3.5 text-green-400" />
-            ) : (
-              <Copy className="h-3.5 w-3.5" />
-            )}
-          </Button>
-        </div>
-        <p className="text-[10px] text-muted-foreground/50 mt-2">
-          El nodo aparecerá como &quot;offline&quot; hasta que el worker agent se conecte.
-        </p>
-      </div>
+      {/* Modal generador de token (one-time) */}
+      <GenerateTokenDialog
+        open={tokenDialogNode !== null}
+        onOpenChange={(open) => {
+          if (!open) {
+            setTokenDialogNode(null);
+            void fetchNodes();
+          }
+        }}
+        nodeId={tokenDialogNode?.id ?? null}
+        nodeName={tokenDialogNode?.name ?? ''}
+      />
     </SettingsCard>
   );
 }
@@ -1977,36 +2274,34 @@ import {
 } from '@dnd-kit/sortable';
 import { CSS } from '@dnd-kit/utilities';
 
+// Tipo local del row del DodSection. Mantiene paridad con el shape del
+// API (`@/lib/api/dod`) — text+description son los campos del operador,
+// el resto son metadata para persistir.
 interface DodCriterion {
   id: string;
+  /** Kind estable solo en criterios estándar; null para custom. */
+  kind: string | null;
   text: string;
+  /** Descripción larga inyectada en el prompt del agente. REQUERIDA — todos
+   *  los criterios deben tener descripción para dar contexto al agente. */
+  description: string;
   enabled: boolean;
   required: boolean;
+  position: number;
 }
-
-const DEFAULT_DOD_CRITERIA: DodCriterion[] = [
-  { id: 'code-written', text: 'Código escrito y funcional', enabled: true, required: true },
-  { id: 'tests-passing', text: 'Tests pasando ≥ 90% cobertura', enabled: true, required: true },
-  { id: 'pr-created', text: 'PR creado y aprobado', enabled: true, required: true },
-  { id: 'no-errors', text: 'Sin errores de lint/typecheck', enabled: true, required: true },
-  { id: 'docs-updated', text: 'Documentación actualizada', enabled: true, required: false },
-  { id: 'security-scan', text: 'Scan de seguridad sin vulnerabilidades críticas', enabled: false, required: false },
-  { id: 'perf-budget', text: 'Dentro del presupuesto de performance', enabled: false, required: false },
-  { id: 'accessibility', text: 'Cumple WCAG 2.1 AA', enabled: false, required: false },
-];
 
 function SortableDodRow({
   criterion,
-  onToggleEnabled,
-  onToggleRequired,
+  onEdit,
   onRemove,
 }: {
   criterion: DodCriterion;
-  onToggleEnabled: () => void;
-  onToggleRequired: () => void;
+  onEdit: () => void;
   onRemove: () => void;
 }) {
-  const { attributes, listeners, setNodeRef, transform, transition, isDragging } = useSortable({ id: criterion.id });
+  const { attributes, listeners, setNodeRef, transform, transition, isDragging } = useSortable({
+    id: criterion.id,
+  });
 
   const style = {
     transform: CSS.Transform.toString(transform),
@@ -2019,41 +2314,96 @@ function SortableDodRow({
     <div
       ref={setNodeRef}
       style={style}
-      className={cn(
-        'grid grid-cols-[1fr_80px_80px_32px] gap-2 px-4 py-3 items-center border-b border-border last:border-b-0 bg-card',
-        !criterion.enabled && 'opacity-50',
-      )}
+      className="grid grid-cols-[1fr_auto] gap-2 px-4 py-3 items-center border-b border-border last:border-b-0 bg-card"
     >
       <div className="flex items-center gap-2 min-w-0">
-        <button {...attributes} {...listeners} className="cursor-grab active:cursor-grabbing touch-none shrink-0">
+        <button
+          {...attributes}
+          {...listeners}
+          className="cursor-grab active:cursor-grabbing touch-none shrink-0"
+        >
           <GripVertical className="h-3.5 w-3.5 text-muted-foreground/30 hover:text-muted-foreground transition-colors" />
         </button>
-        <span className="text-sm text-foreground truncate">{criterion.text}</span>
+        <span className="flex-1 min-w-0 text-sm text-foreground truncate">{criterion.text}</span>
       </div>
-      <div className="flex justify-center">
-        <Checkbox checked={criterion.enabled} onCheckedChange={onToggleEnabled} />
+      <div className="flex items-center gap-1">
+        <button
+          onClick={onEdit}
+          className="flex items-center justify-center h-6 w-6 rounded text-muted-foreground/40 hover:text-foreground hover:bg-muted transition-colors"
+          title="Editar criterio"
+        >
+          <PencilLine className="h-3 w-3" />
+        </button>
+        <button
+          onClick={onRemove}
+          className="flex items-center justify-center h-6 w-6 rounded text-muted-foreground/40 hover:text-red-400 hover:bg-red-500/10 transition-colors"
+          title="Borrar criterio"
+        >
+          <Trash2 className="h-3 w-3" />
+        </button>
       </div>
-      <div className="flex justify-center">
-        <Checkbox checked={criterion.enabled && criterion.required} disabled={!criterion.enabled} onCheckedChange={onToggleRequired} />
-      </div>
-      <button
-        onClick={onRemove}
-        className="flex items-center justify-center h-6 w-6 rounded text-muted-foreground/40 hover:text-red-400 hover:bg-red-500/10 transition-colors"
-      >
-        <Trash2 className="h-3 w-3" />
-      </button>
     </div>
   );
 }
 
 function DodSection() {
-  const [criteria, setCriteria] = useState(DEFAULT_DOD_CRITERIA);
-  const [newCriterion, setNewCriterion] = useState('');
+  const [criteria, setCriteria] = useState<DodCriterion[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [dirty, setDirty] = useState(false);
+  // Dialog modal usado para AMBOS create y edit. Se reusa el mismo
+  // componente porque el shape es idéntico: inputs para text + description.
+  //   - Create: `creatingNew = true`, `editingItemId = null` → submit agrega al array
+  //   - Edit:   `editingItemId !== null` → submit actualiza el existing
+  // Solo uno de los dos modos puede estar activo a la vez.
+  const [editingItemId, setEditingItemId] = useState<string | null>(null);
+  const [creatingNew, setCreatingNew] = useState(false);
+  const [draftText, setDraftText] = useState('');
+  const [draftDescription, setDraftDescription] = useState('');
+  const isDialogOpen = creatingNew || editingItemId !== null;
+  // Confirm dialog para "Restaurar defaults". Es action server-side (POST
+  // que pisa los criterios estándar y reordena custom). El dialog usa el
+  // ConfirmDialog del repo que maneja el busy state internamente.
+  const [resetDialogOpen, setResetDialogOpen] = useState(false);
 
   const sensors = useSensors(
     useSensor(PointerSensor),
     useSensor(KeyboardSensor, { coordinateGetter: sortableKeyboardCoordinates }),
   );
+
+  // Carga inicial desde el backend. Filtramos los `enabled=false` legacy
+  // (los seeds incluían 3 disabled — security-scan, perf-budget, accessibility)
+  // porque el modelo nuevo NO distingue: todo lo que está en la lista es
+  // activo y requerido por construcción. Los disabled persistidos se borran
+  // del backend al primer save de esta sesión.
+  useEffect(() => {
+    let cancelled = false;
+    void (async () => {
+      try {
+        const result = await listDodCriteria();
+        if (!cancelled) {
+          setCriteria(result.filter((c) => c.enabled));
+          setError(null);
+        }
+      } catch (err) {
+        if (!cancelled) {
+          setError((err as Error).message);
+        }
+      } finally {
+        if (!cancelled) setLoading(false);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  // Recalcula `position` para reflejar el orden actual del array. El
+  // backend lo guarda y la UI lo respeta al rehidratar.
+  function reindexPositions(arr: DodCriterion[]): DodCriterion[] {
+    return arr.map((c, i) => ({ ...c, position: i }));
+  }
 
   function handleDragEnd(event: DragEndEvent) {
     const { active, over } = event;
@@ -2061,65 +2411,202 @@ function DodSection() {
       setCriteria((prev) => {
         const oldIndex = prev.findIndex((c) => c.id === active.id);
         const newIndex = prev.findIndex((c) => c.id === over.id);
-        return arrayMove(prev, oldIndex, newIndex);
+        return reindexPositions(arrayMove(prev, oldIndex, newIndex));
       });
+      setDirty(true);
     }
   }
 
-  function toggleEnabled(id: string) {
-    setCriteria((prev) => prev.map((c) => c.id === id ? { ...c, enabled: !c.enabled } : c));
-  }
-
-  function toggleRequired(id: string) {
-    setCriteria((prev) => prev.map((c) => c.id === id ? { ...c, required: !c.required } : c));
-  }
-
   function removeCriterion(id: string) {
-    setCriteria((prev) => prev.filter((c) => c.id !== id));
+    setCriteria((prev) => reindexPositions(prev.filter((c) => c.id !== id)));
+    if (editingItemId === id) {
+      // Si el row borrado estaba siendo editado, cerrar el dialog.
+      cancelDialog();
+    }
+    setDirty(true);
   }
 
-  function addCriterion() {
-    if (!newCriterion.trim()) return;
-    setCriteria((prev) => [...prev, { id: `custom-${Date.now()}`, text: newCriterion.trim(), enabled: true, required: false }]);
-    setNewCriterion('');
+  function startEdit(c: DodCriterion) {
+    setEditingItemId(c.id);
+    setCreatingNew(false);
+    setDraftText(c.text);
+    setDraftDescription(c.description ?? '');
   }
 
-  const enabledCount = criteria.filter((c) => c.enabled).length;
-  const requiredCount = criteria.filter((c) => c.enabled && c.required).length;
+  function startCreate() {
+    setCreatingNew(true);
+    setEditingItemId(null);
+    setDraftText('');
+    setDraftDescription('');
+  }
+
+  /**
+   * Submit del dialog. Decide qué hacer según el modo:
+   *   - editingItemId !== null → actualiza el existing
+   *   - creatingNew              → agrega al final del array
+   * Ambos campos (text y description) son REQUERIDOS — si cualquiera
+   * queda vacío tras trim, no hace nada y mantiene el dialog abierto
+   * (el botón confirm está disabled visualmente igual, pero validamos
+   * acá por defensa contra teclado/scripts).
+   */
+  function commitDialog() {
+    const trimmedText = draftText.trim();
+    const trimmedDescription = draftDescription.trim();
+    if (trimmedText.length === 0 || trimmedDescription.length === 0) return;
+
+    if (editingItemId !== null) {
+      setCriteria((prev) =>
+        prev.map((c) =>
+          c.id === editingItemId
+            ? { ...c, text: trimmedText, description: trimmedDescription }
+            : c,
+        ),
+      );
+    } else if (creatingNew) {
+      setCriteria((prev) => [
+        ...prev,
+        {
+          id: `custom-${Date.now()}`,
+          kind: null,
+          text: trimmedText,
+          description: trimmedDescription,
+          enabled: true,
+          required: true,
+          position: prev.length,
+        },
+      ]);
+    }
+    cancelDialog();
+    setDirty(true);
+  }
+
+  function cancelDialog() {
+    setEditingItemId(null);
+    setCreatingNew(false);
+    setDraftText('');
+    setDraftDescription('');
+  }
+
+  async function handleResetDefaults() {
+    // Llamado por el ConfirmDialog. Si falla, lanzamos para que el dialog
+    // se quede abierto y el operador vea el toast/error y pueda reintentar.
+    setError(null);
+    try {
+      const result = await resetDodCriteriaDefaults();
+      // Actualizamos state local con los criterios canónicos. dirty=false
+      // porque el reset YA persistió server-side; lo que está en pantalla
+      // matchea exactamente lo que está en DB.
+      setCriteria(result.filter((c) => c.enabled));
+      setDirty(false);
+      // Si había algo siendo editado o creando, cerrar el dialog (su id
+      // pudo haberse invalidado por el reset).
+      cancelDialog();
+    } catch (err) {
+      setError((err as Error).message);
+      throw err;
+    }
+  }
+
+  async function handleSave() {
+    setSaving(true);
+    setError(null);
+    try {
+      // Forzamos `enabled: true, required: true` SIEMPRE — el modelo nuevo
+      // no expone toggles, todo lo guardado es activo y bloquea el merge.
+      // El schema mantiene los campos por compatibilidad (sin migration
+      // necesaria si en el futuro decidimos reintroducir toggles).
+      const result = await upsertDodCriteria(
+        criteria.map((c) => ({
+          kind: c.kind,
+          text: c.text,
+          description: c.description,
+          enabled: true,
+          required: true,
+          position: c.position,
+        })),
+      );
+      setCriteria(result.filter((c) => c.enabled));
+      setDirty(false);
+    } catch (err) {
+      setError((err as Error).message);
+    } finally {
+      setSaving(false);
+    }
+  }
 
   return (
     <div className="flex-1 flex flex-col min-h-0 rounded-xl border border-border bg-card p-6">
       <div className="mb-5">
         <h3 className="text-sm font-semibold text-foreground">Definition of Done</h3>
-        <p className="mt-1 text-xs text-muted-foreground/70">Define los criterios estándar que cada agente debe cumplir antes de marcar una historia como completada. Los criterios requeridos bloquean el merge si no se cumplen.</p>
+        <p className="mt-1 text-xs text-muted-foreground/70">Define los criterios que cada agente debe cumplir antes de marcar una historia como completada. Todos los criterios listados son requeridos y bloquean el merge si no se cumplen.</p>
       </div>
       <div className="flex-1 flex flex-col min-h-0 gap-4">
         {/* Summary + save button */}
         <div className="flex items-center justify-between">
           <div className="flex items-center gap-4 text-xs text-muted-foreground">
-            <span>{enabledCount} criterios activos</span>
-            <span className="text-border">|</span>
-            <span>{requiredCount} requeridos</span>
+            <span>{criteria.length} {criteria.length === 1 ? 'criterio' : 'criterios'}</span>
           </div>
-          <TooltipProvider delayDuration={200}>
-            <Tooltip>
-              <TooltipTrigger asChild>
-                <button className="flex items-center justify-center h-8 w-8 rounded-lg border border-border bg-card text-muted-foreground hover:text-foreground hover:bg-muted transition-colors">
-                  <Save className="h-4 w-4" />
-                </button>
-              </TooltipTrigger>
-              <TooltipContent side="left" className="text-xs">Guardar cambios</TooltipContent>
-            </Tooltip>
-          </TooltipProvider>
+          <div className="flex items-center gap-2">
+            {error && (
+              <span className="text-[11px] text-red-400 max-w-xs truncate" title={error}>
+                Error: {error}
+              </span>
+            )}
+            {dirty && !saving && !error && (
+              <span className="text-[11px] text-amber-400">Cambios sin guardar</span>
+            )}
+            <TooltipProvider delayDuration={200}>
+              <Tooltip>
+                <TooltipTrigger asChild>
+                  <button
+                    onClick={startCreate}
+                    disabled={loading || saving}
+                    className="flex items-center justify-center h-8 w-8 rounded-lg border border-border bg-card text-muted-foreground hover:text-foreground hover:bg-muted transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+                  >
+                    <Plus className="h-4 w-4" />
+                  </button>
+                </TooltipTrigger>
+                <TooltipContent side="left" className="text-xs">
+                  Agregar nuevo criterio
+                </TooltipContent>
+              </Tooltip>
+              <Tooltip>
+                <TooltipTrigger asChild>
+                  <button
+                    onClick={() => setResetDialogOpen(true)}
+                    disabled={loading || saving}
+                    className="flex items-center justify-center h-8 w-8 rounded-lg border border-border bg-card text-muted-foreground hover:text-foreground hover:bg-muted transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+                  >
+                    <RefreshCw className="h-4 w-4" />
+                  </button>
+                </TooltipTrigger>
+                <TooltipContent side="left" className="text-xs">
+                  Restaurar criterios estándar (preserva los custom)
+                </TooltipContent>
+              </Tooltip>
+              <Tooltip>
+                <TooltipTrigger asChild>
+                  <button
+                    onClick={handleSave}
+                    disabled={!dirty || saving || loading}
+                    className="flex items-center justify-center h-8 w-8 rounded-lg border border-border bg-card text-muted-foreground hover:text-foreground hover:bg-muted transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+                  >
+                    <Save className="h-4 w-4" />
+                  </button>
+                </TooltipTrigger>
+                <TooltipContent side="left" className="text-xs">
+                  {saving ? 'Guardando…' : dirty ? 'Guardar cambios' : 'Sin cambios'}
+                </TooltipContent>
+              </Tooltip>
+            </TooltipProvider>
+          </div>
         </div>
 
         {/* Criteria list with drag-and-drop */}
         <div className="flex-1 min-h-0 flex flex-col rounded-lg border border-border overflow-hidden">
           {/* Header */}
-          <div className="shrink-0 grid grid-cols-[1fr_80px_80px_32px] gap-2 px-4 py-2 text-[10px] font-medium uppercase tracking-wider text-muted-foreground/60 border-b border-border bg-muted/30">
+          <div className="shrink-0 grid grid-cols-[1fr_32px] gap-2 px-4 py-2 text-[10px] font-medium uppercase tracking-wider text-muted-foreground/60 border-b border-border bg-muted/30">
             <span>Criterio</span>
-            <span className="text-center">Activo</span>
-            <span className="text-center">Requerido</span>
             <span />
           </div>
 
@@ -2131,8 +2618,7 @@ function DodSection() {
                   <SortableDodRow
                     key={criterion.id}
                     criterion={criterion}
-                    onToggleEnabled={() => toggleEnabled(criterion.id)}
-                    onToggleRequired={() => toggleRequired(criterion.id)}
+                    onEdit={() => startEdit(criterion)}
                     onRemove={() => removeCriterion(criterion.id)}
                   />
                 ))}
@@ -2141,30 +2627,104 @@ function DodSection() {
           </div>
         </div>
 
-        {/* Add new criterion */}
-        <div className="flex items-center gap-2">
-          <Input
-            value={newCriterion}
-            onChange={(e) => setNewCriterion(e.target.value)}
-            placeholder="Agregar nuevo criterio..."
-            className="flex-1 text-sm"
-            onKeyDown={(e) => e.key === 'Enter' && addCriterion()}
-          />
-          <Button variant="outline" size="sm" onClick={addCriterion} disabled={!newCriterion.trim()}>
-            <Plus className="h-3.5 w-3.5 mr-1" />
-            Agregar
-          </Button>
-        </div>
-
       </div>
+
+      {/* Dialog usado para AMBOS create y edit. El title/botón cambian según
+          el modo. Aplica al state local (marca dirty) — el persist al backend
+          ocurre al apretar Save de toda la lista, no aquí. */}
+      <Dialog
+        open={isDialogOpen}
+        onOpenChange={(open) => {
+          if (!open) cancelDialog();
+        }}
+      >
+        <DialogContent className="sm:max-w-[560px]">
+          <DialogHeader>
+            <DialogTitle>
+              {creatingNew ? 'Agregar criterio' : 'Editar criterio'}
+            </DialogTitle>
+            <DialogDescription>
+              El texto aparece en la lista del DoD. La descripción se inyecta en el prompt del agente para darle contexto sobre qué se espera de este criterio.
+            </DialogDescription>
+          </DialogHeader>
+          <div className="grid gap-4 py-2">
+            <div className="grid gap-1.5">
+              <label className="text-xs font-medium text-muted-foreground" htmlFor="dod-edit-text">
+                Criterio
+              </label>
+              <Input
+                id="dod-edit-text"
+                value={draftText}
+                onChange={(e) => setDraftText(e.target.value)}
+                maxLength={500}
+                className="text-sm"
+                placeholder="Ej. Tests pasando ≥ 90% cobertura"
+                autoFocus
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) {
+                    e.preventDefault();
+                    commitDialog();
+                  }
+                }}
+              />
+            </div>
+            <div className="grid gap-1.5">
+              <label
+                className="text-xs font-medium text-muted-foreground"
+                htmlFor="dod-edit-description"
+              >
+                Descripción <span className="text-muted-foreground/50">(requerida, para el agente)</span>
+              </label>
+              <textarea
+                id="dod-edit-description"
+                value={draftDescription}
+                onChange={(e) => setDraftDescription(e.target.value)}
+                maxLength={2000}
+                rows={6}
+                className="w-full rounded-md border border-input bg-transparent px-3 py-2 text-sm shadow-sm placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring resize-y min-h-[120px]"
+                placeholder="Detalles del criterio que el agente leerá en el prompt — qué se espera, cómo verificar, qué evitar."
+              />
+              <span className="text-[10px] text-muted-foreground/60 text-right">
+                {draftDescription.length}/2000
+              </span>
+            </div>
+          </div>
+          <DialogFooter>
+            <Button variant="outline" size="sm" onClick={cancelDialog}>
+              Cancelar
+            </Button>
+            <Button
+              size="sm"
+              onClick={commitDialog}
+              disabled={
+                draftText.trim().length === 0 || draftDescription.trim().length === 0
+              }
+            >
+              {creatingNew ? 'Agregar' : 'Guardar cambios'}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* Confirm dialog para "Restaurar defaults". Acción destructiva
+          — pisa las ediciones del operador a los criterios estándar. Los
+          custom (kind=null) sobreviven. Behavior server-side: persiste
+          inmediatamente, no necesita Save posterior. */}
+      <ConfirmDialog
+        open={resetDialogOpen}
+        onOpenChange={setResetDialogOpen}
+        title="Restaurar criterios estándar"
+        description="Esto pisará text y descripción de los 7 criterios estándar (Código escrito, Cumple criterios de aceptación, Tests pasando, Sin errores, Sin vulnerabilidades de seguridad, PR creado, Documentación) con sus valores originales basados en estándares de industria (Atlassian, Scrum.org, Codacy, DORA). Tus criterios custom NO se afectan — sobreviven al final de la lista. Esta acción se aplica inmediatamente."
+        confirmText="Restaurar"
+        onConfirm={handleResetDefaults}
+        destructive
+      />
     </div>
   );
 }
 
 function SectionContent({ section }: { section: SettingsSection }) {
   switch (section) {
-    case 'repository':
-      return <RepositorySection />;
     case 'branches':
       return <BranchStrategySection />;
     case 'linear':
@@ -2177,10 +2737,14 @@ function SectionContent({ section }: { section: SettingsSection }) {
       return <ExternalSecretsSection />;
     case 'nodes':
       return <ComputeNodesSection />;
+    case 'kill-switch':
+      return <ForgeKillSwitchSection />;
     case 'agents':
       return <AgentsSection />;
     case 'agent-tokens':
       return <AgentTokensSection />;
+    case 'anthropic-key':
+      return <AnthropicApiKeySection />;
     case 'dod':
       return <DodSection />;
     case 'pods':
@@ -2201,17 +2765,29 @@ function SectionContent({ section }: { section: SettingsSection }) {
 export function SettingsDashboard() {
   const router = useRouter();
   const searchParams = useSearchParams();
-  const { hasRole } = useAuthContext();
-  const initialSection = (searchParams.get('section') as SettingsSection) || 'repository';
+  const { hasRole, isLoading } = useAuthContext();
+  // Default section: 'codigo' es la primera del sidebar (Control de código).
+  // Antes era 'repository' que ya no existe (la tarjeta mockeada se eliminó).
+  const initialSection = (searchParams.get('section') as SettingsSection) || 'codigo';
   const [activeSection, setActiveSection] = useState<SettingsSection>(initialSection);
 
   // Redirect como efecto, no durante render — evita ReferenceError: location is not defined
   // en SSR cuando el contexto aún no está hidratado.
+  //
+  // CRÍTICO: esperar a que `isLoading=false` antes de evaluar autorización.
+  // Si refrescamos la página, durante la hidratación de Auth0 el currentUser
+  // es null y `hasRole(AltaGerencia)` retorna false → el effect dispararía
+  // el redirect a /factory antes de que la auth termine de cargar. El gate
+  // de `isLoading` previene esa race condition (bug 2026-05-06).
   const authorized = hasRole(UserRole.AltaGerencia);
   useEffect(() => {
+    if (isLoading) return;
     if (!authorized) router.replace('/factory');
-  }, [authorized, router]);
+  }, [authorized, isLoading, router]);
 
+  // Durante loading: render null (sin redirect aún). Solo bloqueamos cuando
+  // ya sabemos con certeza que el user no está autorizado.
+  if (isLoading) return null;
   if (!authorized) return null;
 
   return (

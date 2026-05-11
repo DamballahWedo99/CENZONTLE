@@ -5,6 +5,7 @@ import { useRouter, usePathname, useSearchParams } from 'next/navigation';
 import Link from 'next/link';
 import { useProyectos } from '@/context/ProyectosContext';
 import { useBreadcrumb } from '@/context/BreadcrumbContext';
+import { useIntegrations } from '@/context/IntegrationsContext';
 import { updateEpic as apiUpdateEpic, deleteEpic as apiDeleteEpic, getEpic as apiGetEpic, getDiscoveredDependencies as apiGetDiscoveredDependencies, getStoryDependencies as apiGetStoryDependencies, uploadDesignBundle as apiUploadDesignBundle, deleteDesign as apiDeleteDesign, type StoryDependencyItem } from '@/lib/api/epics';
 import { getEpicDependenciesRollup } from '@/lib/api/story-dependencies';
 import { MOCK_DISCOVERED_DEPENDENCIES } from '@/data/mock/discovered-dependencies';
@@ -32,7 +33,14 @@ import {
   ChangelogEntityType,
   ChangelogEntry,
   UserStory,
+  UserRole,
+  REQUIRED_EPIC_HEADINGS as SHARED_REQUIRED_HEADINGS,
+  epicMarkdownHasAllHeadings,
+  epicMarkdownHeadingsPresent,
 } from '@cenzontle/shared';
+import { useAuthContext } from '@/context/AuthContext';
+import { EpicApprovalDialog } from './EpicApprovalDialog';
+import type { ApprovalRole } from '@/lib/api/epics';
 import { StatusBadge } from '../shared/StatusBadge';
 import { PriorityIndicator } from '../shared/PriorityIndicator';
 import { PodBadge } from '../shared/PodBadge';
@@ -46,6 +54,7 @@ import { EpicDesigns } from './EpicDesigns';
 import { SectionTiptapEditor } from '../historias/editor/SectionTiptapEditor';
 import { ReadOnlyMarkdown } from '@/components/shared/tiptap/ReadOnlyMarkdown';
 import { IntegrationSettingsDialog } from '../settings/IntegrationSettingsDialog';
+import { EpicEnqueueDialog } from './EpicEnqueueDialog';
 import { EpicStoryList } from './EpicStoryList';
 import { StoryAgentPromptBar } from './StoryAgentPromptBar';
 import { StoryProposalList } from './StoryProposalList';
@@ -213,7 +222,66 @@ NO en alcance:
 
 -`;
 
+// --- Protocol Checklist Helpers ---
+
+/**
+ * Etiquetas humanas para los 3 roles aprobadores. Usadas en el modal y
+ * en el botón del checklist.
+ */
+const APPROVAL_ROLE_LABELS: Record<ApprovalRole, string> = {
+  po: 'Product Owner',
+  tl: 'Tech Lead',
+  qa: 'QA',
+};
+
+/**
+ * Construye el `action` del checklist step para los items VoBo. Reglas:
+ *  - Si el usuario actual tiene el rol target O es Alta Gerencia → botón visible.
+ *  - Otros roles → no ven el botón (action retorna undefined), solo el ítem informativo.
+ *  - Si los prerequisites no están cumplidos → botón visible pero disabled
+ *    con tooltip explicativo.
+ *  - Si todo OK → botón habilitado que abre el modal.
+ *
+ * Alta Gerencia puede dar VoBo en nombre de cualquier rol como admin
+ * override. La trazabilidad se preserva porque el backend persiste
+ * `approvedByName` con el nombre real del aprobador (no del rol target).
+ *
+ * Esta función vive a nivel de módulo (no useMemo) porque sólo depende
+ * de los args y no captura nada del scope React.
+ */
+function buildApprovalAction(params: {
+  currentRole: UserRole | undefined;
+  targetRole: UserRole;
+  prerequisitesMet: boolean;
+  prerequisitesUnmetReason: string;
+  onClick: () => void;
+}): ChecklistStepAction | undefined {
+  const isAdmin = params.currentRole === UserRole.AltaGerencia;
+  const isTargetRole = params.currentRole === params.targetRole;
+  if (!isAdmin && !isTargetRole) return undefined;
+  if (!params.prerequisitesMet) {
+    return {
+      label: 'Dar VoBo',
+      onClick: params.onClick,
+      disabled: true,
+      disabledReason: params.prerequisitesUnmetReason,
+    };
+  }
+  return {
+    label: 'Dar VoBo',
+    onClick: params.onClick,
+  };
+}
+
 // --- Protocol Checklist Component ---
+
+interface ChecklistStepAction {
+  /** Label del CTA. Sólo se renderiza si la step no está completada y el caller la provee. */
+  label: string;
+  onClick: () => void;
+  disabled?: boolean;
+  disabledReason?: string;
+}
 
 interface ChecklistStep {
   id: string;
@@ -222,6 +290,8 @@ interface ChecklistStep {
   completed: boolean;
   active: boolean;
   locked: boolean;
+  /** CTA opcional — usado para items VoBo (PO/TL/QA) que requieren modal de password. */
+  action?: ChecklistStepAction;
 }
 
 function ProtocolChecklist({
@@ -234,43 +304,69 @@ function ProtocolChecklist({
   return (
     <div className="rounded-xl border bg-muted/20 p-5">
       <h3 className="text-xs font-semibold uppercase tracking-wider text-muted-foreground mb-4">
-        Protocolo de Definición
+        Protocolo de Visto Bueno
       </h3>
       <div className="space-y-1">
         {steps.map((step, index) => (
-          <button
+          <div
             key={step.id}
-            onClick={() => !step.locked && onStepClick(step.id)}
-            disabled={step.locked}
-            className={`w-full flex items-start gap-3 rounded-lg px-3 py-2.5 text-left transition-all ${
+            className={`group w-full flex items-start gap-3 rounded-lg px-3 py-2.5 text-left transition-all ${
               step.locked
-                ? 'opacity-40 cursor-not-allowed'
+                ? 'opacity-40'
                 : step.active
                   ? 'bg-foreground/5 ring-1 ring-foreground/10'
-                  : 'hover:bg-muted/50 cursor-pointer'
+                  : 'hover:bg-muted/50'
             }`}
           >
-            <div className="mt-0.5 shrink-0">
-              {step.completed ? (
-                <CheckCircle2 className="h-4.5 w-4.5 text-green-600 dark:text-green-400" />
-              ) : step.locked ? (
-                <Lock className="h-4.5 w-4.5 text-muted-foreground/50" />
-              ) : (
-                <Circle className={`h-4.5 w-4.5 ${step.active ? 'text-foreground' : 'text-muted-foreground/60'}`} />
+            <button
+              type="button"
+              onClick={() => !step.locked && onStepClick(step.id)}
+              disabled={step.locked}
+              className="flex-1 flex items-start gap-3 text-left disabled:cursor-not-allowed"
+            >
+              <div className="mt-0.5 shrink-0">
+                {step.completed ? (
+                  <CheckCircle2 className="h-4.5 w-4.5 text-green-600 dark:text-green-400" />
+                ) : step.locked ? (
+                  <Lock className="h-4.5 w-4.5 text-muted-foreground/50" />
+                ) : (
+                  <Circle className={`h-4.5 w-4.5 ${step.active ? 'text-foreground' : 'text-muted-foreground/60'}`} />
+                )}
+              </div>
+              <div className="flex-1 min-w-0">
+                <p className={`text-sm font-medium leading-tight ${step.completed ? 'text-green-700 dark:text-green-400' : step.locked ? 'text-muted-foreground/50' : ''}`}>
+                  {step.label}
+                </p>
+                <p className="text-[11px] text-muted-foreground mt-0.5 leading-snug">
+                  {step.description}
+                </p>
+              </div>
+              {index < steps.length - 1 && (
+                <div className="absolute left-[29px] top-[calc(100%-2px)] w-px h-1 bg-border" />
               )}
-            </div>
-            <div className="flex-1 min-w-0">
-              <p className={`text-sm font-medium leading-tight ${step.completed ? 'text-green-700 dark:text-green-400' : step.locked ? 'text-muted-foreground/50' : ''}`}>
-                {step.label}
-              </p>
-              <p className="text-[11px] text-muted-foreground mt-0.5 leading-snug">
-                {step.description}
-              </p>
-            </div>
-            {index < steps.length - 1 && (
-              <div className="absolute left-[29px] top-[calc(100%-2px)] w-px h-1 bg-border" />
+            </button>
+            {step.action && !step.completed && !step.locked && (
+              <Tooltip>
+                <TooltipTrigger asChild>
+                  <span>
+                    <Button
+                      size="sm"
+                      variant="default"
+                      onClick={step.action.onClick}
+                      disabled={step.action.disabled}
+                      className="shrink-0 h-7 text-xs gap-1.5"
+                    >
+                      <ShieldCheck className="h-3.5 w-3.5" />
+                      {step.action.label}
+                    </Button>
+                  </span>
+                </TooltipTrigger>
+                {step.action.disabled && step.action.disabledReason && (
+                  <TooltipContent>{step.action.disabledReason}</TooltipContent>
+                )}
+              </Tooltip>
             )}
-          </button>
+          </div>
         ))}
       </div>
     </div>
@@ -284,6 +380,7 @@ function EpicFullPageInner({ epicId }: { epicId: string }) {
   const searchParams = useSearchParams();
   const { state, dispatch } = useProyectos();
   const { setBreadcrumb } = useBreadcrumb();
+  const { isLinearConfigured } = useIntegrations();
 
   const rawEpic = useMemo(() => state.epics.find((e) => e.id === epicId) ?? null, [epicId, state.epics]);
 
@@ -380,6 +477,7 @@ function EpicFullPageInner({ epicId }: { epicId: string }) {
     }
   };
   const [showIntegrationDialog, setShowIntegrationDialog] = useState(false);
+  const [showEnqueueDialog, setShowEnqueueDialog] = useState(false);
   const [editTitle, setEditTitle] = useState('');
   /** Markdown único de la épica — reemplaza description + 11 sub-campos del shape v1. */
   const [editMarkdown, setEditMarkdown] = useState('');
@@ -522,26 +620,15 @@ function EpicFullPageInner({ epicId }: { epicId: string }) {
   }, [state.changelog, epic]);
 
   // --- Protocol checklist state ---
-  // Definición considerada completa si el markdown contiene los 9 headings
-  // obligatorios. Si no, la épica está parcialmente definida y el checklist
-  // del protocolo lo refleja.
-  const REQUIRED_EPIC_HEADINGS = useMemo(() => [
-    '## descripción',
-    '## beneficios cualitativos',
-    '## beneficios cuantitativos',
-    '## medición de beneficios',
-    '## alcance',
-    '## criterios de aceptación',
-    '## mejoras tecnológicas',
-    '## canales y flujos impactados',
-    '## dependencias de terceros',
-  ], []);
+  // Definición completa si el markdown contiene los 9 headings obligatorios
+  // (REQUIRED_EPIC_HEADINGS, definidos en @cenzontle/shared). El backend usa
+  // la misma constante + helper para validar pre-aprobación, garantizando
+  // que UI y server estén sincronizados (fix del mismatch que causaba
+  // "épica completa según UI" → 400 del backend).
   const definitionComplete = useMemo(() => {
     if (!rawEpic) return false;
-    const md = (rawEpic.markdown ?? '').toLowerCase();
-    if (md.trim().length === 0) return false;
-    return REQUIRED_EPIC_HEADINGS.every((h) => md.includes(h));
-  }, [rawEpic, REQUIRED_EPIC_HEADINGS]);
+    return epicMarkdownHasAllHeadings(rawEpic.markdown);
+  }, [rawEpic]);
 
   const hasBusinessDiagram = useMemo(() => {
     if (!rawEpic) return false;
@@ -561,18 +648,96 @@ function EpicFullPageInner({ epicId }: { epicId: string }) {
   }, [epic]);
 
 
-  const filledFieldsCount = useMemo(() => {
-    if (!rawEpic) return 0;
-    const md = (rawEpic.markdown ?? '').toLowerCase();
-    return REQUIRED_EPIC_HEADINGS.filter((h) => md.includes(h)).length;
-  }, [rawEpic, REQUIRED_EPIC_HEADINGS]);
-  const totalFields = REQUIRED_EPIC_HEADINGS.length;
+  const presentHeadings = useMemo(() => {
+    if (!rawEpic) return [] as readonly string[];
+    return epicMarkdownHeadingsPresent(rawEpic.markdown);
+  }, [rawEpic]);
+  const filledFieldsCount = presentHeadings.length;
+  const totalFields = SHARED_REQUIRED_HEADINGS.length;
+  const missingHeadings = useMemo(
+    () => SHARED_REQUIRED_HEADINGS.filter((h) => !presentHeadings.includes(h)),
+    [presentHeadings],
+  );
+
+  // ── VoBo (Visto Bueno) state ─────────────────────────────────────
+  const { currentUser, members } = useAuthContext();
+  const [approvalModal, setApprovalModal] = useState<ApprovalRole | null>(null);
+
+  const poApprovalDone = rawEpic?.poApproval?.status === 'approved';
+  const tlApprovalDone = rawEpic?.tlApproval?.status === 'approved';
+  const qaApprovalDone = rawEpic?.qaApproval?.status === 'approved';
+
+  // Resuelve el nombre del aprobador con cascada de fallbacks:
+  //  1. `approvedByName` snapshot persistido (post-feature de display name) —
+  //     fuente de verdad histórica, sobrevive a cambios/eliminación del user.
+  //  2. Lookup en `members` por `approvedBy` (sub) — para approvals legacy
+  //     creados antes de que persistiéramos el nombre.
+  //  3. Fallback al rol genérico — si el aprobador ya no está en members
+  //     y el approval es legacy sin nombre, mostramos al menos algo legible.
+  const resolveApproverName = useCallback(
+    (
+      approval: { approvedByName?: string | null; approvedBy?: string | null } | null | undefined,
+      fallbackRole: string,
+    ): string => {
+      if (approval?.approvedByName) return approval.approvedByName;
+      if (approval?.approvedBy) {
+        const member = members.find((m) => m.id === approval.approvedBy);
+        if (member) return member.name || member.email;
+      }
+      return fallbackRole;
+    },
+    [members],
+  );
+
+  // Prerequisites para habilitar los botones de VoBo. Coinciden con la
+  // validación server-side (epics.service.ts → assertEpicReadyForApproval).
+  const definitionArtifactsReady = definitionComplete && hasBusinessDiagram && hasStories;
+
+  const handleApproved = useCallback(
+    (result: {
+      role: ApprovalRole;
+      approvedBy: string;
+      approvedByName: string;
+      approvedAt: string;
+      comment: string | null;
+    }) => {
+      if (!rawEpic) return;
+      const approval = {
+        status: 'approved' as const,
+        approvedBy: result.approvedBy,
+        approvedByName: result.approvedByName,
+        approvedAt: result.approvedAt,
+        comment: result.comment,
+      };
+      const fieldName: Record<ApprovalRole, 'poApproval' | 'tlApproval' | 'qaApproval'> = {
+        po: 'poApproval',
+        tl: 'tlApproval',
+        qa: 'qaApproval',
+      };
+      dispatch({
+        type: 'UPDATE_EPIC',
+        payload: { id: rawEpic.id, changes: { [fieldName[result.role]]: approval } },
+      });
+    },
+    [rawEpic, dispatch],
+  );
 
   const checklistSteps: ChecklistStep[] = [
     {
       id: 'definition',
       label: `Definición completa (${filledFieldsCount}/${totalFields})`,
-      description: definitionComplete ? 'Todos los campos completados' : 'Completa todos los campos de la épica',
+      // Cuando faltan headings, listamos cuáles — ayuda al usuario a saber
+      // exactamente qué sección añadir (p. ej. el agente generó "## Objetivo
+      // del proyecto" en lugar de "## Objetivo", o el editor humano renombró
+      // un heading sin querer). Si faltan ≤2 los listamos completos; si
+      // faltan más, mostramos los 2 primeros + "y N más" para no romper layout.
+      description: definitionComplete
+        ? 'Todos los campos completados'
+        : missingHeadings.length === 1
+          ? `Falta el heading: ${missingHeadings[0]}`
+          : missingHeadings.length <= 2
+            ? `Faltan: ${missingHeadings.join(', ')}`
+            : `Faltan ${missingHeadings[0]}, ${missingHeadings[1]} y ${missingHeadings.length - 2} más`,
       completed: definitionComplete,
       active: activeTab === 'definicion',
       locked: false,
@@ -595,9 +760,63 @@ function EpicFullPageInner({ epicId }: { epicId: string }) {
       active: activeTab === 'historias',
       locked: false,
     },
+    {
+      id: 'vobo-po',
+      label: 'VoBo Product Owner',
+      description: poApprovalDone
+        ? `Aprobado por ${resolveApproverName(rawEpic?.poApproval, 'el Product Owner')}`
+        : 'El Product Owner valida la definición de negocio',
+      completed: poApprovalDone,
+      active: false,
+      locked: !definitionArtifactsReady,
+      action: buildApprovalAction({
+        currentRole: currentUser?.role,
+        targetRole: UserRole.ProductOwner,
+        prerequisitesMet: definitionArtifactsReady,
+        prerequisitesUnmetReason: 'Completa definición, diagrama e historias antes de aprobar.',
+        onClick: () => setApprovalModal('po'),
+      }),
+    },
+    {
+      id: 'vobo-tl',
+      label: 'VoBo Tech Lead',
+      description: tlApprovalDone
+        ? `Aprobado por ${resolveApproverName(rawEpic?.tlApproval, 'el Tech Lead')}`
+        : 'El Tech Lead valida la viabilidad técnica',
+      completed: tlApprovalDone,
+      active: false,
+      // Independiente del VoBo PO — los 3 roles aprueban en paralelo.
+      // Solo requiere los artefactos (definición + diagrama + historias).
+      locked: !definitionArtifactsReady,
+      action: buildApprovalAction({
+        currentRole: currentUser?.role,
+        targetRole: UserRole.TechLead,
+        prerequisitesMet: definitionArtifactsReady,
+        prerequisitesUnmetReason: 'Completa definición, diagrama e historias antes de aprobar.',
+        onClick: () => setApprovalModal('tl'),
+      }),
+    },
+    {
+      id: 'vobo-qa',
+      label: 'VoBo QA',
+      description: qaApprovalDone
+        ? `Aprobado por ${resolveApproverName(rawEpic?.qaApproval, 'QA')}`
+        : 'QA valida la testabilidad y los criterios de aceptación',
+      completed: qaApprovalDone,
+      active: false,
+      locked: !definitionArtifactsReady,
+      action: buildApprovalAction({
+        currentRole: currentUser?.role,
+        targetRole: UserRole.QA,
+        prerequisitesMet: definitionArtifactsReady,
+        prerequisitesUnmetReason: 'Completa definición, diagrama e historias antes de aprobar.',
+        onClick: () => setApprovalModal('qa'),
+      }),
+    },
   ];
 
   const completedStepsCount = checklistSteps.filter((s) => s.completed).length;
+  const epicReady = completedStepsCount === checklistSteps.length;
 
   const handleChecklistClick = (stepId: string) => {
     const tabMap: Record<string, string> = {
@@ -605,7 +824,10 @@ function EpicFullPageInner({ epicId }: { epicId: string }) {
       diagram: 'diagramas',
       stories: 'historias',
     };
-    setActiveTab(tabMap[stepId] ?? 'definicion');
+    // Los items VoBo no navegan a tabs — sólo se interactúa via el botón "Dar VoBo".
+    if (tabMap[stepId]) {
+      setActiveTab(tabMap[stepId]);
+    }
   };
 
   // Inject breadcrumb into app header
@@ -1068,7 +1290,7 @@ function EpicFullPageInner({ epicId }: { epicId: string }) {
                           Abrir {(epic.tracker as TrackerReference).externalKey} en Linear
                         </TooltipContent>
                       </Tooltip>
-                    ) : (
+                    ) : isLinearConfigured ? (
                       <Tooltip>
                         <TooltipTrigger asChild>
                           <Button
@@ -1087,6 +1309,10 @@ function EpicFullPageInner({ epicId }: { epicId: string }) {
                         </TooltipTrigger>
                         <TooltipContent>Publicar épica + historias en Linear</TooltipContent>
                       </Tooltip>
+                    ) : (
+                      // Linear no configurado — ocultar el CTA para no confundir.
+                      // Si el user quiere publicar, debe ir a Configuraciones primero.
+                      null
                     )}
                     <Tooltip>
                       <TooltipTrigger asChild>
@@ -1103,8 +1329,12 @@ function EpicFullPageInner({ epicId }: { epicId: string }) {
                             </span>
                           )}
                           {completedStepsCount === checklistSteps.length && (
-                            <span className="absolute -top-0.5 -right-0.5 h-4 w-4 rounded-full bg-green-600 text-white text-[10px] flex items-center justify-center">
-                              <Check className="h-2.5 w-2.5" />
+                            <span
+                              className="absolute -top-0.5 -right-0.5 h-4 w-4 rounded-full bg-green-600 flex items-center justify-center text-white font-bold leading-none"
+                              style={{ fontSize: '9px' }}
+                              aria-label="Protocolo completo"
+                            >
+                              ✓
                             </span>
                           )}
                         </Button>
@@ -1158,28 +1388,94 @@ function EpicFullPageInner({ epicId }: { epicId: string }) {
           {showChecklist && (
             <div className="mt-4 animate-in slide-in-from-top-2 fade-in duration-200">
               <ProtocolChecklist steps={checklistSteps} onStepClick={handleChecklistClick} />
-              {completedStepsCount === checklistSteps.length && (
+              {epicReady && (
                 <>
-                  <div className="mt-3 rounded-xl border border-green-200 dark:border-green-800 bg-green-50 dark:bg-green-950/20 p-3 flex items-center gap-3">
-                    <ShieldCheck className="h-5 w-5 text-green-600 dark:text-green-400 shrink-0" />
-                    <div className="flex-1">
-                      <p className="text-xs font-semibold text-green-700 dark:text-green-400">Épica Lista</p>
-                      <p className="text-[11px] text-green-600/80 dark:text-green-400/60">Protocolo completo y aprobado</p>
+                  {rawEpic?.enqueuedAt ? (
+                    // Estado post-envío: la épica ya está en cola del Forge.
+                    // El banner cambia a tono informativo (sin CTA — la acción
+                    // de no-retorno ya pasó). Mostramos timestamp humano y el
+                    // batch ID corto para trazabilidad.
+                    <div className="mt-3 rounded-xl border border-green-200 dark:border-green-800 bg-green-50 dark:bg-green-950/20 p-3 flex items-center gap-3">
+                      <ShieldCheck className="h-5 w-5 text-green-600 dark:text-green-400 shrink-0" />
+                      <div className="flex-1">
+                        <p className="text-xs font-semibold text-green-700 dark:text-green-400">
+                          Épica enviada al Forge
+                        </p>
+                        <p className="text-[11px] text-green-600/80 dark:text-green-400/60">
+                          {epic?.stories.length ?? 0} historia
+                          {(epic?.stories.length ?? 0) !== 1 ? 's' : ''} en cola desde{' '}
+                          {new Date(rawEpic.enqueuedAt).toLocaleString('es-MX', {
+                            dateStyle: 'medium',
+                            timeStyle: 'short',
+                          })}
+                          {rawEpic.enqueuedBatchId && (
+                            <>
+                              {' '}· batch{' '}
+                              <span className="font-mono">
+                                {rawEpic.enqueuedBatchId.slice(0, 8)}
+                              </span>
+                            </>
+                          )}
+                        </p>
+                      </div>
                     </div>
-                    <Button
-                      size="sm"
-                      onClick={() => setShowIntegrationDialog(true)}
-                      className="gap-1.5 bg-green-600 hover:bg-green-700 text-white shrink-0"
-                    >
-                      <Upload className="h-3.5 w-3.5" />
-                      Subir tarjetas
-                    </Button>
-                  </div>
-                  <IntegrationSettingsDialog
-                    open={showIntegrationDialog}
-                    onOpenChange={setShowIntegrationDialog}
-                  />
+                  ) : (
+                    <div className="mt-3 rounded-xl border border-green-200 dark:border-green-800 bg-green-50 dark:bg-green-950/20 p-3 flex items-center gap-3">
+                      <ShieldCheck className="h-5 w-5 text-green-600 dark:text-green-400 shrink-0" />
+                      <div className="flex-1">
+                        <p className="text-xs font-semibold text-green-700 dark:text-green-400">Épica Lista</p>
+                        <p className="text-[11px] text-green-600/80 dark:text-green-400/60">Protocolo completo y aprobado por PO, TL y QA</p>
+                      </div>
+                      <Button
+                        size="sm"
+                        onClick={() => setShowEnqueueDialog(true)}
+                        className="gap-1.5 bg-green-600 hover:bg-green-700 text-white shrink-0"
+                      >
+                        <Upload className="h-3.5 w-3.5" />
+                        Subir tarjetas
+                      </Button>
+                    </div>
+                  )}
+                  {epic && (
+                    <EpicEnqueueDialog
+                      open={showEnqueueDialog}
+                      onOpenChange={setShowEnqueueDialog}
+                      epicId={epic.id}
+                      epicTitle={epic.title}
+                      storiesCount={epic.stories.length}
+                      totalStoryPoints={epic.stories.reduce(
+                        (sum, s) => sum + (s.storyPoints ?? 0),
+                        0,
+                      )}
+                      onEnqueued={(result) => {
+                        // Actualización optimista: setea enqueuedAt + batchId
+                        // en el state local del Context para que el banner
+                        // cambie inmediatamente sin esperar refetch.
+                        if (!rawEpic) return;
+                        dispatch({
+                          type: 'UPDATE_EPIC',
+                          payload: {
+                            id: rawEpic.id,
+                            changes: {
+                              enqueuedAt: result.enqueuedAt,
+                              enqueuedBatchId: result.batchId,
+                            },
+                          },
+                        });
+                      }}
+                    />
+                  )}
                 </>
+              )}
+              {rawEpic && approvalModal && (
+                <EpicApprovalDialog
+                  open={approvalModal !== null}
+                  onOpenChange={(open) => !open && setApprovalModal(null)}
+                  epicId={rawEpic.id}
+                  role={approvalModal}
+                  roleLabel={APPROVAL_ROLE_LABELS[approvalModal]}
+                  onApproved={handleApproved}
+                />
               )}
             </div>
           )}

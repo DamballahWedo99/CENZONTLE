@@ -1,0 +1,31 @@
+{
+  "name": "@cenzontle/worker",
+  "version": "0.1.0",
+  "private": true,
+  "description": "CENZONTLE Factory Worker — connects a compute node to the dashboard, processes stories with Claude Code in headless mode.",
+  "bin": {
+    "factory-worker": "./dist/cli.js"
+  },
+  "main": "./dist/cli.js",
+  "type": "module",
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsx src/cli.ts",
+    "type-check": "tsc --noEmit",
+    "lint": "eslint src --ext .ts",
+    "start": "node dist/cli.js"
+  },
+  "dependencies": {
+    "@cenzontle/shared": "workspace:*",
+    "commander": "^12.1.0",
+    "pino": "^9.5.0",
+    "pino-pretty": "^11.3.0"
+  },
+  "devDependencies": {
+    "@cenzontle/eslint-config": "workspace:*",
+    "@cenzontle/ts-config": "workspace:*",
+    "@types/node": "^22.10.0",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.2"
+  }
+}

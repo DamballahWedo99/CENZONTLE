@@ -1,0 +1,257 @@
+import { BadRequestException, Injectable, Logger } from '@nestjs/common';
+import { PrismaService } from '../../prisma/prisma.service';
+import type { UpsertDodCriteriaDto } from './dto/upsert-dod-criteria.dto';
+
+export interface DodCriterionPublic {
+  id: string;
+  kind: string | null;
+  text: string;
+  description: string;
+  enabled: boolean;
+  required: boolean;
+  position: number;
+}
+
+/**
+ * Catálogo canónico de criterios estándar del DoD. Refresh basado en research
+ * de industria (Atlassian, Scrum.org, Codacy AI agents, DORA/Accelerate)
+ * — migration `20260508250000_dod_evidence_based_defaults`. Este array es
+ * la fuente de verdad cuando el operador hace "Restaurar defaults" — los
+ * valores acá ganan sobre lo que esté en DB para los criterios con `kind`.
+ *
+ * Orden canónico:
+ *  0. code-written          (status quo)
+ *  1. acceptance-criteria   (NUEVO — el más citado por las fuentes)
+ *  2. tests-passing         (REFINADO — quita threshold arbitrario 90%)
+ *  3. no-errors             (status quo)
+ *  4. security-scan         (REACTIVADO — must-have para AI agents)
+ *  5. pr-created            (status quo)
+ *  6. docs-updated          (status quo)
+ *
+ * Si en el futuro se cambia un criterio estándar (text o description),
+ * actualizar acá Y crear migration de backfill para los installs existentes.
+ */
+const DEFAULT_DOD_CRITERIA: ReadonlyArray<{
+  kind: string;
+  text: string;
+  description: string;
+}> = [
+  {
+    kind: 'code-written',
+    text: 'Código escrito y funcional',
+    description:
+      'El código implementado debe ejecutarse sin errores de runtime y cumplir el comportamiento descrito en la historia. Si la story define un endpoint, debe responder; si define un componente, debe renderearse; si define una función, debe retornar valores correctos para los casos descritos. No basta con que compile — debe correr.',
+  },
+  {
+    kind: 'acceptance-criteria',
+    text: 'Cumple criterios de aceptación de la historia',
+    description:
+      'El código no solo debe ejecutarse, debe cumplir TODOS los criterios de aceptación descritos en la historia. Lee la story como una spec: cada bullet es un test mental. Si la story dice "el botón debe ser azul", verifica el color. Si dice "el endpoint retorna 404 cuando no encuentra el recurso", escribe el caso. No marques el criterio como cumplido si solo parte de los acceptance criteria están cubiertos — todos o ninguno.',
+  },
+  {
+    kind: 'tests-passing',
+    text: 'Tests pasando + casos edge cubiertos',
+    description:
+      'Los tests automáticos del repo deben pasar localmente (npm test / pnpm test) antes de pushear. Más importante que la cobertura numérica es la CALIDAD de los tests: cubrí el happy path + casos edge (inputs vacíos, valores límite, condiciones de error) + manejo de errores. NO bypasear tests con flags ni excluir archivos del coverage para alcanzar un threshold. NO escribir tests triviales solo para subir el coverage % — eso es teatro de cobertura sin valor real.',
+  },
+  {
+    kind: 'no-errors',
+    text: 'Sin errores de lint/typecheck',
+    description:
+      'No debe haber errores de lint (ESLint/Biome/etc.) ni de TypeScript en el código modificado. Corre `pnpm lint` y `pnpm type-check` antes de cerrar el run. Si encontrás errores pre-existentes en archivos que NO estás modificando, déjalos — no expandas el scope.',
+  },
+  {
+    kind: 'security-scan',
+    text: 'Sin vulnerabilidades críticas de seguridad',
+    description:
+      'Tu código no debe introducir vulnerabilidades de severidad crítica/alta detectables por herramientas estándar (npm audit, dependabot, semgrep). En particular: cero command injection, cero SQL injection, cero secretos hardcoded, cero XSS en componentes que renderean input del usuario. Validá inputs en los boundaries del sistema (endpoints, queries DB, exec de comandos shell).',
+  },
+  {
+    kind: 'pr-created',
+    text: 'PR creado y aprobado',
+    description:
+      'Al terminar el trabajo, debes pushear la branch al remote y abrir un Pull Request en GitHub apuntando a la branch base de la épica (forge/sprint-batch-{epicId}). El PR debe tener título descriptivo y body explicando qué se implementó. La aprobación humana del PR es la confirmación final.',
+  },
+  {
+    kind: 'docs-updated',
+    text: 'Documentación actualizada',
+    description:
+      'Si tu cambio modifica APIs públicas, comportamiento del usuario, comandos CLI, variables de entorno, o flujos de auth, actualiza la documentación correspondiente (README, docs/, CLAUDE.md) en el mismo PR. Cambios internos sin impacto visible no requieren docs.',
+  },
+];
+
+/**
+ * Catálogo global de criterios de Definition of Done. Reemplaza el
+ * useState local que vivía en el frontend.
+ *
+ * Estrategia de update: replace-all en transaction. El frontend manda el
+ * array completo cada vez que el operador toca "Guardar". El backend
+ * borra todo y reinserta. Trade-off: se pierde `createdAt` per-criterio
+ * en cada save, pero el flow de uso (lista chica, edits agrupadas, replace
+ * de la totalidad de la lista cuando dragea/agrega/borra) es lo
+ * suficientemente coherente para que sea aceptable.
+ */
+@Injectable()
+export class DodService {
+  private readonly logger = new Logger(DodService.name);
+
+  constructor(private readonly prisma: PrismaService) {}
+
+  /**
+   * Lista todos los criterios ordenados por `position` ASC. Devuelve también
+   * los disabled (la UI los muestra grayed-out con el toggle off).
+   */
+  async findAll(): Promise<DodCriterionPublic[]> {
+    const rows = await this.prisma.dodCriterion.findMany({
+      orderBy: { position: 'asc' },
+      select: {
+        id: true,
+        kind: true,
+        text: true,
+        description: true,
+        enabled: true,
+        required: true,
+        position: true,
+      },
+    });
+    return rows;
+  }
+
+  /**
+   * Replace-all del catálogo. Validaciones:
+   *  - `kind` debe ser único entre los criterios del payload (un mismo
+   *    `kind` dos veces revienta el UNIQUE de la DB; mejor validar antes
+   *    para devolver 400 con mensaje claro).
+   *  - `position` debe ser entero ≥ 0 (el DTO ya lo valida con class-validator).
+   *
+   * Hace delete + insert en una sola transacción para que un fallo a mitad
+   * no deje el catálogo vacío.
+   */
+  async replaceAll(
+    dto: UpsertDodCriteriaDto,
+    actorEmail?: string,
+  ): Promise<DodCriterionPublic[]> {
+    // Validar duplicados de `kind` ANTES de pegarle a la DB.
+    const seenKinds = new Set<string>();
+    for (const c of dto.criteria) {
+      if (c.kind != null) {
+        if (seenKinds.has(c.kind)) {
+          throw new BadRequestException(
+            `Duplicate kind "${c.kind}" — cada criterio estándar puede aparecer solo una vez.`,
+          );
+        }
+        seenKinds.add(c.kind);
+      }
+    }
+
+    return this.prisma.$transaction(async (tx) => {
+      await tx.dodCriterion.deleteMany({});
+      if (dto.criteria.length === 0) {
+        return [];
+      }
+      await tx.dodCriterion.createMany({
+        data: dto.criteria.map((c) => ({
+          kind: c.kind ?? null,
+          text: c.text,
+          // description ya viene validada non-empty por el DTO
+          // (@MinLength(1)). Si llega vacía es un bug del frontend, no
+          // un caso a manejar acá — Prisma rechazará por la NOT NULL.
+          description: c.description,
+          enabled: c.enabled,
+          required: c.required,
+          position: c.position,
+        })),
+      });
+      this.logger.log(
+        `[dod.replace_all] count=${dto.criteria.length} actor=${actorEmail ?? 'unknown'}`,
+      );
+      return tx.dodCriterion.findMany({
+        orderBy: { position: 'asc' },
+        select: {
+          id: true,
+          kind: true,
+          text: true,
+          description: true,
+          enabled: true,
+          required: true,
+          position: true,
+        },
+      });
+    });
+  }
+
+  /**
+   * Restaura los criterios estándar al estado canónico definido en
+   * `DEFAULT_DOD_CRITERIA`. Para cada uno (`code-written`, `acceptance-criteria`,
+   * `tests-passing`, `no-errors`, `security-scan`, `pr-created`, `docs-updated`):
+   *  - Si existe en DB (con cualquier text/description), lo PISA con los
+   *    valores canónicos.
+   *  - Si NO existe (operador lo borró), lo INSERTA de nuevo.
+   *
+   * Los criterios CUSTOM (kind=null) NO se tocan — sobreviven al reset
+   * y mantienen su position relativa, pero el array se reordena: defaults
+   * primero (position 0..3), luego custom (position 4..N).
+   *
+   * Es la única forma de reset que ofrecemos hoy. Si en el futuro se
+   * agrega "reset full" (que también borre custom), debería ser un
+   * endpoint distinto con confirmación más fuerte (type-to-confirm).
+   */
+  async resetDefaults(actorEmail?: string): Promise<DodCriterionPublic[]> {
+    return this.prisma.$transaction(async (tx) => {
+      // 1) Levantar custom existentes para preservarlos. Solo necesitamos
+      //    text/description/created para reinsertar — id/position se regeneran.
+      const existingCustom = await tx.dodCriterion.findMany({
+        where: { kind: null },
+        orderBy: { position: 'asc' },
+        select: { text: true, description: true, enabled: true, required: true },
+      });
+
+      // 2) Wipe completo. Más simple que "upsert por kind + delete custom
+      //    + reinsert" — y como estamos dentro de la transacción, no hay
+      //    ventana de inconsistencia visible.
+      await tx.dodCriterion.deleteMany({});
+
+      // 3) Reinsertar los 4 defaults canónicos en posiciones 0..3.
+      const defaultsData = DEFAULT_DOD_CRITERIA.map((d, i) => ({
+        kind: d.kind,
+        text: d.text,
+        description: d.description,
+        enabled: true,
+        required: true,
+        position: i,
+      }));
+
+      // 4) Reinsertar los custom preservados con position offset por el
+      //    largo de defaults. Mantienen su orden relativo.
+      const customData = existingCustom.map((c, i) => ({
+        kind: null,
+        text: c.text,
+        description: c.description,
+        enabled: c.enabled,
+        required: c.required,
+        position: defaultsData.length + i,
+      }));
+
+      await tx.dodCriterion.createMany({
+        data: [...defaultsData, ...customData],
+      });
+
+      this.logger.log(
+        `[dod.reset_defaults] preserved=${existingCustom.length} custom criteria, restored ${defaultsData.length} defaults. actor=${actorEmail ?? 'unknown'}`,
+      );
+
+      return tx.dodCriterion.findMany({
+        orderBy: { position: 'asc' },
+        select: {
+          id: true,
+          kind: true,
+          text: true,
+          description: true,
+          enabled: true,
+          required: true,
+          position: true,
+        },
+      });
+    });
+  }
+}
