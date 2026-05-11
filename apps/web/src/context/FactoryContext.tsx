@@ -245,13 +245,37 @@ const initialState: FactoryContextState = {
     // ahora muestra solo épicas reales que pasaron por el Protocolo de Visto
     // Bueno y fueron enviadas al Forge.
     queuedBatches: [],
+    // ResourcePool — la UI real (`ComputeNodesSection` en /factory/settings)
+    // hidrata desde `GET /factory/nodes` con polling 5s. Aquí se mantiene
+    // UN nodo MOCK temporal porque las vistas `/factory/agents` (Fleet
+    // Monitor con cards de agents activos) aún consumen del FactoryContext
+    // y necesitan al menos 1 nodo con agents para no quedarse vacías.
+    //
+    // TODO (Sprint 4): cuando `/factory/agents` se conecte al backend real
+    // (consumiendo `GET /factory/nodes` + `GET /factory/runs`), eliminar
+    // este mock y poner `nodes: []`.
     resourcePool: {
       nodes: [
-        { id: 'node-local', name: 'My MacBook Pro', type: 'local' as const, os: 'macOS 15.3 (Apple M3 Pro)', location: 'Local', ip: '127.0.0.1', status: 'online' as const, totalSlots: 3, agents: [{ agentId: 'agent-1', batchId: 'batch-47', batchName: 'Checkout Redesign' }, { agentId: 'agent-2', batchId: 'batch-47', batchName: 'Checkout Redesign' }, { agentId: 'agent-3', batchId: 'batch-47', batchName: 'Checkout Redesign' }], addedAt: '2026-03-20T10:00:00Z', lastHeartbeat: '2026-03-24T04:50:00Z' },
-        { id: 'node-mm1', name: 'Mac Mini Office 1', type: 'mac-mini' as const, os: 'macOS 15.3 (Apple M2)', location: 'CDMX Office', ip: '100.64.0.2', status: 'online' as const, totalSlots: 6, agents: [{ agentId: 'agent-4', batchId: 'batch-48', batchName: 'API Gateway v2' }, { agentId: 'agent-5', batchId: 'batch-48', batchName: 'API Gateway v2' }], addedAt: '2026-03-21T09:00:00Z', lastHeartbeat: '2026-03-24T04:50:00Z' },
+        {
+          id: 'node-local',
+          name: 'My MacBook Pro',
+          type: 'local' as const,
+          os: 'macOS 15.3 (Apple M3 Pro)',
+          location: 'Local',
+          ip: '127.0.0.1',
+          status: 'online' as const,
+          totalSlots: 3,
+          agents: [
+            { agentId: 'agent-1', batchId: 'batch-47', batchName: 'Checkout Redesign' },
+            { agentId: 'agent-2', batchId: 'batch-47', batchName: 'Checkout Redesign' },
+            { agentId: 'agent-3', batchId: 'batch-47', batchName: 'Checkout Redesign' },
+          ],
+          addedAt: '2026-03-20T10:00:00Z',
+          lastHeartbeat: '2026-03-24T04:50:00Z',
+        },
       ],
-      totalSlots: 9,
-      usedSlots: 5,
+      totalSlots: 3,
+      usedSlots: 3,
     },
     activeLayers: [PipelineLayer.Forge, PipelineLayer.Staging],
     totalCost: 35.47,
@@ -474,9 +498,17 @@ function mapForgeQueueItemToQueuedBatch(item: ForgeQueueItem): QueuedBatch {
     tracker: null,
     stories: item.storiesCount,
     storyDetails: undefined,
-    priority: 'medium',
+    // Priority real desde el backend (antes hardcoded 'medium').
+    priority: item.priority,
     queuedAt: item.enqueuedAt,
     estimatedStartAt: null,
+    // Runtime data — propagado al frontend para que `FactoryOverview`
+    // pueda mover la épica de "queue" a "forge" cuando agentCount > 0.
+    storiesDone: item.storiesDone,
+    storiesInProgress: item.storiesInProgress,
+    agentCount: item.agentCount,
+    runStartedAt: item.runStartedAt,
+    forgeBranch: item.forgeBranch,
   };
 }
 
@@ -484,13 +516,18 @@ function mapForgeQueueItemToQueuedBatch(item: ForgeQueueItem): QueuedBatch {
 export function FactoryProvider({ children }: { children: ReactNode }) {
   const [state, dispatch] = useReducer(factoryReducer, initialState);
 
-  // Hidrata `queuedBatches` desde el endpoint real al montar. Best-effort:
-  // si falla (no autenticado, network), el state queda en [] y el dashboard
-  // muestra cola vacía sin romper. NO hace polling — para refresh continuo
-  // del orquestador real (Mes 1) usaremos WebSocket o SSE.
+  // Hidrata `queuedBatches` desde el endpoint real con polling 5s para
+  // que los runtime fields (`storiesDone`, `agentCount`, `runStartedAt`)
+  // se actualicen cuando los workers reclaman/completan stories. Sin
+  // polling, el dashboard mostraría datos congelados hasta que el user
+  // recargue la página.
+  //
+  // Best-effort: si falla (no autenticado, network), el state queda como
+  // estaba y el dashboard sigue funcional. Sprint 5+ podemos migrar a
+  // SSE/WebSocket para evitar polling y reducir latencia.
   useEffect(() => {
     let cancelled = false;
-    void (async () => {
+    const fetchAndUpdate = async () => {
       try {
         const items = await getForgeQueue();
         if (cancelled) return;
@@ -500,11 +537,14 @@ export function FactoryProvider({ children }: { children: ReactNode }) {
           payload: { queuedBatches },
         });
       } catch {
-        // Silencio — el state queda en [] y el dashboard sigue funcional.
+        // Silencio — el state queda como estaba.
       }
-    })();
+    };
+    void fetchAndUpdate();
+    const interval = setInterval(() => void fetchAndUpdate(), 5_000);
     return () => {
       cancelled = true;
+      clearInterval(interval);
     };
   }, []);
 

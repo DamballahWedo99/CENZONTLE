@@ -37,6 +37,26 @@ enum StoryStatus {
   blocked
 }
 
+/// Estado de un nodo de cómputo en la flota del Forge. `online` = heartbeat
+/// reciente; `offline` = sin heartbeat por > threshold (default 90s);
+/// `degraded` = reachable pero reportando errores o slots reducidos.
+enum ComputeNodeStatus {
+  online
+  offline
+  degraded
+}
+
+/// Tipo de hardware del nodo. Solo metadata para UI/filtering — la lógica
+/// de scheduling no distingue hoy. Mes 3+ podemos hacer routing inteligente
+/// (ej. workloads GPU-heavy → gpu_instance).
+enum ComputeNodeType {
+  local
+  mac_mini
+  cloud_vm
+  gpu_instance
+  other
+}
+
 model Initiative {
   id          String           @id @default(uuid())
   name        String
@@ -94,6 +114,20 @@ model Epic {
   // tabla `SprintBatch` con `EpicBatchRun` para wave planning + retries.
   enqueuedAt                DateTime?
   enqueuedBatchId           String?
+
+  // Forge integration branch (Sprint 4): nombre de la rama temporal del
+  // Forge donde mergean los PRs de las historias. Cortada de DEV cuando
+  // se encola la épica. Formato: `${BranchStrategyConfig.forgeBranchPrefix}{epicId.slice(0,8)}`.
+  // NULL hasta que la épica entra al Forge.
+  forgeBranch               String?
+  forgeBranchCreatedAt      DateTime?
+  // SHA del DEV branch al momento de crear la integration branch — útil
+  // para detectar drift y para diagnostics si el merge consolidado falla.
+  forgeBranchBaseSha        String?
+  // Número del PR consolidado al DEV (set cuando se completa todo el batch).
+  consolidatedPrNumber      Int?
+  consolidatedPrCreatedAt   DateTime?
+  consolidatedPrMergedAt    DateTime?
 
   // Path to the markdown file in the vault (GitHub repo)
   vaultPath                 String?
@@ -159,6 +193,12 @@ model Story {
   // del batch antes de conocer los storyId reales.
   sourceClientId String?
 
+  // Forge claim — set cuando un nodo del Compute Fleet reclama esta historia
+  // para procesarla con Claude Code. NULL = claimable por el próximo worker
+  // que pase el check del DAG (todas sus deps hard en status='done').
+  // El sweeper cron resetea a NULL cuando un AgentRun queda 'abandoned'.
+  claimedAt      DateTime?
+
   createdAt      DateTime    @default(now())
   updatedAt      DateTime    @updatedAt
 
@@ -171,10 +211,16 @@ model Story {
   // Reemplazan el modelo viejo Epic.dependencies + DiscoveredDependency-en-vault.
   technicalDependencies StoryTechnicalDependency[]
 
+  // Runs históricos del Forge sobre esta historia (incluye abandoned/failed
+  // para auditoría). UNIQUE constraint en AgentRun(storyId, status) garantiza
+  // que solo haya 1 run "claimed" o "running" simultáneamente.
+  agentRuns      AgentRun[]
+
   @@index([epicId])
   @@index([podId])
   @@index([sprintId])
   @@index([sourceClientId])
+  @@index([claimedAt])
   @@map("stories")
 }
 
@@ -327,6 +373,14 @@ model CodeRepository {
 
   // Solo un repo "activo" a la vez (análogo a VaultConfig.isActive).
   isActive        Boolean  @default(false)
+
+  // Permite que el Forge ESCRIBA en este repo (clone + commit + push + PR).
+  // Independiente de `isActive` que es solo READ (ripgrep/glob por agentes
+  // que generan épicas/stories). Para que el Forge use este repo como
+  // destino de su trabajo, hace falta toggle EXPLÍCITO — opt-in defensivo.
+  // Si false: getCloneUrl() de GitHubService excluye este repo y el Forge
+  // cae a sandbox mode (no abre PRs).
+  forgeWritable   Boolean  @default(false)
 
   // Lifecycle del clone local en disco
   cloneStatus     CodeRepoCloneStatus @default(pending)
@@ -485,4 +539,278 @@ model AgentTokenSettings {
   updatedBy String?
 
   @@map("agent_token_settings")
+}
+
+/// Nodo de cómputo registrado en la flota del Forge. Cada nodo es una
+/// máquina externa (MacBook local, Mac Mini de oficina, futuras VMs) que
+/// corre el binario `factory-worker` y se autoregistra al dashboard usando
+/// un `WorkerToken` Bearer.
+///
+/// El campo `ip` es self-reported — NUNCA usar para autenticar (un atacante
+/// podría spoofear). La auth real es el token Bearer en headers.
+///
+/// Soft delete via `retiredAt`: cuando un nodo se "elimina" desde la UI,
+/// no destruimos los `agentRuns` históricos. Solo lo marcamos retired y
+/// revocamos sus tokens.
+model ComputeNode {
+  id            String            @id @default(uuid())
+  name          String
+  type          ComputeNodeType   @default(mac_mini)
+  os            String            @default("")
+  location      String            @default("")
+  ip            String            @default("")
+  status        ComputeNodeStatus @default(offline)
+  totalSlots    Int               @default(1)
+  lastHeartbeat DateTime?
+  retiredAt     DateTime?
+
+  tokens        WorkerToken[]
+  agentRuns     AgentRun[]
+
+  createdById   String?
+  createdAt     DateTime          @default(now())
+  updatedAt     DateTime          @updatedAt
+
+  // Hot path: SELECT WHERE status='online' AND retiredAt IS NULL — listing
+  // de nodos vivos en el dashboard.
+  @@index([status, retiredAt])
+  // Hot path: cron sweeper que marca `offline` nodos sin heartbeat reciente.
+  @@index([lastHeartbeat])
+  @@map("compute_nodes")
+}
+
+/// Token de autenticación Bearer para que un worker se conecte al dashboard.
+/// Plaintext format: `worker_<32 base32 chars>` — devuelto UNA SOLA VEZ al
+/// crear (patrón Stripe sk_xxx). Después solo se conoce por `prefix` (8 chars
+/// visibles) y `tokenHash` (SHA-256 hex del plaintext).
+///
+/// `revokedAt` permite revocación inmediata: el guard rechaza con 401 si está
+/// set. `expiresAt` es opcional (null = persistente para Mes 0/1; Mes 2
+/// agregaremos JIT tokens single-use).
+///
+/// `lastUsedAt` se actualiza en cada request autenticado del worker — útil
+/// para detectar uso anómalo desde la UI.
+model WorkerToken {
+  id          String       @id @default(uuid())
+  nodeId      String
+  node        ComputeNode  @relation(fields: [nodeId], references: [id], onDelete: Cascade)
+
+  // SHA-256 hex (64 chars) del plaintext. NUNCA guardamos plaintext.
+  tokenHash   String       @unique
+  // Primeros chars del plaintext después de "worker_" — para mostrar en UI.
+  prefix      String
+  expiresAt   DateTime?
+  revokedAt   DateTime?
+  lastUsedAt  DateTime?
+
+  createdById String?
+  createdAt   DateTime     @default(now())
+
+  @@index([nodeId, revokedAt])
+  @@map("worker_tokens")
+}
+
+/// Run de un agente Claude Code sobre UNA historia, ejecutado en UN nodo
+/// del Compute Fleet. Granularidad story (no épica) permite paralelismo
+/// cross-machine respetando el DAG `StoryDependency` (hard).
+///
+/// Lifecycle:
+///   claimed   → Worker llamó claim-story, fila creada. Aún no spawneó claude.
+///   running   → Worker reportó progress al menos 1 vez. lastProgressAt fresh.
+///   completed → Exit 0 + PR creado (prNumber set).
+///   failed    → Exit ≠ 0 (errorMessage explica por qué).
+///   abandoned → Sweeper cron detectó lastProgressAt > 10min sin update.
+///               Reseta story.claimedAt = NULL para que otro worker pueda re-claim.
+///
+/// `@@unique([storyId, status])` red de seguridad: garantiza que solo haya
+/// 1 fila claimed/running por historia. Si la lógica del SQL atómico de
+/// claim falla por algún bug, la DB rechaza el INSERT.
+model AgentRun {
+  id              String      @id @default(uuid())
+  storyId         String
+  story           Story       @relation(fields: [storyId], references: [id], onDelete: Cascade)
+  nodeId          String
+  node            ComputeNode @relation(fields: [nodeId], references: [id])
+
+  // Forensics: WorkerToken específico usado para reclamar este run.
+  // Si un token se filtra y se revoca, este campo permite reconstruir
+  // exactamente qué runs hizo. Sin onDelete porque queremos preservar el
+  // audit trail aunque el token se borre del catálogo (por eso String? sin
+  // FK Prisma). Se llena en claimStory desde request.workerNode.tokenId.
+  claimedByTokenId String?
+
+  status          String      @default("claimed") // claimed | running | completed | failed | abandoned
+  branch          String                          // forge/sprint-batch-XX/story-YY
+  // Heartbeat por run — distinto del nodo. Refrescado cada vez que el worker
+  // reporta progress. El sweeper marca abandoned si > 10min sin update.
+  lastProgressAt  DateTime    @default(now())
+  // Output capturado del proceso claude (stdout/stderr trimmed). Limitado
+  // por el caller a últimas N líneas para no inflar el row con MB de logs.
+  // SECURITY: el worker aplica regex de redacción antes de enviar (sk-ant-,
+  // ghp_, AKIA, x-access-token) para evitar persistencia de secretos.
+  lastOutput      String?
+  // Si el run completa exitosamente Y el worker abrió un PR real, este
+  // campo lleva el número. NULL no es sentinel de "no PR" — puede ser
+  // pre-Sprint-3 (cuando el worker aún no implementa apertura de PRs).
+  prNumber        Int?
+  exitCode        Int?
+  errorMessage    String?
+
+  // Timeline de criterios/milestones del run. JSON array de
+  // { id, label, status: 'pending'|'in_progress'|'completed'|'failed',
+  //   source: 'worker'|'agent', startedAt?, completedAt? }.
+  //
+  // Combina:
+  //  - Milestones automáticos del worker (workdir, clone, commit, push, PR)
+  //    que son objetivos y verificables sin confiar en el agente
+  //  - Criterios que el agente reporta vía /workspace/.cenzontle-criteria.json
+  //    (opcional, para criterios específicos de la story)
+  //
+  // El AgentDetailDrawer consume este campo para mostrar progreso real.
+  criteriaProgress Json?
+
+  // URL del ttyd que el worker arranca contra la sesión tmux donde corre
+  // claude. El frontend la abre en iframe para mostrar terminal interactiva
+  // en vivo (igual que el AgentTerminal del agente mock). Null mientras
+  // el run no haya iniciado ttyd, o si el worker corre en sandbox mode
+  // sin terminal exposición. Formato: `http://host:port/`.
+  ttydUrl         String?
+
+  // Tier 1 harness — DoD enforcement loop.
+  //
+  // attempts: cuántas veces el worker re-spawneó claude para este run.
+  // 1 es el primer intento (default). Cada vez que la verificación
+  // determinística del DoD falla, el worker hace una pasada nueva con
+  // retry-prompt incluyendo el output del fallo, hasta MAX_ATTEMPTS o
+  // hasta que pase. Visible en UI para distinguir runs "limpios" vs
+  // "que necesitaron correcciones".
+  attempts        Int         @default(1)
+
+  // dodVerification: log estructurado del veredicto por criterio en cada
+  // attempt. Shape: array de objetos
+  //   { attempt, criterion, kind, command, exitCode, output (truncated), passed }
+  // El frontend lo consume para pintar timeline detallada de qué pasó/falló
+  // en cada iteración del loop. Null antes del primer attempt verification.
+  dodVerification Json?
+
+  startedAt       DateTime    @default(now())
+  completedAt     DateTime?
+
+  // Atomicidad del claim: solo 1 fila claimed/running por historia.
+  //
+  // IMPORTANTE: el constraint correcto es PARTIAL UNIQUE INDEX (solo
+  // aplica a status IN ('claimed', 'running')). Prisma NO expresa partial
+  // indexes en schema syntax — está creado manualmente con SQL raw:
+  //
+  //   CREATE UNIQUE INDEX agent_runs_story_active_unique
+  //     ON agent_runs ("storyId", status)
+  //     WHERE status IN ('claimed', 'running');
+  //
+  // Este index PERMITE múltiples runs terminales (completed/failed/
+  // abandoned) por historia — necesario para retries y para el sweeper
+  // que marca abandoned múltiples veces a lo largo del tiempo.
+  //
+  // Si haces `prisma db push` y el index desaparece, ejecuta el SQL de
+  // arriba manualmente. Para detectarlo: el sweeper falla con error
+  // "Unique constraint failed on (storyId, status)" cuando el índice
+  // es full unique en lugar de partial.
+  @@index([storyId, status])           // query helper para lookups por story
+  @@index([nodeId, status])
+  @@index([status, lastProgressAt])    // hot path: sweeper de abandoned
+  @@index([claimedByTokenId])          // forensics: lookup por token leakeado
+  @@map("agent_runs")
+}
+
+/// Singleton — UNA fila por organización (id='global' fixed). Almacena
+/// la API key de Anthropic encriptada con AES-256-GCM (mismo CryptoService
+/// que VaultConfig/CodeRepository/ExternalSecret).
+///
+/// El backend forwardea esta key al worker en el response de `claim-story`,
+/// para que el worker la pase como ANTHROPIC_API_KEY env var al spawn de
+/// `claude -p`. El worker NUNCA persiste la key a disco — solo en RAM
+/// durante el run.
+///
+/// Solo Alta Gerencia puede leer/actualizar (admin endpoint dedicado).
+/// Rotación: humano edita config, próximos claims usan la nueva key.
+model OrgAnthropicConfig {
+  id              String   @id @default("global")
+  // Encriptado con AES-256-GCM via CryptoService. Plaintext NUNCA persiste.
+  apiKeyCiphertext String?
+  apiKeyIv         String?
+  apiKeyAuthTag    String?
+  // Últimos 4 chars del plaintext para mostrar en UI ("sk-...a3f8") sin
+  // requerir decryptar. Generado al guardar.
+  maskedKey       String?
+  updatedAt       DateTime @updatedAt
+  updatedBy       String?
+
+  @@map("org_anthropic_config")
+}
+
+/// Singleton — UNA fila por organización (id='global' fixed). Configura
+/// el modelo de ramas que el Forge usa para crear branches y abrir PRs.
+///
+/// Modelo de 3 niveles (de la arquitectura v2 documentada):
+///   main ← devBranch ← forge/sprint-batch-{epicId}
+///
+/// El Forge:
+///  1. Por cada épica encolada, crea `${forgeBranchPrefix}{epicId}` cortada de devBranch
+///  2. Cada historia genera PR contra esa integration branch
+///  3. Reviewers automáticos (code + security) aprueban o piden cambios
+///  4. Cuando todas las historias del batch están done, crea PR consolidado
+///     `${forgeBranchPrefix}{epicId} → devBranch` para human gate (Staging)
+///  5. Si autoDeleteForgeBranch=true, borra la branch tras el merge a DEV
+///
+/// Solo Alta Gerencia puede leer/actualizar.
+model BranchStrategyConfig {
+  id                    String   @id @default("global")
+  devBranch             String   @default("dev")
+  mainBranch            String   @default("main")
+  forgeBranchPrefix     String   @default("forge/sprint-batch-")
+  autoDeleteForgeBranch Boolean  @default(true)
+  // Kill switch persistido en DB (no env var, que puede filtrarse por
+  // turbo y no propagarse al backend). Cuando true, el endpoint
+  // claim-story devuelve null inmediatamente sin importar el resto del
+  // estado. Toggleable via UI sin reinicio del proceso.
+  forgePaused           Boolean  @default(false)
+  forgePausedAt         DateTime?
+  forgePausedBy         String?
+  forgePausedReason     String?
+  updatedAt             DateTime @updatedAt
+  updatedBy             String?
+
+  @@map("branch_strategy_config")
+}
+
+/// Catálogo de criterios de Definition of Done que aplica a TODAS las stories
+/// del Forge (lista global; no per-pod, no per-team). El operador edita esta
+/// lista en `/factory/settings/Definition of Done` y los agentes la usan como
+/// checklist al cerrar un run.
+///
+/// `kind` es un identificador estable (nullable) que el frontend usa para
+/// mapear a lógica de evaluación determinística — ej. `code-written` →
+/// run.exitCode === 0; `pr-created` → run.prNumber !== null. Custom criteria
+/// que el operador agrega via UI tienen `kind = null` y solo se marcan como
+/// hechos si el agente los reporta en `criteriaProgress` durante el run.
+///
+/// Solo Alta Gerencia puede leer/escribir esta tabla.
+model DodCriterion {
+  id        String   @id @default(uuid())
+  /// Identificador estable para mapping determinístico. Nullable y único
+  /// (Postgres permite múltiples NULLs en UNIQUE). Custom = null.
+  kind      String?  @unique
+  text      String
+  /// Descripción larga (markdown-friendly). Se inyecta en el prompt del
+  /// agente para que sepa exactamente qué se espera del criterio sin
+  /// tener que adivinar desde el `text` corto. REQUERIDO — sin descripción
+  /// el agente no tiene contexto suficiente, y el modelo de DoD pierde valor.
+  description String
+  enabled   Boolean  @default(true)
+  required  Boolean  @default(false)
+  /// Orden de display en la UI (drag&drop persiste aquí).
+  position  Int      @default(0)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@map("dod_criteria")
 }

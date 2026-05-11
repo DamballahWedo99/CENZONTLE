@@ -94,6 +94,22 @@ export class CodeRepositoryController {
     return this.repos.disable(id);
   }
 
+  @Post(':id/forge-writable/enable')
+  @Permissions(Permission.MANAGE_INTEGRATIONS)
+  @ApiOperation({
+    summary: 'Permitir que el Forge ESCRIBA en este repo (clone+commit+push+PR). Opt-in defensivo.',
+  })
+  enableForgeWritable(@Param('id') id: string) {
+    return this.repos.enableForgeWritable(id);
+  }
+
+  @Post(':id/forge-writable/disable')
+  @Permissions(Permission.MANAGE_INTEGRATIONS)
+  @ApiOperation({ summary: 'Quitar permiso de escritura del Forge (vuelve a read-only)' })
+  disableForgeWritable(@Param('id') id: string) {
+    return this.repos.disableForgeWritable(id);
+  }
+
   @Post(':id/test')
   @Permissions(Permission.MANAGE_INTEGRATIONS)
   @ApiOperation({ summary: 'Probar conexión a GitHub con el token' })

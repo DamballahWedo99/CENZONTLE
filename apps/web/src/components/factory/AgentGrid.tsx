@@ -5,6 +5,7 @@ import * as d3 from 'd3';
 import { Monitor, Cpu, Layers, ChevronRight } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { useFactory } from '@/context/FactoryContext';
+import { useEffectiveResourcePool } from '@/hooks/use-effective-resource-pool';
 import { AgentCard } from '@/components/factory/AgentCard';
 import { AgentDetailDrawer } from '@/components/factory/AgentDetailDrawer';
 import { AgentStatus } from '@cenzontle/shared';
@@ -649,12 +650,58 @@ export function AgentGrid({ initialAgentId }: AgentGridProps = {}) {
     }
   }, [initialAgentId, dispatch]);
 
-  const agents = state.agents;
-  const machines = state.factory.resourcePool?.nodes ?? [];
+  // Hidrata nodos reales del backend (polling 5s) y los usa en lugar del
+  // mock del FactoryContext cuando hay alguno. Patrón consistente con
+  // FactoryOverview — un nodo agregado en /factory/settings aparece aquí
+  // dentro de máximo 5s.
+  const effectivePool = useEffectiveResourcePool(state.factory.resourcePool);
+
+  // Construye FactoryAgents derivados de los active runs del backend
+  // (nodes[*].agents). Cada slot ocupado en un nodo se convierte en un
+  // FactoryAgent placeholder con campos default — la story ya tiene
+  // runId, epicId, epicTitle del backend; el resto (tokens, cost,
+  // currentFile, etc.) vendrá en Sprint 5+ cuando el worker reporte
+  // métricas reales en el progress endpoint.
+  //
+  // Los agents reales tienen prioridad sobre el mock: si el array tiene
+  // runs activos del backend, ignoramos `state.agents` para evitar mezcla
+  // confusa entre runs vivos y mocks históricos.
+  const machines = effectivePool.nodes;
+  const effectiveAgents = useMemo<FactoryAgent[]>(() => {
+    const fromRuns: FactoryAgent[] = [];
+    for (const machine of machines) {
+      for (const slot of machine.agents) {
+        fromRuns.push({
+          id: slot.agentId, // = runId del backend
+          name: `Agent ${slot.agentId.slice(0, 8)}`,
+          storyId: null, // TODO: extender hook para devolver storyId real
+          storyKey: null,
+          status: AgentStatus.Coding, // running = coding por simplicidad
+          worktree: machine.name,
+          tmuxSession: '',
+          startedAt: machine.lastHeartbeat ?? null,
+          duration: 0,
+          tokens: 0,
+          cost: 0,
+          lastOutput: [],
+          currentFile: null,
+          linesWritten: 0,
+          testsRun: 0,
+          testsPassed: 0,
+        });
+      }
+    }
+    // Si hay agents reales del backend, prefer those. Si no hay (forge
+    // pausado o sin actividad), fallback al mock para mantener la UX
+    // visual de referencia.
+    return fromRuns.length > 0 ? fromRuns : state.agents;
+  }, [machines, state.agents]);
+
+  const agents = effectiveAgents;
   const selectedAgentId = state.selectedAgentId;
   const activeCount = computed.activeAgentCount;
-  const totalSlots = state.factory.resourcePool?.totalSlots ?? agents.length;
-  const usedSlots = state.factory.resourcePool?.usedSlots ?? activeCount;
+  const totalSlots = effectivePool.totalSlots || agents.length;
+  const usedSlots = effectivePool.usedSlots || activeCount;
 
   const filteredAgents = useMemo(
     () => agents.filter((a) => matchesFilter(a.status, filter)),

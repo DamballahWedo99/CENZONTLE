@@ -15,6 +15,8 @@ import {
 import { PrismaService } from '../../prisma/prisma.service';
 import { ChangelogService } from '../../proyectos/changelog/changelog.service';
 import { assertUserCanAccessEpicPods } from '../../proyectos/epics/epic-access.util';
+import { BranchStrategyService } from '../branch-strategy/branch-strategy.service';
+import { GitHubService } from '../github/github.service';
 
 export interface EnqueuedBatch {
   batchId: string;
@@ -25,6 +27,20 @@ export interface EnqueuedBatch {
   enqueuedAt: string;
   enqueuedBy: string;
   enqueuedByName: string;
+  // Runtime data — necesario para que el frontend renderice el card como
+  // "active" cuando la épica está siendo procesada por el Forge:
+  /** Priority del Epic (mapeado de Prisma `Priority` enum). */
+  priority: 'critical' | 'high' | 'medium' | 'low';
+  /** Stories en status='done' (ya procesadas por Forge — sandbox o post-merge). */
+  storiesDone: number;
+  /** Stories actualmente reclamadas/corriendo en algún worker. */
+  storiesInProgress: number;
+  /** Number de AgentRuns activos asociados a esta epic (= storiesInProgress). */
+  agentCount: number;
+  /** ISO timestamp del primer run activo (start of "active" period). Null si nunca corrió. */
+  runStartedAt: string | null;
+  /** Branch de integración del Forge si ya fue creada. */
+  forgeBranch: string | null;
 }
 
 /**
@@ -46,6 +62,8 @@ export class FactoryQueueService {
   constructor(
     private prisma: PrismaService,
     private changelog: ChangelogService,
+    private branchStrategy: BranchStrategyService,
+    private github: GitHubService,
   ) {}
 
   /**
@@ -119,10 +137,61 @@ export class FactoryQueueService {
       throw new BadRequestException('Falta el VoBo de QA');
     }
 
-    // 5. Persistir + changelog en transacción atómica.
+    // 5. Crear integration branch en GitHub (Sprint 4 Fase 2).
+    // Estrategia: ANTES del transaction de DB. Si la creación falla, el
+    // operador no debería tener una épica enqueued sin branch — eso causa
+    // que workers reclamen y fallen al pushear. Mejor fail-fast con error
+    // accionable.
+    //
+    // Fallback graceful: si NO hay repo configurado (ej. dashboard recién
+    // instalado o user testing en sandbox mode), seguimos sin branch.
+    // El AgentRunService maneja `forgeBranch=null` igual que antes.
     const now = new Date();
     const batchId = randomUUID();
     const userName = user.name || user.email || user.sub;
+
+    let forgeBranchData: {
+      forgeBranch: string;
+      forgeBranchCreatedAt: Date;
+      forgeBranchBaseSha: string;
+    } | null = null;
+
+    try {
+      const strategy = await this.branchStrategy.getOrInitDefault();
+      const branchName = `${strategy.forgeBranchPrefix}${epicId.slice(0, 8)}`;
+      const result = await this.github.createIntegrationBranch({
+        branchName,
+        devBranch: strategy.devBranch,
+        epicId,
+      });
+      forgeBranchData = {
+        forgeBranch: result.branchName,
+        forgeBranchCreatedAt: now,
+        forgeBranchBaseSha: result.baseSha,
+      };
+      this.logger.log(
+        `[enqueue] integration branch ready: ${result.branchName} @${result.baseSha.slice(0, 7)} (alreadyExisted=${result.alreadyExisted})`,
+      );
+    } catch (err) {
+      // Sandbox mode: si NO hay repo configurado (NotFoundException con
+      // mensaje específico), loggeamos warn y seguimos sin branch. El
+      // claim/run flow funciona sin push (agent-run sandbox mode — exit 0
+      // sin PR avanza la story a 'done').
+      const isNoRepoConfigured =
+        err instanceof NotFoundException &&
+        (err as Error).message?.includes('No hay code repository enabled');
+
+      if (isNoRepoConfigured) {
+        this.logger.warn(
+          `[enqueue] No hay code repository configurado — encolando en SANDBOX MODE (sin integration branch). ` +
+            `Configura un repo en /factory/settings → Código para flow real con PRs.`,
+        );
+      } else {
+        // Otra falla (auth GitHub, devBranch no existe, etc.) → throw con
+        // mensaje del GitHubService que ya es accionable.
+        throw err;
+      }
+    }
 
     await this.prisma.$transaction([
       this.prisma.epic.update({
@@ -130,6 +199,7 @@ export class FactoryQueueService {
         data: {
           enqueuedAt: now,
           enqueuedBatchId: batchId,
+          ...(forgeBranchData ?? {}),
           updatedAt: now,
         },
       }),
@@ -141,7 +211,9 @@ export class FactoryQueueService {
           action: 'created',
           field: 'enqueuedAt',
           oldValue: null,
-          newValue: `Enviada al Forge por ${userName} (batch ${batchId.slice(0, 8)})`,
+          newValue: forgeBranchData
+            ? `Enviada al Forge por ${userName} (batch ${batchId.slice(0, 8)}, branch ${forgeBranchData.forgeBranch})`
+            : `Enviada al Forge por ${userName} (batch ${batchId.slice(0, 8)}, sandbox mode sin branch)`,
           changedById: user.sub,
           changedByName: userName,
         },
@@ -164,6 +236,13 @@ export class FactoryQueueService {
       storiesCount: epic.stories.length,
       totalStoryPoints,
       enqueuedAt: now.toISOString(),
+      // Campos runtime — recién encolada, ningún run aún:
+      priority: epic.priority as 'critical' | 'high' | 'medium' | 'low',
+      storiesDone: 0,
+      storiesInProgress: 0,
+      agentCount: 0,
+      runStartedAt: null,
+      forgeBranch: forgeBranchData?.forgeBranch ?? null,
       enqueuedBy: user.sub,
       enqueuedByName: userName,
     };
@@ -189,27 +268,66 @@ export class FactoryQueueService {
     const epics = await this.prisma.epic.findMany({
       where,
       include: {
-        stories: { select: { id: true, storyPoints: true } },
+        stories: {
+          select: {
+            id: true,
+            storyPoints: true,
+            status: true,
+            agentRuns: {
+              where: { status: { in: ['claimed', 'running'] } },
+              select: { id: true, startedAt: true },
+              orderBy: { startedAt: 'asc' },
+              take: 1,
+            },
+          },
+        },
       },
       orderBy: { enqueuedAt: 'asc' },
     });
 
     return epics
       .filter((e) => e.enqueuedAt && e.enqueuedBatchId)
-      .map((e) => ({
-        batchId: e.enqueuedBatchId!,
-        epicId: e.id,
-        epicTitle: e.title,
-        storiesCount: e.stories.length,
-        totalStoryPoints: e.stories.reduce(
-          (sum, s) => sum + (s.storyPoints ?? 0),
+      .map((e) => {
+        // Cuenta stories por estado para que el frontend muestre el
+        // progress bar correcto cuando la épica está activa en Forge.
+        const storiesDone = e.stories.filter((s) => s.status === 'done').length;
+        const storiesInProgress = e.stories.reduce(
+          (sum, s) => sum + s.agentRuns.length,
           0,
-        ),
-        enqueuedAt: e.enqueuedAt!.toISOString(),
-        // No exponemos enqueuedBy en el listing — viene del changelog si se
-        // necesita auditar. En el dashboard típicamente no se muestra.
-        enqueuedBy: '',
-        enqueuedByName: '',
-      }));
+        );
+        // Earliest startedAt de cualquier run activo en cualquier story
+        // de la épica — sirve como "epic empezó a procesarse" para el
+        // duration calc del card.
+        let earliestRunStartedAt: Date | null = null;
+        for (const s of e.stories) {
+          for (const r of s.agentRuns) {
+            if (!earliestRunStartedAt || r.startedAt < earliestRunStartedAt) {
+              earliestRunStartedAt = r.startedAt;
+            }
+          }
+        }
+
+        return {
+          batchId: e.enqueuedBatchId!,
+          epicId: e.id,
+          epicTitle: e.title,
+          storiesCount: e.stories.length,
+          totalStoryPoints: e.stories.reduce(
+            (sum, s) => sum + (s.storyPoints ?? 0),
+            0,
+          ),
+          enqueuedAt: e.enqueuedAt!.toISOString(),
+          // No exponemos enqueuedBy en el listing — viene del changelog
+          // si se necesita auditar.
+          enqueuedBy: '',
+          enqueuedByName: '',
+          priority: e.priority as 'critical' | 'high' | 'medium' | 'low',
+          storiesDone,
+          storiesInProgress,
+          agentCount: storiesInProgress,
+          runStartedAt: earliestRunStartedAt?.toISOString() ?? null,
+          forgeBranch: e.forgeBranch,
+        };
+      });
   }
 }

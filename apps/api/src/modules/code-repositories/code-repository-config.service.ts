@@ -16,6 +16,9 @@ export interface CodeRepositoryPublic {
   repo: string;
   branch: string;
   isActive: boolean;
+  /** Cuando true, el Forge puede clonar+commitear+pushear+abrir PRs en este repo.
+   *  Independiente de `isActive` (que solo da acceso de lectura a agentes). */
+  forgeWritable: boolean;
   hasToken: boolean;
   tokenPreview: string;
   cloneStatus: CodeRepoCloneStatus;
@@ -95,6 +98,25 @@ export class CodeRepositoryConfigService {
    */
   async getEnabledWithTokens(): Promise<Array<{ config: CodeRepository; token: string }>> {
     const repos = await this.prisma.codeRepository.findMany({ where: { isActive: true } });
+    return repos
+      .map((r) => this.decryptRow(r))
+      .filter((x): x is { config: CodeRepository; token: string } => x !== null);
+  }
+
+  /**
+   * Devuelve los repos donde el Forge puede ESCRIBIR (clone + commit + push + PR).
+   * Filtra por `forgeWritable=true` AND `isActive=true` — opt-in defensivo:
+   * un repo debe estar enabled (read) Y explícitamente marcado como forgeWritable
+   * (write) para ser destino del Forge. Esto evita que el Forge escriba
+   * accidentalmente en un repo que solo se quería para read-only.
+   *
+   * Usado por GitHubService para resolver el clone URL al claim de stories.
+   * Si retorna [], el Forge cae a sandbox mode (run sin push, sin PR).
+   */
+  async getForgeWritableWithTokens(): Promise<Array<{ config: CodeRepository; token: string }>> {
+    const repos = await this.prisma.codeRepository.findMany({
+      where: { isActive: true, forgeWritable: true },
+    });
     return repos
       .map((r) => this.decryptRow(r))
       .filter((x): x is { config: CodeRepository; token: string } => x !== null);
@@ -232,6 +254,43 @@ export class CodeRepositoryConfigService {
   }
 
   /**
+   * Activa el toggle `forgeWritable` para que este repo sea destino válido
+   * de escritura del Forge. Requiere que `isActive=true` también — read es
+   * pre-requisito para write.
+   */
+  async enableForgeWritable(id: string): Promise<CodeRepositoryPublic> {
+    const existing = await this.prisma.codeRepository.findUnique({ where: { id } });
+    if (!existing) throw new NotFoundException('Code repository no encontrado');
+    if (!existing.isActive) {
+      throw new ConflictException(
+        'El repo debe estar habilitado (isActive=true) antes de permitir escritura del Forge',
+      );
+    }
+    if (existing.forgeWritable) return this.toPublic(existing);
+    const updated = await this.prisma.codeRepository.update({
+      where: { id },
+      data: { forgeWritable: true },
+    });
+    this.logger.warn(
+      `[forgeWritable.enable] id=${id} name="${updated.name}" — Forge ahora puede ESCRIBIR (commit/push/PR) en este repo`,
+    );
+    return this.toPublic(updated);
+  }
+
+  /** Desactiva escritura del Forge en este repo (vuelve a read-only). */
+  async disableForgeWritable(id: string): Promise<CodeRepositoryPublic> {
+    const existing = await this.prisma.codeRepository.findUnique({ where: { id } });
+    if (!existing) throw new NotFoundException('Code repository no encontrado');
+    if (!existing.forgeWritable) return this.toPublic(existing);
+    const updated = await this.prisma.codeRepository.update({
+      where: { id },
+      data: { forgeWritable: false },
+    });
+    this.logger.log(`[forgeWritable.disable] id=${id} name="${updated.name}"`);
+    return this.toPublic(updated);
+  }
+
+  /**
    * Test connection contra GitHub. No dispara un clone — solo valida token + repo + branch.
    */
   async testConnection(id: string): Promise<{ ok: boolean; message: string }> {
@@ -298,6 +357,7 @@ export class CodeRepositoryConfigService {
       repo: repo.repo,
       branch: repo.branch,
       isActive: repo.isActive,
+      forgeWritable: repo.forgeWritable,
       hasToken: !!repo.tokenCiphertext,
       tokenPreview: 'ghp_' + '•'.repeat(20) + repo.id.slice(-4),
       cloneStatus: repo.cloneStatus,
