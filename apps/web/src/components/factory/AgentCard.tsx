@@ -1,7 +1,7 @@
 'use client';
 
 import { useCallback } from 'react';
-import { Clock, Zap, DollarSign, FileCode2, TestTube2, Info } from 'lucide-react';
+import { Clock, Zap, DollarSign, FileDiff, Info } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import type { FactoryAgent } from '@cenzontle/shared';
 import { AgentStatus } from '@cenzontle/shared';
@@ -194,7 +194,7 @@ export function AgentCard({ agent, isSelected = false, onClick, onInfoClick }: A
       tabIndex={onClick ? 0 : undefined}
       role={onClick ? 'button' : undefined}
       aria-pressed={onClick ? isSelected : undefined}
-      aria-label={`${agent.name}, status: ${config.label}${agent.storyKey ? `, working on ${agent.storyKey}` : ''}`}
+      aria-label={`${agent.name}, status: ${config.label}`}
     >
       {/* Header: name + info button + status pill */}
       <div className="flex items-center justify-between gap-2">
@@ -211,27 +211,21 @@ export function AgentCard({ agent, isSelected = false, onClick, onInfoClick }: A
         <StatusPill status={agent.status} />
       </div>
 
-      {/* Assignment */}
-      <div className="mt-1.5 min-h-[20px]">
-        {agent.storyKey ? (
-          <p className="truncate text-xs text-muted-foreground">
-            <span className="font-medium text-foreground">{agent.storyKey}</span>
-            {agent.currentFile && (
-              <span className="text-muted-foreground/70"> &middot; {agent.currentFile.split('/').pop()}</span>
-            )}
-          </p>
-        ) : (
-          <p className="text-xs italic text-muted-foreground/50">Idle</p>
-        )}
-      </div>
-
-      {/* Metrics row — all in one line */}
+      {/* Metrics row — 4 KPIs: tiempo, tokens new, cost, archivos del diff.
+          filesModified=null se muestra como "—" (sandbox mode o run sin push). */}
       <div className="mt-3 flex items-center gap-3 flex-wrap">
         <MetricItem icon={Clock} value={formatDuration(agent.duration)} label="Duration" />
         <MetricItem icon={Zap} value={formatTokens(agent.tokens)} label="Tokens" />
         <MetricItem icon={DollarSign} value={formatCost(agent.cost)} label="Cost" />
-        <MetricItem icon={FileCode2} value={`${agent.linesWritten}`} label="lines" />
-        <MetricItem icon={TestTube2} value={`${agent.testsPassed}/${agent.testsRun}`} label="tests" />
+        <MetricItem
+          icon={FileDiff}
+          value={
+            agent.filesModified !== null && agent.filesModified !== undefined
+              ? `${agent.filesModified}`
+              : '—'
+          }
+          label="files"
+        />
       </div>
 
       {/* DoD checkpoints */}

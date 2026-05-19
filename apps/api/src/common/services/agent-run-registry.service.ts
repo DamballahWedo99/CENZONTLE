@@ -1,4 +1,8 @@
-import { ConflictException, Injectable, Logger } from '@nestjs/common';
+import {
+  ConflictException,
+  Injectable,
+} from '@nestjs/common';
+import { InjectPinoLogger, PinoLogger } from 'nestjs-pino';
 
 /**
  * Registro centralizado de agentes IA en ejecución (story / diagram / epic
@@ -20,7 +24,9 @@ import { ConflictException, Injectable, Logger } from '@nestjs/common';
  */
 @Injectable()
 export class AgentRunRegistryService {
-  private readonly logger = new Logger(AgentRunRegistryService.name);
+  constructor(
+    @InjectPinoLogger(AgentRunRegistryService.name) private readonly logger: PinoLogger,
+  ) {}
 
   /**
    * Cap por usuario — total agentes simultáneos sumados across los 3

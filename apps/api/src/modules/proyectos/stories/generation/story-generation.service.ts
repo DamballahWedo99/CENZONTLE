@@ -1,4 +1,6 @@
-import { Injectable, Logger } from '@nestjs/common';
+import {
+  Injectable,
+} from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import Anthropic from '@anthropic-ai/sdk';
 import { Subject } from 'rxjs';
@@ -45,6 +47,7 @@ import type {
 } from '@cenzontle/shared';
 import { scrubSecrets } from '../../../../common/utils/scrub-secrets.util';
 import { AgentTokenSettingsService } from '../../../agent-token-settings/agent-token-settings.service';
+import { InjectPinoLogger, PinoLogger } from 'nestjs-pino';
 
 // Sonnet 4.6 — soporta adaptive thinking + effort levels + web_search_20260209
 // con dynamic filtering. Migrado desde claude-sonnet-4-20250514 (Sonnet 4.0)
@@ -491,7 +494,6 @@ interface AgentLoopParams {
 
 @Injectable()
 export class StoryGenerationService {
-  private readonly logger = new Logger(StoryGenerationService.name);
   private readonly client: Anthropic;
   // Toolsets por rol (referencias a las mismas instancias inyectadas).
   private readonly poToolset: AgentTool[];
@@ -519,6 +521,7 @@ export class StoryGenerationService {
     private readonly vaultRead: VaultReadTool,
     private readonly codeRepoClones: CodeRepoCloneService,
     private readonly tokenSettings: AgentTokenSettingsService,
+    @InjectPinoLogger(StoryGenerationService.name) private readonly logger: PinoLogger,
   ) {
     const apiKey = this.config.get<string>('ANTHROPIC_API_KEY');
     if (!apiKey) {
@@ -549,7 +552,7 @@ export class StoryGenerationService {
         `[StoryGen] STORY_AGENT_CONCURRENCY=${concurrencyOrDefault} fuera de rango [${STORY_AGENT_CONCURRENCY_MIN}, ${STORY_AGENT_CONCURRENCY_MAX}]. Usando ${this.storyAgentConcurrency}.`,
       );
     } else {
-      this.logger.log(
+      this.logger.info(
         `[StoryGen] STORY_AGENT_CONCURRENCY=${this.storyAgentConcurrency} (default=${STORY_AGENT_CONCURRENCY_DEFAULT}, range=[${STORY_AGENT_CONCURRENCY_MIN}, ${STORY_AGENT_CONCURRENCY_MAX}])`,
       );
     }
@@ -624,7 +627,7 @@ export class StoryGenerationService {
     const subject = new Subject<{ data: StoryGenerationEvent }>();
 
     this.runOrchestrator(epicId, prompt, count, subject, signal, webSearch).catch((err) => {
-      this.logger.error(`Orchestrator error: ${err.message}`, err.stack);
+      this.logger.error({ err }, `Orchestrator error: ${err.message}`);
       subject.next({
         data: {
           type: 'error',
@@ -651,7 +654,7 @@ export class StoryGenerationService {
     webSearch: boolean,
   ) {
     const runStartTime = Date.now();
-    this.logger.log(
+    this.logger.info(
       `[StoryGen] ═══ START orchestrator epic=${epicId} count=${count ?? 'auto'} webSearch=${webSearch} hasPrompt=${!!userPrompt}`,
     );
     subject.next({ data: { type: 'run_started', timestamp: new Date().toISOString() } });
@@ -696,7 +699,7 @@ export class StoryGenerationService {
 
     try {
       // ── Fase 2: drafting_po
-      this.logger.log(`[StoryGen] ── Phase: drafting_po (t=${Date.now() - runStartTime}ms)`);
+      this.logger.info({ phase: 'drafting_po', elapsedMs: Date.now() - runStartTime }, `[StoryGen] ── Phase: drafting_po (t=${Date.now() - runStartTime}ms)`);
       subject.next({
         data: {
           type: 'phase_change',
@@ -712,7 +715,7 @@ export class StoryGenerationService {
         this.logger.warn(`[StoryGen] PO agent returned null — aborting orchestration`);
         return;
       }
-      this.logger.log(
+      this.logger.info(
         `[StoryGen] ✓ PO done in ${Date.now() - poStart}ms: ${poResult.outlines.length} outlines, ${poResult.relatedDocuments.length} relatedDocs`,
       );
 
@@ -737,7 +740,7 @@ export class StoryGenerationService {
       // Constraint mantenido: el pipeline RESUELVE solo cuando todos los
       // workers terminaron sus QA → DepsAuditor + StoryOrder siguen viendo
       // el batch completo (su semántica es "evaluación cross-story").
-      this.logger.log(`[StoryGen] ── Phase: drafting_technical+qa (PIPELINE) (t=${Date.now() - runStartTime}ms)`);
+      this.logger.info({ phase: 'drafting_technical_qa', elapsedMs: Date.now() - runStartTime }, `[StoryGen] ── Phase: drafting_technical+qa (PIPELINE) (t=${Date.now() - runStartTime}ms)`);
       const outlinesPayload = poResult.outlines.map((o, i) => ({ storyIndex: i, title: o.title }));
       subject.next({
         data: {
@@ -777,7 +780,7 @@ export class StoryGenerationService {
         return;
       }
       const { tlResult, qaResult } = pipelineResult;
-      this.logger.log(
+      this.logger.info(
         `[StoryGen] ✓ TL+QA pipeline done in ${Date.now() - tlqaStart}ms: ${tlResult.designs.size} designs, ${qaResult.strategies.size} strategies`,
       );
       const qaDepsTotal = Array.from(qaResult.discoveredDependenciesByIndex.values()).reduce(
@@ -787,7 +790,7 @@ export class StoryGenerationService {
       // Log de QA usa el mismo `tlqaStart` porque ambos agentes corrieron
       // pipelined (no hay un "start del QA" separado en el orquestador —
       // cada worker arrancó su QA en su propio momento).
-      this.logger.log(
+      this.logger.info(
         `[StoryGen] ✓ QA done in pipeline (total ${Date.now() - tlqaStart}ms): ${qaResult.strategies.size} strategies, ${qaDepsTotal} deps across ${qaResult.discoveredDependenciesByIndex.size} stories`,
       );
 
@@ -799,7 +802,7 @@ export class StoryGenerationService {
       // sacrifica la #N — y deps técnicas suele ser el sacrificado. El
       // DepsAuditor tiene UNA sola prioridad, no la puede sacrificar.
       if (webSearch) {
-        this.logger.log(`[StoryGen] ── Phase: auditing_deps (t=${Date.now() - runStartTime}ms)`);
+        this.logger.info({ phase: 'auditing_deps', elapsedMs: Date.now() - runStartTime }, `[StoryGen] ── Phase: auditing_deps (t=${Date.now() - runStartTime}ms)`);
         subject.next({
           data: {
             type: 'phase_change',
@@ -843,18 +846,18 @@ export class StoryGenerationService {
           const dedupAfterAudit = dedupCrossStoriesPure(merged, common.existingDepKeys);
           qaResult.discoveredDependenciesByIndex = dedupAfterAudit.depsByIndex;
           const auditAddedTotal = Array.from(auditedDeps.values()).reduce((s, a) => s + a.length, 0);
-          this.logger.log(
+          this.logger.info(
             `[StoryGen] ✓ DepsAuditor done in ${Date.now() - auditStart}ms: emitted=${auditAddedTotal}, ` +
               `removed=${dedupAfterAudit.duplicatesRemoved} (collisions with TL/QA), ` +
               `collidedWithExisting=${dedupAfterAudit.collidedWithExisting}`,
           );
         } else {
-          this.logger.log(
+          this.logger.info(
             `[StoryGen] ✓ DepsAuditor done in ${Date.now() - auditStart}ms: no missing deps detected`,
           );
         }
       } else {
-        this.logger.log(
+        this.logger.info(
           `[StoryGen] ⊘ DepsAuditor skipped (webSearch=false). Sin web_search el auditor no puede investigar vendors.`,
         );
       }
@@ -865,7 +868,7 @@ export class StoryGenerationService {
       // razón de tenerla como fase separada es recuperar el DAG hard/soft
       // entre historias que se perdió al paralelizar TL/QA por historia.
       // Skip interno si solo hay 1 outline (sin pareja no hay edge posible).
-      this.logger.log(`[StoryGen] ── Phase: analyzing_order (t=${Date.now() - runStartTime}ms)`);
+      this.logger.info({ phase: 'analyzing_order', elapsedMs: Date.now() - runStartTime }, `[StoryGen] ── Phase: analyzing_order (t=${Date.now() - runStartTime}ms)`);
       subject.next({
         data: {
           type: 'phase_change',
@@ -899,17 +902,17 @@ export class StoryGenerationService {
             }
           : tlResult;
       if (recoveredEdges.length > 0) {
-        this.logger.log(
+        this.logger.info(
           `[StoryGen] ✓ StoryOrderAnalyzer done in ${Date.now() - orderStart}ms: recovered ${recoveredEdges.length} edges. Total now: ${finalTlResult.storyOrderEdges.length}.`,
         );
       } else {
-        this.logger.log(
+        this.logger.info(
           `[StoryGen] ✓ StoryOrderAnalyzer done in ${Date.now() - orderStart}ms: no edges (historias independientes o agente sin output).`,
         );
       }
 
       // ── Fase 7: proposing (consolidacion y emision)
-      this.logger.log(`[StoryGen] ── Phase: proposing (t=${Date.now() - runStartTime}ms)`);
+      this.logger.info({ phase: 'proposing', elapsedMs: Date.now() - runStartTime }, `[StoryGen] ── Phase: proposing (t=${Date.now() - runStartTime}ms)`);
       subject.next({
         data: {
           type: 'phase_change',
@@ -922,7 +925,7 @@ export class StoryGenerationService {
       this.emitProposals(poResult, finalTlResult, qaResult, common, subject);
 
       const totalMs = Date.now() - runStartTime;
-      this.logger.log(`[StoryGen] ═══ DONE orchestrator in ${totalMs}ms (${(totalMs / 1000).toFixed(1)}s)`);
+      this.logger.info({ totalMs }, `[StoryGen] ═══ DONE orchestrator in ${totalMs}ms (${(totalMs / 1000).toFixed(1)}s)`);
       subject.next({ data: { type: 'done', timestamp: new Date().toISOString() } });
       subject.next({
         data: {
@@ -1044,7 +1047,7 @@ export class StoryGenerationService {
         const note = await this.vault.readNote(epic.vaultPath);
         epicMarkdown = note?.content ?? '';
       } catch (err: any) {
-        this.logger.warn(`No se pudo leer markdown de la epica: ${err?.message}`);
+        this.logger.warn({ message: err?.message }, `No se pudo leer markdown de la epica: ${err?.message}`);
       }
     }
 
@@ -1191,7 +1194,7 @@ export class StoryGenerationService {
       const titleKey = normalizeTitle(s.name);
       globalSecretsRegistry.set(`${vendorKey}::${titleKey}`, s);
     }
-    this.logger.log(
+    this.logger.info(
       `[StoryGen] globalSecretsRegistry loaded: ${globalSecretsRegistry.size} secrets across ${new Set(allExternalSecretsRaw.map((s) => s.vendor ?? '')).size} vendors`,
     );
 
@@ -1278,7 +1281,7 @@ export class StoryGenerationService {
     // Si no hay vaultPath en formato nuevo, no hay folder canonico que listar.
     if (!isNewFormatVaultPath(vaultPath)) {
       if (vaultPath) {
-        this.logger.warn(`[StoryGen] epic vault scan omitido — vaultPath legacy o nulo: "${vaultPath}"`);
+        this.logger.warn({ vaultPath }, `[StoryGen] epic vault scan omitido — vaultPath legacy o nulo: "${vaultPath}"`);
       }
       return [];
     }
@@ -1329,7 +1332,7 @@ export class StoryGenerationService {
         (acc, f) => { acc[f.kind] = (acc[f.kind] || 0) + 1; return acc; },
         { diagrama: 0, documento: 0, dependencia: 0, diseno: 0, matriz: 0, historia: 0, otro: 0 },
       );
-      this.logger.log(
+      this.logger.info(
         `[StoryGen] epic vault scan: found ${limited.length} files` +
         ` (${counts.diagrama} diagramas, ${counts.diseno} disenos,` +
         ` ${counts.documento} documentos, ${counts.dependencia} deps,` +
@@ -1338,7 +1341,7 @@ export class StoryGenerationService {
 
       return limited;
     } catch (err: any) {
-      this.logger.warn(`[StoryGen] epic vault scan falló (vault desconectado o 404): ${err?.message}`);
+      this.logger.warn({ message: err?.message }, `[StoryGen] epic vault scan falló (vault desconectado o 404): ${err?.message}`);
       return [];
     }
   }
@@ -2158,7 +2161,7 @@ NO cambies titles, descriptions, acceptanceCriteria — esos estan congelados. S
       0,
     );
     if (totalTechDeps > 0) {
-      this.logger.log(
+      this.logger.info(
         `[StoryGen:TL] ${totalTechDeps} technical dependencies emitted across ${technicalDependenciesByIndex.size} stories (per-story, no longer transversal)`,
       );
     }
@@ -2188,7 +2191,7 @@ NO cambies titles, descriptions, acceptanceCriteria — esos estan congelados. S
       },
     );
     if (storyOrderEdges.length > 0) {
-      this.logger.log(
+      this.logger.info(
         `[StoryGen:TL] ${storyOrderEdges.length} story-order edges emitted ` +
           `(${storyOrderEdges.filter((e) => e.hardness === 'hard').length} hard / ` +
           `${storyOrderEdges.filter((e) => e.hardness === 'soft').length} soft)`,
@@ -2674,7 +2677,7 @@ NO cambies PO ni technical. Si una historia es dificil de testear, dilo en \`qa.
       0,
     );
     if (totalQADeps > 0) {
-      this.logger.log(
+      this.logger.info(
         `[StoryGen:QA] ${totalQADeps} discovered dependencies emitted across ${discoveredDependenciesByIndex.size} stories (per-story, no longer transversal)`,
       );
     }
@@ -2752,7 +2755,7 @@ NO cambies PO ni technical. Si una historia es dificil de testear, dilo en \`qa.
     runStartTime: number,
   ): Promise<{ tlResult: TLResult; qaResult: QAResult } | null> {
     const N = poResult.outlines.length;
-    this.logger.log(
+    this.logger.info(
       `[StoryGen:Pipeline] TL→QA PIPELINE mode — ${N} stories, concurrency=${this.storyAgentConcurrency}`,
     );
 
@@ -2796,7 +2799,7 @@ NO cambies PO ni technical. Si una historia es dificil de testear, dilo en \`qa.
 
         // ── Paso 1: TL para esta historia. Si TL tira, propaga al worker
         //    (capturado por runWithConcurrency como `results[i].error`).
-        this.logger.log(`[StoryGen:Pipeline] [${originalIdx + 1}/${N}] TL start`);
+        this.logger.info({ N }, `[StoryGen:Pipeline] [${originalIdx + 1}/${N}] TL start`);
         const tlR = await this.runTechnicalAgent(
           common,
           commonContextBlock,
@@ -2807,7 +2810,7 @@ NO cambies PO ni technical. Si una historia es dificil de testear, dilo en \`qa.
           runStartTime,
         );
         const tlReturnedNull = tlR === null;
-        this.logger.log(
+        this.logger.info(
           `[StoryGen:Pipeline] [${originalIdx + 1}/${N}] TL done (designs=${tlR?.designs.size ?? 0})`,
         );
 
@@ -2853,7 +2856,7 @@ NO cambies PO ni technical. Si una historia es dificil de testear, dilo en \`qa.
         const tlDeps = tlR.technicalDependenciesByIndex.get(0);
         if (tlDeps) singletonTL.technicalDependenciesByIndex.set(0, tlDeps);
 
-        this.logger.log(
+        this.logger.info(
           `[StoryGen:Pipeline] [${originalIdx + 1}/${N}] QA start (TL→QA pipeline, sin esperar a otros workers)`,
         );
         // QA en try/catch propio — el throw NO debe propagar al worker
@@ -2880,7 +2883,7 @@ NO cambies PO ni technical. Si una historia es dificil de testear, dilo en \`qa.
           );
         }
         const qaReturnedNull = qaError === null && qaR === null;
-        this.logger.log(
+        this.logger.info(
           `[StoryGen:Pipeline] [${originalIdx + 1}/${N}] QA done (strategies=${qaR?.strategies.size ?? 0}, error=${qaError !== null})`,
         );
 
@@ -3295,10 +3298,10 @@ Si todas las deps están completas, retorna \`additions: []\` — está OK.`;
       storyIndex?: number;
     }>;
 
-    this.logger.log(
+    this.logger.info(
       `[StoryGen:DepsAuditor] services identified: ${servicesIdentified.map((s) => s.name).filter(Boolean).join(', ') || '(none)'}`,
     );
-    this.logger.log(
+    this.logger.info(
       `[StoryGen:DepsAuditor] additions emitted: ${additions.length}`,
     );
 
@@ -3379,7 +3382,7 @@ Si todas las deps están completas, retorna \`additions: []\` — está OK.`;
     runStartTime: number,
   ): Promise<StoryOrderEdge[]> {
     if (poResult.outlines.length < 2) {
-      this.logger.log(
+      this.logger.info(
         `[StoryGen:StoryOrder] ⊘ skipped — solo ${poResult.outlines.length} story en batch (sin edges posibles).`,
       );
       return [];
@@ -3545,7 +3548,7 @@ Reglas:
       tlResult.storyOrderEdges,
     );
 
-    this.logger.log(
+    this.logger.info(
       `[StoryGen:StoryOrder] ✓ emitted ${validated.length} edges ` +
         `(${validated.filter((e) => e.hardness === 'hard').length} hard / ` +
         `${validated.filter((e) => e.hardness === 'soft').length} soft) ` +
@@ -3609,7 +3612,7 @@ Reglas:
       : thinkingEnabled
         ? `adaptive(${effort})`
         : 'off';
-    this.logger.log(
+    this.logger.info(
       `[StoryGen:${role.toUpperCase()}] ▶ loop start: model=${model} maxIter=${maxIterations} maxTokens=${maxTokens} tools=${agentToolset.length}+terminal thinking=${thinkingDisplay} ` +
         `commonContext=${commonContextChars} chars (~${commonContextEstTokens} tokens), roleSystemPrompt=${roleSystemChars} chars (~${roleSystemEstTokens} tokens). ` +
         `Cache ${activeBreakpoints.length > 0 ? `✅ activará en: [${activeBreakpoints.join(', ')}]` : '⚠️ NO activará (ambos < 1024 tokens)'}.`,
@@ -3639,12 +3642,12 @@ Reglas:
 
     for (let iteration = 0; iteration < maxIterations; iteration++) {
       if (signal?.aborted) {
-        this.logger.warn(`[StoryGen:${role.toUpperCase()}] aborted before iter ${iteration}`);
+        this.logger.warn({ iteration }, `[StoryGen:${role.toUpperCase()}] aborted before iter ${iteration}`);
         return null;
       }
 
       if (iteration === maxIterations - 2) {
-        this.logger.log(`[StoryGen:${role.toUpperCase()}] nudge (iter ${iteration}/${maxIterations}) — forcing terminal tool soon`);
+        this.logger.info({ iteration, maxIterations }, `[StoryGen:${role.toUpperCase()}] nudge (iter ${iteration}/${maxIterations}) — forcing terminal tool soon`);
         messages.push({
           role: 'user',
           content: `Ya tienes suficiente contexto. Llama a ${terminalToolName} AHORA con todo lo que tengas. No hagas mas busquedas.`,
@@ -3853,12 +3856,12 @@ Reglas:
       // request to let Claude continue" — exactamente lo que hace el push
       // de assistantContent + continue del loop.
       if (response.stop_reason === 'pause_turn') {
-        this.logger.log(
+        this.logger.info(
           `[StoryGen:${role.toUpperCase()}] ⏸ pause_turn at iter ${iteration} — server-side loop hit limit (likely advisor or web_search dangling). Continuing on next iter.`,
         );
       }
 
-      this.logger.log(
+      this.logger.info(
         `[StoryGen:${role.toUpperCase()}] iter ${iteration} stop=${response.stop_reason} dur=${Date.now() - callStart}ms ` +
           `tokens(in=${inputTokens} out=${outputTokens} cache_read=${cacheRead} cache_create=${cacheCreate}) ` +
           `thinking_blocks=${thinkingBlocksCount} tool_calls=${toolUseBlocksCount}` +
@@ -3909,7 +3912,7 @@ Reglas:
         const advisorSummary = totalAdvisorCount > 0
           ? ` advisor(uses=${totalAdvisorCount} in=${totalAdvisorInputTokens} out=${totalAdvisorOutputTokens}) 🦉`
           : ' advisor(uses=0)';
-        this.logger.log(
+        this.logger.info(
           `[StoryGen:${role.toUpperCase()}] ▣ run summary: iters=${iteration + 1} model=${model} ` +
             `totals(in=${totalInputTokens} out=${totalOutputTokens} cache_read=${totalCacheRead} cache_create=${totalCacheCreate}) ` +
             `ratio_read_to_write=${ratio}:1 — target ≥4:1 (anti-thrashing OK).${advisorSummary}`,
@@ -3973,7 +3976,7 @@ Reglas:
 
       if (toolUseBlocks.length === 0 && response.stop_reason === 'end_turn') {
         // El agente termino sin llamar terminal tool — output ambiguo.
-        this.logger.warn(`Agent ${role} ended without calling ${terminalToolName}`);
+        this.logger.warn({ role, terminalToolName }, `Agent ${role} ended without calling ${terminalToolName}`);
         subject.next({
           data: {
             type: 'error',
@@ -4030,7 +4033,7 @@ Reglas:
               `[StoryGen:${role.toUpperCase()}] ⚠ terminal tool '${terminalToolName}' called at iter ${iteration} BUT stop_reason=max_tokens — JSON likely truncated. Preview: ${preview}. Modelo escribio: "${scrubSecrets(assistantText).slice(0, 400)}"`,
             );
           } else {
-            this.logger.log(
+            this.logger.info(
               `[StoryGen:${role.toUpperCase()}] ✓ terminal tool '${terminalToolName}' called at iter ${iteration} — ${preview}${assistantText ? ` | text_preview="${scrubSecrets(assistantText).slice(0, 300)}"` : ''}`,
             );
           }
@@ -4069,7 +4072,7 @@ Reglas:
             const toolPromise = tool
               .executeMultimodal(toolBlock.input as Record<string, unknown>, ctx)
               .catch((err) => {
-                this.logger.warn(`Late rejection from ${tool.name}: ${err?.message}`);
+                this.logger.warn({ name: tool.name, message: err?.message }, `Late rejection from ${tool.name}: ${err?.message}`);
                 throw err;
               });
             const mm = await Promise.race([toolPromise, timer]);
@@ -4092,7 +4095,7 @@ Reglas:
             const toolPromise = tool
               .execute(toolBlock.input as Record<string, unknown>, ctx)
               .catch((err) => {
-                this.logger.warn(`Late rejection from ${tool.name}: ${err?.message}`);
+                this.logger.warn({ name: tool.name, message: err?.message }, `Late rejection from ${tool.name}: ${err?.message}`);
                 throw err;
               });
             result = await Promise.race([toolPromise, timer]);
@@ -4119,7 +4122,7 @@ Reglas:
           });
         } catch (err: any) {
           timer.clear();
-          this.logger.warn(`Tool ${tool.name} (${role}) failed: ${err?.message}`);
+          this.logger.warn({ name: tool.name, role, message: err?.message }, `Tool ${tool.name} (${role}) failed: ${err?.message}`);
           subject.next({
             data: {
               type: 'step_done',
@@ -4153,7 +4156,7 @@ Reglas:
     }
 
     // Max iter alcanzado sin terminal tool
-    this.logger.warn(`Agent ${role} reached max iterations (${maxIterations}) without calling ${terminalToolName}`);
+    this.logger.warn({ role, maxIterations, terminalToolName }, `Agent ${role} reached max iterations (${maxIterations}) without calling ${terminalToolName}`);
     subject.next({
       data: {
         type: 'error',
@@ -4201,7 +4204,7 @@ Reglas:
       (s, a) => s + a.length,
       0,
     );
-    this.logger.log(
+    this.logger.info(
       `[StoryGen] Consolidating ${poResult.outlines.length} proposals (docs=${poResult.relatedDocuments.length} tl=${totalTechDeps} qa=${totalQADeps} per-story, storyEdges=${tlResult.storyOrderEdges.length})`,
     );
 
@@ -4275,13 +4278,13 @@ Reglas:
         const matchedSecret = common.globalSecretsRegistry.get(key);
         if (!matchedSecret) return dep;
         autoLinkedCount++;
-        this.logger.log(
+        this.logger.info(
           `[StoryGen] auto-link cross-org: story[${i}] dep "${dep.title}" [vendor=${dep.vendor ?? '∅'}] → secret "${matchedSecret.name}" (id=${matchedSecret.id})`,
         );
         return { ...dep, linkedSecretId: matchedSecret.id };
       });
       if (autoLinkedCount > 0) {
-        this.logger.log(
+        this.logger.info(
           `[StoryGen] story[${i}] "${outline.title.slice(0, 40)}…" — ${autoLinkedCount}/${depsForThisStory.length} deps auto-vinculadas a secrets globales existentes`,
         );
       }
@@ -4304,7 +4307,7 @@ Reglas:
         blockedBy: blockedBy.length > 0 ? blockedBy : undefined,
       };
 
-      this.logger.log(
+      this.logger.info(
         `[StoryGen]   proposal[${i}] "${outline.title.slice(0, 60)}" SP=${outline.storyPoints} pod=${podId}${podFallbackUsed ? ' (fallback)' : ''} tech=${technical.markdown ? `${technical.markdown.length}c` : 'empty'} qa=${qa.markdown ? `${qa.markdown.length}c` : 'empty'}`,
       );
 
@@ -4453,7 +4456,7 @@ Reglas:
       /(jest|vitest|pytest|junit|mockito|@testing-library|supertest|playwright)/i.test(qa.markdown),
     ).length;
     const avgChars = entries.reduce((s, qa) => s + qa.markdown.length, 0) / entries.length;
-    this.logger.log(
+    this.logger.info(
       `[StoryGen:QA] quality: ${allHeadings}/${entries.length} have all 5 headings, ` +
         `${citesRealPaths}/${entries.length} cite real repo paths, ` +
         `${citesFramework}/${entries.length} cite framework, ` +
@@ -4470,7 +4473,7 @@ Reglas:
     ).length;
     const citesRealPaths = entries.filter((t) => this.REPO_PATH_REGEX.test(t.markdown)).length;
     const avgChars = entries.reduce((s, t) => s + t.markdown.length, 0) / entries.length;
-    this.logger.log(
+    this.logger.info(
       `[StoryGen:TL] quality: ${allHeadings}/${entries.length} have all 5 headings, ` +
         `${citesRealPaths}/${entries.length} cite real repo paths, ` +
         `avg_chars=${avgChars.toFixed(0)}`,
@@ -4485,7 +4488,7 @@ Reglas:
     ).length;
     const withTBD = outlines.filter((o) => /(tbd|n\/a|pronto|asap|por definir)/i.test(o.po.markdown)).length;
     const avgChars = outlines.reduce((s, o) => s + o.po.markdown.length, 0) / outlines.length;
-    this.logger.log(
+    this.logger.info(
       `[StoryGen:PO] quality: ${allHeadings}/${outlines.length} have all 5 headings, ` +
         `${withTBD}/${outlines.length} contain TBD/N/A (FALLA si > 0), ` +
         `avg_chars=${avgChars.toFixed(0)}`,
@@ -4545,7 +4548,7 @@ Reglas:
     qaDeps: DiscoveredDependency[],
   ): DiscoveredDependency[] {
     return mergeDiscoveredDependenciesPure(tlDeps, qaDeps, (details) => {
-      this.logger.log(
+      this.logger.info(
         `[mergeDiscoveredDependencies] deduped ${details.input} → ${details.output} (tl=${details.tl} qa=${details.qa})`,
       );
     });

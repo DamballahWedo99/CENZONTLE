@@ -1,4 +1,6 @@
-import { Injectable, Logger } from '@nestjs/common';
+import {
+  Injectable,
+} from '@nestjs/common';
 import {
   DEFAULT_DIAGRAM_GROUP_COLORS,
   DEFAULT_DIAGRAM_TEXT_COLORS,
@@ -7,6 +9,7 @@ import {
   type DiagramTextColors,
 } from '@cenzontle/shared';
 import { PrismaService } from '../prisma/prisma.service';
+import { InjectPinoLogger, PinoLogger } from 'nestjs-pino';
 
 /**
  * Row singleton con id fijo. Usar siempre esta constante y NO el default del
@@ -41,9 +44,9 @@ export interface DiagramThemeSettingsPublic {
  */
 @Injectable()
 export class DiagramThemeSettingsService {
-  private readonly logger = new Logger(DiagramThemeSettingsService.name);
-
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(private readonly prisma: PrismaService,
+    @InjectPinoLogger(DiagramThemeSettingsService.name) private readonly logger: PinoLogger,
+  ) {}
 
   /**
    * Devuelve la configuración actual de colores. Si la row singleton no existe,
@@ -110,7 +113,7 @@ export class DiagramThemeSettingsService {
       },
     });
 
-    this.logger.log(
+    this.logger.info(
       `[update] colors updated by sub=${updatedBy ?? '<unknown>'}` +
         (textColors ? ' (textColors included)' : ''),
     );

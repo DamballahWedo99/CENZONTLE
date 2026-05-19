@@ -18,6 +18,7 @@ import { Prisma } from '@prisma/client';
 import { AuthenticatedUser, UserRole } from '@cenzontle/shared';
 import { StoryDependenciesService } from './story-dependencies.service';
 import type { CreateStoryDependencyDto } from './dto/create-story-dependency.dto';
+import { createMockPinoLogger } from '../../../../common/testing/mock-pino-logger';
 
 // Para los tests no-authz usamos AltaGerencia (bypassa pod intersection
 // del helper). La cobertura de pod intersection vive en `epic-access.util.spec`.
@@ -87,7 +88,7 @@ function makePrismaStub() {
 }
 
 function createService(prisma = makePrismaStub()) {
-  const service = new StoryDependenciesService(prisma as any);
+  const service = new StoryDependenciesService(prisma as any, createMockPinoLogger());
   return { service, prisma };
 }
 

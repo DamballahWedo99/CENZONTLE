@@ -1,4 +1,5 @@
 import { AgentTokenSettingsService } from './agent-token-settings.service';
+import { createMockPinoLogger } from '../../common/testing/mock-pino-logger';
 
 /**
  * Mock mínimo del PrismaService — solo los métodos que el service usa.
@@ -50,7 +51,7 @@ describe('AgentTokenSettingsService', () => {
   describe('get()', () => {
     it('devuelve settings con shape público y cachea el resultado', async () => {
       const prisma = makeMockPrisma();
-      const service = new AgentTokenSettingsService(prisma);
+      const service = new AgentTokenSettingsService(prisma, createMockPinoLogger());
 
       const a = await service.get();
       const b = await service.get();
@@ -65,7 +66,7 @@ describe('AgentTokenSettingsService', () => {
       // Cambio 2026-05-04: el fallback default cambió de 'high' a 'medium'
       // para balancear calidad vs costo de thinking tokens.
       const prisma = makeMockPrisma({ storyPoEffort: 'invalid_value' });
-      const service = new AgentTokenSettingsService(prisma);
+      const service = new AgentTokenSettingsService(prisma, createMockPinoLogger());
 
       const settings = await service.get();
       expect(settings.storyPoEffort).toBe('medium');
@@ -75,7 +76,7 @@ describe('AgentTokenSettingsService', () => {
   describe('update()', () => {
     it('aplica patch de effort dentro de transacción Serializable', async () => {
       const prisma = makeMockPrisma();
-      const service = new AgentTokenSettingsService(prisma);
+      const service = new AgentTokenSettingsService(prisma, createMockPinoLogger());
 
       const updated = await service.update(
         { storyPoEffort: 'medium', storyPoMaxTokens: 30000 },
@@ -96,7 +97,7 @@ describe('AgentTokenSettingsService', () => {
       prisma.$transaction = jest.fn().mockRejectedValue(
         Object.assign(new Error('serialize'), { code: 'P2034' }),
       );
-      const service = new AgentTokenSettingsService(prisma);
+      const service = new AgentTokenSettingsService(prisma, createMockPinoLogger());
 
       await expect(
         service.update({ storyPoEffort: 'low' }, 'user-123'),
@@ -105,7 +106,7 @@ describe('AgentTokenSettingsService', () => {
 
     it('toggle enabled=false se persiste y se devuelve por los helpers', async () => {
       const prisma = makeMockPrisma();
-      const service = new AgentTokenSettingsService(prisma);
+      const service = new AgentTokenSettingsService(prisma, createMockPinoLogger());
 
       await service.update({ diagramThinkingEnabled: false }, 'user-123');
 
@@ -117,7 +118,7 @@ describe('AgentTokenSettingsService', () => {
 
     it('invalida cache tras update — siguiente get() ve los nuevos valores', async () => {
       const prisma = makeMockPrisma();
-      const service = new AgentTokenSettingsService(prisma);
+      const service = new AgentTokenSettingsService(prisma, createMockPinoLogger());
 
       const before = await service.get();
       expect(before.diagramEffort).toBe('high');
@@ -132,7 +133,7 @@ describe('AgentTokenSettingsService', () => {
   describe('helpers tipados', () => {
     it('getStoryPo/Tl/Qa devuelven { effort, maxTokens, enabled }', async () => {
       const prisma = makeMockPrisma();
-      const service = new AgentTokenSettingsService(prisma);
+      const service = new AgentTokenSettingsService(prisma, createMockPinoLogger());
 
       expect(await service.getStoryPo()).toEqual({ effort: 'high', maxTokens: 28000, enabled: true });
       expect(await service.getStoryTl()).toEqual({ effort: 'high', maxTokens: 44000, enabled: true });
@@ -141,14 +142,14 @@ describe('AgentTokenSettingsService', () => {
 
     it('getEpic devuelve { effort, maxTokensCap, enabled }', async () => {
       const prisma = makeMockPrisma();
-      const service = new AgentTokenSettingsService(prisma);
+      const service = new AgentTokenSettingsService(prisma, createMockPinoLogger());
 
       expect(await service.getEpic()).toEqual({ effort: 'high', maxTokensCap: 64000, enabled: true });
     });
 
     it('getDiagram devuelve { effort, maxTokens, enabled }', async () => {
       const prisma = makeMockPrisma();
-      const service = new AgentTokenSettingsService(prisma);
+      const service = new AgentTokenSettingsService(prisma, createMockPinoLogger());
 
       expect(await service.getDiagram()).toEqual({ effort: 'high', maxTokens: 64000, enabled: true });
     });

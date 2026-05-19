@@ -1,8 +1,11 @@
-import { Injectable, Logger } from '@nestjs/common';
+import {
+  Injectable,
+} from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { RedisService } from '../../../redis/redis.service';
 import type { StoryGenerationEvent, ProposedStory, CachedStoryGenerationSession } from '@cenzontle/shared';
 import { scrubSecrets } from '../../../../common/utils/scrub-secrets.util';
+import { InjectPinoLogger, PinoLogger } from 'nestjs-pino';
 
 const STREAMING_TTL_SECONDS = 3600;
 
@@ -18,12 +21,12 @@ const DEFAULT_STAGING_TTL_SECONDS = 5 * 24 * 60 * 60;
 
 @Injectable()
 export class StoryProposalCacheService {
-  private readonly logger = new Logger(StoryProposalCacheService.name);
   private readonly defaultTtl: number;
 
   constructor(
     private readonly redis: RedisService,
     private readonly config: ConfigService,
+    @InjectPinoLogger(StoryProposalCacheService.name) private readonly logger: PinoLogger,
   ) {
     this.defaultTtl = this.config.get<number>(
       'STORY_PROPOSAL_CACHE_TTL',
@@ -79,7 +82,7 @@ export class StoryProposalCacheService {
     session.status = 'staging';
     session.completedAt = new Date().toISOString();
     await this.redis.setex(this.key(epicId), this.defaultTtl, scrubSecrets(JSON.stringify(session)));
-    this.logger.log(`Session completed for epic=${epicId}, TTL=${this.defaultTtl}s`);
+    this.logger.info({ epicId, defaultTtl: this.defaultTtl }, `Session completed for epic=${epicId}, TTL=${this.defaultTtl}s`);
   }
 
   async getSession(epicId: string): Promise<CachedStoryGenerationSession | null> {
@@ -102,7 +105,7 @@ export class StoryProposalCacheService {
     session.proposals = session.proposals.filter((p) => p.clientId !== clientId);
     if (session.proposals.length === 0) {
       await this.redis.del(this.key(epicId));
-      this.logger.log(`All proposals consumed, cache deleted for epic=${epicId}`);
+      this.logger.info({ epicId }, `All proposals consumed, cache deleted for epic=${epicId}`);
     } else {
       const payload = scrubSecrets(JSON.stringify(session));
       const ttl = await this.redis.ttl(this.key(epicId));
@@ -127,11 +130,11 @@ export class StoryProposalCacheService {
     };
     const payload = scrubSecrets(JSON.stringify(session));
     await this.redis.setex(this.key(epicId), this.defaultTtl, payload);
-    this.logger.log(`Full session saved for epic=${epicId}: ${proposals.length} proposals, ${events.length} events, TTL=${this.defaultTtl}s`);
+    this.logger.info({ epicId, length: proposals.length, events_length: events.length, defaultTtl: this.defaultTtl }, `Full session saved for epic=${epicId}: ${proposals.length} proposals, ${events.length} events, TTL=${this.defaultTtl}s`);
   }
 
   async invalidateSession(epicId: string): Promise<void> {
     await this.redis.del(this.key(epicId));
-    this.logger.log(`Cache invalidated for epic=${epicId}`);
+    this.logger.info({ epicId }, `Cache invalidated for epic=${epicId}`);
   }
 }

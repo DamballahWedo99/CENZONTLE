@@ -6,7 +6,6 @@ import {
   Query,
   Req,
   Res,
-  Logger,
   ParseUUIDPipe,
   ForbiddenException,
   NotFoundException,
@@ -24,6 +23,7 @@ import { scrubSecrets } from '../../../../common/utils/scrub-secrets.util';
 import { setupSseHeartbeat } from '../../../../common/utils/sse-heartbeat.util';
 import { AgentRunRegistryService } from '../../../../common/services/agent-run-registry.service';
 import type { Request, Response } from 'express';
+import { InjectPinoLogger, PinoLogger } from 'nestjs-pino';
 
 /**
  * Sanitiza una cadena para uso en logs: redacta patrones tipo PAT/token, elimina
@@ -38,13 +38,12 @@ function sanitizeForLog(s: string, maxLen = 200): string {
 @ApiTags('Historias — Generación IA')
 @Controller('proyectos/story-generation')
 export class StoryGenerationController {
-  private readonly logger = new Logger(StoryGenerationController.name);
-
   constructor(
     private readonly generation: StoryGenerationService,
     private readonly cache: StoryProposalCacheService,
     private readonly prisma: PrismaService,
     private readonly registry: AgentRunRegistryService,
+    @InjectPinoLogger(StoryGenerationController.name) private readonly logger: PinoLogger,
   ) {}
 
   /**
@@ -166,7 +165,7 @@ export class StoryGenerationController {
     // CWE-117: sanitizar el prompt del usuario antes de log. Evita log injection y
     // evita que credenciales pegadas accidentalmente en el prompt lleguen a logs externos.
     const promptForLog = query.prompt ? sanitizeForLog(query.prompt) : '';
-    this.logger.log(
+    this.logger.info(
       `[SSE:story-gen] ═══ CONNECT user=${user.sub} role=${user.role} epic=${epicId} prompt="${promptForLog}" count=${query.count ?? 'auto'} webSearch=${webSearchEnabled}`,
     );
 
@@ -224,7 +223,7 @@ export class StoryGenerationController {
       // Detener heartbeat al socket muerto — el agente sigue en background
       // pero no necesitamos seguir intentando pings al cliente desconectado.
       stopHeartbeat();
-      this.logger.log(`[SSE:story-gen] client disconnected — agent continues in background epic=${epicId}`);
+      this.logger.info({ epicId }, `[SSE:story-gen] client disconnected — agent continues in background epic=${epicId}`);
     });
 
     const subject = this.generation.generate(
@@ -265,7 +264,7 @@ export class StoryGenerationController {
         this.cache.writeSession(epicId, collectedEvents, collectedProposals).catch(() => {});
       },
       complete: () => {
-        this.logger.log(
+        this.logger.info(
           `[SSE:story-gen] ═══ DISCONNECT epic=${epicId} events=${collectedEvents.length} proposals=${collectedProposals.length} clientDisconnected=${clientDisconnected}`,
         );
         streamCompleted = true;
@@ -281,7 +280,7 @@ export class StoryGenerationController {
         // Identidad por AbortController — un cancel sobre otro controller
         // del mismo epic no afecta este persist.
         if (this.registry.wasCancelled(abortController)) {
-          this.logger.log(`[SSE:story-gen] skipping cache save — run was explicitly cancelled`);
+          this.logger.info(`[SSE:story-gen] skipping cache save — run was explicitly cancelled`);
           return;
         }
 
@@ -289,16 +288,16 @@ export class StoryGenerationController {
         // persistir un staging vacío que confunde la hidratación futura.
         if (collectedProposals.length === 0) {
           this.cache.invalidateSession(epicId).catch(() => {});
-          this.logger.log(`[SSE:story-gen] no proposals — invalidating session`);
+          this.logger.info(`[SSE:story-gen] no proposals — invalidating session`);
           return;
         }
 
         this.cache.saveFullSession(epicId, collectedEvents, collectedProposals)
-          .then(() => this.logger.log(`[SSE:story-gen] cache saved (${collectedProposals.length} proposals)`))
-          .catch((e) => this.logger.warn(`[SSE:story-gen] saveFullSession failed: ${e.message}`));
+          .then(() => this.logger.info({ length: collectedProposals.length }, `[SSE:story-gen] cache saved (${collectedProposals.length} proposals)`))
+          .catch((e) => this.logger.warn({ message: e.message }, `[SSE:story-gen] saveFullSession failed: ${e.message}`));
       },
       error: (err) => {
-        this.logger.error(`[SSE:story-gen] ✗ stream error: ${err?.message}`);
+        this.logger.error({ message: err?.message }, `[SSE:story-gen] ✗ stream error: ${err?.message}`);
         streamCompleted = true;
         stopHeartbeat();
         this.registry.unregister(user.sub, epicId, abortController);
@@ -382,7 +381,7 @@ export class StoryGenerationController {
         this.cache.invalidateSession(epicId).catch(() => {});
       }
     }, 500);
-    this.logger.log(`[SSE:story-gen] ✗ run cancelled by user=${user.sub} epic=${epicId}`);
+    this.logger.info({ sub: user.sub, epicId }, `[SSE:story-gen] ✗ run cancelled by user=${user.sub} epic=${epicId}`);
     return { cancelled: true };
   }
 }

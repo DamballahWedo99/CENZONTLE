@@ -2,7 +2,6 @@ import { Type } from 'class-transformer';
 import {
   ArrayMaxSize,
   IsArray,
-  IsBoolean,
   IsInt,
   IsOptional,
   IsString,
@@ -51,14 +50,6 @@ export class DodCriterionInputDto {
   @MinLength(1)
   @MaxLength(2000)
   description!: string;
-
-  @ApiProperty({ description: 'Si el criterio aparece en la lista activa del DoD.' })
-  @IsBoolean()
-  enabled!: boolean;
-
-  @ApiProperty({ description: 'Si el criterio bloquea el merge cuando no se cumple.' })
-  @IsBoolean()
-  required!: boolean;
 
   @ApiProperty({ description: 'Orden de display (drag&drop persiste aquí).', minimum: 0 })
   @IsInt()

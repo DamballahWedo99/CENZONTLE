@@ -1,7 +1,11 @@
-import { Injectable, Logger, OnModuleInit } from '@nestjs/common';
+import {
+  Injectable,
+  OnModuleInit,
+} from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { ComputeNodeStatus } from '@prisma/client';
 import { PrismaService } from '../../prisma/prisma.service';
+import { InjectPinoLogger, PinoLogger } from 'nestjs-pino';
 
 /**
  * Modos de ejecución del Forge:
@@ -40,11 +44,10 @@ export type ExecutionMode = 'local-tmux' | 'remote-worker';
  */
 @Injectable()
 export class ExecutionRouterService implements OnModuleInit {
-  private readonly logger = new Logger(ExecutionRouterService.name);
-
   constructor(
     private readonly prisma: PrismaService,
     private readonly config: ConfigService,
+    @InjectPinoLogger(ExecutionRouterService.name) private readonly logger: PinoLogger,
   ) {}
 
   /**
@@ -57,7 +60,7 @@ export class ExecutionRouterService implements OnModuleInit {
   async onModuleInit(): Promise<void> {
     const override = this.config.get<string>('FORGE_EXECUTION_MODE');
     if (!override) {
-      this.logger.log(
+      this.logger.info(
         '[router:boot] FORGE_EXECUTION_MODE no configurado — auto-detect activo (remote si hay nodos online, local si no)',
       );
       return;
@@ -89,7 +92,7 @@ export class ExecutionRouterService implements OnModuleInit {
           changedByName: 'Forge Execution Router (boot)',
         },
       });
-      this.logger.log(
+      this.logger.info(
         `[router:boot] Audit row emitida en changelog_entries (override=${normalized})`,
       );
     } catch (err) {
@@ -126,7 +129,7 @@ export class ExecutionRouterService implements OnModuleInit {
     });
 
     const mode: ExecutionMode = onlineCount > 0 ? 'remote-worker' : 'local-tmux';
-    this.logger.debug(`[router] mode=${mode} onlineNodes=${onlineCount}`);
+    this.logger.debug({ mode, onlineCount }, `[router] mode=${mode} onlineNodes=${onlineCount}`);
     return mode;
   }
 }

@@ -17,8 +17,6 @@ export interface DodCriterion {
   /** Descripción larga que se inyecta en el prompt del agente.
    *  REQUERIDA — todos los criterios del DoD deben tenerla. */
   description: string;
-  enabled: boolean;
-  required: boolean;
   position: number;
 }
 
@@ -26,8 +24,6 @@ export interface DodCriterionInput {
   kind?: string | null;
   text: string;
   description: string;
-  enabled: boolean;
-  required: boolean;
   position: number;
 }
 

@@ -1,0 +1,16 @@
+-- Add `generatorUsage` JSON column to AgentRun.
+--
+-- Tracks cost/tokens del agente generator (claude -p con --output-format
+-- stream-json) acumulado across DoD attempts. Separado de dodVerification
+-- (que es del verifier Sonnet) porque son modelos distintos con price tables
+-- independientes.
+--
+-- Shape esperado:
+--   { callsCount: number, totalInputTokens: number, totalOutputTokens: number,
+--     totalCacheCreationInputTokens: number, totalCacheReadInputTokens: number,
+--     totalCostUsd: number, totalDurationMs: number, totalDurationApiMs: number,
+--     totalNumTurns: number, perAttempt: [{ attempt, ...usage }] }
+--
+-- NULL = run pre-feature (compatible con rows existentes) o claude crasheó
+-- antes de emitir el evento `result`. getBatchDetail trata NULL como 0.
+ALTER TABLE "agent_runs" ADD COLUMN "generatorUsage" JSONB;

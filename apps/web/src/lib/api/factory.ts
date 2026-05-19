@@ -1,4 +1,42 @@
+import type { CriterionEvent, DodVerificationEntry } from '@cenzontle/shared';
 import { apiFetch } from './client';
+
+/**
+ * Type guard runtime para `criteriaProgress` (viene del backend como JSON
+ * crudo). Verifica que cada elemento tenga el shape mínimo de un
+ * `CriterionEvent`.
+ *
+ * Centralizado aquí (architecture-reviewer 2026-05-11) para eliminar 3
+ * redefiniciones duplicadas en `page.tsx`, `AgentRunTerminal.tsx` y
+ * `AgentRunOutputViewer.tsx`. El guard sigue siendo necesario aunque el
+ * TS type sea concreto — la columna `agent_runs.criteriaProgress` es Json
+ * en Prisma y `unknown[]` antes de validación shallow del DTO.
+ *
+ * Validación por campo:
+ *  - `id`, `label`, `status`: requeridos, deben ser string.
+ *  - `source`: opcional para preservar compat con rows legacy pre-Tier-1
+ *    donde el campo no existía (qa+arch-reviewer 2026-05-11). Items sin
+ *    source caen a default 'worker' en downstream (== 'agent' comparison
+ *    retorna false).
+ *  - `startedAt`/`completedAt`: opcionales, deben ser string si presentes.
+ *    Sin este check, un `completedAt: 123` (número) pasaría al render que
+ *    hace `new Date(c.completedAt)` y produce "hace 56 años" silencioso.
+ */
+export function isCriterionEventArray(v: unknown): v is CriterionEvent[] {
+  if (!Array.isArray(v)) return false;
+  return v.every((c) => {
+    if (c === null || typeof c !== 'object') return false;
+    const r = c as Record<string, unknown>;
+    return (
+      typeof r.id === 'string' &&
+      typeof r.label === 'string' &&
+      typeof r.status === 'string' &&
+      (r.source === undefined || typeof r.source === 'string') &&
+      (r.startedAt === undefined || typeof r.startedAt === 'string') &&
+      (r.completedAt === undefined || typeof r.completedAt === 'string')
+    );
+  });
+}
 
 // ──────────────────────────────────────────────────────────────────────
 // Compute Fleet — gestión de nodos de cómputo
@@ -130,6 +168,22 @@ export interface ForgeQueueItem {
   agentCount: number;
   runStartedAt: string | null;
   forgeBranch: string | null;
+  /** True cuando todas las stories están done pero la épica sigue en queue —
+   *  está esperando approval humano antes de pasar a Staged. */
+  awaitingHumanGate: boolean;
+  /** ISO timestamp del momento en que terminó la última story (NULL mientras
+   *  alguna sigue en progreso). Permite que el card congele el reloj. */
+  completedAt?: string | null;
+  /** Cost agregado USD del epic — generator + verifier across todos los runs. */
+  totalCostUsd?: number;
+  /** Tokens "nuevos" agregados (input + output + cache_creation, sin cache_read). */
+  totalTokensNew?: number;
+  /** Tokens cached (cache_read), separados para transparencia. */
+  totalTokensCached?: number;
+  /** ISO timestamp del approval del Tech Lead. Cuando está set, el frontend
+   *  mueve el batch de la columna Forge a Staged del Pipeline Board sin
+   *  esperar el próximo poll del detail endpoint. */
+  stagingApprovedAt?: string | null;
 }
 
 /**
@@ -144,6 +198,135 @@ export interface ForgeQueueItem {
  */
 export function getForgeQueue() {
   return apiFetch<ForgeQueueItem[]>('/factory/queue');
+}
+
+/**
+ * Shape detallado de un batch — usado por la página `/factory/batch/:id`.
+ * Reemplaza el shape mock previo. Coincide con `BatchDetailResponse` del
+ * backend (`factory-queue.service.ts`).
+ */
+export interface BatchDetailResponse {
+  batchId: string;
+  epicId: string;
+  epicTitle: string;
+  priority: 'critical' | 'high' | 'medium' | 'low';
+  forgeBranch: string | null;
+  /** URL del repo activo en GitHub (ej. `https://github.com/owner/repo`). NULL
+   *  si no hay code repository forgeWritable configurado (sandbox mode). El
+   *  frontend lo combina con `forgeBranch` para construir el link clickeable
+   *  a la branch del Forge. */
+  repoUrl: string | null;
+  /** ISO timestamp del approval del Tech Lead — derivamos `currentLayer =
+   *  Staging` y `gate.decision = Approved` cuando este campo está set. */
+  stagingApprovedAt?: string | null;
+  /** Nombre legible del aprobador (mismo valor persistido en DB). */
+  stagingApprovedByName?: string | null;
+  /** Número del consolidated PR a DEV — NULL si nunca se abrió. */
+  consolidatedPrNumber?: number | null;
+  /** ISO timestamp del merge del consolidated PR a DEV. */
+  consolidatedPrMergedAt?: string | null;
+  enqueuedAt: string;
+  runStartedAt: string | null;
+  storiesCount: number;
+  storiesDone: number;
+  storiesInProgress: number;
+  awaitingHumanGate: boolean;
+  totalCostUsd: number;
+  totalTokens: number;
+  // Split: "new" (input + output + cache_creation, billable a precio
+  // completo) vs "cached" (cache_read, $0.10/1M). El UI los muestra por
+  // separado para evitar el efecto "1.5M tokens" engañoso de re-lecturas.
+  totalTokensNew?: number;
+  totalTokensCached?: number;
+  stories: BatchStoryDetail[];
+  waveCount: number;
+}
+
+export interface BatchStoryDetail {
+  id: string;
+  title: string;
+  status: string;
+  storyPoints: number;
+  waveNumber: number;
+  blockedByIds: string[];
+  latestRun: BatchStoryRun | null;
+}
+
+export interface BatchStoryRun {
+  id: string;
+  status: string;
+  branch: string;
+  nodeId: string;
+  prNumber: number | null;
+  exitCode: number | null;
+  errorMessage: string | null;
+  startedAt: string;
+  completedAt: string | null;
+  /** Cost USD del run individual (generator + verifier). */
+  costUsd?: number;
+  /** Tokens "nuevos" del run (input + output + cache_creation). */
+  tokensNew?: number;
+  /** Archivos modificados en el diff del commit. NULL si sandbox/no-push. */
+  filesModified?: number | null;
+}
+
+/**
+ * Detalle completo de un batch del Forge. Retorna stories + agentRuns + cost
+ * + DAG real (sin mocks). 404 si el batchId no existe o el user no tiene
+ * acceso al pod del epic.
+ */
+export function getBatchDetail(batchId: string) {
+  return apiFetch<BatchDetailResponse>(`/factory/queue/${batchId}/detail`);
+}
+
+// ──────────────────────────────────────────────────────────────────────
+// Staging Gate Approval — TechLead aprueba merge a DEV (step-up auth)
+// ──────────────────────────────────────────────────────────────────────
+
+export interface ApproveStagingGateInput {
+  /** Password actual del usuario para step-up auth (valida vs Auth0). */
+  password: string;
+  /** Notas opcionales — persistidas en el ChangelogEntry. */
+  notes?: string;
+}
+
+export interface ApproveStagingGateResponse {
+  batchId: string;
+  epicId: string;
+  approvedAt: string;
+  approvedBy: string;
+  approvedByName: string;
+  consolidatedPrNumber: number | null;
+  consolidatedPrMergedAt: string | null;
+}
+
+/**
+ * Aprueba el staging gate de un batch — mergea el consolidated PR a DEV y
+ * mueve el batch a la columna Staged del Pipeline Board. Solo TechLead (o
+ * AltaGerencia admin) puede aprobar. Step-up auth con password requerido.
+ *
+ * Retry semantics: el endpoint permite re-llamarse cuando el approval ya
+ * persistió pero el merge a DEV no se completó (ej. branch no estaba listo
+ * en remote, conflict transitorio). El primer aprobador se preserva intacto
+ * y solo se reintenta la parte operacional. Solo lanza 409 cuando approval
+ * Y merge ya son terminales.
+ *
+ * Errores tipados:
+ *  - 400: batch no listo (stories pendientes)
+ *  - 401: password incorrecta (re-verifica también en retries)
+ *  - 403: rol no autorizado
+ *  - 404: batchId no existe
+ *  - 409: ya aprobado Y mergeado — no hay nada que reintentar
+ *  - 502/503: GitHub merge falló o Auth0 no configurado
+ */
+export function approveStagingGate(
+  batchId: string,
+  input: ApproveStagingGateInput,
+) {
+  return apiFetch<ApproveStagingGateResponse>(
+    `/factory/queue/${batchId}/approve-staging`,
+    { method: 'POST', body: JSON.stringify(input) },
+  );
 }
 
 // ──────────────────────────────────────────────────────────────────────
@@ -229,17 +412,20 @@ export interface RunDetailResponse {
    *  debe renderear iframe en lugar del polling estático. */
   ttydUrl: string | null;
   /** HITO 1.6: timeline de criterios/milestones del run. Array de
-   *  CriterionEvent (worker milestones + agente custom). */
-  criteriaProgress: unknown[] | null;
+   *  CriterionEvent (worker milestones + agente custom). Aunque el backend
+   *  lo persiste como Json en Prisma, el shape es estable — los consumidores
+   *  deben pasar por `isCriterionEventArray` antes de iterarlo. */
+  criteriaProgress: CriterionEvent[] | null;
   /** Tier 1 Harness: total de attempts del DoD enforcement loop.
    *  1 = primer intento limpio. 2-3 = el agente necesitó retries tras fallar
    *  verificación determinística. */
   attempts: number;
   /** Tier 1 Harness: log estructurado del veredicto por criterio en cada
-   *  attempt. Shape: array de { attempt, verdicts: CriterionVerdict[] }.
-   *  Null antes del primer verifier run. La UI usa el último entry para
-   *  pintar el estado actual de cada criterio del DoD. */
-  dodVerification: unknown[] | null;
+   *  attempt. Array de DodVerificationEntry. Null antes del primer verifier
+   *  run. La UI hace merge across all attempts con last-wins por criterionId
+   *  (ver `extractMergedVerdicts` en terminal/page.tsx) — NO leer solo el
+   *  último entry (produce regresión durante POST /progress parciales). */
+  dodVerification: DodVerificationEntry[] | null;
   storyId: string;
   storyTitle: string;
   epicId: string;
@@ -298,6 +484,84 @@ export function updateBranchStrategy(input: UpdateBranchStrategyInput) {
 }
 
 // ──────────────────────────────────────────────────────────────────────
+// Git state validation + alignment
+// ──────────────────────────────────────────────────────────────────────
+
+export interface BranchGitStateResponse {
+  /** True si hay un code repository con forgeWritable configurado.
+   *  Cuando es false, el frontend oculta el banner — la sección git state
+   *  no aplica hasta que el operador configure un repo. */
+  repoConfigured: boolean;
+  devBranch: string;
+  mainBranch: string;
+  devExists: boolean;
+  mainExists: boolean;
+  devSha: string | null;
+  mainSha: string | null;
+  /** Status del compare main...dev en GitHub. NULL si una branch no existe. */
+  compareStatus:
+    | 'identical'
+    | 'ahead'
+    | 'behind'
+    | 'diverged'
+    | 'no_common_ancestor'
+    | 'missing_branch'
+    | null;
+  /** True si dev y main comparten ancestro común (cualquier status válido). */
+  sharesHistory: boolean;
+  /** Mensaje accionable para el banner. NULL si todo está OK. */
+  warning: string | null;
+  /** True si tiene sentido ofrecer el botón "Alinear dev con main". */
+  canAlignDev: boolean;
+}
+
+/**
+ * Valida el git state actual: dev y main existen + comparten historia.
+ * El frontend lo llama después de cargar el config para decidir si mostrar
+ * el banner de "Alinear dev con main".
+ */
+export function getBranchGitState() {
+  return apiFetch<BranchGitStateResponse>('/factory/branch-strategy/git-state');
+}
+
+export interface AlignDevBranchInput {
+  /** Password del user para step-up auth contra Auth0. */
+  password: string;
+}
+
+export interface AlignDevBranchResponse {
+  devBranch: string;
+  mainBranch: string;
+  /** SHA donde apuntaba dev ANTES del force-update. NULL si dev no existía. */
+  previousDevSha: string | null;
+  /** SHA nuevo de dev (= mainBranch HEAD al momento del align). */
+  newDevSha: string;
+  alignedAt: string;
+  alignedByName: string;
+}
+
+/**
+ * Force-update de la branch dev para que comparta historia con main.
+ * DESTRUCTIVO — descarta cualquier historia única de dev. Step-up auth
+ * con password + rol TechLead o AltaGerencia es enforced en el backend.
+ *
+ * Errores tipados:
+ *  - 401: password incorrecta
+ *  - 403: rol no autorizado (no es TechLead ni AltaGerencia)
+ *  - 404: no hay code repo configurado, o mainBranch no existe en remote
+ *  - 502/503: GitHub API falló o Auth0 no configurado
+ */
+export function alignDevBranch(input: AlignDevBranchInput) {
+  return apiFetch<AlignDevBranchResponse>(
+    '/factory/branch-strategy/align-dev',
+    {
+      method: 'POST',
+      body: JSON.stringify(input),
+    },
+  );
+}
+
+// ──────────────────────────────────────────────────────────────────────
 // Forge Kill Switch — pause/resume + emergency abort
 // ──────────────────────────────────────────────────────────────────────
 
@@ -343,4 +607,62 @@ export function abortAllForgeRuns(reason: string) {
       body: JSON.stringify({ reason }),
     },
   );
+}
+
+// ════════════════════════════════════════════════════════════════════════
+// Preview API — local dev server preview de sprint-batch branches
+// ════════════════════════════════════════════════════════════════════════
+
+export type PreviewStatus = 'starting' | 'running' | 'stopped' | 'error';
+
+export interface PreviewStartResponse {
+  batchId: string;
+  status: PreviewStatus;
+  url: string;
+  port: number;
+  branch: string;
+}
+
+export interface PreviewStatusResponse {
+  status: PreviewStatus;
+  url?: string;
+  port?: number;
+  branch?: string;
+  projectType?: 'static' | 'node';
+  startedAt?: string;
+  error?: string;
+  logsTail?: string[];
+}
+
+/**
+ * Inicia el preview local de un sprint-batch. El backend clona la branch
+ * a tmpdir + spawnea dev server (`pnpm dev` o `npx serve`) + retorna
+ * inmediatamente con status='starting'. El caller debe pollear getPreviewStatus
+ * hasta status='running' para abrir la URL.
+ */
+export function startPreview(batchId: string) {
+  return apiFetch<PreviewStartResponse>(
+    `/factory/batch/${batchId}/preview/start`,
+    { method: 'POST' },
+  );
+}
+
+/**
+ * Detiene el preview (kill proceso + cleanup tmpdir). Idempotente — si no
+ * hay preview activo, retorna stopped=false sin error.
+ */
+export function stopPreview(batchId: string) {
+  return apiFetch<{ stopped: boolean }>(
+    `/factory/batch/${batchId}/preview`,
+    { method: 'DELETE' },
+  );
+}
+
+/**
+ * Estado actual del preview. Si no hay preview activo, retorna status='stopped'
+ * (NO 404). Usado para polling cada 1-2s mientras status='starting' hasta
+ * que se ponga 'running' o 'error'.
+ */
+export function getPreviewStatus(batchId: string) {
+  return apiFetch<PreviewStatusResponse>(`/factory/batch/${batchId}/preview`);
 }

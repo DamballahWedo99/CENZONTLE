@@ -1,7 +1,6 @@
 import {
   ConflictException,
   Injectable,
-  Logger,
   NotFoundException,
 } from '@nestjs/common';
 import type { Prisma } from '@prisma/client';
@@ -9,6 +8,7 @@ import type { ExternalSecret } from '@cenzontle/shared';
 import { PrismaService } from '../prisma/prisma.service';
 import { CryptoService } from '../vault/crypto.service';
 import { CreateExternalSecretDto } from './dto/create-external-secret.dto';
+import { InjectPinoLogger, PinoLogger } from 'nestjs-pino';
 
 /**
  * Normaliza un título de credencial para matcheo. PARITARIO con
@@ -61,11 +61,10 @@ function normalizeTitle(title: string): string {
  */
 @Injectable()
 export class ExternalSecretsService {
-  private readonly logger = new Logger(ExternalSecretsService.name);
-
   constructor(
     private readonly prisma: PrismaService,
     private readonly crypto: CryptoService,
+    @InjectPinoLogger(ExternalSecretsService.name) private readonly logger: PinoLogger,
   ) {}
 
   /**
@@ -103,7 +102,7 @@ export class ExternalSecretsService {
       },
     });
 
-    this.logger.log(
+    this.logger.info(
       `[create] external secret name=${created.name} vendor=${created.vendor ?? '∅'} id=${created.id}` +
         (dto.sourceDependencyId ? ` sourceDependencyId=${dto.sourceDependencyId}` : ''),
     );
@@ -167,7 +166,7 @@ export class ExternalSecretsService {
       return result.count;
     });
 
-    this.logger.log(
+    this.logger.info(
       `[delete] external secret name=${found.name} id=${id} unlinkedStories=${unlinkedCount}`,
     );
   }
@@ -232,7 +231,7 @@ export class ExternalSecretsService {
     if (epics.length === 0) {
       // El dep vino de un DiscoveredDependency (vault-only) — el link se
       // reflejará en la próxima regeneración. No es error.
-      this.logger.log(
+      this.logger.info(
         `[resolveSourceDependency] no epic owns dep ${sourceDependencyId} — likely vault-only DiscoveredDependency`,
       );
       return;
@@ -268,7 +267,7 @@ export class ExternalSecretsService {
       WHERE id = ${epicId}
     `;
 
-    this.logger.log(
+    this.logger.info(
       `[resolveSourceDependency] epic=${epicId} dep=${sourceDependencyId} linkedSecret=${secretId} rowsAffected=${affected}`,
     );
   }
@@ -326,7 +325,7 @@ export class ExternalSecretsService {
       .map((d) => d.id);
 
     if (matchingIds.length === 0) {
-      this.logger.log(
+      this.logger.info(
         `[resolveAllStoryDependenciesByVendor] vendor="${vendor}" secret=${secretId} (name="${secretName}") candidates=${candidates.length} matched=0 — no deps share normalizedTitle`,
       );
       return 0;
@@ -354,7 +353,7 @@ export class ExternalSecretsService {
         `[resolveAllStoryDependenciesByVendor] race detected: candidates=${candidates.length} matched=${matchingIds.length} updated=${result.count} — ${matchingIds.length - result.count} deps fueron vinculadas por una request concurrent. Comportamiento correcto.`,
       );
     } else {
-      this.logger.log(
+      this.logger.info(
         `[resolveAllStoryDependenciesByVendor] vendor="${vendor}" secret=${secretId} (name="${secretName}") candidates=${candidates.length} matched=${matchingIds.length} updated=${result.count}`,
       );
     }

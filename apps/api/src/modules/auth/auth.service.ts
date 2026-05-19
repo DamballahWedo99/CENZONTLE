@@ -1,11 +1,11 @@
 import {
   BadRequestException,
   Injectable,
-  Logger,
   ServiceUnavailableException,
   UnauthorizedException,
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
+import { InjectPinoLogger, PinoLogger } from 'nestjs-pino';
 import {
   AuthenticatedUser,
   ROLE_PERMISSIONS,
@@ -14,9 +14,9 @@ import {
 
 @Injectable()
 export class AuthService {
-  private readonly logger = new Logger(AuthService.name);
-
-  constructor(private readonly configService: ConfigService) {}
+  constructor(private readonly configService: ConfigService,
+    @InjectPinoLogger(AuthService.name) private readonly logger: PinoLogger,
+  ) {}
 
   getProfile(user: AuthenticatedUser): TeamMember {
     return {

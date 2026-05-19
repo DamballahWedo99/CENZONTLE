@@ -1,6 +1,14 @@
 import { ApiPropertyOptional } from '@nestjs/swagger';
 import { IsBoolean, IsIn, IsInt, IsOptional, Max, Min } from 'class-validator';
-import { AGENT_EFFORT_LEVELS, AGENT_TOKEN_BOUNDS, type AgentEffortLevel } from '@cenzontle/shared';
+import {
+  AGENT_EFFORT_LEVELS,
+  AGENT_TOKEN_BOUNDS,
+  FORGE_WORKER_EFFORT_LEVELS,
+  FORGE_WORKER_MODELS,
+  type AgentEffortLevel,
+  type ForgeWorkerEffortLevel,
+  type ForgeWorkerModel,
+} from '@cenzontle/shared';
 
 const T = AGENT_TOKEN_BOUNDS;
 
@@ -71,4 +79,40 @@ export class UpdateAgentTokenSettingsDto {
   @ApiPropertyOptional({ description: 'Activar/desactivar adaptive thinking de los agentes de diagramas' })
   @IsOptional() @IsBoolean()
   diagramThinkingEnabled?: boolean;
+
+  // ════════════════════════════════════════════════════════════════════
+  // Forge Worker (coder agent — Claude Code CLI)
+  // ════════════════════════════════════════════════════════════════════
+
+  @ApiPropertyOptional({
+    enum: FORGE_WORKER_MODELS,
+    description: 'Modelo Anthropic que usa el Claude Code CLI del worker (--model). Cambio aplica al próximo claim-story.',
+  })
+  @IsOptional() @IsIn(FORGE_WORKER_MODELS as unknown as string[])
+  forgeWorkerModel?: ForgeWorkerModel;
+
+  @ApiPropertyOptional({
+    enum: FORGE_WORKER_EFFORT_LEVELS,
+    description: 'Nivel de extended thinking del CLI (--effort). low|medium|high|xhigh|max. Para Sonnet/Opus high+ activa thinking blocks.',
+  })
+  @IsOptional() @IsIn(FORGE_WORKER_EFFORT_LEVELS as unknown as string[])
+  forgeWorkerEffort?: ForgeWorkerEffortLevel;
+
+  // ════════════════════════════════════════════════════════════════════
+  // DoD Verifier (reviewer agent — Claude Code CLI con --output-format json)
+  // ════════════════════════════════════════════════════════════════════
+
+  @ApiPropertyOptional({
+    enum: FORGE_WORKER_MODELS,
+    description: 'Modelo Anthropic que usa el verifier del DoD. Default Haiku 4.5 para checks atómicos baratos; Sonnet 4.6 cuando se requiera detectar bypass del coder.',
+  })
+  @IsOptional() @IsIn(FORGE_WORKER_MODELS as unknown as string[])
+  dodVerifierModel?: ForgeWorkerModel;
+
+  @ApiPropertyOptional({
+    enum: FORGE_WORKER_EFFORT_LEVELS,
+    description: 'Effort del verifier. Default low (checks binarios atómicos no requieren thinking). high+ solo para debug puntual.',
+  })
+  @IsOptional() @IsIn(FORGE_WORKER_EFFORT_LEVELS as unknown as string[])
+  dodVerifierEffort?: ForgeWorkerEffortLevel;
 }

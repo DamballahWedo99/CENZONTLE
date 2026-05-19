@@ -1,14 +1,16 @@
-import { BadRequestException, Injectable, Logger } from '@nestjs/common';
+import {
+  BadRequestException,
+  Injectable,
+} from '@nestjs/common';
 import { PrismaService } from '../../prisma/prisma.service';
 import type { UpsertDodCriteriaDto } from './dto/upsert-dod-criteria.dto';
+import { InjectPinoLogger, PinoLogger } from 'nestjs-pino';
 
 export interface DodCriterionPublic {
   id: string;
   kind: string | null;
   text: string;
   description: string;
-  enabled: boolean;
-  required: boolean;
   position: number;
 }
 
@@ -47,6 +49,12 @@ const DEFAULT_DOD_CRITERIA: ReadonlyArray<{
     text: 'Cumple criterios de aceptación de la historia',
     description:
       'El código no solo debe ejecutarse, debe cumplir TODOS los criterios de aceptación descritos en la historia. Lee la story como una spec: cada bullet es un test mental. Si la story dice "el botón debe ser azul", verifica el color. Si dice "el endpoint retorna 404 cuando no encuentra el recurso", escribe el caso. No marques el criterio como cumplido si solo parte de los acceptance criteria están cubiertos — todos o ninguno.',
+  },
+  {
+    kind: 'technical-design',
+    text: 'Sigue el diseño técnico del Tech Lead',
+    description:
+      'El código debe respetar la arquitectura, contratos API, patrones, validaciones y manejo de errores documentados en la sección Técnica de la story. Cada item del checklist técnico, cada endpoint/type/interface del contrato, cada regla de validación y cada flujo de errores definidos por el TL DEBEN estar visibles en el código (archivos, funciones, módulos correspondientes). NO improvisar decisiones que el TL ya tomó: si el TL dijo "usar repository pattern", no inventes un service pattern; si definió `interface LoginDto { email, password }`, el código debe tener esa interface con esos campos. El verifier evalúa per-item con grep determinístico + judgment semántico.',
   },
   {
     kind: 'tests-passing',
@@ -93,13 +101,14 @@ const DEFAULT_DOD_CRITERIA: ReadonlyArray<{
  */
 @Injectable()
 export class DodService {
-  private readonly logger = new Logger(DodService.name);
-
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(private readonly prisma: PrismaService,
+    @InjectPinoLogger(DodService.name) private readonly logger: PinoLogger,
+  ) {}
 
   /**
-   * Lista todos los criterios ordenados por `position` ASC. Devuelve también
-   * los disabled (la UI los muestra grayed-out con el toggle off).
+   * Lista todos los criterios ordenados por `position` ASC. Todo lo que está
+   * en la tabla está activo — no hay toggles ni filtros (los campos `enabled`
+   * y `required` se eliminaron en migration 20260512 por ser scaffolding sin UI).
    */
   async findAll(): Promise<DodCriterionPublic[]> {
     const rows = await this.prisma.dodCriterion.findMany({
@@ -109,8 +118,6 @@ export class DodService {
         kind: true,
         text: true,
         description: true,
-        enabled: true,
-        required: true,
         position: true,
       },
     });
@@ -157,12 +164,10 @@ export class DodService {
           // (@MinLength(1)). Si llega vacía es un bug del frontend, no
           // un caso a manejar acá — Prisma rechazará por la NOT NULL.
           description: c.description,
-          enabled: c.enabled,
-          required: c.required,
           position: c.position,
         })),
       });
-      this.logger.log(
+      this.logger.info(
         `[dod.replace_all] count=${dto.criteria.length} actor=${actorEmail ?? 'unknown'}`,
       );
       return tx.dodCriterion.findMany({
@@ -172,8 +177,6 @@ export class DodService {
           kind: true,
           text: true,
           description: true,
-          enabled: true,
-          required: true,
           position: true,
         },
       });
@@ -199,11 +202,11 @@ export class DodService {
   async resetDefaults(actorEmail?: string): Promise<DodCriterionPublic[]> {
     return this.prisma.$transaction(async (tx) => {
       // 1) Levantar custom existentes para preservarlos. Solo necesitamos
-      //    text/description/created para reinsertar — id/position se regeneran.
+      //    text/description para reinsertar — id/position se regeneran.
       const existingCustom = await tx.dodCriterion.findMany({
         where: { kind: null },
         orderBy: { position: 'asc' },
-        select: { text: true, description: true, enabled: true, required: true },
+        select: { text: true, description: true },
       });
 
       // 2) Wipe completo. Más simple que "upsert por kind + delete custom
@@ -211,13 +214,11 @@ export class DodService {
       //    ventana de inconsistencia visible.
       await tx.dodCriterion.deleteMany({});
 
-      // 3) Reinsertar los 4 defaults canónicos en posiciones 0..3.
+      // 3) Reinsertar los defaults canónicos en posiciones 0..N.
       const defaultsData = DEFAULT_DOD_CRITERIA.map((d, i) => ({
         kind: d.kind,
         text: d.text,
         description: d.description,
-        enabled: true,
-        required: true,
         position: i,
       }));
 
@@ -227,8 +228,6 @@ export class DodService {
         kind: null,
         text: c.text,
         description: c.description,
-        enabled: c.enabled,
-        required: c.required,
         position: defaultsData.length + i,
       }));
 
@@ -236,7 +235,7 @@ export class DodService {
         data: [...defaultsData, ...customData],
       });
 
-      this.logger.log(
+      this.logger.info(
         `[dod.reset_defaults] preserved=${existingCustom.length} custom criteria, restored ${defaultsData.length} defaults. actor=${actorEmail ?? 'unknown'}`,
       );
 
@@ -247,8 +246,6 @@ export class DodService {
           kind: true,
           text: true,
           description: true,
-          enabled: true,
-          required: true,
           position: true,
         },
       });

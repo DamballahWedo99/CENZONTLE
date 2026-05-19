@@ -10,10 +10,12 @@ import { ExecutionModule } from "./execution/execution.module";
 import { BranchStrategyModule } from "./branch-strategy/branch-strategy.module";
 import { GitHubModule } from "./github/github.module";
 import { DodModule } from "./dod/dod.module";
+import { PreviewModule } from "./preview/preview.module";
 import { ProyectosModule } from "../proyectos/proyectos.module";
+import { AuthModule } from "../auth/auth.module";
 
 @Module({
-  imports: [ProyectosModule, FleetModule, ExecutionModule, BranchStrategyModule, GitHubModule, DodModule],
+  imports: [ProyectosModule, FleetModule, ExecutionModule, BranchStrategyModule, GitHubModule, DodModule, PreviewModule, AuthModule],
   controllers: [FactoryController, TerminalController, FactoryQueueController],
   providers: [FactoryService, TerminalService, FactoryQueueService],
   exports: [FactoryService, TerminalService, FactoryQueueService],

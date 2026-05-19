@@ -1,4 +1,6 @@
-import { Injectable, Logger } from '@nestjs/common';
+import {
+  Injectable,
+} from '@nestjs/common';
 import { RedisService } from '../../../redis/redis.service';
 import {
   migrateLegacyDiagramGroups,
@@ -6,6 +8,7 @@ import {
   type EpicDiagram,
 } from '@cenzontle/shared';
 import { scrubSecrets } from '../../../../common/utils/scrub-secrets.util';
+import { InjectPinoLogger, PinoLogger } from 'nestjs-pino';
 
 /**
  * Persiste diagramas generados por el agente LLM en Redis con TTL de 5 días.
@@ -33,9 +36,9 @@ const DIAGRAM_CACHE_TTL_SECONDS = 5 * 24 * 60 * 60;
 
 @Injectable()
 export class DiagramCacheService {
-  private readonly logger = new Logger(DiagramCacheService.name);
-
-  constructor(private readonly redis: RedisService) {}
+  constructor(private readonly redis: RedisService,
+    @InjectPinoLogger(DiagramCacheService.name) private readonly logger: PinoLogger,
+  ) {}
 
   private key(epicId: string, type: DiagramGenerationType): string {
     return `epic-diagram:${epicId}:${type}`;
@@ -57,7 +60,7 @@ export class DiagramCacheService {
       DIAGRAM_CACHE_TTL_SECONDS,
       payload,
     );
-    this.logger.log(
+    this.logger.info(
       `Diagram cached: epic=${epicId} type=${type} nodes=${normalized.nodes.length} edges=${normalized.edges.length} ttl=${DIAGRAM_CACHE_TTL_SECONDS}s`,
     );
   }
@@ -87,6 +90,6 @@ export class DiagramCacheService {
     type: DiagramGenerationType,
   ): Promise<void> {
     await this.redis.del(this.key(epicId, type));
-    this.logger.log(`Diagram cache invalidated: epic=${epicId} type=${type}`);
+    this.logger.info({ epicId, type }, `Diagram cache invalidated: epic=${epicId} type=${type}`);
   }
 }

@@ -52,6 +52,7 @@ mockExecFileSync.mockImplementation((_bin: string, args: string[]) => {
 });
 
 import { TerminalService } from './terminal.service';
+import { createMockPinoLogger } from '../../common/testing/mock-pino-logger';
 
 // ============================================================================
 // Setup helpers
@@ -88,7 +89,7 @@ describe('Security Demonstration: Shell Injection', () => {
 
   beforeEach(() => {
     jest.clearAllMocks();
-    service = new TerminalService();
+    service = new TerminalService(createMockPinoLogger());
     setupMocks();
   });
 

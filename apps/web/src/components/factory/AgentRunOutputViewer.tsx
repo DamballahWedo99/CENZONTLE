@@ -12,9 +12,14 @@ import {
   Circle,
   XCircle,
 } from 'lucide-react';
+import type { CriterionEvent } from '@cenzontle/shared';
 import { cn } from '@/lib/utils';
 import { ApiError } from '@/lib/api/client';
-import { getRunDetail, type RunDetailResponse } from '@/lib/api/factory';
+import {
+  getRunDetail,
+  isCriterionEventArray,
+  type RunDetailResponse,
+} from '@/lib/api/factory';
 
 interface Props {
   runId: string;
@@ -23,37 +28,6 @@ interface Props {
 
 const POLL_INTERVAL_MS = 5_000;
 
-/**
- * Forma de cada item en `run.criteriaProgress`. Coincide con el
- * `CriterionEvent` del package shared. Lo redefinimos local para evitar
- * la dependencia entre web y shared (criterio más laxo).
- */
-interface RunCriterion {
-  id: string;
-  label: string;
-  status: 'pending' | 'in_progress' | 'completed' | 'failed';
-  source: 'worker' | 'agent';
-  startedAt?: string;
-  completedAt?: string;
-}
-
-/**
- * Type guard: el campo viene de DB como `unknown[] | null`. Validamos
- * shape antes de pintarlo para evitar runtime errors si el JSON está
- * corrupto o de una versión vieja del worker.
- */
-function isRunCriterionArray(v: unknown): v is RunCriterion[] {
-  if (!Array.isArray(v)) return false;
-  return v.every(
-    (c) =>
-      c &&
-      typeof c === 'object' &&
-      typeof (c as Record<string, unknown>).id === 'string' &&
-      typeof (c as Record<string, unknown>).label === 'string' &&
-      typeof (c as Record<string, unknown>).status === 'string' &&
-      typeof (c as Record<string, unknown>).source === 'string',
-  );
-}
 
 /**
  * Viewer del output de un AgentRun real (backend) — usado en la página
@@ -357,16 +331,19 @@ function CriteriaStrip({
   rawCriteria,
   prNumber,
 }: {
-  rawCriteria: unknown[] | null;
+  rawCriteria: CriterionEvent[] | null;
   prNumber: number | null;
 }) {
-  if (!isRunCriterionArray(rawCriteria) || rawCriteria.length === 0) {
+  // Guard sigue siendo necesario: el caller pasa el field tipado pero
+  // ese tipo viene de un cast del API layer (Json column en Prisma). El
+  // guard reconfirma el shape antes de iterar y descarta arrays vacíos.
+  if (!isCriterionEventArray(rawCriteria) || rawCriteria.length === 0) {
     return null;
   }
 
   // Pseudo-criterio derivado: si el backend ya abrió un PR, mostrarlo en
   // la timeline aunque el worker no lo haya emitido (lo abre el backend).
-  const enriched: RunCriterion[] = [...rawCriteria];
+  const enriched: CriterionEvent[] = [...rawCriteria];
   if (prNumber !== null) {
     enriched.push({
       id: 'pr.opened',
@@ -387,7 +364,7 @@ function CriteriaStrip({
   );
 }
 
-function CriterionChip({ criterion }: { criterion: RunCriterion }) {
+function CriterionChip({ criterion }: { criterion: CriterionEvent }) {
   const isCompleted = criterion.status === 'completed';
   const isInProgress = criterion.status === 'in_progress';
   const isFailed = criterion.status === 'failed';

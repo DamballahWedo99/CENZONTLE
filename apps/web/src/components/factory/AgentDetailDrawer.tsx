@@ -498,7 +498,7 @@ export function AgentDetailDrawer({
                 Identity
               </h3>
 
-              <div className="rounded-lg border border-border bg-[#0d1117] p-4 space-y-4">
+              <div className="rounded-lg border border-border bg-muted/30 p-4 space-y-4">
                 {/* Agent ID row */}
                 <div className="flex items-center justify-between gap-3">
                   <span className="text-xs text-muted-foreground/60">Agent ID</span>
@@ -518,7 +518,7 @@ export function AgentDetailDrawer({
                     Branch
                   </span>
                   <a
-                    href={`https://github.com/DamballahWedo99/CENZONTLE/tree/${branchName}`}
+                    href={`https://github.com/DamballahWedo99/AeroDemo-App/tree/${branchName}`}
                     target="_blank"
                     rel="noopener noreferrer"
                     className="font-mono text-[11px] text-blue-400 hover:text-blue-300 hover:underline text-right break-all transition-colors"

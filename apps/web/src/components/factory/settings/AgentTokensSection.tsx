@@ -12,6 +12,8 @@ import {
   Layers,
   Workflow,
   RotateCcw,
+  Cpu,
+  FolderKanban,
 } from 'lucide-react';
 import {
   AGENT_DESCRIPTORS,
@@ -23,12 +25,16 @@ import {
   type AgentEffortLevel,
   type AgentKey,
   type AgentTokenSettings,
+  type ForgeWorkerEffortLevel,
+  type ForgeWorkerModel,
 } from '@cenzontle/shared';
 import { Input } from '@/components/ui/input';
 import { Button } from '@/components/ui/button';
 import { Switch } from '@/components/ui/switch';
+import { Tabs, TabsList, TabsTrigger, TabsContent } from '@/components/ui/tabs';
 import { getAgentTokenSettings, updateAgentTokenSettings } from '@/lib/api/agent-token-settings';
 import { ApiError } from '@/lib/api/client';
+import { ForgeWorkerSection } from './ForgeWorkerSection';
 
 type EditableSettings = Omit<AgentTokenSettings, 'updatedAt' | 'updatedBy'>;
 
@@ -76,7 +82,15 @@ const EFFORT_SHORT: Record<AgentEffortLevel, string> = {
  */
 export function AgentTokensSection() {
   const [settings, setSettings] = useState<EditableSettings>(DEFAULT_AGENT_TOKEN_SETTINGS);
-  const [updatedAt, setUpdatedAt] = useState<string | null>(null);
+  // Nota: removí el state `updatedAt` cuando moví las tabs al header (donde
+  // vivía la fecha). La API sigue devolviendo el campo; lo descartamos al
+  // destructurar el response. Si se vuelve a necesitar (audit trail, log
+  // visible), re-introducir el useState aquí.
+
+  // Controlled tabs — necesario para renderizar el header dinámicamente
+  // según la tab activa. Sin esto, no podemos leer el `value` actual desde
+  // el componente padre (Radix mantiene su propio state interno).
+  const [activeTab, setActiveTab] = useState<'proyectos' | 'factory'>('proyectos');
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -94,9 +108,8 @@ export function AgentTokensSection() {
       .then((s) => {
         if (cancelled) return;
         // eslint-disable-next-line @typescript-eslint/no-unused-vars
-        const { updatedAt: ua, updatedBy: _ub, ...editable } = s;
+        const { updatedAt: _ua, updatedBy: _ub, ...editable } = s;
         setSettings(editable);
-        setUpdatedAt(ua);
       })
       .catch((e) => {
         if (cancelled) return;
@@ -126,9 +139,8 @@ export function AgentTokensSection() {
     try {
       const updated = await updateAgentTokenSettings(settings);
       // eslint-disable-next-line @typescript-eslint/no-unused-vars
-      const { updatedAt: ua, updatedBy: _ub, ...editable } = updated;
+      const { updatedAt: _ua, updatedBy: _ub, ...editable } = updated;
       setSettings(editable);
-      setUpdatedAt(ua);
       setSavedRecently(true);
     } catch (e) {
       const msg =
@@ -166,83 +178,144 @@ export function AgentTokensSection() {
 
   return (
     <div className="space-y-6">
-      {/* Header compacto — 1 línea con icono, sin info-overload. La meta
-          de la página la deduces del label del sidebar (Tokens IA). */}
-      <div className="flex items-start justify-between gap-4 pb-4 border-b border-border/60">
-        <div className="flex items-start gap-3 min-w-0">
-          <div className="rounded-lg bg-primary/10 p-2 shrink-0">
-            <Sparkles className="h-4 w-4 text-primary" />
+      {/* Tabs: Proyectos (agentes story-gen/epic/diagram) vs Factory (coder
+          agent del Forge — CLI claude). El TabsList vive en el header a la
+          derecha (en lugar de la fecha legacy) para que el switch entre tabs
+          esté visualmente alineado con el título de la sección. */}
+      <Tabs
+        value={activeTab}
+        onValueChange={(v) => setActiveTab(v as 'proyectos' | 'factory')}
+        className="w-full"
+      >
+        {/* Header — título dinámico según la tab activa. Cada tab tiene su
+            propia identidad visual (icono + título + descripción) para que
+            el operador sepa de qué sección está mirando los settings.
+            Las tabs viven a la derecha del header (donde antes estaba
+            `updatedAt`, ahora removido). */}
+        <div className="flex items-start justify-between gap-4 pb-4 border-b border-border/60">
+          <div className="flex items-start gap-3 min-w-0">
+            <div className="rounded-lg bg-primary/10 p-2 shrink-0">
+              {activeTab === 'proyectos' ? (
+                <FolderKanban className="h-4 w-4 text-primary" />
+              ) : (
+                <Cpu className="h-4 w-4 text-primary" />
+              )}
+            </div>
+            <div className="min-w-0">
+              {activeTab === 'proyectos' ? (
+                <>
+                  <h3 className="text-sm font-semibold text-foreground">
+                    Agentes de Proyectos · Generación con IA
+                  </h3>
+                  <p className="mt-0.5 text-xs text-muted-foreground">
+                    Configurá el nivel de razonamiento y presupuesto de tokens de los
+                    agentes IA que generan historias (PO → TL → QA), épicas y diagramas
+                    del proyecto. Los cambios aplican a generaciones nuevas en ≤30s, sin
+                    redeploy.
+                  </p>
+                </>
+              ) : (
+                <>
+                  <h3 className="text-sm font-semibold text-foreground">
+                    Agentes del Forge · Coder + Verifier
+                  </h3>
+                  <p className="mt-0.5 text-xs text-muted-foreground">
+                    Configurá modelo y extended thinking del agente que escribe el código
+                    (coder) y del que revisa el Definition of Done (verifier). Ambos
+                    invocan el Claude Code CLI. Los cambios aplican al próximo claim-story
+                    del worker (≤30s).
+                  </p>
+                </>
+              )}
+            </div>
           </div>
-          <div className="min-w-0">
-            <h3 className="text-sm font-semibold text-foreground">Adaptive thinking · Effort levels</h3>
-            <p className="mt-0.5 text-xs text-muted-foreground">
-              Ajusta esfuerzo de razonamiento y max_tokens por agente. Los cambios aplican a runs nuevos en ≤30s, sin redeploy.
-            </p>
-          </div>
+          <TabsList className="grid grid-cols-2 w-[240px] shrink-0">
+            <TabsTrigger value="proyectos">Proyectos</TabsTrigger>
+            <TabsTrigger value="factory">Factory</TabsTrigger>
+          </TabsList>
         </div>
-        {updatedAt && (
-          <span className="text-[10px] text-muted-foreground/60 shrink-0 mt-2">
-            {new Date(updatedAt).toLocaleString('es-MX', {
-              day: 'numeric',
-              month: 'short',
-              hour: '2-digit',
-              minute: '2-digit',
-            })}
-          </span>
-        )}
-      </div>
 
-      {/* Grupo: Historias (3 agentes secuenciales) */}
-      <section className="space-y-3">
-        <div className="flex items-baseline gap-2">
-          <h4 className="text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">
-            Historias
-          </h4>
-          <span className="text-[10px] text-muted-foreground/60">
-            Pipeline secuencial PO → TL → QA
-          </span>
-        </div>
-        <div className="space-y-2.5">
-          {storyAgents.map((desc) => (
-            <AgentCard
-              key={desc.key}
-              desc={desc}
-              effortValue={settings[desc.effortField] as AgentEffortLevel}
-              maxTokensValue={settings[desc.maxTokensField] as number}
-              enabledValue={settings[desc.enabledField] as boolean}
-              onEffortChange={(v) => handleField(desc.effortField, v)}
-              onMaxTokensChange={(v) => handleField(desc.maxTokensField, v)}
-              onEnabledChange={(v) => handleToggle(desc.enabledField, v)}
-            />
-          ))}
-        </div>
-      </section>
+        <TabsContent value="proyectos" className="mt-6 space-y-6">
+          {/* Grupo: Historias (3 agentes secuenciales) */}
+          <section className="space-y-3">
+            <div className="flex items-baseline gap-2">
+              <h4 className="text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">
+                Historias
+              </h4>
+              <span className="text-[10px] text-muted-foreground/60">
+                Pipeline secuencial PO → TL → QA
+              </span>
+            </div>
+            <div className="space-y-2.5">
+              {storyAgents.map((desc) => (
+                <AgentCard
+                  key={desc.key}
+                  desc={desc}
+                  effortValue={settings[desc.effortField] as AgentEffortLevel}
+                  maxTokensValue={settings[desc.maxTokensField] as number}
+                  enabledValue={settings[desc.enabledField] as boolean}
+                  onEffortChange={(v) => handleField(desc.effortField, v)}
+                  onMaxTokensChange={(v) => handleField(desc.maxTokensField, v)}
+                  onEnabledChange={(v) => handleToggle(desc.enabledField, v)}
+                />
+              ))}
+            </div>
+          </section>
 
-      {/* Grupo: Generación standalone (Épicas + Diagramas) */}
-      <section className="space-y-3">
-        <div className="flex items-baseline gap-2">
-          <h4 className="text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">
-            Generación standalone
-          </h4>
-          <span className="text-[10px] text-muted-foreground/60">
-            Agentes one-shot
-          </span>
-        </div>
-        <div className="space-y-2.5">
-          {standaloneAgents.map((desc) => (
-            <AgentCard
-              key={desc.key}
-              desc={desc}
-              effortValue={settings[desc.effortField] as AgentEffortLevel}
-              maxTokensValue={settings[desc.maxTokensField] as number}
-              enabledValue={settings[desc.enabledField] as boolean}
-              onEffortChange={(v) => handleField(desc.effortField, v)}
-              onMaxTokensChange={(v) => handleField(desc.maxTokensField, v)}
-              onEnabledChange={(v) => handleToggle(desc.enabledField, v)}
-            />
-          ))}
-        </div>
-      </section>
+          {/* Grupo: Generación standalone (Épicas + Diagramas) */}
+          <section className="space-y-3">
+            <div className="flex items-baseline gap-2">
+              <h4 className="text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">
+                Generación standalone
+              </h4>
+              <span className="text-[10px] text-muted-foreground/60">
+                Agentes one-shot
+              </span>
+            </div>
+            <div className="space-y-2.5">
+              {standaloneAgents.map((desc) => (
+                <AgentCard
+                  key={desc.key}
+                  desc={desc}
+                  effortValue={settings[desc.effortField] as AgentEffortLevel}
+                  maxTokensValue={settings[desc.maxTokensField] as number}
+                  enabledValue={settings[desc.enabledField] as boolean}
+                  onEffortChange={(v) => handleField(desc.effortField, v)}
+                  onMaxTokensChange={(v) => handleField(desc.maxTokensField, v)}
+                  onEnabledChange={(v) => handleToggle(desc.enabledField, v)}
+                />
+              ))}
+            </div>
+          </section>
+        </TabsContent>
+
+        <TabsContent value="factory" className="mt-6">
+          <ForgeWorkerSection
+            // Coder agent
+            model={settings.forgeWorkerModel as ForgeWorkerModel}
+            effort={settings.forgeWorkerEffort as ForgeWorkerEffortLevel}
+            onModelChange={(v) => {
+              setSettings((prev) => ({ ...prev, forgeWorkerModel: v }));
+              setSavedRecently(false);
+            }}
+            onEffortChange={(v) => {
+              setSettings((prev) => ({ ...prev, forgeWorkerEffort: v }));
+              setSavedRecently(false);
+            }}
+            // DoD verifier
+            dodVerifierModel={settings.dodVerifierModel as ForgeWorkerModel}
+            dodVerifierEffort={settings.dodVerifierEffort as ForgeWorkerEffortLevel}
+            onDodVerifierModelChange={(v) => {
+              setSettings((prev) => ({ ...prev, dodVerifierModel: v }));
+              setSavedRecently(false);
+            }}
+            onDodVerifierEffortChange={(v) => {
+              setSettings((prev) => ({ ...prev, dodVerifierEffort: v }));
+              setSavedRecently(false);
+            }}
+          />
+        </TabsContent>
+      </Tabs>
 
       {error && (
         <div className="rounded-lg border border-destructive/40 bg-destructive/10 px-4 py-3 text-xs text-destructive flex items-start gap-2">

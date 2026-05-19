@@ -1,6 +1,9 @@
-import { Injectable, Logger } from '@nestjs/common';
+import {
+  Injectable,
+} from '@nestjs/common';
 import { createHash, randomBytes } from 'crypto';
 import { PrismaService } from '../../prisma/prisma.service';
+import { InjectPinoLogger, PinoLogger } from 'nestjs-pino';
 
 export interface GeneratedToken {
   /** Plaintext devuelto UNA SOLA VEZ al crear. Después solo existe el hash. */
@@ -24,9 +27,9 @@ export interface GeneratedToken {
  */
 @Injectable()
 export class WorkerTokenService {
-  private readonly logger = new Logger(WorkerTokenService.name);
-
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(private readonly prisma: PrismaService,
+    @InjectPinoLogger(WorkerTokenService.name) private readonly logger: PinoLogger,
+  ) {}
 
   /**
    * Genera un token nuevo para un nodo. Devuelve el plaintext UNA vez —
@@ -57,7 +60,7 @@ export class WorkerTokenService {
       },
     });
 
-    this.logger.log(
+    this.logger.info(
       `[token] generated tokenId=${token.id} nodeId=${nodeId} prefix=${prefix} createdBy=${createdById ?? 'system'}`,
     );
 
@@ -102,7 +105,7 @@ export class WorkerTokenService {
         data: { lastUsedAt: new Date() },
       });
     } catch (err) {
-      this.logger.warn(`[token] touchLastUsed failed tokenId=${tokenId}: ${(err as Error).message}`);
+      this.logger.warn({ tokenId, message: (err as Error).message }, `[token] touchLastUsed failed tokenId=${tokenId}: ${(err as Error).message}`);
     }
   }
 
@@ -136,7 +139,7 @@ export class WorkerTokenService {
       where: { id: tokenId },
       data: { revokedAt: new Date() },
     });
-    this.logger.log(`[token] revoke tokenId=${tokenId} by=${revokedById ?? 'system'}`);
+    this.logger.info({ tokenId }, `[token] revoke tokenId=${tokenId} by=${revokedById ?? 'system'}`);
   }
 
   /**
@@ -149,7 +152,7 @@ export class WorkerTokenService {
       where: { nodeId, revokedAt: null },
       data: { revokedAt: new Date() },
     });
-    this.logger.log(
+    this.logger.info(
       `[token] revokeAllForNode nodeId=${nodeId} count=${result.count} by=${revokedById ?? 'system'}`,
     );
     return result.count;

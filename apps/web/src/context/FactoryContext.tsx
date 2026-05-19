@@ -509,6 +509,17 @@ function mapForgeQueueItemToQueuedBatch(item: ForgeQueueItem): QueuedBatch {
     agentCount: item.agentCount,
     runStartedAt: item.runStartedAt,
     forgeBranch: item.forgeBranch,
+    awaitingHumanGate: item.awaitingHumanGate,
+    // Aggregates del epic — permiten que KanbanBatchCard muestre cost,
+    // tokens y congele el reloj cuando completedAt está set.
+    completedAt: item.completedAt,
+    totalCostUsd: item.totalCostUsd,
+    totalTokensNew: item.totalTokensNew,
+    totalTokensCached: item.totalTokensCached,
+    // Staging approval propagado del backend — el FactoryOverview lo usa
+    // para derivar `currentLayer = Staging` y mover el batch a la columna
+    // STAGED sin esperar al próximo poll del detail endpoint.
+    stagingApprovedAt: item.stagingApprovedAt ?? null,
   };
 }
 

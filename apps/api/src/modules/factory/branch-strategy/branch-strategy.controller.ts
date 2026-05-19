@@ -1,7 +1,7 @@
 import { Body, Controller, Get, HttpCode, HttpStatus, Post, Put } from '@nestjs/common';
 import { ApiOperation, ApiTags } from '@nestjs/swagger';
 import { type AuthenticatedUser } from '@cenzontle/shared';
-import { IsOptional, IsString, MaxLength } from 'class-validator';
+import { IsNotEmpty, IsOptional, IsString, MaxLength, MinLength } from 'class-validator';
 import { CurrentUser } from '../../auth/decorators';
 import { FleetService } from '../fleet/fleet.service';
 import { BranchStrategyService } from './branch-strategy.service';
@@ -18,6 +18,17 @@ class AbortRunsDto {
   @IsString()
   @MaxLength(500)
   reason!: string;
+}
+
+class AlignDevBranchDto {
+  /** Password actual del user — step-up auth contra Auth0 antes del
+   *  force-update de `dev`. La operación es destructiva (descarta historia
+   *  única de dev) así que exigimos confirmación reciente de identidad. */
+  @IsString()
+  @IsNotEmpty()
+  @MinLength(1)
+  @MaxLength(256)
+  password!: string;
 }
 
 /**
@@ -106,5 +117,39 @@ export class BranchStrategyController {
     this.fleet.assertCanManageFleet(user);
     const aborted = await this.service.abortAllActiveRuns(user.sub, dto.reason);
     return { aborted, reason: dto.reason };
+  }
+
+  // ════════════════════════════════════════════════════════════════════
+  // GIT STATE VALIDATION + ALIGNMENT — dev y main deben compartir historia
+  // ════════════════════════════════════════════════════════════════════
+
+  @Get('git-state')
+  @ApiOperation({
+    summary:
+      'Valida el git state actual: dev y main existen y comparten historia. ' +
+      'El frontend usa esto para mostrar un banner si hay un problema arreglable.',
+  })
+  async getGitState(@CurrentUser() user: AuthenticatedUser) {
+    this.fleet.assertCanManageFleet(user);
+    return this.service.validateGitState();
+  }
+
+  @Post('align-dev')
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({
+    summary:
+      'Force-update de la branch dev para que comparta historia con main. ' +
+      'DESTRUCTIVO — descarta cualquier historia única de dev. Requiere ' +
+      'step-up auth con password + rol TechLead o AltaGerencia.',
+  })
+  async alignDev(
+    @CurrentUser() user: AuthenticatedUser,
+    @Body() dto: AlignDevBranchDto,
+  ) {
+    // Note: NO llamamos fleet.assertCanManageFleet — el service hace su
+    // propio role check (TechLead o AltaGerencia, mismo set que el
+    // staging gate approval). El step-up auth con password es la barrera
+    // crítica adicional.
+    return this.service.alignDevWithMain(user, dto.password);
   }
 }

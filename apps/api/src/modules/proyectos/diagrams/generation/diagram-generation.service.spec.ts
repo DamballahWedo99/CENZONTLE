@@ -30,6 +30,7 @@ jest.mock('simple-git', () => ({
 
 import type { EpicDiagram } from '@cenzontle/shared';
 import { DiagramGenerationService } from './diagram-generation.service';
+import { createMockPinoLogger } from '../../../../common/testing/mock-pino-logger';
 
 // ---------------------------------------------------------------------------
 // Stubs de deps — el constructor solo las guarda como refs privadas; los
@@ -55,6 +56,7 @@ function createService(): DiagramGenerationService {
     emptyStub,  // ChangelogService
     emptyStub,  // VaultService
     emptyStub,  // AgentTokenSettingsService
+    createMockPinoLogger(),
   );
 }
 

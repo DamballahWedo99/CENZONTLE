@@ -1,7 +1,10 @@
-import { Injectable, Logger } from '@nestjs/common';
+import {
+  Injectable,
+} from '@nestjs/common';
 import { RedisService } from '../../../redis/redis.service';
 import type { DiagramGenerationEvent, DiagramGenerationType } from '@cenzontle/shared';
 import { scrubSecrets } from '../../../../common/utils/scrub-secrets.util';
+import { InjectPinoLogger, PinoLogger } from 'nestjs-pino';
 
 /**
  * Cachea la SESIÓN SSE en curso de la generación de un diagrama (events
@@ -29,9 +32,9 @@ export interface CachedDiagramSession {
 
 @Injectable()
 export class DiagramSessionCacheService {
-  private readonly logger = new Logger(DiagramSessionCacheService.name);
-
-  constructor(private readonly redis: RedisService) {}
+  constructor(private readonly redis: RedisService,
+    @InjectPinoLogger(DiagramSessionCacheService.name) private readonly logger: PinoLogger,
+  ) {}
 
   private key(epicId: string, type: DiagramGenerationType): string {
     return `diagram-gen:${epicId}:${type}:session`;
@@ -77,6 +80,6 @@ export class DiagramSessionCacheService {
 
   async invalidateSession(epicId: string, type: DiagramGenerationType): Promise<void> {
     await this.redis.del(this.key(epicId, type));
-    this.logger.log(`Session cache invalidated for epic=${epicId} type=${type}`);
+    this.logger.info({ epicId, type }, `Session cache invalidated for epic=${epicId} type=${type}`);
   }
 }

@@ -1,4 +1,7 @@
-import { Injectable, Logger, OnModuleInit } from '@nestjs/common';
+import {
+  Injectable,
+  OnModuleInit,
+} from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { PrismaService } from '../prisma/prisma.service';
 import { CodeRepositoryConfigService } from './code-repository-config.service';
@@ -8,6 +11,7 @@ import * as path from 'node:path';
 import * as fs from 'node:fs/promises';
 import { homedir } from 'node:os';
 import type { CodeRepoCloneStatus } from '@prisma/client';
+import { InjectPinoLogger, PinoLogger } from 'nestjs-pino';
 
 export interface ActiveCloneInfo {
   id: string;
@@ -38,7 +42,6 @@ export interface CloneStatusInfo {
  */
 @Injectable()
 export class CodeRepoCloneService implements OnModuleInit {
-  private readonly logger = new Logger(CodeRepoCloneService.name);
   private readonly reposDir: string;
   private readonly locks = new Map<string, Promise<void>>();
 
@@ -46,6 +49,7 @@ export class CodeRepoCloneService implements OnModuleInit {
     private readonly prisma: PrismaService,
     private readonly config: ConfigService,
     private readonly configService: CodeRepositoryConfigService,
+    @InjectPinoLogger(CodeRepoCloneService.name) private readonly logger: PinoLogger,
   ) {
     // Default bajo $HOME porque `/var/` requiere root en dev (macOS/Linux).
     // En prod se debe setear `CODE_REPOS_DIR` explícito (ej. volumen persistente).
@@ -56,7 +60,7 @@ export class CodeRepoCloneService implements OnModuleInit {
 
   async onModuleInit() {
     await fs.mkdir(this.reposDir, { recursive: true }).catch((err) => {
-      this.logger.warn(`Failed to create reposDir ${this.reposDir}: ${err.message}`);
+      this.logger.warn({ reposDir: this.reposDir, message: err.message }, `Failed to create reposDir ${this.reposDir}: ${err.message}`);
     });
   }
 
@@ -100,13 +104,13 @@ export class CodeRepoCloneService implements OnModuleInit {
    * Wrapped en withLock para evitar race si otro thread dispara clone simultáneo.
    */
   scheduleClone(repoId: string): void {
-    this.logger.log(`[scheduleClone] triggered repo=${repoId}`);
+    this.logger.info({ repoId }, `[scheduleClone] triggered repo=${repoId}`);
     void this.withLock(repoId, async () => {
       try {
         await this.doCloneOrPull(repoId);
-        this.logger.log(`[scheduleClone] completed repo=${repoId}`);
+        this.logger.info({ repoId }, `[scheduleClone] completed repo=${repoId}`);
       } catch (err: any) {
-        this.logger.warn(`[scheduleClone] failed repo=${repoId} error="${scrubSecrets(err.message ?? String(err))}"`);
+        this.logger.warn({ repoId }, `[scheduleClone] failed repo=${repoId} error="${scrubSecrets(err.message ?? String(err))}"`);
       }
     });
   }
@@ -134,7 +138,7 @@ export class CodeRepoCloneService implements OnModuleInit {
     const reason = needsClone
       ? `status=${repo.cloneStatus}`
       : `stale (age=${Math.round(ageMs / 1000)}s > maxAge=${Math.round(maxAgeMs / 1000)}s)`;
-    this.logger.log(`[ensureFresh] pulling repo=${repoId} reason="${reason}"`);
+    this.logger.info({ repoId, reason }, `[ensureFresh] pulling repo=${repoId} reason="${reason}"`);
 
     await this.withLock(repoId, () => this.doCloneOrPull(repoId));
   }
@@ -160,9 +164,9 @@ export class CodeRepoCloneService implements OnModuleInit {
     await this.withLock(repoId, async () => {
       try {
         await fs.rm(this.repoPath(repoId), { recursive: true, force: true });
-        this.logger.log(`[removeClone] ${repoId}`);
+        this.logger.info({ repoId }, `[removeClone] ${repoId}`);
       } catch (err: any) {
-        this.logger.warn(`[removeClone] failed for ${repoId}: ${err.message}`);
+        this.logger.warn({ repoId, message: err.message }, `[removeClone] failed for ${repoId}: ${err.message}`);
       }
     });
   }
@@ -234,28 +238,50 @@ export class CodeRepoCloneService implements OnModuleInit {
     });
 
     try {
-      const hasGitDir = await fs
-        .access(path.join(dest, '.git'))
-        .then(() => true)
-        .catch(() => false);
+      // Validez del clone: el detector anterior solo chequeaba `fs.access('.git')`
+      // — eso es falsa confianza. Si `.git` existe pero está corrupto/incompleto
+      // (típico cuando /tmp es limpiado parcialmente por macOS: borra archivos
+      // del working tree y archivos críticos como HEAD/config pero deja
+      // subdirectorios), el branch del pull arroja "fatal: no es un repositorio
+      // git" porque simpleGit() ejecuta git en un dest donde HEAD no existe.
+      //
+      // Fix (2026-05-11): `checkIsRepo()` ejecuta `git rev-parse --is-inside-work-tree`
+      // que valida la estructura mínima (HEAD + config). Si retorna false,
+      // tratamos como ausente — limpiamos el directorio zombi y caemos al
+      // path de fresh-clone, que re-clona desde cero.
+      let hasValidRepo = false;
+      try {
+        hasValidRepo = await simpleGit(dest).checkIsRepo();
+      } catch {
+        hasValidRepo = false;
+      }
+      if (!hasValidRepo) {
+        // Limpieza preventiva del directorio zombi para que el clone fresh no
+        // falle por "dest no vacío". Best-effort: si no se puede borrar, el
+        // clone tirará un error claro que el catch exterior registra.
+        await fs.rm(dest, { recursive: true, force: true }).catch(() => {
+          // ignore — el clone se encarga de reportar si el problema persiste
+        });
+      }
 
       const authUrl = this.authUrl(config.owner, config.repo, token);
       const cleanUrl = this.cleanUrl(config.owner, config.repo);
 
       // Capturar SHA actual antes del fetch para diagnosticar si el pull avanzó.
       let oldSha: string | null = null;
-      if (hasGitDir) {
+      if (hasValidRepo) {
         try {
           oldSha = (await simpleGit(dest).revparse(['HEAD'])).trim();
         } catch {
-          // .git existe pero corrupto — el fetch/reset abajo lo recuperará
+          // checkIsRepo pasó pero revparse falló — edge case raro, el reset
+          // abajo lo recupera o el catch exterior reporta
         }
       }
-      this.logger.log(
-        `[doCloneOrPull] start repo=${repoId} mode=${hasGitDir ? `pull (current=${oldSha?.slice(0, 7) ?? 'unknown'})` : 'fresh-clone'} branch=${config.branch}`,
+      this.logger.info(
+        `[doCloneOrPull] start repo=${repoId} mode=${hasValidRepo ? `pull (current=${oldSha?.slice(0, 7) ?? 'unknown'})` : 'fresh-clone'} branch=${config.branch}`,
       );
 
-      if (hasGitDir) {
+      if (hasValidRepo) {
         // Existing clone: fetch + reset to origin branch (más robusto que pull si hubo historia divergente).
         // Pasamos authUrl como primer argumento de fetch() para que git use las credenciales
         // en runtime SIN persistirlas en .git/config. Defense in depth: también reescribimos
@@ -331,7 +357,7 @@ export class CodeRepoCloneService implements OnModuleInit {
       const transition = oldSha
         ? `${oldSha.slice(0, 7)} → ${sha.slice(0, 7)} ${changed ? '(updated)' : '(no changes)'}`
         : sha.slice(0, 7);
-      this.logger.log(`[doCloneOrPull] success repo=${repoId} ${transition} files=${fileCount}`);
+      this.logger.info({ repoId, transition, fileCount }, `[doCloneOrPull] success repo=${repoId} ${transition} files=${fileCount}`);
       return { sha };
     } catch (err: any) {
       const scrubbed = scrubSecrets(String(err?.message ?? err));
@@ -342,7 +368,7 @@ export class CodeRepoCloneService implements OnModuleInit {
           lastSyncError: scrubbed.slice(0, 500),
         },
       });
-      this.logger.error(`[doCloneOrPull] FAILED repo=${repoId} error="${scrubbed}"`);
+      this.logger.error({ repoId, scrubbed }, `[doCloneOrPull] FAILED repo=${repoId} error="${scrubbed}"`);
       throw new Error(scrubbed);
     }
   }

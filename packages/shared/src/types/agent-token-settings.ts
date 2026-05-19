@@ -40,6 +40,67 @@ export const AGENT_EFFORT_DESCRIPTIONS: Record<AgentEffortLevel, string> = {
   high: 'Razonamiento profundo. Recomendado para agentes con tools.',
 };
 
+/**
+ * Modelos válidos para el Forge Worker (coder agent que corre Claude Code CLI).
+ * Distinto del set para los agentes story-gen porque el CLI maneja el rango
+ * completo de modelos production-grade.
+ *
+ * Cuando se agreguen nuevos modelos (Haiku 4.6, etc.), agregar al array y
+ * el DTO + UI se actualizan automáticamente.
+ */
+export const FORGE_WORKER_MODELS = [
+  'claude-haiku-4-5-20251001',
+  'claude-sonnet-4-6',
+  'claude-opus-4-7',
+] as const;
+export type ForgeWorkerModel = typeof FORGE_WORKER_MODELS[number];
+
+export const FORGE_WORKER_MODEL_LABELS: Record<ForgeWorkerModel, string> = {
+  'claude-haiku-4-5-20251001': 'Claude Haiku 4.5',
+  'claude-sonnet-4-6': 'Claude Sonnet 4.6',
+  'claude-opus-4-7': 'Claude Opus 4.7',
+};
+
+/**
+ * Pricing público de Anthropic (USD por 1M tokens). Para mostrar al user
+ * en la UI como hint de cost relativo entre modelos. Si Anthropic actualiza
+ * precios, este es el único punto de update.
+ */
+export const FORGE_WORKER_MODEL_PRICING: Record<ForgeWorkerModel, { input: number; output: number }> = {
+  'claude-haiku-4-5-20251001': { input: 1, output: 5 },
+  'claude-sonnet-4-6': { input: 3, output: 15 },
+  'claude-opus-4-7': { input: 15, output: 75 },
+};
+
+/**
+ * Effort levels que soporta el CLI `claude` via `--effort`. Más granular que
+ * el `AgentEffortLevel` de los agentes story-gen porque el CLI permite
+ * `xhigh` y `max` para extended thinking más generoso.
+ *  - 'low'    — sin thinking, latency mínima.
+ *  - 'medium' — thinking moderado, default histórico del CLI.
+ *  - 'high'   — extended thinking activo (recomendado para coding).
+ *  - 'xhigh'  — thinking budget más generoso.
+ *  - 'max'    — thinking budget máximo (solo en Opus 4.6+).
+ */
+export const FORGE_WORKER_EFFORT_LEVELS = ['low', 'medium', 'high', 'xhigh', 'max'] as const;
+export type ForgeWorkerEffortLevel = typeof FORGE_WORKER_EFFORT_LEVELS[number];
+
+export const FORGE_WORKER_EFFORT_LABELS: Record<ForgeWorkerEffortLevel, string> = {
+  low: 'Bajo',
+  medium: 'Medio',
+  high: 'Alto',
+  xhigh: 'X-Alto',
+  max: 'Máximo',
+};
+
+export const FORGE_WORKER_EFFORT_DESCRIPTIONS: Record<ForgeWorkerEffortLevel, string> = {
+  low: 'Sin extended thinking. Latencia mínima. Para tasks triviales.',
+  medium: 'Thinking moderado. Balance entre quality y latencia.',
+  high: 'Extended thinking activo. Recomendado para coding production.',
+  xhigh: 'Thinking budget más generoso. Tasks complejas.',
+  max: 'Thinking budget máximo. Solo Opus 4.6+. Tasks que requieren razonamiento profundo.',
+};
+
 export interface AgentTokenSettings {
   // Stories — Product Owner
   storyPoEffort: AgentEffortLevel;
@@ -66,6 +127,16 @@ export interface AgentTokenSettings {
   diagramMaxTokens: number;
   diagramThinkingEnabled: boolean;
 
+  // Forge Worker — coder agent (Claude Code CLI)
+  forgeWorkerModel: ForgeWorkerModel;
+  forgeWorkerEffort: ForgeWorkerEffortLevel;
+
+  // DoD Verifier — reviewer agent (Claude Code CLI, --output-format json)
+  // Reusa el mismo set de modelos + effort levels que el Forge Worker
+  // porque ambos invocan el CLI con los mismos parámetros válidos.
+  dodVerifierModel: ForgeWorkerModel;
+  dodVerifierEffort: ForgeWorkerEffortLevel;
+
   updatedAt: string;
   updatedBy: string | null;
 }
@@ -87,6 +158,10 @@ export const DEFAULT_AGENT_TOKEN_SETTINGS: Omit<AgentTokenSettings, 'updatedAt' 
   diagramEffort: 'medium',
   diagramMaxTokens: 64_000,
   diagramThinkingEnabled: true,
+  forgeWorkerModel: 'claude-sonnet-4-6',
+  forgeWorkerEffort: 'high',
+  dodVerifierModel: 'claude-haiku-4-5-20251001',
+  dodVerifierEffort: 'low',
 };
 
 /** Bounds usados tanto en server (validation) como en client (input min/max). */

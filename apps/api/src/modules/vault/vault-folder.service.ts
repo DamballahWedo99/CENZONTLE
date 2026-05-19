@@ -1,5 +1,8 @@
-import { Injectable, Logger } from '@nestjs/common';
+import {
+  Injectable,
+} from '@nestjs/common';
 import { VaultService, VaultTreeNode } from './vault.service';
+import { InjectPinoLogger, PinoLogger } from 'nestjs-pino';
 
 export interface MoveFolderResult {
   filesMoved: number;
@@ -14,9 +17,9 @@ export interface MoveFolderResult {
  */
 @Injectable()
 export class VaultFolderService {
-  private readonly logger = new Logger(VaultFolderService.name);
-
-  constructor(private readonly vault: VaultService) {}
+  constructor(private readonly vault: VaultService,
+    @InjectPinoLogger(VaultFolderService.name) private readonly logger: PinoLogger,
+  ) {}
 
   /**
    * Mueve un folder entero de `fromFolder` a `toFolder`.
@@ -39,7 +42,7 @@ export class VaultFolderService {
     commitMsgDelete: string,
   ): Promise<MoveFolderResult> {
     if (fromFolder === toFolder) {
-      this.logger.log(`[moveFolder] noop: from === to (${fromFolder})`);
+      this.logger.info({ fromFolder }, `[moveFolder] noop: from === to (${fromFolder})`);
       return { filesMoved: 0, copyErrors: [], deleteErrors: [] };
     }
 
@@ -47,11 +50,11 @@ export class VaultFolderService {
     const files = this.flattenFiles(tree);
 
     if (files.length === 0) {
-      this.logger.log(`[moveFolder] source folder empty or missing: ${fromFolder}`);
+      this.logger.info({ fromFolder }, `[moveFolder] source folder empty or missing: ${fromFolder}`);
       return { filesMoved: 0, copyErrors: [], deleteErrors: [] };
     }
 
-    this.logger.log(`[moveFolder] ${files.length} file(s): ${fromFolder} → ${toFolder}`);
+    this.logger.info({ length: files.length, fromFolder, toFolder }, `[moveFolder] ${files.length} file(s): ${fromFolder} → ${toFolder}`);
 
     // Paso 1: copy all to new location.
     const writtenOldPaths: string[] = [];
@@ -63,7 +66,7 @@ export class VaultFolderService {
       try {
         const note = await this.vault.readNote(fromPath);
         if (!note) {
-          this.logger.warn(`[moveFolder] skip missing ${fromPath}`);
+          this.logger.warn({ fromPath }, `[moveFolder] skip missing ${fromPath}`);
           continue;
         }
         await this.vault.writeNote(toPath, note.content, commitMsgCopy);
@@ -95,7 +98,7 @@ export class VaultFolderService {
         `[moveFolder] ${deleteErrors.length}/${writtenOldPaths.length} deletes failed. New folder OK, old has leftovers. Errors: ${deleteErrors.join('; ')}`,
       );
     } else {
-      this.logger.log(`[moveFolder] ✓ moved ${writtenOldPaths.length} files`);
+      this.logger.info({ length: writtenOldPaths.length }, `[moveFolder] ✓ moved ${writtenOldPaths.length} files`);
     }
 
     return {
@@ -115,11 +118,11 @@ export class VaultFolderService {
     const files = this.flattenFiles(tree);
 
     if (files.length === 0) {
-      this.logger.log(`[deleteFolder] folder empty or missing: ${folder}`);
+      this.logger.info({ folder }, `[deleteFolder] folder empty or missing: ${folder}`);
       return 0;
     }
 
-    this.logger.log(`[deleteFolder] ${files.length} file(s) in ${folder}`);
+    this.logger.info({ length: files.length, folder }, `[deleteFolder] ${files.length} file(s) in ${folder}`);
 
     let first = true;
     let successCount = 0;
@@ -132,7 +135,7 @@ export class VaultFolderService {
         await this.vault.deleteNote(filePath, msg);
         successCount++;
       } catch (err: any) {
-        this.logger.warn(`[deleteFolder] failed to delete ${filePath}: ${err?.message}`);
+        this.logger.warn({ filePath, message: err?.message }, `[deleteFolder] failed to delete ${filePath}: ${err?.message}`);
       }
       first = false;
     }

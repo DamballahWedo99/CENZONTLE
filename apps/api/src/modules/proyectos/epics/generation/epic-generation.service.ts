@@ -1,4 +1,6 @@
-import { Injectable, Logger } from '@nestjs/common';
+import {
+  Injectable,
+} from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import Anthropic from '@anthropic-ai/sdk';
 import { anthropicFetch } from '../../../../lib/anthropic-fetch';
@@ -22,6 +24,7 @@ import { Subject } from 'rxjs';
 import { scrubSecrets } from '../../../../common/utils/scrub-secrets.util';
 import { sanitizeUserPromptForLLM } from '../../../../common/utils/sanitize-llm-input.util';
 import { AgentTokenSettingsService } from '../../../agent-token-settings/agent-token-settings.service';
+import { InjectPinoLogger, PinoLogger } from 'nestjs-pino';
 
 const MAX_TOOL_ITERATIONS = 15;
 // Sonnet 4.6 — soporta adaptive thinking + effort levels.
@@ -66,7 +69,6 @@ function cap(s: string, n = MAX_FIELD_LEN): string {
 
 @Injectable()
 export class EpicGenerationService {
-  private readonly logger = new Logger(EpicGenerationService.name);
   private readonly client: Anthropic;
   private readonly tools: AgentTool[];
 
@@ -83,6 +85,7 @@ export class EpicGenerationService {
     private readonly vaultRead: VaultReadTool,
     private readonly codeRepoClones: CodeRepoCloneService,
     private readonly tokenSettings: AgentTokenSettingsService,
+    @InjectPinoLogger(EpicGenerationService.name) private readonly logger: PinoLogger,
   ) {
     const apiKey = this.config.get<string>('ANTHROPIC_API_KEY');
     if (!apiKey) {
@@ -134,7 +137,7 @@ export class EpicGenerationService {
     const subject = new Subject<{ data: EpicGenerationEvent }>();
 
     this.runAgent(initiativeId, prompt, count, subject, signal, webSearch).catch((err) => {
-      this.logger.error(`Agent error: ${err.message}`, err.stack);
+      this.logger.error({ err }, `Agent error: ${err.message}`);
       subject.next({ data: { type: 'error', message: 'Error interno al generar epicas. Intenta de nuevo.', timestamp: new Date().toISOString() } });
       subject.complete();
     });
@@ -322,7 +325,7 @@ REGLAS DUROS:
     const activeBreakpoints: string[] = [];
     if (systemPromptChars >= 4096) activeBreakpoints.push('systemPrompt');
     if (contextBlockChars >= 4096) activeBreakpoints.push('contextBlock');
-    this.logger.log(
+    this.logger.info(
       `[EpicGen] ▶ loop start: systemPrompt=${systemPromptChars} chars (~${systemPromptEstTokens} tokens), contextBlock=${contextBlockChars} chars (~${contextBlockEstTokens} tokens). ` +
         `Cache ${activeBreakpoints.length > 0 ? `✅ activará en: [${activeBreakpoints.join(', ')}]` : '⚠️ NO activará (ambos < 1024 tokens)'}.`,
     );
@@ -476,7 +479,7 @@ REGLAS DUROS:
         (b: any) => b.type === 'tool_use',
       ).length;
 
-      this.logger.log(
+      this.logger.info(
         `[EpicGen] iter ${iteration} stop=${response.stop_reason} dur=${Date.now() - callStart}ms ` +
           `tokens(in=${inputTokens} out=${outputTokens} cache_read=${cacheRead} cache_create=${cacheCreate}) ` +
           `thinking_blocks=${thinkingBlocksCount} tool_calls=${toolUseBlocksCount}` +
@@ -521,7 +524,7 @@ REGLAS DUROS:
         const ratio = totalCacheCreate > 0
           ? (totalCacheRead / totalCacheCreate).toFixed(1)
           : '∞';
-        this.logger.log(
+        this.logger.info(
           `[EpicGen] ▣ run summary: iters=${iteration + 1} ` +
             `totals(in=${totalInputTokens} out=${totalOutputTokens} cache_read=${totalCacheRead} cache_create=${totalCacheCreate}) ` +
             `ratio_read_to_write=${ratio}:1 — target ≥4:1 (anti-thrashing OK).`,
@@ -563,8 +566,11 @@ REGLAS DUROS:
           const searchResults = Array.isArray(result.content) ? result.content : [];
           const searchCount = searchResults.length;
 
-          // Debug: log structure to understand Anthropic's format
-          this.logger.debug(`web_search_tool_result structure: ${JSON.stringify(searchResults.slice(0, 2).map((r: any) => ({ type: r.type, keys: Object.keys(r) })))}`);
+          // Debug: log structure to understand Anthropic's format. Pino
+          // serializa el sample como property `sample` del payload — más
+          // legible que JSON.stringify inline en el msg.
+          const searchSample = searchResults.slice(0, 2).map((r: any) => ({ type: r.type, keys: Object.keys(r) }));
+          this.logger.debug({ searchCount, sample: searchSample }, 'web_search_tool_result structure');
 
           // Extract titles + URLs — handle multiple possible structures
           let resultPreview = '';
@@ -587,7 +593,7 @@ REGLAS DUROS:
                 : '';
             }
           } catch (e) {
-            this.logger.warn(`Failed to extract web search preview: ${e}`);
+            this.logger.warn({ e }, `Failed to extract web search preview: ${e}`);
           }
 
           subject.next({
@@ -690,7 +696,7 @@ REGLAS DUROS:
             const toolPromise = tool
               .executeMultimodal(toolBlock.input as Record<string, unknown>, ctx)
               .catch((err) => {
-                this.logger.warn(`Late rejection from ${tool.name}: ${err?.message}`);
+                this.logger.warn({ name: tool.name, message: err?.message }, `Late rejection from ${tool.name}: ${err?.message}`);
                 throw err;
               });
             const mm = await Promise.race([toolPromise, timer]);
@@ -716,7 +722,7 @@ REGLAS DUROS:
             const toolPromise = tool
               .execute(toolBlock.input as Record<string, unknown>, ctx)
               .catch((err) => {
-                this.logger.warn(`Late rejection from ${tool.name}: ${err?.message}`);
+                this.logger.warn({ name: tool.name, message: err?.message }, `Late rejection from ${tool.name}: ${err?.message}`);
                 throw err;
               });
             result = await Promise.race([toolPromise, timer]);
@@ -747,7 +753,7 @@ REGLAS DUROS:
           timer.clear();
           // Log completo server-side; mensaje genérico al cliente para no
           // filtrar paths absolutos / stack traces via el SSE resultPreview.
-          this.logger.warn(`Tool ${tool.name} failed: ${err?.message}`);
+          this.logger.warn({ name: tool.name, message: err?.message }, `Tool ${tool.name} failed: ${err?.message}`);
           subject.next({
             data: {
               type: 'step_done',

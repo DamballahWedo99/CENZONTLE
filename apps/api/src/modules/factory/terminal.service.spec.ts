@@ -47,6 +47,7 @@ mockExecSync.mockImplementation((cmd: string) => {
 
 import { resolve } from 'path';
 import { TerminalService } from './terminal.service';
+import { createMockPinoLogger } from '../../common/testing/mock-pino-logger';
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -92,7 +93,7 @@ describe('TerminalService', () => {
 
   beforeEach(() => {
     jest.clearAllMocks();
-    service = new TerminalService();
+    service = new TerminalService(createMockPinoLogger());
 
     simulateFreePort();
     mockFetch.mockResolvedValue({ ok: true });

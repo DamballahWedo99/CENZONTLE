@@ -1,10 +1,18 @@
-import { BadRequestException, Injectable, Logger } from '@nestjs/common';
+import {
+  BadRequestException,
+  Injectable,
+} from '@nestjs/common';
 import {
   type AgentEffortLevel,
   type AgentTokenSettings as AgentTokenSettingsPublic,
   DEFAULT_AGENT_TOKEN_SETTINGS,
+  FORGE_WORKER_EFFORT_LEVELS,
+  FORGE_WORKER_MODELS,
+  type ForgeWorkerEffortLevel,
+  type ForgeWorkerModel,
 } from '@cenzontle/shared';
 import { PrismaService } from '../prisma/prisma.service';
+import { InjectPinoLogger, PinoLogger } from 'nestjs-pino';
 
 const SINGLETON_ID = 'singleton';
 
@@ -19,10 +27,11 @@ type Mutable<T> = { -readonly [K in keyof T]: T[K] };
 
 @Injectable()
 export class AgentTokenSettingsService {
-  private readonly logger = new Logger(AgentTokenSettingsService.name);
   private cached: { value: AgentTokenSettingsPublic; expiresAt: number } | null = null;
 
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(private readonly prisma: PrismaService,
+    @InjectPinoLogger(AgentTokenSettingsService.name) private readonly logger: PinoLogger,
+  ) {}
 
   /**
    * Lee la configuración (cached). Auto-inicializa el singleton si no existe.
@@ -73,7 +82,7 @@ export class AgentTokenSettingsService {
       );
 
       this.cached = null;
-      this.logger.log(
+      this.logger.info(
         `[AgentTokenSettings] updated by=${updatedBy ?? 'anon'} fields=${Object.keys(patch).join(',')}`,
       );
       return this.toPublic(row);
@@ -119,6 +128,33 @@ export class AgentTokenSettingsService {
     return { effort: s.diagramEffort, maxTokens: s.diagramMaxTokens, enabled: s.diagramThinkingEnabled };
   }
 
+  /**
+   * Helper para el DoD Verifier (reviewer agent). Análogo a getForgeWorker
+   * pero para el verifier que evalúa los criterios DoD post-spawn del coder.
+   * El worker pasa los valores como override al `runVerifierAgent` y
+   * `runVerifierAgentBatch` (fallback a env vars DOD_VERIFIER_MODEL/EFFORT).
+   */
+  async getDodVerifier(): Promise<{ model: ForgeWorkerModel; effort: ForgeWorkerEffortLevel }> {
+    // No log aquí — el worker emite `dod.verifier_agent.spawn_config` con el
+    // valor autoritativo aplicado al spawn del verifier. Loggear el read
+    // backend genera ruido redundante (cleanup 2026-05-19).
+    const s = await this.get();
+    return { model: s.dodVerifierModel, effort: s.dodVerifierEffort };
+  }
+
+  /**
+   * Helper para el Forge Worker (coder agent). Retorna model + effort para
+   * que `agent-run.service.ts:claimStory` lo incluya en la response al worker.
+   * El worker pasa estos valores al CLI `claude` via `--model` y `--effort`.
+   */
+  async getForgeWorker(): Promise<{ model: ForgeWorkerModel; effort: ForgeWorkerEffortLevel }> {
+    // No log aquí — el worker emite `Spawning claude with model=... source=backend`
+    // con el valor autoritativo aplicado. El log del lado backend es redundante
+    // (cleanup 2026-05-19).
+    const s = await this.get();
+    return { model: s.forgeWorkerModel, effort: s.forgeWorkerEffort };
+  }
+
   // ─────────────────────────────────────────────────────────────────────
 
   private toPublic(row: {
@@ -137,6 +173,10 @@ export class AgentTokenSettingsService {
     diagramEffort: string;
     diagramMaxTokens: number;
     diagramThinkingEnabled: boolean;
+    forgeWorkerModel: string;
+    forgeWorkerEffort: string;
+    dodVerifierModel: string;
+    dodVerifierEffort: string;
     updatedAt: Date;
     updatedBy: string | null;
   }): AgentTokenSettingsPublic {
@@ -146,6 +186,18 @@ export class AgentTokenSettingsService {
     // medium balancea calidad vs costo — high duplica thinking tokens).
     const effort = (s: string): AgentEffortLevel =>
       s === 'low' || s === 'medium' || s === 'high' ? s : 'medium';
+
+    // Casts para Forge Worker — set de modelos + efforts más amplio que los
+    // agentes story-gen (acepta xhigh/max + opus). Defense in depth: si la
+    // BD tiene valor inválido por algún downgrade, default a Sonnet + high.
+    const forgeModel = (s: string): ForgeWorkerModel =>
+      (FORGE_WORKER_MODELS as readonly string[]).includes(s)
+        ? (s as ForgeWorkerModel)
+        : 'claude-sonnet-4-6';
+    const forgeEffort = (s: string): ForgeWorkerEffortLevel =>
+      (FORGE_WORKER_EFFORT_LEVELS as readonly string[]).includes(s)
+        ? (s as ForgeWorkerEffortLevel)
+        : 'high';
 
     return {
       storyPoEffort: effort(row.storyPoEffort),
@@ -163,6 +215,12 @@ export class AgentTokenSettingsService {
       diagramEffort: effort(row.diagramEffort),
       diagramMaxTokens: row.diagramMaxTokens,
       diagramThinkingEnabled: row.diagramThinkingEnabled,
+      forgeWorkerModel: forgeModel(row.forgeWorkerModel),
+      forgeWorkerEffort: forgeEffort(row.forgeWorkerEffort),
+      // DoD verifier — mismo cast defensivo, defaults distintos (haiku+low
+      // porque el verifier hace checks atómicos baratos).
+      dodVerifierModel: forgeModel(row.dodVerifierModel),
+      dodVerifierEffort: forgeEffort(row.dodVerifierEffort),
       updatedAt: row.updatedAt.toISOString(),
       updatedBy: row.updatedBy,
     };

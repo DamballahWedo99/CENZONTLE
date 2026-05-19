@@ -1,8 +1,11 @@
-import { Injectable, Logger } from '@nestjs/common';
+import {
+  Injectable,
+} from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { RedisService } from '../../../redis/redis.service';
 import type { EpicGenerationEvent, ProposedEpic, CachedGenerationSession } from '@cenzontle/shared';
 import { scrubSecrets } from '../../../../common/utils/scrub-secrets.util';
+import { InjectPinoLogger, PinoLogger } from 'nestjs-pino';
 
 /**
  * TTL de la sesión mientras está en modo streaming. Redis SET sin flag EX
@@ -14,12 +17,12 @@ const STREAMING_TTL_SECONDS = 3600;
 
 @Injectable()
 export class ProposalCacheService {
-  private readonly logger = new Logger(ProposalCacheService.name);
   private readonly defaultTtl: number;
 
   constructor(
     private readonly redis: RedisService,
     private readonly config: ConfigService,
+    @InjectPinoLogger(ProposalCacheService.name) private readonly logger: PinoLogger,
   ) {
     this.defaultTtl = this.config.get<number>('PROPOSAL_CACHE_TTL', 1800);
   }
@@ -82,7 +85,7 @@ export class ProposalCacheService {
     session.status = 'staging';
     session.completedAt = new Date().toISOString();
     await this.redis.setex(this.key(initiativeId), this.defaultTtl, scrubSecrets(JSON.stringify(session)));
-    this.logger.log(`Session completed for ${initiativeId}, TTL=${this.defaultTtl}s`);
+    this.logger.info({ initiativeId, defaultTtl: this.defaultTtl }, `Session completed for ${initiativeId}, TTL=${this.defaultTtl}s`);
   }
 
   async getSession(initiativeId: string): Promise<CachedGenerationSession | null> {
@@ -105,7 +108,7 @@ export class ProposalCacheService {
     session.proposals = session.proposals.filter((p) => p.clientId !== clientId);
     if (session.proposals.length === 0) {
       await this.redis.del(this.key(initiativeId));
-      this.logger.log(`All proposals consumed, cache deleted for ${initiativeId}`);
+      this.logger.info({ initiativeId }, `All proposals consumed, cache deleted for ${initiativeId}`);
     } else {
       // Preserve remaining TTL
       const payload = scrubSecrets(JSON.stringify(session));
@@ -142,11 +145,11 @@ export class ProposalCacheService {
     };
     const payload = scrubSecrets(JSON.stringify(session));
     await this.redis.setex(this.key(initiativeId), this.defaultTtl, payload);
-    this.logger.log(`Full session saved for ${initiativeId}: ${proposals.length} proposals, ${events.length} events, TTL=${this.defaultTtl}s`);
+    this.logger.info({ initiativeId, length: proposals.length, events_length: events.length, defaultTtl: this.defaultTtl }, `Full session saved for ${initiativeId}: ${proposals.length} proposals, ${events.length} events, TTL=${this.defaultTtl}s`);
   }
 
   async invalidateSession(initiativeId: string): Promise<void> {
     await this.redis.del(this.key(initiativeId));
-    this.logger.log(`Cache invalidated for ${initiativeId}`);
+    this.logger.info({ initiativeId }, `Cache invalidated for ${initiativeId}`);
   }
 }

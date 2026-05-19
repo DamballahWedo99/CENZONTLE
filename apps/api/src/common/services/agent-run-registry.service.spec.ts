@@ -1,5 +1,6 @@
 import { ConflictException } from '@nestjs/common';
 import { AgentRunRegistryService } from './agent-run-registry.service';
+import { createMockPinoLogger } from '../testing/mock-pino-logger';
 
 /**
  * Tests del registry — DoS protection central. Los invariantes son sutiles
@@ -11,7 +12,7 @@ describe('AgentRunRegistryService', () => {
   let registry: AgentRunRegistryService;
 
   beforeEach(() => {
-    registry = new AgentRunRegistryService();
+    registry = new AgentRunRegistryService(createMockPinoLogger());
   });
 
   // ─────────────────────────────────────────────────────────────────

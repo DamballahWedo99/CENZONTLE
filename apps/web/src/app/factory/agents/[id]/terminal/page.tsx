@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { useParams } from 'next/navigation';
 import type {
+  CriterionEvent,
   CriterionVerdict,
   DodVerificationEntry,
   FactoryAgent,
@@ -11,7 +12,11 @@ import { AgentStatus } from '@cenzontle/shared';
 import { useFactory } from '@/context/FactoryContext';
 import { AgentTerminal } from '@/components/factory/AgentTerminal';
 import { ApiError } from '@/lib/api/client';
-import { getRunDetail, type RunDetailResponse } from '@/lib/api/factory';
+import {
+  getRunDetail,
+  isCriterionEventArray,
+  type RunDetailResponse,
+} from '@/lib/api/factory';
 import { listDodCriteria, type DodCriterion } from '@/lib/api/dod';
 
 const POLL_INTERVAL_MS = 5_000;
@@ -27,25 +32,6 @@ const RUN_STATUS_TO_AGENT_STATUS: Record<RunDetailResponse['status'], AgentStatu
   failed: AgentStatus.Error,
   abandoned: AgentStatus.Error,
 };
-
-interface RunCriterion {
-  id: string;
-  label: string;
-  status: 'pending' | 'in_progress' | 'completed' | 'failed';
-  source: 'worker' | 'agent';
-}
-
-function isCriterionArray(v: unknown): v is RunCriterion[] {
-  if (!Array.isArray(v)) return false;
-  return v.every(
-    (c) =>
-      c &&
-      typeof c === 'object' &&
-      typeof (c as Record<string, unknown>).id === 'string' &&
-      typeof (c as Record<string, unknown>).label === 'string' &&
-      typeof (c as Record<string, unknown>).status === 'string',
-  );
-}
 
 /**
  * Construye un FactoryAgent sintético a partir del RunDetailResponse para
@@ -74,29 +60,46 @@ function synthesizeAgentFromRun(run: RunDetailResponse): FactoryAgent {
 }
 
 /**
- * Type guard del log estructurado de Tier 1 — `agent_runs.dodVerification`.
- * Devuelve los verdicts del último attempt si el shape es válido, sino null.
+ * Type guard + merge del log estructurado de Tier 1 — `agent_runs.dodVerification`.
+ *
+ * Itera TODOS los attempts y construye un map por `criterionId`; el último
+ * verdict gana por criterio. Esto evita la regresión visual que tenía la
+ * versión anterior (`extractLastVerdicts`) durante POST `/progress`:
+ *
+ *   - Attempt 1 termina con 6 verdicts (1 passed, 5 failed) → UI: 1/6 ✓
+ *   - Attempt 2 inicia, verifier emite 1er verdict → backend tiene
+ *     `[{att:1, [6]}, {att:2, [1]}]`. La función vieja agarraba el último
+ *     entry y devolvía SOLO 1 verdict — la UI mostraba 0/6 o 1/6 porque
+ *     los otros 5 criterios caían a `return false` en `evaluateCriterion`.
+ *   - Con merge, los 6 verdicts del attempt 1 quedan visibles hasta que
+ *     el attempt 2 los sobrescriba uno por uno → progress monotónico.
+ *
+ * Semántica del "último gana": si el agente pasó un criterio en attempt 1
+ * y lo rompió en attempt 2, el verdict 'failed' del attempt 2 manda
+ * (refleja el estado real del repo, no historial optimista).
  *
  * El backend tipa `dodVerification` como `unknown[]` (validación shallow en
- * `class-validator`), por eso el guard runtime acá — `DodVerificationEntry`
+ * class-validator), por eso el guard runtime acá — `DodVerificationEntry`
  * solo le da tipo al output, no garantiza el input.
- *
- * Tolera arrays parciales: durante POST `/progress` el último attempt puede
- * tener `verdicts.length < dodConfig.length` (UX progressive — checkmarks
- * incrementales). Los criterios sin verdict aún caen al fallback heurístico
- * de `evaluateCriterion`.
  */
-function extractLastVerdicts(raw: unknown): CriterionVerdict[] | null {
+function extractMergedVerdicts(raw: unknown): CriterionVerdict[] | null {
   if (!Array.isArray(raw) || raw.length === 0) return null;
-  const last = raw[raw.length - 1] as Partial<DodVerificationEntry> | undefined;
-  if (!last || !Array.isArray(last.verdicts)) return null;
-  return last.verdicts.filter(
-    (v): v is CriterionVerdict =>
-      v != null &&
-      typeof v === 'object' &&
-      typeof (v as CriterionVerdict).label === 'string' &&
-      ['passed', 'failed', 'skipped'].includes((v as CriterionVerdict).status),
-  );
+  const byCriterion = new Map<string, CriterionVerdict>();
+  for (const entry of raw as Array<Partial<DodVerificationEntry> | undefined>) {
+    if (!entry || !Array.isArray(entry.verdicts)) continue;
+    for (const v of entry.verdicts) {
+      if (
+        v != null &&
+        typeof v === 'object' &&
+        typeof (v as CriterionVerdict).criterionId === 'string' &&
+        typeof (v as CriterionVerdict).label === 'string' &&
+        ['passed', 'failed', 'skipped'].includes((v as CriterionVerdict).status)
+      ) {
+        byCriterion.set((v as CriterionVerdict).criterionId, v as CriterionVerdict);
+      }
+    }
+  }
+  return byCriterion.size > 0 ? [...byCriterion.values()] : null;
 }
 
 /**
@@ -116,21 +119,19 @@ function extractLastVerdicts(raw: unknown): CriterionVerdict[] | null {
 function evaluateDodFromConfig(
   config: DodCriterion[],
   run: RunDetailResponse,
-  criteriaProgress: RunCriterion[],
+  criteriaProgress: CriterionEvent[],
 ): { text: string; done: boolean }[] {
-  const verdicts = extractLastVerdicts(run.dodVerification);
-  return config
-    .filter((c) => c.enabled)
-    .map((c) => ({
-      text: c.text,
-      done: evaluateCriterion(c, run, criteriaProgress, verdicts),
-    }));
+  const verdicts = extractMergedVerdicts(run.dodVerification);
+  return config.map((c) => ({
+    text: c.text,
+    done: evaluateCriterion(c, run, criteriaProgress, verdicts),
+  }));
 }
 
 function evaluateCriterion(
   criterion: DodCriterion,
   run: RunDetailResponse,
-  criteriaProgress: RunCriterion[],
+  criteriaProgress: CriterionEvent[],
   verdicts: CriterionVerdict[] | null,
 ): boolean {
   // 1. Tier 1 verifier — si ya corrió, su veredicto manda. Match por kind
@@ -198,15 +199,25 @@ function evaluateCriterion(
 }
 
 /**
- * Milestones para runs reales — vienen de criteriaProgress (worker +
- * agente). Si no hay criterios reportados aún, devuelve [] y el pill
- * mostrará 0/0.
+ * Milestones para runs reales — vienen de criteriaProgress que combina:
+ *  - `source: 'story'`: acceptance criteria parseados del vault (pill PRIMARIA
+ *    "acceptance"), marcados individualmente por el verifier Sonnet per-criterio.
+ *  - `source: 'worker'`: milestones técnicos hardcoded del runner (pill
+ *    SECUNDARIA "workflow"), marcados durante el flow del worker.
+ *  - `source: 'agent'`: legacy self-report, DEPRECATED 2026-05-13 (no
+ *    debería venir ya, pero filtramos por compatibilidad con runs históricos).
+ *
+ * El `source` se preserva en el shape para que el AgentTerminal pueda
+ * separar las dos pills.
  */
-function deriveMilestonesFromRun(run: RunDetailResponse): { text: string; done: boolean }[] {
-  if (!isCriterionArray(run.criteriaProgress)) return [];
+function deriveMilestonesFromRun(
+  run: RunDetailResponse,
+): { text: string; done: boolean; source: 'worker' | 'agent' | 'story' }[] {
+  if (!isCriterionEventArray(run.criteriaProgress)) return [];
   return run.criteriaProgress.map((c) => ({
     text: c.label,
     done: c.status === 'completed',
+    source: c.source,
   }));
 }
 
@@ -328,7 +339,7 @@ export default function AgentTerminalPage() {
         ? evaluateDodFromConfig(
             dodConfig,
             run,
-            isCriterionArray(run.criteriaProgress) ? run.criteriaProgress : [],
+            isCriterionEventArray(run.criteriaProgress) ? run.criteriaProgress : [],
           )
         : [],
     [run, dodConfig],

@@ -1,4 +1,18 @@
-import { Body, Controller, Delete, Get, Param, Patch, Put, Query, Req, Res, Logger, ParseUUIDPipe, ForbiddenException, NotFoundException } from '@nestjs/common';
+import {
+  Body,
+  Controller,
+  Delete,
+  Get,
+  Param,
+  Patch,
+  Put,
+  Query,
+  Req,
+  Res,
+  ParseUUIDPipe,
+  ForbiddenException,
+  NotFoundException,
+} from '@nestjs/common';
 import { ApiTags, ApiOperation } from '@nestjs/swagger';
 import { Throttle } from '@nestjs/throttler';
 import { Permission, UserRole } from '@cenzontle/shared';
@@ -14,17 +28,17 @@ import { sanitizeForLog } from '../../../../common/utils/sanitize-llm-input.util
 import { setupSseHeartbeat } from '../../../../common/utils/sse-heartbeat.util';
 import { AgentRunRegistryService } from '../../../../common/services/agent-run-registry.service';
 import type { Request, Response } from 'express';
+import { InjectPinoLogger, PinoLogger } from 'nestjs-pino';
 
 @ApiTags('Diagramas — Generación IA')
 @Controller('proyectos/diagram-generation')
 export class DiagramGenerationController {
-  private readonly logger = new Logger(DiagramGenerationController.name);
-
   constructor(
     private readonly generation: DiagramGenerationService,
     private readonly sessionCache: DiagramSessionCacheService,
     private readonly registry: AgentRunRegistryService,
     private readonly prisma: PrismaService,
+    @InjectPinoLogger(DiagramGenerationController.name) private readonly logger: PinoLogger,
   ) {}
 
   /**
@@ -99,7 +113,7 @@ export class DiagramGenerationController {
     @CurrentUser() user: AuthenticatedUser,
   ): Promise<{ diagram: EpicDiagram }> {
     await this.assertUserCanAccessEpic(user, epicId);
-    this.logger.log(`[saveCached] epic=${epicId} type=${dto.type}`);
+    this.logger.info({ epicId, type: dto.type }, `[saveCached] epic=${epicId} type=${dto.type}`);
     const diagram = await this.generation.saveCached(
       epicId,
       dto.type,
@@ -129,7 +143,7 @@ export class DiagramGenerationController {
   ): Promise<{ diagram: EpicDiagram | null }> {
     await this.assertUserCanAccessEpic(user, epicId);
     const type = query.type ?? 'business';
-    this.logger.log(`[resetLayout] epic=${epicId} type=${type}`);
+    this.logger.info({ epicId, type }, `[resetLayout] epic=${epicId} type=${type}`);
     const diagram = await this.generation.resetLayout(epicId, type, user);
     return { diagram };
   }
@@ -160,7 +174,7 @@ export class DiagramGenerationController {
   ) {
     await this.assertUserCanAccessEpic(user, epicId);
     const type = query.type ?? 'business';
-    this.logger.log(`[generateIntegrationDoc] epic=${epicId} type=${type}`);
+    this.logger.info({ epicId, type }, `[generateIntegrationDoc] epic=${epicId} type=${type}`);
 
     // Namespace separado para que el cap del registry NO confunda este
     // backfill con el run principal de generación de diagrama (que usa
@@ -189,7 +203,7 @@ export class DiagramGenerationController {
     // overhead de session cache + polling. Si el user cierra, abortamos.
     req.on('close', () => {
       stopHeartbeat();
-      this.logger.log(`[generateIntegrationDoc] Client disconnected, aborting agent`);
+      this.logger.info(`[generateIntegrationDoc] Client disconnected, aborting agent`);
       abortController.abort();
     });
 
@@ -209,13 +223,13 @@ export class DiagramGenerationController {
       complete: () => {
         stopHeartbeat();
         this.registry.unregister(user.sub, runKey, abortController);
-        this.logger.log(`[generateIntegrationDoc] SSE stream finalized for epic=${epicId}`);
+        this.logger.info({ epicId }, `[generateIntegrationDoc] SSE stream finalized for epic=${epicId}`);
         if (!res.writableEnded) res.end();
       },
       error: (err) => {
         stopHeartbeat();
         this.registry.unregister(user.sub, runKey, abortController);
-        this.logger.error(`[generateIntegrationDoc] SSE stream error: ${err?.message}`);
+        this.logger.error({ message: err?.message }, `[generateIntegrationDoc] SSE stream error: ${err?.message}`);
         try {
           res.write(`data: ${JSON.stringify({ type: 'error', message: 'Error interno' })}\n\n`);
           res.end();
@@ -266,7 +280,7 @@ export class DiagramGenerationController {
       if (user.role !== UserRole.AltaGerencia && !this.registry.isOwner(key, user.sub)) {
         throw new ForbiddenException('Solo el usuario que inició la generación puede cancelarla.');
       }
-      this.logger.log(`[cancel] aborting active run for ${key}`);
+      this.logger.info({ key }, `[cancel] aborting active run for ${key}`);
       this.registry.markCancelled(controller);
       controller.abort();
     }
@@ -299,7 +313,7 @@ export class DiagramGenerationController {
     await this.assertUserCanAccessEpic(user, epicId);
     const type = query.type ?? 'business';
     const safePromptForLog = query.prompt ? sanitizeForLog(query.prompt) : '';
-    this.logger.log(`[generate] epic=${epicId} type=${type} prompt="${safePromptForLog}"`);
+    this.logger.info({ epicId, type, safePromptForLog }, `[generate] epic=${epicId} type=${type} prompt="${safePromptForLog}"`);
 
     const runKey = this.runKey(epicId, type);
     // Registramos el run ANTES de flushHeaders. ConflictException se
@@ -338,7 +352,7 @@ export class DiagramGenerationController {
       // que dispara como red de seguridad si nadie regresa.
       if (clientDisconnected) return;
       stopHeartbeat();
-      this.logger.log(`[generate] Client disconnected — agent continues in background`);
+      this.logger.info(`[generate] Client disconnected — agent continues in background`);
       clientDisconnected = true;
     });
 
@@ -358,7 +372,7 @@ export class DiagramGenerationController {
       try {
         res.write(payload);
       } catch (e) {
-        this.logger.debug(`[generate] write failed (client gone): ${(e as Error)?.message}`);
+        this.logger.debug({ message: (e as Error)?.message }, `[generate] write failed (client gone): ${(e as Error)?.message}`);
       }
     };
 
@@ -386,7 +400,7 @@ export class DiagramGenerationController {
         streamCompleted = true;
         stopHeartbeat();
         this.registry.unregister(user.sub, runKey, abortController);
-        this.logger.log(`[generate] SSE stream finalized for epic=${epicId} type=${type} (clientDisconnected=${clientDisconnected}, aborted=${abortController.signal.aborted})`);
+        this.logger.info({ epicId, type, clientDisconnected, aborted: abortController.signal.aborted }, `[generate] SSE stream finalized for epic=${epicId} type=${type} (clientDisconnected=${clientDisconnected}, aborted=${abortController.signal.aborted})`);
         if (!res.writableEnded) res.end();
 
         if (this.registry.wasCancelled(abortController)) return;
@@ -398,7 +412,7 @@ export class DiagramGenerationController {
         streamCompleted = true;
         stopHeartbeat();
         this.registry.unregister(user.sub, runKey, abortController);
-        this.logger.error(`[generate] SSE stream error: ${err?.message}`);
+        this.logger.error({ message: err?.message }, `[generate] SSE stream error: ${err?.message}`);
         safeWrite(`data: ${JSON.stringify({ type: 'error', message: 'Error interno' })}\n\n`);
         if (!res.writableEnded) res.end();
 
