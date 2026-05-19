@@ -1,10 +1,19 @@
-import { Injectable, Logger, NotFoundException, BadRequestException, ConflictException, OnModuleInit, Inject, forwardRef } from '@nestjs/common';
+import {
+  Injectable,
+  NotFoundException,
+  BadRequestException,
+  ConflictException,
+  OnModuleInit,
+  Inject,
+  forwardRef,
+} from '@nestjs/common';
 import { Octokit } from '@octokit/rest';
 import { Prisma, VaultConfig } from '@prisma/client';
 import { AuthenticatedUser, UserRole } from '@cenzontle/shared';
 import { PrismaService } from '../prisma/prisma.service';
 import { CryptoService } from './crypto.service';
 import { VaultService } from './vault.service';
+import { InjectPinoLogger, PinoLogger } from 'nestjs-pino';
 
 /**
  * Representación pública de un vault config — nunca incluye el token
@@ -62,8 +71,6 @@ export interface VaultConfigUpdateInput {
  */
 @Injectable()
 export class VaultConfigService implements OnModuleInit {
-  private readonly logger = new Logger(VaultConfigService.name);
-
   constructor(
     private prisma: PrismaService,
     private crypto: CryptoService,
@@ -75,6 +82,7 @@ export class VaultConfigService implements OnModuleInit {
     // van al repo equivocado.
     @Inject(forwardRef(() => VaultService))
     private readonly vaultService: VaultService,
+    @InjectPinoLogger(VaultConfigService.name) private readonly logger: PinoLogger,
   ) {}
 
   async onModuleInit() {
@@ -99,11 +107,11 @@ export class VaultConfigService implements OnModuleInit {
     const token = process.env.VAULT_GITHUB_TOKEN;
 
     if (!owner || !repo || !token) {
-      this.logger.log('[seed] No env vars VAULT_GITHUB_* — skipping auto-seed');
+      this.logger.info('[seed] No env vars VAULT_GITHUB_* — skipping auto-seed');
       return;
     }
 
-    this.logger.log(`[seed] Auto-importing env vars as "Default" vault: ${owner}/${repo}`);
+    this.logger.info({ owner, repo }, `[seed] Auto-importing env vars as "Default" vault: ${owner}/${repo}`);
     const encrypted = this.crypto.encrypt(token);
     try {
       await this.prisma.vaultConfig.create({
@@ -118,7 +126,7 @@ export class VaultConfigService implements OnModuleInit {
           isActive: true,
         },
       });
-      this.logger.log('[seed] Auto-seeded Default vault from env vars');
+      this.logger.info('[seed] Auto-seeded Default vault from env vars');
       this.logger.warn(
         '[seed] ⚠ VAULT_GITHUB_TOKEN has been encrypted and stored in the DB. ' +
           'For security, REMOVE the VAULT_GITHUB_* env vars from your environment ' +
@@ -127,7 +135,7 @@ export class VaultConfigService implements OnModuleInit {
     } catch (err: any) {
       // P2002 = unique constraint violation (raza con otra instancia booteando)
       if (err?.code === 'P2002') {
-        this.logger.log('[seed] Default vault already exists (concurrent boot), skipping');
+        this.logger.info('[seed] Default vault already exists (concurrent boot), skipping');
         return;
       }
       throw err;
@@ -227,7 +235,7 @@ export class VaultConfigService implements OnModuleInit {
       },
     });
 
-    this.logger.log(`[create] name="${vault.name}" owner=${vault.owner} repo=${vault.repo} autoActive=${count === 0}`);
+    this.logger.info({ name: vault.name, owner: vault.owner, repo: vault.repo }, `[create] name="${vault.name}" owner=${vault.owner} repo=${vault.repo} autoActive=${count === 0}`);
     return this.toPublic(vault);
   }
 
@@ -261,7 +269,7 @@ export class VaultConfigService implements OnModuleInit {
     }
 
     const vault = await this.prisma.vaultConfig.update({ where: { id }, data });
-    this.logger.log(`[update] id=${id} fields=${Object.keys(data).join(',')}`);
+    this.logger.info({ id }, `[update] id=${id} fields=${Object.keys(data).join(',')}`);
     // Si se editó algún campo que forma parte del ActiveContext del
     // VaultService (token/owner/repo/branch) y este vault es el activo,
     // invalidamos el cache para que el próximo write use los valores nuevos.
@@ -308,12 +316,12 @@ export class VaultConfigService implements OnModuleInit {
             where: { id: next.id },
             data: { isActive: true },
           });
-          this.logger.log(`[remove] Activated "${next.name}" after removing "${existing.name}"`);
+          this.logger.info({ name: next.name, existing_name: existing.name }, `[remove] Activated "${next.name}" after removing "${existing.name}"`);
         } else {
-          this.logger.log(`[remove] Removed last vault "${existing.name}" — system has no active vault now`);
+          this.logger.info({ name: existing.name }, `[remove] Removed last vault "${existing.name}" — system has no active vault now`);
         }
       }
-      this.logger.log(`[remove] id=${id} name="${existing.name}"`);
+      this.logger.info({ id, name: existing.name }, `[remove] id=${id} name="${existing.name}"`);
       return existing.isActive;
     });
 
@@ -348,7 +356,7 @@ export class VaultConfigService implements OnModuleInit {
       });
     });
 
-    this.logger.log(`[activate] id=${id} name="${activated.name}"`);
+    this.logger.info({ id, name: activated.name }, `[activate] id=${id} name="${activated.name}"`);
     // CRÍTICO: invalidar el cache del active context en VaultService — sin
     // esto, los siguientes writes (épicas, historias, etc.) durante 30s
     // siguen yendo al vault viejo porque el cache no detecta el cambio.

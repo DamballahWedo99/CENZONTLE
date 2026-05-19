@@ -1,6 +1,18 @@
 import { ApiPropertyOptional } from '@nestjs/swagger';
-import { IsArray, IsOptional, IsString, MaxLength } from 'class-validator';
-import type { DodVerificationEntry } from '@cenzontle/shared';
+import { Type } from 'class-transformer';
+import {
+  ArrayMaxSize,
+  IsArray,
+  IsOptional,
+  IsString,
+  MaxLength,
+  ValidateNested,
+} from 'class-validator';
+import {
+  CriterionEventDto,
+  DodVerificationEntryDto,
+  GeneratorUsageDto,
+} from './dod-verification.dto';
 
 /**
  * Body que el worker envía periódicamente durante la ejecución de Claude
@@ -16,6 +28,11 @@ import type { DodVerificationEntry } from '@cenzontle/shared';
  * custom del agente. El worker la actualiza cada vez que cumple un milestone
  * técnico (clone, commit, push) y la lee del archivo
  * `/workspace/.cenzontle-criteria.json` si el agente reporta criterios custom.
+ *
+ * Validación profunda (post-fix MEDIUM sec): tanto `criteriaProgress` como
+ * `dodVerification` usan @ValidateNested + @ArrayMaxSize. Antes era @IsArray()
+ * shallow — un worker token leakeado podía POSTear arrays de 10MB con shapes
+ * arbitrarios que el backend persistía como Json y reventaban el frontend.
  */
 export class RunProgressDto {
   @ApiPropertyOptional({
@@ -31,10 +48,15 @@ export class RunProgressDto {
     description:
       'Timeline de criterios/milestones del run. Array de CriterionEvent. ' +
       'Se persiste en agent_runs.criteriaProgress (sobreescribe el anterior).',
+    type: () => CriterionEventDto,
+    isArray: true,
   })
   @IsOptional()
   @IsArray()
-  criteriaProgress?: unknown[];
+  @ArrayMaxSize(100)
+  @ValidateNested({ each: true })
+  @Type(() => CriterionEventDto)
+  criteriaProgress?: CriterionEventDto[];
 
   @ApiPropertyOptional({
     description:
@@ -51,15 +73,32 @@ export class RunProgressDto {
   @ApiPropertyOptional({
     description:
       'Tier 1 Harness — verdicts parciales del DoD verifier durante el run. ' +
-      'Shape: array de DodVerificationEntry (@cenzontle/shared). Idéntico al ' +
-      'que persiste /complete. El worker lo envía en cada POST /progress ' +
-      'después de verificar cada criterio individual, para que la UI muestre ' +
-      'progreso incremental (1/7, 2/7, ...) en lugar del salto 0/N → N/N al ' +
-      'final del run. Validación runtime es @IsArray() shallow — el shape ' +
-      'profundo se valida en el frontend con type guards (mismo patrón que ' +
-      'criteriaProgress).',
+      'Shape: array de DodVerificationEntry. Idéntico al que persiste /complete. ' +
+      'El worker lo envía en cada POST /progress después de verificar cada ' +
+      'criterio individual, para que la UI muestre progreso incremental ' +
+      '(1/7, 2/7, ...) en lugar del salto 0/N → N/N al final del run. ' +
+      'Validación deep con @ValidateNested + @ArrayMaxSize=10 attempts.',
+    type: () => DodVerificationEntryDto,
+    isArray: true,
   })
   @IsOptional()
   @IsArray()
-  dodVerification?: DodVerificationEntry[];
+  @ArrayMaxSize(10)
+  @ValidateNested({ each: true })
+  @Type(() => DodVerificationEntryDto)
+  dodVerification?: DodVerificationEntryDto[];
+
+  @ApiPropertyOptional({
+    description:
+      'Cost/tokens del agente generator acumulado hasta este attempt. El worker ' +
+      'lo envía inmediatamente después de cada `result` event del CLI claude ' +
+      '(en lugar de esperar al /complete final) para que la UI muestre cost en ' +
+      'tiempo real attempt-por-attempt. Backend persiste en agent_runs.generatorUsage; ' +
+      'getBatchDetail lo lee y suma con el verifier cost.',
+    type: () => GeneratorUsageDto,
+  })
+  @IsOptional()
+  @ValidateNested()
+  @Type(() => GeneratorUsageDto)
+  generatorUsage?: GeneratorUsageDto;
 }

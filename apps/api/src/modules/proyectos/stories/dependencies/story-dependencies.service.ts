@@ -1,7 +1,6 @@
 import {
   BadRequestException,
   Injectable,
-  Logger,
   NotFoundException,
 } from '@nestjs/common';
 import { Prisma } from '@prisma/client';
@@ -10,6 +9,7 @@ import { PrismaService } from '../../../prisma/prisma.service';
 import { assertUserCanAccessStoryByEpic } from '../../epics/epic-access.util';
 import type { CreateStoryDependencyDto } from './dto/create-story-dependency.dto';
 import type { UpdateStoryDependencyDto } from './dto/update-story-dependency.dto';
+import { InjectPinoLogger, PinoLogger } from 'nestjs-pino';
 
 type StoryTechnicalDependencyRow = NonNullable<
   Awaited<ReturnType<PrismaService['storyTechnicalDependency']['findUnique']>>
@@ -28,9 +28,9 @@ type StoryTechnicalDependencyRow = NonNullable<
  */
 @Injectable()
 export class StoryDependenciesService {
-  private readonly logger = new Logger(StoryDependenciesService.name);
-
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(private readonly prisma: PrismaService,
+    @InjectPinoLogger(StoryDependenciesService.name) private readonly logger: PinoLogger,
+  ) {}
 
   async findByStory(storyId: string): Promise<StoryTechnicalDependency[]> {
     const rows = await this.prisma.storyTechnicalDependency.findMany({
@@ -106,7 +106,7 @@ export class StoryDependenciesService {
         mdContent: dto.mdContent ?? null,
       },
     });
-    this.logger.log(
+    this.logger.info(
       `[create] story=${storyId} category=${created.category} title="${this.sanitizeForLog(created.title).slice(0, 50)}"`,
     );
     return this.toResponse(created);
@@ -200,7 +200,7 @@ export class StoryDependenciesService {
     if (result.count === 0) {
       throw new NotFoundException('Dependencia no encontrada');
     }
-    this.logger.log(`[remove] story=${storyId} dep=${depId}`);
+    this.logger.info({ storyId, depId }, `[remove] story=${storyId} dep=${depId}`);
   }
 
   // ── Internals ───────────────────────────────────────────────────────

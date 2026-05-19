@@ -1,4 +1,7 @@
-import { Injectable, Logger, NotFoundException } from '@nestjs/common';
+import {
+  Injectable,
+  NotFoundException,
+} from '@nestjs/common';
 import type {
   IntegrationProvider,
   LinearConfig,
@@ -11,6 +14,7 @@ import { CryptoService } from '../vault/crypto.service';
 import { TrackerProviderFactory } from './providers/tracker-provider.factory';
 import type { SaveLinearConfigDto } from './dto/save-linear-config.dto';
 import type { TestLinearConnectionDto } from './dto/test-linear-connection.dto';
+import { InjectPinoLogger, PinoLogger } from 'nestjs-pino';
 import type {
   TestConnectionResult,
   TrackerProvider,
@@ -18,12 +22,11 @@ import type {
 
 @Injectable()
 export class IntegrationsService {
-  private readonly logger = new Logger(IntegrationsService.name);
-
   constructor(
     private readonly prisma: PrismaService,
     private readonly crypto: CryptoService,
     private readonly factory: TrackerProviderFactory,
+    @InjectPinoLogger(IntegrationsService.name) private readonly logger: PinoLogger,
   ) {}
 
   /**
@@ -108,7 +111,7 @@ export class IntegrationsService {
       },
     });
 
-    this.logger.log(
+    this.logger.info(
       `[saveLinearConfig] actor=${createdBy ?? '∅'} team=${dto.teamId} workspace=${dto.workspaceSlug} rotatedKey=${!!dto.apiKey}`,
     );
 
@@ -196,7 +199,7 @@ export class IntegrationsService {
     const row = await this.prisma.integrationConfig.findUnique({ where: { provider } });
     if (!row) throw new NotFoundException(`No hay configuración para "${provider}"`);
     await this.prisma.integrationConfig.delete({ where: { provider } });
-    this.logger.log(`[deleteConfig] removed integration ${provider}`);
+    this.logger.info({ provider }, `[deleteConfig] removed integration ${provider}`);
   }
 
   /** Marca un sync exitoso — llamado por proyectos tras publishToTracker. */

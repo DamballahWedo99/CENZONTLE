@@ -1,5 +1,9 @@
-import { Injectable, Logger, InternalServerErrorException } from '@nestjs/common';
+import {
+  Injectable,
+  InternalServerErrorException,
+} from '@nestjs/common';
 import { createCipheriv, createDecipheriv, randomBytes, scryptSync } from 'crypto';
+import { InjectPinoLogger, PinoLogger } from 'nestjs-pino';
 
 /**
  * Encripta/desencripta secretos sensibles (tokens de GitHub, API keys) para
@@ -12,13 +16,14 @@ import { createCipheriv, createDecipheriv, randomBytes, scryptSync } from 'crypt
  */
 @Injectable()
 export class CryptoService {
-  private readonly logger = new Logger(CryptoService.name);
   private readonly key: Buffer;
   private static readonly ALGORITHM = 'aes-256-gcm';
   private static readonly IV_LENGTH = 12; // 96 bits, recomendado para GCM
   private static readonly KEY_LENGTH = 32; // 256 bits
 
-  constructor() {
+  constructor(
+    @InjectPinoLogger(CryptoService.name) private readonly logger: PinoLogger,
+  ) {
     const secret = process.env.VAULT_ENCRYPTION_KEY;
     if (!secret || secret.length < 16) {
       this.logger.error(
@@ -34,7 +39,7 @@ export class CryptoService {
     // El salt "cenzontle:vault:v1" es público pero estable — cambiarlo rotaría
     // efectivamente la key y requeriría re-encriptar todos los tokens.
     this.key = scryptSync(secret, 'cenzontle:vault:v1', CryptoService.KEY_LENGTH);
-    this.logger.log('[ctor] CryptoService initialized');
+    this.logger.info('[ctor] CryptoService initialized');
   }
 
   /**

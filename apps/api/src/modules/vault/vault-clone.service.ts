@@ -1,4 +1,7 @@
-import { Injectable, Logger, OnModuleInit } from '@nestjs/common';
+import {
+  Injectable,
+  OnModuleInit,
+} from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { PrismaService } from '../prisma/prisma.service';
 import { VaultConfigService } from './vault-config.service';
@@ -8,6 +11,7 @@ import * as path from 'node:path';
 import * as fs from 'node:fs/promises';
 import { homedir } from 'node:os';
 import type { VaultCloneStatus } from '@prisma/client';
+import { InjectPinoLogger, PinoLogger } from 'nestjs-pino';
 
 export interface ActiveVaultCloneInfo {
   id: string;
@@ -44,7 +48,6 @@ export interface VaultCloneStatusInfo {
  */
 @Injectable()
 export class VaultCloneService implements OnModuleInit {
-  private readonly logger = new Logger(VaultCloneService.name);
   private readonly reposDir: string;
   private readonly locks = new Map<string, Promise<void>>();
 
@@ -52,6 +55,7 @@ export class VaultCloneService implements OnModuleInit {
     private readonly prisma: PrismaService,
     private readonly config: ConfigService,
     private readonly configService: VaultConfigService,
+    @InjectPinoLogger(VaultCloneService.name) private readonly logger: PinoLogger,
   ) {
     // Default bajo $HOME porque `/var/` requiere root en dev (macOS/Linux) —
     // el proceso Node típicamente corre como user sin permisos para mkdir ahí.
@@ -63,7 +67,7 @@ export class VaultCloneService implements OnModuleInit {
 
   async onModuleInit() {
     await fs.mkdir(this.reposDir, { recursive: true }).catch((err) => {
-      this.logger.warn(`Failed to create reposDir ${this.reposDir}: ${err.message}`);
+      this.logger.warn({ reposDir: this.reposDir, message: err.message }, `Failed to create reposDir ${this.reposDir}: ${err.message}`);
     });
   }
 
@@ -158,15 +162,15 @@ export class VaultCloneService implements OnModuleInit {
    * después de escribir. Sin esta señal, el glob lee del clone stale.
    */
   scheduleClone(vaultId: string): void {
-    this.logger.log(`[scheduleClone] triggered vault=${vaultId} pendingSize=${this.pendingSyncs.size + 1}`);
+    this.logger.info({ vaultId }, `[scheduleClone] triggered vault=${vaultId} pendingSize=${this.pendingSyncs.size + 1}`);
     this.pendingSyncs.add(vaultId);
     void this.withLock(vaultId, async () => {
       try {
         await this.doCloneOrPull(vaultId);
         this.pendingSyncs.delete(vaultId);
-        this.logger.log(`[scheduleClone] completed vault=${vaultId} pendingFlag=cleared`);
+        this.logger.info({ vaultId }, `[scheduleClone] completed vault=${vaultId} pendingFlag=cleared`);
       } catch (err: any) {
-        this.logger.warn(`[scheduleClone] failed vault=${vaultId} flagRetained=true error="${scrubSecrets(err.message ?? String(err))}"`);
+        this.logger.warn({ vaultId }, `[scheduleClone] failed vault=${vaultId} flagRetained=true error="${scrubSecrets(err.message ?? String(err))}"`);
         // Mantener el vault en pendingSyncs — el próximo ensureFresh va a
         // intentar pull de nuevo. Sin esto, un pull fallido dejaría el
         // clone permanentemente stale hasta que pase el maxAge.
@@ -203,7 +207,7 @@ export class VaultCloneService implements OnModuleInit {
       : hasPendingSync
         ? 'pendingSync (recent write)'
         : `stale (age=${Math.round(ageMs / 1000)}s > maxAge=${Math.round(maxAgeMs / 1000)}s)`;
-    this.logger.log(`[ensureFresh] pulling vault=${vaultId} reason="${reason}"`);
+    this.logger.info({ vaultId, reason }, `[ensureFresh] pulling vault=${vaultId} reason="${reason}"`);
 
     await this.withLock(vaultId, () => this.doCloneOrPull(vaultId));
     // Limpiar el flag tras pull exitoso. Si falla, el flag permanece y el
@@ -231,9 +235,9 @@ export class VaultCloneService implements OnModuleInit {
     await this.withLock(vaultId, async () => {
       try {
         await fs.rm(this.repoPath(vaultId), { recursive: true, force: true });
-        this.logger.log(`[removeClone] ${vaultId}`);
+        this.logger.info({ vaultId }, `[removeClone] ${vaultId}`);
       } catch (err: any) {
-        this.logger.warn(`[removeClone] failed for ${vaultId}: ${err.message}`);
+        this.logger.warn({ vaultId, message: err.message }, `[removeClone] failed for ${vaultId}: ${err.message}`);
       }
     });
   }
@@ -321,7 +325,7 @@ export class VaultCloneService implements OnModuleInit {
           // .git existe pero corrupto — el fetch/reset abajo lo recuperará
         }
       }
-      this.logger.log(
+      this.logger.info(
         `[doCloneOrPull] start vault=${vaultId} mode=${hasGitDir ? `pull (current=${oldSha?.slice(0, 7) ?? 'unknown'})` : 'fresh-clone'} branch=${config.branch}`,
       );
 
@@ -403,7 +407,7 @@ export class VaultCloneService implements OnModuleInit {
       const transition = oldSha
         ? `${oldSha.slice(0, 7)} → ${sha.slice(0, 7)} ${changed ? '(updated)' : '(no changes)'}`
         : sha.slice(0, 7);
-      this.logger.log(`[doCloneOrPull] success vault=${vaultId} ${transition} files=${fileCount}`);
+      this.logger.info({ vaultId, transition, fileCount }, `[doCloneOrPull] success vault=${vaultId} ${transition} files=${fileCount}`);
       return { sha };
     } catch (err: any) {
       const scrubbed = scrubSecrets(String(err?.message ?? err));
@@ -414,7 +418,7 @@ export class VaultCloneService implements OnModuleInit {
           lastSyncError: scrubbed.slice(0, 500),
         },
       });
-      this.logger.error(`[doCloneOrPull] FAILED vault=${vaultId} error="${scrubbed}"`);
+      this.logger.error({ vaultId, scrubbed }, `[doCloneOrPull] FAILED vault=${vaultId} error="${scrubbed}"`);
       throw new Error(scrubbed);
     }
   }

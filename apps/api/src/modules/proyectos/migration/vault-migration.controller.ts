@@ -1,10 +1,14 @@
-import { Controller, Logger, Post } from '@nestjs/common';
+import {
+  Controller,
+  Post,
+} from '@nestjs/common';
 import { ApiTags, ApiOperation } from '@nestjs/swagger';
 import { Permission } from '@cenzontle/shared';
 import type { AuthenticatedUser } from '@cenzontle/shared';
 import { CurrentUser, Permissions } from '../../auth/decorators';
 import { sanitizeForLog } from '../../../common/utils/sanitize-llm-input.util';
 import { VaultMigrationService, MigrationReport, OrphanCleanupReport, LegacyRootCleanupReport } from './vault-migration.service';
+import { InjectPinoLogger, PinoLogger } from 'nestjs-pino';
 
 /**
  * Endpoint de administración para ejecutar la migración big-bang del vault
@@ -20,9 +24,9 @@ import { VaultMigrationService, MigrationReport, OrphanCleanupReport, LegacyRoot
 @ApiTags('Admin — Vault Migration')
 @Controller('admin/vault/migration')
 export class VaultMigrationController {
-  private readonly logger = new Logger(VaultMigrationController.name);
-
-  constructor(private readonly migration: VaultMigrationService) {}
+  constructor(private readonly migration: VaultMigrationService,
+    @InjectPinoLogger(VaultMigrationController.name) private readonly logger: PinoLogger,
+  ) {}
 
   @Post('run')
   @Permissions(Permission.MANAGE_USERS)
@@ -35,7 +39,7 @@ export class VaultMigrationController {
       'Responde 409 Conflict si ya hay una migración en ejecución.',
   })
   async run(@CurrentUser() user: AuthenticatedUser): Promise<MigrationReport> {
-    this.logger.log(
+    this.logger.info(
       `[VaultMigration] ejecutada por user=${sanitizeForLog(user.sub)} email=${sanitizeForLog(user.email ?? 'unknown')}`,
     );
     return this.migration.migrateAll(user.sub);
@@ -57,7 +61,7 @@ export class VaultMigrationController {
       'rollback incompleto. Operacion idempotente.',
   })
   async cleanupOrphans(@CurrentUser() user: AuthenticatedUser): Promise<OrphanCleanupReport> {
-    this.logger.log(
+    this.logger.info(
       `[VaultCleanup] ejecutada por user=${sanitizeForLog(user.sub)} email=${sanitizeForLog(user.email ?? 'unknown')}`,
     );
     return this.migration.cleanupOrphanStories();
@@ -80,7 +84,7 @@ export class VaultMigrationController {
       'POST /admin/vault/migration/run primero.',
   })
   async cleanupLegacyRoots(@CurrentUser() user: AuthenticatedUser): Promise<LegacyRootCleanupReport> {
-    this.logger.log(
+    this.logger.info(
       `[VaultLegacyCleanup] ejecutada por user=${sanitizeForLog(user.sub)} email=${sanitizeForLog(user.email ?? 'unknown')}`,
     );
     return this.migration.cleanupLegacyRoots();

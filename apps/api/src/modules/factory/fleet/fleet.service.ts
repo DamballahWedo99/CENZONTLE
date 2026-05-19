@@ -1,21 +1,20 @@
 import {
   ConflictException,
-  ForbiddenException,
   Injectable,
-  Logger,
   NotFoundException,
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { ComputeNodeStatus } from '@prisma/client';
 import type { AuthenticatedUser } from '@cenzontle/shared';
-import { UserRole } from '@cenzontle/shared';
 import { PrismaService } from '../../prisma/prisma.service';
 import { ChangelogService } from '../../proyectos/changelog/changelog.service';
+import { FactoryAuthzService } from '../authz/factory-authz.service';
 import { WorkerTokenService } from './worker-token.service';
 import { CreateComputeNodeDto } from './dto/create-node.dto';
 import { UpdateComputeNodeDto } from './dto/update-node.dto';
 import { WorkerRegisterDto } from './dto/worker-register.dto';
 import { WorkerHeartbeatDto } from './dto/worker-heartbeat.dto';
+import { InjectPinoLogger, PinoLogger } from 'nestjs-pino';
 
 /**
  * Threshold en milisegundos. Si `lastHeartbeat` es más viejo, el sweeper
@@ -34,13 +33,13 @@ const STALE_HEARTBEAT_MS = 90_000;
  */
 @Injectable()
 export class FleetService {
-  private readonly logger = new Logger(FleetService.name);
-
   constructor(
     private readonly prisma: PrismaService,
     private readonly tokens: WorkerTokenService,
     private readonly changelog: ChangelogService,
     private readonly config: ConfigService,
+    private readonly authz: FactoryAuthzService,
+    @InjectPinoLogger(FleetService.name) private readonly logger: PinoLogger,
   ) {}
 
   /**
@@ -107,7 +106,7 @@ export class FleetService {
       user,
     );
 
-    this.logger.log(
+    this.logger.info(
       `[node] created nodeId=${node.id} name="${node.name}" type=${node.type} createdBy=${user.sub}`,
     );
 
@@ -128,7 +127,7 @@ export class FleetService {
       },
     });
 
-    this.logger.log(`[node] updated nodeId=${id} by=${user.sub}`);
+    this.logger.info({ id, sub: user.sub }, `[node] updated nodeId=${id} by=${user.sub}`);
     return updated;
   }
 
@@ -169,7 +168,7 @@ export class FleetService {
       user,
     );
 
-    this.logger.log(`[node] retired nodeId=${id} by=${user.sub}`);
+    this.logger.info({ id, sub: user.sub }, `[node] retired nodeId=${id} by=${user.sub}`);
   }
 
   // ── Token operations (delegado al WorkerTokenService) ────────────────
@@ -278,7 +277,7 @@ export class FleetService {
       },
     });
 
-    this.logger.log(
+    this.logger.info(
       `[register] nodeId=${nodeId} hostname="${dto.hostname}" os="${dto.os}" version=${dto.version ?? 'unknown'} totalSlots=${updated.totalSlots}`,
     );
 
@@ -336,7 +335,7 @@ export class FleetService {
       data: { status: ComputeNodeStatus.offline },
     });
     if (result.count > 0) {
-      this.logger.warn(`[sweeper] markedOffline=${result.count}`);
+      this.logger.warn({ count: result.count }, `[sweeper] markedOffline=${result.count}`);
     }
     return result.count;
   }
@@ -363,15 +362,14 @@ export class FleetService {
   // ── Authz helpers ─────────────────────────────────────────────────────
 
   /**
-   * Para Mes 0/1: solo Alta Gerencia puede gestionar la flota. Mes 2+
-   * podemos relajar a "Tech Lead que comparta pod con el nodo" cuando
-   * agreguemos `ComputeNode.podId`.
+   * Delega a FactoryAuthzService.assertCanManageFleet — extraído ahí para
+   * romper el ciclo FleetModule↔DodModule (architecture-reviewer 2026-05-13).
+   * Este método se mantiene como facade para que los callers existentes
+   * (FleetController, OrgAnthropicConfigController, BranchStrategyController)
+   * no tengan que cambiar imports. Nuevos consumers pueden inyectar
+   * FactoryAuthzService directamente.
    */
   assertCanManageFleet(user: AuthenticatedUser): void {
-    if (user.role !== UserRole.AltaGerencia) {
-      throw new ForbiddenException(
-        'Solo Alta Gerencia puede gestionar la flota de cómputo',
-      );
-    }
+    this.authz.assertCanManageFleet(user);
   }
 }

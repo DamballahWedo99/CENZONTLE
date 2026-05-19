@@ -5,7 +5,11 @@ import { Loader2, Circle, X, Info, Terminal as TerminalIcon } from 'lucide-react
 import { cn } from '@/lib/utils';
 import { Button } from '@/components/ui/button';
 import { ApiError } from '@/lib/api/client';
-import { getRunDetail, type RunDetailResponse } from '@/lib/api/factory';
+import {
+  getRunDetail,
+  isCriterionEventArray,
+  type RunDetailResponse,
+} from '@/lib/api/factory';
 
 interface Props {
   runId: string;
@@ -13,33 +17,6 @@ interface Props {
 }
 
 const POLL_INTERVAL_MS = 5_000;
-
-/**
- * Replica el componente CriterionEvent del worker para uso en frontend.
- * No reusamos directamente el tipo de @cenzontle/shared para mantener el
- * paquete web sin acoplar a internals del worker.
- */
-interface RunCriterion {
-  id: string;
-  label: string;
-  status: 'pending' | 'in_progress' | 'completed' | 'failed';
-  source: 'worker' | 'agent';
-  startedAt?: string;
-  completedAt?: string;
-}
-
-function isCriterionArray(v: unknown): v is RunCriterion[] {
-  if (!Array.isArray(v)) return false;
-  return v.every(
-    (c) =>
-      c &&
-      typeof c === 'object' &&
-      typeof (c as Record<string, unknown>).id === 'string' &&
-      typeof (c as Record<string, unknown>).label === 'string' &&
-      typeof (c as Record<string, unknown>).status === 'string' &&
-      typeof (c as Record<string, unknown>).source === 'string',
-  );
-}
 
 /**
  * Mapea el status del run + criterios al formato del DoD pill (igual al
@@ -61,7 +38,7 @@ function deriveDodFromRun(run: RunDetailResponse): { text: string; done: boolean
  * muestra `0/0`.
  */
 function deriveMilestonesFromRun(run: RunDetailResponse): { text: string; done: boolean }[] {
-  if (!isCriterionArray(run.criteriaProgress)) return [];
+  if (!isCriterionEventArray(run.criteriaProgress)) return [];
   return run.criteriaProgress.map((c) => ({
     text: c.label,
     done: c.status === 'completed',

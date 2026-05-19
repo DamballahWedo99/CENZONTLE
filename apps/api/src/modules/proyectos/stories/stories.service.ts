@@ -3,7 +3,6 @@ import {
   ConflictException,
   ForbiddenException,
   Injectable,
-  Logger,
   NotFoundException,
 } from '@nestjs/common';
 import { Prisma } from '@prisma/client';
@@ -37,6 +36,7 @@ import {
   type StoryRef,
 } from '../vault-paths';
 import { buildFrontmatter } from '../vault-frontmatter';
+import { InjectPinoLogger, PinoLogger } from 'nestjs-pino';
 
 export interface StoryMarkdownData {
   po?: StoryPoFieldsDto;
@@ -67,13 +67,12 @@ interface BuildFileSetInput {
 
 @Injectable()
 export class StoriesService {
-  private readonly logger = new Logger(StoriesService.name);
-
   constructor(
     private prisma: PrismaService,
     private vault: VaultService,
     private vaultFolder: VaultFolderService,
     private integrationsService: IntegrationsService,
+    @InjectPinoLogger(StoriesService.name) private readonly logger: PinoLogger,
   ) {}
 
   /**
@@ -123,7 +122,7 @@ export class StoriesService {
       existingTracker?.externalId &&
       existingTracker.externalId !== PENDING_TRACKER_SENTINEL
     ) {
-      this.logger.log(
+      this.logger.info(
         `[publishToTracker] story=${storyId} already published → ${existingTracker.externalKey}`,
       );
       return { alreadyPublished: true, tracker: existingTracker };
@@ -221,7 +220,7 @@ export class StoriesService {
 
     await this.integrationsService.markSyncedAt(provider);
 
-    this.logger.log(
+    this.logger.info(
       `[publishToTracker] actor=${user.sub} story=${storyId} → ${tracker.externalKey} ` +
         `(project=${parentTracker?.externalKey ?? '∅'})`,
     );
@@ -321,7 +320,7 @@ export class StoriesService {
   async create(dto: CreateStoryDto) {
     const docsCount = dto.relatedDocuments?.length ?? 0;
     const depsCount = dto.discoveredDependencies?.length ?? 0;
-    this.logger.log(
+    this.logger.info(
       `[StoryVault:create] ═══ START title="${dto.title}" epicId=${dto.epicId} podId=${dto.podId} docs=${docsCount} deps=${depsCount}`,
     );
 
@@ -339,7 +338,7 @@ export class StoriesService {
     const storyRef: StoryRef = { id, title: dto.title };
     const folderPath = storyFolderPath(iniRef, epicRef, storyRef);
     const indexPath = storyIndexPath(iniRef, epicRef, storyRef);
-    this.logger.log(`[StoryVault:create] folder=${folderPath}`);
+    this.logger.info({ folderPath }, `[StoryVault:create] folder=${folderPath}`);
 
     const fileSet = this.buildStoryFileSet({
       id,
@@ -355,7 +354,7 @@ export class StoriesService {
       relatedDocuments: dto.relatedDocuments,
       discoveredDependencies: dto.discoveredDependencies,
     }, folderPath);
-    this.logger.log(
+    this.logger.info(
       `[StoryVault:create] fileSet built: ${fileSet.size} files\n  - ${Array.from(fileSet.keys()).join('\n  - ')}`,
     );
 
@@ -377,7 +376,7 @@ export class StoriesService {
         dto.epicId,
       ),
     ]);
-    this.logger.log(
+    this.logger.info(
       `[StoryVault:create] ✓ vault writes OK (${writtenPaths.length} story files in ${Date.now() - writesStart}ms, plus epic-level artifacts in parallel)`,
     );
 
@@ -427,17 +426,17 @@ export class StoriesService {
       // deps se pierden si se aceptan fuera de orden — loggeado como warn.
       // Ver comentario en `persistBlockedByEdges`.
 
-      this.logger.log(`[StoryVault:create] ═══ DONE story.id=${result.id} vaultPath=${indexPath} sourceClientId=${result.sourceClientId ?? 'none'}`);
+      this.logger.info({ id: result.id, indexPath }, `[StoryVault:create] ═══ DONE story.id=${result.id} vaultPath=${indexPath} sourceClientId=${result.sourceClientId ?? 'none'}`);
       return result;
     } catch (err) {
-      this.logger.error(`[StoryVault:create] ✗ PG insert FAILED, rolling back ${writtenPaths.length} vault files`, err);
+      this.logger.error({ err }, `[StoryVault:create] ✗ PG insert FAILED, rolling back ${writtenPaths.length} vault files`);
       await this.rollbackFileSet(writtenPaths, id);
       throw err;
     }
   }
 
   async update(id: string, dto: UpdateStoryDto, user: AuthenticatedUser) {
-    this.logger.log(`[StoryVault:update] START id=${id} fields=[${Object.keys(dto).join(',')}]`);
+    this.logger.info({ id }, `[StoryVault:update] START id=${id} fields=[${Object.keys(dto).join(',')}]`);
     const existing = await this.prisma.story.findUnique({
       where: { id },
       include: {
@@ -479,7 +478,7 @@ export class StoriesService {
       ...structuralData
     } = dto;
     const isLegacy = existing.vaultPath ? !existing.vaultPath.endsWith('/index.md') : false;
-    this.logger.log(`[StoryVault:update] format=${isLegacy ? 'LEGACY' : 'NEW'} vaultPath=${existing.vaultPath}`);
+    this.logger.info({ vaultPath: existing.vaultPath }, `[StoryVault:update] format=${isLegacy ? 'LEGACY' : 'NEW'} vaultPath=${existing.vaultPath}`);
 
     // ── Rename: si cambio el title Y estamos en formato nuevo, mover el folder
     // ANTES de hacer cualquier partial write. Asi el partial update escribe
@@ -498,7 +497,7 @@ export class StoriesService {
       const oldFolder = storyFolderPath(iniRef, epicRef, oldStoryRef);
       const newFolder = storyFolderPath(iniRef, epicRef, newStoryRef);
 
-      this.logger.log(`[StoryVault:update] Renaming folder: ${oldFolder} → ${newFolder}`);
+      this.logger.info({ oldFolder, newFolder }, `[StoryVault:update] Renaming folder: ${oldFolder} → ${newFolder}`);
       const result = await this.vaultFolder.moveFolder(
         oldFolder,
         newFolder,
@@ -602,7 +601,7 @@ export class StoriesService {
       }
 
       if (partialSet.size > 0) {
-        this.logger.log(
+        this.logger.info(
           `[StoryVault:update] rewriting ${partialSet.size} files: ${Array.from(partialSet.keys()).map((p) => this.basename(p)).join(', ')}`,
         );
         // Invalidar cache de cada path para leer SHAs frescos y evitar 409 Conflict.
@@ -611,7 +610,7 @@ export class StoriesService {
         }
         await this.writeFileSet(partialSet);
       } else {
-        this.logger.log(`[StoryVault:update] no vault changes (only PG structural fields)`);
+        this.logger.info(`[StoryVault:update] no vault changes (only PG structural fields)`);
       }
     }
 
@@ -624,7 +623,7 @@ export class StoriesService {
       where: { id },
       data: pgData,
     });
-    this.logger.log(`[StoryVault:update] ═══ DONE id=${id}${newVaultPath ? ` (renamed → ${newVaultPath})` : ''}`);
+    this.logger.info({ id, newVaultPath }, `[StoryVault:update] ═══ DONE id=${id}${newVaultPath ? ` (renamed → ${newVaultPath})` : ''}`);
     return result;
   }
 
@@ -644,18 +643,18 @@ export class StoriesService {
       storyPodId: story.podId ?? null,
     });
 
-    this.logger.log(`[StoryVault:remove] START id=${id} title="${story.title}" vaultPath=${story.vaultPath}`);
+    this.logger.info({ id, title: story.title, vaultPath: story.vaultPath }, `[StoryVault:remove] START id=${id} title="${story.title}" vaultPath=${story.vaultPath}`);
 
     if (story.vaultPath) {
       const isLegacy = !story.vaultPath.endsWith('/index.md');
       if (isLegacy) {
-        this.logger.log(`[StoryVault:remove] format=LEGACY — deleting single file`);
+        this.logger.info(`[StoryVault:remove] format=LEGACY — deleting single file`);
         await this.vault
           .deleteNote(story.vaultPath, `feat(story): delete "${story.title}" [${id}]`)
-          .catch((err) => this.logger.warn(`[StoryVault:remove] failed to delete legacy ${story.vaultPath}: ${err?.message}`));
+          .catch((err) => this.logger.warn({ vaultPath: story.vaultPath, message: err?.message }, `[StoryVault:remove] failed to delete legacy ${story.vaultPath}: ${err?.message}`));
       } else {
         const folderPath = this.dirname(story.vaultPath);
-        this.logger.log(`[StoryVault:remove] format=NEW — deleting folder ${folderPath}`);
+        this.logger.info({ folderPath }, `[StoryVault:remove] format=NEW — deleting folder ${folderPath}`);
         await this.vaultFolder.deleteFolder(
           folderPath,
           `feat(story): delete "${story.title}" [${id}]`,
@@ -664,7 +663,7 @@ export class StoriesService {
     }
 
     await this.prisma.story.delete({ where: { id } });
-    this.logger.log(`[StoryVault:remove] ═══ DONE id=${id}`);
+    this.logger.info({ id }, `[StoryVault:remove] ═══ DONE id=${id}`);
   }
 
   // ─────────────────────────────────────────────────────────────────────
@@ -769,14 +768,14 @@ export class StoriesService {
         const existing = await this.vault.readNote(path).catch(() => null);
         const newContent = this.buildDocReferenceMarkdown(doc);
         if (existing && existing.content === newContent) {
-          this.logger.log(`[StoryVault:epic-artifacts] doc ${path} already exists with same content — skip`);
+          this.logger.info({ path }, `[StoryVault:epic-artifacts] doc ${path} already exists with same content — skip`);
           return;
         }
         const commitMsg = existing
           ? `docs(initiative): update doc reference "${doc.docName}" [from story ${storyId}]`
           : `docs(initiative): link doc "${doc.docName}" [from story ${storyId}]`;
         await this.vault.writeNote(path, newContent, commitMsg);
-        this.logger.log(
+        this.logger.info(
           `[StoryVault:epic-artifacts] ✓ doc ${existing ? 'updated' : 'created'} at ${path}`,
         );
       } catch (err: any) {
@@ -848,7 +847,7 @@ export class StoriesService {
     try {
       await this.prisma.storyTechnicalDependency.createMany({ data: rows });
       const autoLinked = rows.filter((r) => r.linkedSecretId !== null).length;
-      this.logger.log(
+      this.logger.info(
         `[StoryDeps:persist] ✓ inserted ${rows.length} discovered deps for story=${storyId}` +
           (autoLinked > 0 ? ` (${autoLinked} auto-linked to existing org secrets)` : ''),
       );
@@ -877,7 +876,7 @@ export class StoriesService {
         const writeStart = Date.now();
         await this.vault.writeNote(path, entry.content, entry.commitMsg);
         const dur = Date.now() - writeStart;
-        this.logger.log(
+        this.logger.info(
           `[StoryVault:write] ✓ ${path} (${dur}ms, msg="${entry.commitMsg.slice(0, 60)}")`,
         );
         return path;
@@ -899,7 +898,7 @@ export class StoriesService {
     }
 
     const totalDur = Date.now() - batchStart;
-    this.logger.log(
+    this.logger.info(
       `[StoryVault:write] batch done in ${totalDur}ms — ${writtenPaths.length}/${entries.length} OK, ${failures.length} failed`,
     );
 
@@ -917,7 +916,7 @@ export class StoriesService {
 
   private async rollbackFileSet(paths: string[], storyIdHint: string): Promise<void> {
     if (paths.length === 0) return;
-    this.logger.warn(`[rollback] Removing ${paths.length} vault files for ${storyIdHint}`);
+    this.logger.warn({ length: paths.length, storyIdHint }, `[rollback] Removing ${paths.length} vault files for ${storyIdHint}`);
     const results = await Promise.allSettled(
       paths.map((p) =>
         this.vault.deleteNote(p, `revert(story): rollback partial create [${storyIdHint}]`),
@@ -970,12 +969,12 @@ export class StoriesService {
           ? `feat(story): delete "${storyTitle}" [${storyId}]`
           : `chore(story): cleanup ${this.basename(file)} [${storyId}]`;
         await this.vault.deleteNote(file, msg).catch((err) =>
-          this.logger.warn(`[deleteFolder] Failed to delete ${file}: ${err?.message}`),
+          this.logger.warn({ file, message: err?.message }, `[deleteFolder] Failed to delete ${file}: ${err?.message}`),
         );
         first = false;
       }
     } catch (err: any) {
-      this.logger.warn(`[deleteFolder] Error listing/deleting folder ${folderPath}: ${err?.message}`);
+      this.logger.warn({ folderPath, message: err?.message }, `[deleteFolder] Error listing/deleting folder ${folderPath}: ${err?.message}`);
     }
   }
 
@@ -1206,7 +1205,7 @@ export class StoriesService {
       // Legacy flat: archivo único `<story>.md` con shape v1 (sub-campos
       // bajo headings ## Producto/Tecnico/QA). Parseamos a shape v1 y
       // concatenamos a markdown v2 con headings nuevos.
-      this.logger.log(`[StoryVault:read] format=LEGACY-FLAT path=${vaultPath}`);
+      this.logger.info({ vaultPath }, `[StoryVault:read] format=LEGACY-FLAT path=${vaultPath}`);
       const note = await this.vault.readNote(vaultPath);
       if (!note) return { po: { markdown: '' }, technical: { markdown: '' }, qa: { markdown: '' } };
       const v1 = this.parseLegacyMarkdown(note.content);
@@ -1218,13 +1217,13 @@ export class StoriesService {
     }
 
     const folderPath = this.dirname(vaultPath);
-    this.logger.log(`[StoryVault:read] format=FOLDER folder=${folderPath} (reading 3 section files)`);
+    this.logger.info({ folderPath }, `[StoryVault:read] format=FOLDER folder=${folderPath} (reading 3 section files)`);
     const [poNote, tlNote, qaNote] = await Promise.all([
       this.vault.readNote(`${folderPath}/definicion-negocio.md`).catch(() => null),
       this.vault.readNote(`${folderPath}/definicion-tecnica.md`).catch(() => null),
       this.vault.readNote(`${folderPath}/testing-strategy.md`).catch(() => null),
     ]);
-    this.logger.log(
+    this.logger.info(
       `[StoryVault:read] files: po=${poNote ? 'ok' : 'missing'} tl=${tlNote ? 'ok' : 'missing'} qa=${qaNote ? 'ok' : 'missing'}`,
     );
 
@@ -1695,7 +1694,7 @@ export class StoriesService {
         continue;
       }
       if (resolvedId === storyId) {
-        this.logger.warn(`[StoryDep] Skip edge: self-block story=${storyId}`);
+        this.logger.warn({ storyId }, `[StoryDep] Skip edge: self-block story=${storyId}`);
         skipped++;
         continue;
       }
@@ -1724,7 +1723,7 @@ export class StoriesService {
         skipped++;
       }
     }
-    this.logger.log(
+    this.logger.info(
       `[StoryDep] story=${storyId} edges: created=${created} skipped=${skipped} (of ${blockedBy.length})`,
     );
   }
@@ -1792,7 +1791,7 @@ export class StoriesService {
       WHERE id = ${epicId}
     `;
 
-    this.logger.log(
+    this.logger.info(
       `[persistDiscoveredDependenciesToEpicJsonb] epic=${epicId} attempted=${deps.length} (duplicates by id are skipped)`,
     );
   }

@@ -2,12 +2,12 @@ import {
   CanActivate,
   ExecutionContext,
   Injectable,
-  Logger,
   UnauthorizedException,
 } from '@nestjs/common';
 import { Reflector } from '@nestjs/core';
 import { WorkerTokenService } from './worker-token.service';
 import { IS_WORKER_ROUTE_KEY } from './worker-route.decorator';
+import { InjectPinoLogger, PinoLogger } from 'nestjs-pino';
 
 /**
  * Guard custom que valida el header `Authorization: Bearer worker_xxx` para
@@ -29,11 +29,10 @@ import { IS_WORKER_ROUTE_KEY } from './worker-route.decorator';
  */
 @Injectable()
 export class WorkerAuthGuard implements CanActivate {
-  private readonly logger = new Logger(WorkerAuthGuard.name);
-
   constructor(
     private readonly reflector: Reflector,
     private readonly tokens: WorkerTokenService,
+    @InjectPinoLogger(WorkerAuthGuard.name) private readonly logger: PinoLogger,
   ) {}
 
   async canActivate(context: ExecutionContext): Promise<boolean> {

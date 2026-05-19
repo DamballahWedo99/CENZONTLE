@@ -111,14 +111,34 @@ function batchColor(batchId: string): string {
 // Helpers
 // ---------------------------------------------------------------------------
 
-function formatElapsed(isoDate: string): string {
-  const diff = Date.now() - new Date(isoDate).getTime();
+/**
+ * Formatea elapsed time desde `startedAt` hasta `completedAt` (si está set)
+ * o hasta `Date.now()` (mientras corre). Sin esto, el card del KanbanBatchCard
+ * mostraba "3h 9m" para un batch que duró 2 minutos pero terminó hace 3h, lo
+ * cual confundía al operador.
+ */
+function formatElapsed(startedAt: string, completedAt?: string | null): string {
+  const endMs = completedAt ? new Date(completedAt).getTime() : Date.now();
+  const diff = endMs - new Date(startedAt).getTime();
   const totalMinutes = Math.floor(diff / 60_000);
-  if (totalMinutes < 1) return 'just now';
-  if (totalMinutes < 60) return `${totalMinutes}m`;
+  if (totalMinutes < 1) {
+    const secs = Math.floor(diff / 1000);
+    return secs <= 0 ? 'just now' : `${secs}s`;
+  }
+  if (totalMinutes < 60) {
+    const secs = Math.floor((diff % 60_000) / 1000);
+    return `${totalMinutes}m ${secs}s`;
+  }
   const hours = Math.floor(totalMinutes / 60);
   const mins = totalMinutes % 60;
   return mins > 0 ? `${hours}h ${mins}m` : `${hours}h`;
+}
+
+/** Formatter compact de tokens (idéntico al de BatchDetail). */
+function formatTokensCompact(tokens: number): string {
+  if (tokens < 1000) return `${tokens}`;
+  if (tokens < 1_000_000) return `${(tokens / 1000).toFixed(1).replace(/\.0$/, '')}K`;
+  return `${(tokens / 1_000_000).toFixed(1).replace(/\.0$/, '')}M`;
 }
 
 function formatTimeUntil(isoDate: string | null): string {
@@ -665,16 +685,22 @@ function KanbanBatchCard({ batch, gates }: { batch: SprintBatch; gates: HumanGat
         </div>
       ) : null}
 
-      {/* Bottom metrics */}
+      {/* Bottom metrics — agents, cost, tokens new, elapsed (con freeze al
+          completar). Antes el reloj seguía corriendo y faltaba tokens. */}
       <div className="flex items-center gap-3 text-[10px] text-muted-foreground/70">
         <span className="flex items-center gap-1">
           <Users className="w-3 h-3" />{batch.agentCount}
         </span>
         <span className="flex items-center gap-1">
-          <DollarSign className="w-3 h-3" />${batch.totalCost.toFixed(0)}
+          <DollarSign className="w-3 h-3" />${batch.totalCost.toFixed(2)}
         </span>
+        {batch.totalTokensNew !== undefined && (
+          <span className="flex items-center gap-1">
+            <Zap className="w-3 h-3" />{formatTokensCompact(batch.totalTokensNew)}
+          </span>
+        )}
         <span className="flex items-center gap-1 ml-auto">
-          <Clock className="w-3 h-3" />{formatElapsed(batch.startedAt)}
+          <Clock className="w-3 h-3" />{formatElapsed(batch.startedAt, batch.completedAt)}
         </span>
       </div>
     </Link>
@@ -890,32 +916,51 @@ export function FactoryOverview() {
       columns.set(col.id, { active: [], queued: [] });
     }
 
-    // QueuedBatches: si la épica tiene runs activos → convertirla a un
-    // SprintBatch sintético y meterla en `.active` de la columna Forge
-    // (renderiza con `BatchCard` formato bonito: progress bar, agents,
-    // duration). Si no → quedarse como QueuedBatch en `queue`
-    // (renderiza con `KanbanQueueCard` formato simple).
+    // QueuedBatches: la épica está "activa en Forge" en 3 estados:
+    //   (a) Tiene agentes corriendo → epicId en activeEpicIds (slots ocupados)
+    //   (b) Todas las stories están done pero sigue en queue → awaiting
+    //       human approval antes de pasar a Staged (q.awaitingHumanGate=true,
+    //       fix 2026-05-12).
+    //   (c) Recién encolada, 0 stories done y 0 en progreso → IN QUEUE
+    //       (cae al else abajo).
     //
-    // El SprintBatch sintético usa runtime data del backend (storiesDone,
-    // agentCount, runStartedAt, priority) que el endpoint /factory/queue
-    // ahora devuelve. Stories array se llena con N placeholders cuyo
-    // status ('done' o 'coding') refleja el progreso — eso es lo que el
-    // BatchCard usa para calcular `completedStories/totalStories`.
+    // Si está activa, convertimos a SprintBatch sintético y meterla en
+    // `.active` de la columna Forge (renderiza con `BatchCard` formato bonito:
+    // progress bar, agents, duration). Si no → quedarse como QueuedBatch
+    // en `queue` (renderiza con `KanbanQueueCard` formato simple).
     //
     // Mutuamente exclusivos: una épica nunca aparece en ambas columnas.
     for (const q of queuedBatches) {
-      const isActive = q.epicId !== undefined && activeEpicIds.has(q.epicId);
-      if (isActive) {
+      const hasActiveAgents = q.epicId !== undefined && activeEpicIds.has(q.epicId);
+      const storiesInReview = q.storiesInReview ?? 0;
+      // Staging approval: si el Tech Lead ya aprobó el merge, el batch pasa
+      // a la columna STAGED — independiente de los flags de Forge. Esto se
+      // evalúa primero porque un batch aprobado ya NO debe verse en Forge,
+      // aunque las stories sigan reportando estado done/in_review.
+      const isStaged = Boolean(q.stagingApprovedAt);
+      // Epic se considera "activa en Forge" en 4 escenarios:
+      //  (a) Tiene agentes corriendo (slots ocupados).
+      //  (b) awaitingHumanGate (todas las stories están done O in_review).
+      //  (c) Tiene stories in_review (Forge YA TERMINÓ ese trabajo y abrió
+      //      el PR, pero el operador no lo ha mergeado y hay stories del
+      //      mismo epic todavía bloqueadas por DAG). Sin este caso, las
+      //      épicas con progreso parcial caen a IN QUEUE cuando se libera
+      //      el slot — confuso porque hay trabajo del Forge ya hecho.
+      //  (d) Tiene stories done parcialmente (mismo razonamiento).
+      const isActive =
+        !isStaged && (
+          hasActiveAgents ||
+          q.awaitingHumanGate === true ||
+          storiesInReview > 0 ||
+          (q.storiesDone ?? 0) > 0
+        );
+      if (isStaged || isActive) {
         const total = q.stories;
         const done = q.storiesDone ?? 0;
-        // Construye un array de stories placeholder. Status determina si
-        // cuenta como "completed" en el progress bar — los primeros `done`
-        // son Done, el resto son Coding (placeholder de "en progreso").
-        // Placeholder stories — solo el `status` importa para que el
-        // BatchCard calcule `completedStories/totalStories` correcto.
-        // El resto son defaults razonables; cuando Sprint 5+ traiga
-        // story-level data real, reemplazamos este array con el de
-        // verdad desde un endpoint dedicado.
+        // Construye un array de stories placeholder. Los primeros `done` son
+        // Done (mergeados), los siguientes `storiesInReview` son InReview
+        // (PR abierto esperando merge humano), el resto son Coding (en
+        // progreso o pendientes). BatchCard calcula progress bar de ahí.
         const syntheticStories = Array.from({ length: total }, (_, i) => ({
           id: `${q.id}-story-${i}`,
           tracker: { provider: 'linear' as const, externalId: '', externalKey: '', externalUrl: '' },
@@ -925,7 +970,12 @@ export function FactoryOverview() {
           dependsOn: [] as string[],
           agentId: null,
           prNumber: null,
-          status: i < done ? AgentStatus.Done : AgentStatus.Coding,
+          status:
+            i < done
+              ? AgentStatus.Done
+              : i < done + storiesInReview
+                ? AgentStatus.InReview
+                : AgentStatus.Coding,
           storyPoints: 0,
           startedAt: null,
           completedAt: null,
@@ -934,6 +984,7 @@ export function FactoryOverview() {
           tokens: 0,
           cost: 0,
         }));
+        const targetLayer = isStaged ? PipelineLayer.Staging : PipelineLayer.Forge;
         const syntheticBatch: SprintBatch = {
           id: q.id,
           name: q.epicTitle,
@@ -943,16 +994,24 @@ export function FactoryOverview() {
           stories: syntheticStories,
           waves: [],
           branch: q.forgeBranch ?? `forge/sprint-batch-${(q.epicId ?? '').slice(0, 8)}`,
-          status: 'in-progress',
-          currentLayer: PipelineLayer.Forge,
+          status: q.completedAt ? 'completed' : 'in-progress',
+          // currentLayer derivado del approval: si el Tech Lead aprobó el
+          // staging gate, el batch está en Staged. Esta misma derivación
+          // se hace en BatchDetail.tsx para consistency entre vistas.
+          currentLayer: targetLayer,
           agentCount: q.agentCount ?? 0,
           priority: q.priority,
           startedAt: q.runStartedAt ?? q.queuedAt,
-          completedAt: null,
-          totalCost: 0, // TODO Sprint 5: cost real desde tokens reportados por worker
-          totalTokens: 0,
+          // Aggregates reales del backend (antes hardcoded a null/0). Permiten
+          // que el KanbanBatchCard congele el reloj y muestre cost/tokens
+          // reales sin necesidad de abrir el batch detail.
+          completedAt: q.completedAt ?? null,
+          totalCost: q.totalCostUsd ?? 0,
+          totalTokens: (q.totalTokensNew ?? 0) + (q.totalTokensCached ?? 0),
+          totalTokensNew: q.totalTokensNew,
+          totalTokensCached: q.totalTokensCached,
         };
-        columns.get(PipelineLayer.Forge)!.active.push(syntheticBatch);
+        columns.get(targetLayer)!.active.push(syntheticBatch);
       } else {
         columns.get('queue')!.queued.push(q);
       }

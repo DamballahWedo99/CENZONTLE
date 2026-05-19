@@ -2,11 +2,26 @@ import { NestFactory } from "@nestjs/core";
 import { NestExpressApplication } from "@nestjs/platform-express";
 import { ValidationPipe } from "@nestjs/common";
 import { SwaggerModule, DocumentBuilder } from "@nestjs/swagger";
+import { Logger as PinoNestLogger } from "nestjs-pino";
 import { AppModule } from "./app.module";
 import { PrismaExceptionFilter } from "./common/filters/prisma-exception.filter";
 
 async function bootstrap() {
-  const app = await NestFactory.create<NestExpressApplication>(AppModule);
+  // `bufferLogs: true` retiene cualquier log emitido durante el bootstrap
+  // hasta que `useLogger()` registre pino — sin esto, los primeros logs
+  // ("Nest application starting...", módulos resolviendo, etc.) saldrían
+  // por el logger default y los siguientes por pino — inconsistencia molesta
+  // en tail -f.
+  const app = await NestFactory.create<NestExpressApplication>(AppModule, {
+    bufferLogs: true,
+  });
+
+  // Reemplaza el logger global (@nestjs/common Logger) por pino. Cualquier
+  // `new Logger(SomeService.name)` legacy ahora sale como JSON estructurado
+  // automáticamente, sin tocar los 50+ services existentes. Los services
+  // nuevos pueden inyectar `PinoLogger` directamente para object destructuring
+  // nativo (ver `agent-run.service.ts:logVaultLoaded`).
+  app.useLogger(app.get(PinoNestLogger));
 
   // CRÍTICO para ThrottlerGuard: detrás de un reverse proxy (Auth0 BFF,
   // load balancer, CDN), `req.ip` por default es el IP del proxy, no del
@@ -39,9 +54,18 @@ async function bootstrap() {
 
   const port = process.env.PORT || 3001;
   await app.listen(port);
-  console.log(`Cenzontle API running on http://localhost:${port}/api`);
-  if (process.env.NODE_ENV !== "production") {
-    console.log(`Swagger docs at http://localhost:${port}/api/docs`);
-  }
+
+  // Bootstrap notice via pino (no console.log). Sale como JSON estructurado
+  // con event key para queries de startup ("¿cuándo arrancó la última vez?").
+  const bootstrapLogger = app.get(PinoNestLogger);
+  bootstrapLogger.log(
+    {
+      event: 'app.bootstrap.ready',
+      port,
+      env: process.env.NODE_ENV ?? 'development',
+      swaggerEnabled: process.env.NODE_ENV !== 'production',
+    },
+    `Cenzontle API ready on :${port}/api${process.env.NODE_ENV !== 'production' ? ` (docs: /api/docs)` : ''}`,
+  );
 }
 bootstrap();

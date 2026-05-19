@@ -7,6 +7,7 @@ import { DesignBundleService } from './design-bundle.service';
 // a `getEntries()` con `..` literal, mockeamos AdmZip y forzamos el shape.
 jest.mock('adm-zip');
 import AdmZip from 'adm-zip';
+import { createMockPinoLogger } from '../../../common/testing/mock-pino-logger';
 
 const MockAdmZip = AdmZip as unknown as jest.Mock;
 
@@ -44,7 +45,7 @@ describe('DesignBundleService — zip-slip path traversal (CWE-22)', () => {
   let warnSpy: jest.SpyInstance;
 
   beforeEach(() => {
-    service = new DesignBundleService();
+    service = new DesignBundleService(createMockPinoLogger());
     // Silenciar warns en el spec; los verificamos cuando importan.
     warnSpy = jest.spyOn((service as any).logger, 'warn').mockImplementation();
   });

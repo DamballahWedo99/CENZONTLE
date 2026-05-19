@@ -128,6 +128,22 @@ model Epic {
   consolidatedPrNumber      Int?
   consolidatedPrCreatedAt   DateTime?
   consolidatedPrMergedAt    DateTime?
+  // SHA del merge commit en DEV — persistido en el mismo CAS transaction que
+  // `consolidatedPrMergedAt`. Permite al PreviewService recuperar el snapshot
+  // del epic post-merge aunque la integration branch ya haya sido borrada por
+  // el cleanup automático (defense-in-depth fallback ante branch deletion).
+  consolidatedMergeSha      String?
+
+  // Staging gate approval — set cuando un TechLead aprueba el merge del
+  // consolidated PR a DEV, después del Forge done. Step-up auth requerida
+  // (password via Auth0 + role check estricto: TechLead o AltaGerencia).
+  // Cuando estos campos están set, getBatchDetail/listQueue derivan
+  // `currentLayer: Staging` y el batch se mueve a la columna Staged del
+  // Pipeline Board. ApprovedByName es snapshot del nombre al momento de
+  // aprobar para que el changelog persista aunque el user se renombre.
+  stagingApprovedAt         DateTime?
+  stagingApprovedBy         String?
+  stagingApprovedByName     String?
 
   // Path to the markdown file in the vault (GitHub repo)
   vaultPath                 String?
@@ -535,6 +551,27 @@ model AgentTokenSettings {
   diagramMaxTokens       Int     @default(64000)
   diagramThinkingEnabled Boolean @default(true)
 
+  // Forge Worker — coder agent (Claude Code CLI). Configurable desde
+  // /factory/settings → tab "Factory". Reemplaza el approach de env vars
+  // (CLAUDE_MODEL, CLAUDE_EFFORT) que requería redeploy del worker.
+  //
+  // forgeWorkerModel: ID del modelo Anthropic. Validados en DTO contra
+  //   FORGE_WORKER_MODELS (haiku-4-5 | sonnet-4-6 | opus-4-7).
+  // forgeWorkerEffort: low | medium | high | xhigh | max. Para Sonnet/Opus
+  //   con effort >= 'high' el CLI activa extended thinking automático.
+  //   Para Haiku, todos los valores != 'low' son no-op (Haiku no soporta).
+  forgeWorkerModel  String @default("claude-sonnet-4-6")
+  forgeWorkerEffort String @default("high")
+
+  // DoD Verifier — reviewer agent (Claude Code CLI con --output-format json).
+  // Configurable desde la misma tab "Factory". Reemplaza env vars
+  // (DOD_VERIFIER_MODEL, DOD_VERIFIER_EFFORT). Default Haiku 4.5 + low porque
+  // el verifier hace checks atómicos (passed/failed) y no requiere extended
+  // thinking. Subir a Sonnet para detectar bypass sycophantic del coder en
+  // tasks complejas.
+  dodVerifierModel  String @default("claude-haiku-4-5-20251001")
+  dodVerifierEffort String @default("low")
+
   updatedAt DateTime @updatedAt
   updatedBy String?
 
@@ -693,6 +730,50 @@ model AgentRun {
   // en cada iteración del loop. Null antes del primer attempt verification.
   dodVerification Json?
 
+  // plannerPlan: texto completo del plan generado por ForgePlannerService
+  // (Sonnet executor + Opus advisor) ANTES del spawn CLI del coder. NULL si
+  // el planner falló o no se invocó (degradación graciosa — el coder ejecutó
+  // sin plan). Persistido para forensics: si una story falla, el operador
+  // puede ver qué plan recibió y diagnosticar si el plan estaba mal o si el
+  // coder lo ignoró.
+  plannerPlan     String?
+
+  // plannerUsage: breakdown cost/tokens del planner. Shape:
+  //   { executorTokensIn/Out, advisorTokensIn/Out, advisorCalls,
+  //     executorCostUsd, advisorCostUsd, totalCostUsd, elapsedMs }
+  // Sumado a `totalCostUsd` del batch en `getBatchDetail` para que el
+  // dashboard refleje cost real (planner + generator + verifier).
+  plannerUsage    Json?
+
+  // generatorUsage: cost/tokens del agente generator (claude -p con
+  // --output-format stream-json) acumulado across DoD attempts. Shape:
+  //   { callsCount, totalInputTokens, totalOutputTokens, totalCacheCreationInputTokens,
+  //     totalCacheReadInputTokens, totalCostUsd, totalDurationMs, totalDurationApiMs,
+  //     totalNumTurns, perAttempt: [{ attempt, ...usage }] }
+  // Separado de dodVerification (que es del verifier Sonnet) porque son
+  // modelos distintos con price tables independientes. `getBatchDetail` suma
+  // ambos en `totalCostUsd` del batch.
+  generatorUsage  Json?
+
+  // filesModified: número de archivos únicos modificados en el diff entre el
+  // baseBranch del epic y el head branch del worker tras el commit + push.
+  // Calculado por el worker via `git diff --name-only origin/<base>..HEAD | wc -l`.
+  // Visible en el AgentCard como "X files" para que el operador vea de un
+  // vistazo el alcance del cambio sin tener que abrir el PR.
+  filesModified   Int?
+
+  // filesModifiedPaths: lista exacta de paths relativos modificados (mismo
+  // diff que filesModified pero estructurado). Permite que el backend, al
+  // materializar el claim de una story dependiente, inyecte en el prompt
+  // del próximo agente los paths concretos producidos por stories del DAG
+  // ya terminadas — el agente sabe qué archivos LEER antes de implementar
+  // para respetar contratos previos en lugar de improvisar duplicados.
+  // Cap defensivo: el worker trunca a 200 paths antes de enviar (defensa
+  // contra runs masivos accidentales que inflarían el row). NULL para runs
+  // legacy anteriores a la migration; los consumers degradan a `filesModified`
+  // count cuando este array no está set.
+  filesModifiedPaths String[]    @default([])
+
   startedAt       DateTime    @default(now())
   completedAt     DateTime?
 
@@ -805,8 +886,6 @@ model DodCriterion {
   /// tener que adivinar desde el `text` corto. REQUERIDO — sin descripción
   /// el agente no tiene contexto suficiente, y el modelo de DoD pierde valor.
   description String
-  enabled   Boolean  @default(true)
-  required  Boolean  @default(false)
   /// Orden de display en la UI (drag&drop persiste aquí).
   position  Int      @default(0)
   createdAt DateTime @default(now())

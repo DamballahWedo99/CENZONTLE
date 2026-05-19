@@ -1,4 +1,7 @@
-import { ConflictException, Injectable, Logger } from '@nestjs/common';
+import {
+  ConflictException,
+  Injectable,
+} from '@nestjs/common';
 import { PrismaService } from '../../prisma/prisma.service';
 import { VaultService } from '../../vault/vault.service';
 import { VaultFolderService } from '../../vault/vault-folder.service';
@@ -26,6 +29,7 @@ import {
   buildEpicQAMatrixMarkdown,
 } from '../epics/epic-markdown-builders';
 import { buildFrontmatter, type FrontmatterValue } from '../vault-frontmatter';
+import { InjectPinoLogger, PinoLogger } from 'nestjs-pino';
 import type {
   EpicDiagram,
   EpicDependency,
@@ -84,8 +88,6 @@ export interface LegacyRootCleanupReport {
  */
 @Injectable()
 export class VaultMigrationService {
-  private readonly logger = new Logger(VaultMigrationService.name);
-
   /**
    * Lock in-memory para evitar dos invocaciones concurrentes de migrateAll().
    * Dos migraciones simultaneas duplicarian commits al vault (cada write va a
@@ -104,6 +106,7 @@ export class VaultMigrationService {
     private readonly prisma: PrismaService,
     private readonly vault: VaultService,
     private readonly vaultFolder: VaultFolderService,
+    @InjectPinoLogger(VaultMigrationService.name) private readonly logger: PinoLogger,
   ) {}
 
   /**
@@ -133,7 +136,7 @@ export class VaultMigrationService {
   }
 
   private async runMigration(executedByUserId?: string): Promise<MigrationReport> {
-    this.logger.log(
+    this.logger.info(
       `[VaultMigration] ===== INICIO de migración big-bang (user=${sanitizeForLog(executedByUserId ?? 'unknown')}) =====`,
     );
 
@@ -159,7 +162,7 @@ export class VaultMigrationService {
       orderBy: { createdAt: 'asc' },
     });
 
-    this.logger.log(
+    this.logger.info(
       `[VaultMigration] ${initiatives.length} initiative(s) encontradas para procesar`,
     );
 
@@ -187,7 +190,7 @@ export class VaultMigrationService {
       void iniMigrated; // usado solo para trazabilidad futura
     }
 
-    this.logger.log(
+    this.logger.info(
       `[VaultMigration] ===== FIN de migración =====\n` +
         `  Initiatives: migradas=${report.initiativesMigrated}, skipped=${report.initiativesSkipped}\n` +
         `  Epics: migradas=${report.epicsMigrated}, skipped=${report.epicsSkipped}\n` +
@@ -229,7 +232,7 @@ export class VaultMigrationService {
 
     // Sin vaultPath legacy → crear index.md (sumario) + definicion.md (vacía/desde DB)
     if (!ini.vaultPath || !isLegacyVaultPath(ini.vaultPath)) {
-      this.logger.log(
+      this.logger.info(
         `[VaultMigration] initiative ${ini.id} sin vaultPath legacy, creando ${newPath} + ${newDefinicionPath}`,
       );
       try {
@@ -249,7 +252,7 @@ export class VaultMigrationService {
           data: { vaultPath: newPath },
         });
         report.initiativesMigrated++;
-        this.logger.log(
+        this.logger.info(
           `[VaultMigration] initiative ${ini.id}: (sin legacy) → ${newPath} + ${newDefinicionPath} ✓`,
         );
         return true;
@@ -262,7 +265,7 @@ export class VaultMigrationService {
     // Existe vaultPath legacy → el contenido legacy es la "definición narrativa"
     // (formato single-file pre-migration). Lo movemos a definicion.md y creamos
     // un index.md sumario nuevo.
-    this.logger.log(
+    this.logger.info(
       `[VaultMigration] initiative ${ini.id}: ${ini.vaultPath} → ${newPath} + ${newDefinicionPath}`,
     );
 
@@ -314,7 +317,7 @@ export class VaultMigrationService {
       }
 
       report.initiativesMigrated++;
-      this.logger.log(
+      this.logger.info(
         `[VaultMigration] initiative ${ini.id}: old=${ini.vaultPath} → new=${newPath} + ${newDefinicionPath} ✓`,
       );
       return true;
@@ -367,7 +370,7 @@ export class VaultMigrationService {
       return false;
     }
 
-    this.logger.log(
+    this.logger.info(
       `[VaultMigration] epic ${epic.id}: ${epic.vaultPath ?? '(sin path)'} → ${newIndexPath}`,
     );
 
@@ -421,7 +424,7 @@ export class VaultMigrationService {
       }
 
       report.epicsMigrated++;
-      this.logger.log(
+      this.logger.info(
         `[VaultMigration] epic ${epic.id}: old=${epic.vaultPath ?? 'n/a'} → new=${newIndexPath} ✓`,
       );
       return true;
@@ -462,7 +465,7 @@ export class VaultMigrationService {
           buildDiagramMarkdown(diagram as EpicDiagram),
           `refactor(vault-migration): write diagram "${sanitizeForLog(diagram.type)}" for epic [${epic.id}]`,
         );
-        this.logger.log(`[VaultMigration] epic ${epic.id}: diagrama "${sanitizeForLog(diagram.type)}" → ${path}`);
+        this.logger.info({ id: epic.id, path }, `[VaultMigration] epic ${epic.id}: diagrama "${sanitizeForLog(diagram.type)}" → ${path}`);
       } catch (err: any) {
         this.logger.warn(
           `[VaultMigration] epic ${epic.id}: error escribiendo diagrama ${path}: ${err?.message}`,
@@ -484,7 +487,7 @@ export class VaultMigrationService {
           buildDependencyMarkdown(dep as EpicDependency),
           `refactor(vault-migration): write dependency "${safeTitle}" for epic [${epic.id}]`,
         );
-        this.logger.log(`[VaultMigration] epic ${epic.id}: dependencia "${safeTitle}" → ${path}`);
+        this.logger.info({ id: epic.id, safeTitle, path }, `[VaultMigration] epic ${epic.id}: dependencia "${safeTitle}" → ${path}`);
       } catch (err: any) {
         this.logger.warn(
           `[VaultMigration] epic ${epic.id}: error escribiendo dependencia ${path}: ${err?.message}`,
@@ -502,7 +505,7 @@ export class VaultMigrationService {
           buildQAMatrixMarkdown(qaMatrix),
           `refactor(vault-migration): write QA matrix for epic [${epic.id}]`,
         );
-        this.logger.log(`[VaultMigration] epic ${epic.id}: matriz QA funcional → ${path}`);
+        this.logger.info({ id: epic.id, path }, `[VaultMigration] epic ${epic.id}: matriz QA funcional → ${path}`);
       } catch (err: any) {
         this.logger.warn(
           `[VaultMigration] epic ${epic.id}: error escribiendo QA funcional ${path}: ${err?.message}`,
@@ -520,7 +523,7 @@ export class VaultMigrationService {
           buildEpicQAMatrixMarkdown(epicQAMatrix),
           `refactor(vault-migration): write epic QA matrix for epic [${epic.id}]`,
         );
-        this.logger.log(`[VaultMigration] epic ${epic.id}: matriz QA sistémica → ${path}`);
+        this.logger.info({ id: epic.id, path }, `[VaultMigration] epic ${epic.id}: matriz QA sistémica → ${path}`);
       } catch (err: any) {
         this.logger.warn(
           `[VaultMigration] epic ${epic.id}: error escribiendo QA sistémica ${path}: ${err?.message}`,
@@ -585,7 +588,7 @@ export class VaultMigrationService {
       return false;
     }
 
-    this.logger.log(
+    this.logger.info(
       `[VaultMigration] story ${story.id}: ${oldFolder} → ${newFolder}`,
     );
 
@@ -620,7 +623,7 @@ export class VaultMigrationService {
       });
 
       report.storiesMigrated++;
-      this.logger.log(
+      this.logger.info(
         `[VaultMigration] story ${story.id}: old=${oldFolder} → new=${newFolder} (moved=${result.filesMoved}) ✓`,
       );
       return true;
@@ -891,7 +894,7 @@ export class VaultMigrationService {
    * `<slug>-<id6>` de storyFolderPath.
    */
   async cleanupOrphanStories(): Promise<OrphanCleanupReport> {
-    this.logger.log('[VaultCleanup] ===== INICIO cleanup de folders huerfanos =====');
+    this.logger.info('[VaultCleanup] ===== INICIO cleanup de folders huerfanos =====');
 
     // 1. Cargar todos los shortIds validos desde PG
     const allStories = await this.prisma.story.findMany({
@@ -900,7 +903,7 @@ export class VaultMigrationService {
     const validShortIds = new Set(
       allStories.filter((s) => s.id.length >= 6).map((s) => s.id.slice(-6)),
     );
-    this.logger.log(`[VaultCleanup] ${allStories.length} stories en PG, ${validShortIds.size} shortIds validos`);
+    this.logger.info({ length: allStories.length, size: validShortIds.size }, `[VaultCleanup] ${allStories.length} stories en PG, ${validShortIds.size} shortIds validos`);
 
     // 2. Listar el tree completo bajo iniciativas/ y detectar folders en historias/
     const tree = await this.vault.listTree('iniciativas').catch(() => []);
@@ -934,7 +937,7 @@ export class VaultMigrationService {
     };
     walk(tree, false);
 
-    this.logger.log(
+    this.logger.info(
       `[VaultCleanup] detectados ${orphanPaths.length} folder(s) huerfano(s)`,
     );
 
@@ -949,15 +952,15 @@ export class VaultMigrationService {
           `cleanup(vault): remove orphan story folder ${folder.split('/').pop()}`,
         );
         foldersDeleted++;
-        this.logger.log(`[VaultCleanup] ✓ deleted orphan: ${folder}`);
+        this.logger.info({ folder }, `[VaultCleanup] ✓ deleted orphan: ${folder}`);
       } catch (err: any) {
         const message = err instanceof Error ? err.message : String(err);
         errors.push({ folder, error: message });
-        this.logger.warn(`[VaultCleanup] ✗ failed to delete ${folder}: ${message}`);
+        this.logger.warn({ folder, message }, `[VaultCleanup] ✗ failed to delete ${folder}: ${message}`);
       }
     }
 
-    this.logger.log(
+    this.logger.info(
       `[VaultCleanup] ===== FIN cleanup: ${foldersDeleted}/${orphanPaths.length} borrados, ${errors.length} errores =====`,
     );
 
@@ -992,7 +995,7 @@ export class VaultMigrationService {
    * Idempotente: si el root ya no existe (404), retorna 0 archivos borrados.
    */
   async cleanupLegacyRoots(): Promise<LegacyRootCleanupReport> {
-    this.logger.log('[VaultLegacyCleanup] ===== INICIO cleanup de roots legacy =====');
+    this.logger.info('[VaultLegacyCleanup] ===== INICIO cleanup de roots legacy =====');
 
     // Safety check: ¿alguna entidad PG apunta todavia a los roots legacy?
     const [stuckInits, stuckEpics, stuckStories] = await Promise.all([
@@ -1038,15 +1041,15 @@ export class VaultMigrationService {
           `cleanup(vault): remove legacy root ${root}/ (post-migration)`,
         );
         filesDeleted[root] = count;
-        this.logger.log(`[VaultLegacyCleanup] ✓ ${root}/ — ${count} archivo(s) borrado(s)`);
+        this.logger.info({ root, count }, `[VaultLegacyCleanup] ✓ ${root}/ — ${count} archivo(s) borrado(s)`);
       } catch (err: any) {
         const message = err instanceof Error ? err.message : String(err);
         errors.push({ root, error: message });
-        this.logger.warn(`[VaultLegacyCleanup] ✗ ${root}/: ${message}`);
+        this.logger.warn({ root, message }, `[VaultLegacyCleanup] ✗ ${root}/: ${message}`);
       }
     }
 
-    this.logger.log(
+    this.logger.info(
       `[VaultLegacyCleanup] ===== FIN: deleted epics=${filesDeleted.epics ?? 0}, ` +
       `stories=${filesDeleted.stories ?? 0}, initiatives=${filesDeleted.initiatives ?? 0}, ` +
       `errors=${errors.length} =====`,

@@ -1,4 +1,7 @@
-import { BadGatewayException, Logger } from '@nestjs/common';
+import {
+  BadGatewayException,
+  Logger,
+} from '@nestjs/common';
 import { LinearClient, IssueRelationType } from '@linear/sdk';
 import type {
   TrackerReference,
@@ -33,8 +36,13 @@ const CATEGORY_LABELS: Record<StoryTechnicalDependencyCategory, string> = {
 
 export class LinearTrackerProvider implements TrackerProvider {
   readonly providerName = 'linear' as const;
-  private readonly logger = new Logger(LinearTrackerProvider.name);
   private readonly client: LinearClient;
+  // Logger local — esta clase NO es @Injectable. Se instancia con `new` desde
+  // TrackerProviderFactory cada vez que el caller necesita un cliente fresh
+  // (la API key puede rotarse, no cacheamos). Como no pasa por DI no podemos
+  // inyectar PinoLogger; usamos el legacy Logger que igual sale como JSON
+  // via el useLogger global del bootstrap (pino transport).
+  private readonly logger = new Logger(LinearTrackerProvider.name);
 
   constructor(
     private readonly apiKey: string,
@@ -90,7 +98,7 @@ export class LinearTrackerProvider implements TrackerProvider {
     } catch (err) {
       if (err instanceof BadGatewayException) throw err;
       const raw = err instanceof Error ? err.message : String(err);
-      this.logger.error(`[publishInitiative] Linear createInitiative failed: ${raw}`);
+      this.logger.error({ raw }, `[publishInitiative] Linear createInitiative failed: ${raw}`);
       throw new BadGatewayException(
         `Linear rechazó la creación de la initiative: ${this.sanitizeLinearError(raw)}`,
       );
@@ -133,7 +141,7 @@ export class LinearTrackerProvider implements TrackerProvider {
     } catch (err) {
       if (err instanceof BadGatewayException) throw err;
       const raw = err instanceof Error ? err.message : String(err);
-      this.logger.error(`[publishEpic] Linear createProject failed: ${raw}`);
+      this.logger.error({ raw }, `[publishEpic] Linear createProject failed: ${raw}`);
       throw new BadGatewayException(
         `Linear rechazó la creación del project de la épica: ${this.sanitizeLinearError(raw)}`,
       );

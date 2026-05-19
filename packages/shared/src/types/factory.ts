@@ -133,6 +133,12 @@ export interface QueuedBatch {
   // ═════════════════════════════════════════════════════════════════════
   /** Stories completadas (status='done'). */
   storiesDone?: number;
+  /** Stories esperando merge humano del PR (status='in_review'). El Forge
+   *  ya terminó su parte (claude generó, verifier validó, PR abierto) — el
+   *  trabajo pendiente es del operador. El frontend cuenta estas como parte
+   *  del progreso del epic en la columna FORGE (no las regresa a IN QUEUE
+   *  cuando los slots se liberan), igual que `storiesDone` (2026-05-13). */
+  storiesInReview?: number;
   /** Stories actualmente reclamadas/corriendo en algún worker. */
   storiesInProgress?: number;
   /** Number de AgentRuns activos en esta epic (= storiesInProgress). */
@@ -141,6 +147,34 @@ export interface QueuedBatch {
   runStartedAt?: string | null;
   /** Branch de integración del Forge — link directo al GitHub para el operador. */
   forgeBranch?: string | null;
+  /** True cuando todas las stories están done (storiesDone === stories) pero
+   *  la épica sigue en queue. La épica completó el trabajo de agentes y está
+   *  esperando approval humano antes de pasar a Staged. El frontend usa este
+   *  campo en `FactoryOverview` para mantener la épica en la columna FORGE
+   *  del Pipeline Board (no regresarla a IN QUEUE cuando los slots se liberan
+   *  porque ya no hay agentes activos). Cuando se modele el HumanGate real
+   *  en DB, este campo se derivará del gate.decision en vez de storiesDone —
+   *  semántica del consumer estable. */
+  awaitingHumanGate?: boolean;
+  /** ISO timestamp del momento en que la última story de la épica terminó.
+   *  NULL mientras hay stories sin terminar. Permite que el card congele
+   *  el reloj cuando la épica completa. */
+  completedAt?: string | null;
+  /** Cost USD agregado del epic — generator + verifier across todos los runs.
+   *  Mostrado en el card del Pipeline (KanbanBatchCard) sin tener que abrir
+   *  el batch detail. */
+  totalCostUsd?: number;
+  /** Tokens "nuevos" agregados (input + output + cache_creation). NO incluye
+   *  cache_reads. Mostrado en el card del Pipeline. */
+  totalTokensNew?: number;
+  /** Tokens cached agregados (cache_read), separados para transparencia. */
+  totalTokensCached?: number;
+  /** ISO timestamp del approval del Tech Lead del staging gate. Cuando está
+   *  set, el `FactoryOverview` mueve el batch de la columna FORGE a STAGED
+   *  del Pipeline Board y deriva `currentLayer = Staging` en el synthetic
+   *  batch. NULL mientras el batch esté pre-approval (Forge work-in-progress
+   *  o awaiting humano). */
+  stagingApprovedAt?: string | null;
 }
 
 export interface ResourcePool {
@@ -185,6 +219,15 @@ export interface SprintBatch {
   stories: FactoryStory[];
   waves: Wave[];
   branch: string;
+  /**
+   * URL clickeable a la integration branch del Forge en GitHub. Construido
+   * por el frontend como `${repoUrl}/tree/${forgeBranch}` SOLO cuando ambos
+   * vienen del backend (repo writable configurado + branch persistida en
+   * remote). Null cuando falta cualquiera — el frontend renderea el nombre
+   * de la branch como texto sin link para evitar apuntar a 404 de GitHub.
+   * Opcional por backwards compat con mocks y clients legacy.
+   */
+  branchUrl?: string | null;
   status: 'pending' | 'in-progress' | 'completed' | 'failed';
   currentLayer: PipelineLayer;
   agentCount: number;
@@ -193,6 +236,18 @@ export interface SprintBatch {
   completedAt: string | null;
   totalCost: number;
   totalTokens: number;
+  /**
+   * Split de tokens: "new" = procesados por primera vez (input + output +
+   * cache_creation, billable a precio completo). "cached" = re-lecturas
+   * del cache ($0.10/1M, 10x más barato).
+   *
+   * El frontend muestra ambos en el card "Cost" para evitar el efecto
+   * engañoso "1.5M tokens" cuando 90% son re-lecturas del cache (que
+   * inflan el total sin reflejar el cost real). Opcionales por backwards
+   * compat con clientes legacy.
+   */
+  totalTokensNew?: number;
+  totalTokensCached?: number;
 }
 
 export interface Wave {
@@ -240,6 +295,10 @@ export interface FactoryAgent {
   linesWritten: number;
   testsRun: number;
   testsPassed: number;
+  /** Archivos únicos modificados en el diff del commit del run. NULL si no
+   *  hay push (sandbox mode o run en progreso). El AgentCard lo muestra como
+   *  "X files" para indicar el alcance del cambio del agente. */
+  filesModified?: number | null;
 }
 
 export interface FactoryPR {
@@ -479,7 +538,16 @@ export interface CriterionEvent {
   /** Texto humano para mostrar en el drawer ("Repositorio clonado", etc). */
   label: string;
   status: 'pending' | 'in_progress' | 'completed' | 'failed';
-  source: 'worker' | 'agent';
+  /**
+   *  - 'worker': milestone técnico hardcoded del runner (workdir, clone, spawn, etc.).
+   *    Útil para diagnosis del flow del worker — visible en UI como pill secundaria.
+   *  - 'story': acceptance criterion concreto extraído del vault (sección
+   *    "## Criterios de aceptación" del storyMarkdown). Marcado individualmente
+   *    por el verifier Sonnet Layer 3 — visible en UI como pill PRIMARIA.
+   *  - 'agent': legacy self-report del generator (DEPRECATED 2026-05-13 por
+   *    sycophancy; el verifier independiente reemplazó esta semántica).
+   */
+  source: 'worker' | 'agent' | 'story';
   /** Cuando entró a in_progress (ISO 8601). */
   startedAt?: string;
   /** Cuando entró a completed/failed (ISO 8601). */
@@ -494,6 +562,12 @@ export interface ClaimedStory {
   storyId: string;
   /** Título humano de la historia (para logs y UX en el worker). */
   storyTitle: string;
+  /** Markdown completo de la story (sección Producto del vault) — incluye
+   *  Antecedentes, Objetivo, Historia de usuario, Criterios de aceptación,
+   *  etc. Null si la story no tiene vaultPath o el read falló. El verifier
+   *  Layer 3 lo usa para evaluar `acceptance-criteria` contra los criterios
+   *  reales de la historia en vez de evaluar en abstracto (2026-05-12). */
+  storyMarkdown: string | null;
   /** UUID de la épica padre (para correlación en dashboard / logs). */
   epicId: string;
   /** Branch git que el worker debe crear: `forge/epic-<short>/story-<short>`. */
@@ -515,12 +589,96 @@ export interface ClaimedStory {
    *  encriptada. El worker lo pasa al spawn de claude como env var.
    *  NUNCA se persiste en disco — solo en RAM durante el run. */
   anthropicApiKey: string;
+  /** Modelo del coder agent (CLI claude `--model`). Configurado desde
+   *  `/factory/settings → Factory`. Worker lo usa con prioridad sobre
+   *  `process.env.CLAUDE_MODEL` (que queda como fallback legacy). */
+  forgeWorkerModel: string;
+  /** Effort del coder agent (CLI claude `--effort`). Valores: low | medium |
+   *  high | xhigh | max. Para Sonnet/Opus, high+ activa extended thinking
+   *  automático. Worker prioriza esto sobre `process.env.CLAUDE_EFFORT`. */
+  forgeWorkerEffort: string;
+  /** Modelo del DoD Verifier (reviewer agent CLI). Configurado desde la
+   *  misma tab Factory de settings. Worker lo usa con prioridad sobre
+   *  `process.env.DOD_VERIFIER_MODEL`. */
+  dodVerifierModel: string;
+  /** Effort del DoD Verifier (CLI `--effort`). Default 'low' — checks
+   *  atómicos no requieren thinking. Prioridad sobre DOD_VERIFIER_EFFORT. */
+  dodVerifierEffort: string;
   /** Tier 1 Harness — catálogo de criterios DoD configurado por el operador
    *  en `/factory/settings/Definition of Done`. El worker los usa para correr
    *  verificación determinística post-claude (ver `dod-verifier.ts`). Solo
    *  los `enabled` (todos hoy por construcción del modelo nuevo). Si está
    *  vacío, el worker skipea la verificación y termina como antes. */
   dodCriteria: DodCriterionForAgent[];
+  /** Lista plana de criterios de aceptación específicos de la historia,
+   *  extraídos del `storyMarkdown` (sección `## Criterios de aceptación`).
+   *  El worker los usa para:
+   *   1. Inicializar `criteriaProgress` con entries `source: 'story'` que
+   *      la UI renderiza como milestones individuales (1 pill por criterio).
+   *   2. Pasarlos al verifier Layer 3 para evaluación per-criterio: el
+   *      verifier emite JSON `[{index, passed, reason}]` y el worker marca
+   *      cada criterio individualmente según el verdict.
+   *  Array vacío si la story no tiene markdown o el parser no encontró la
+   *  sección — el verifier degrada a evaluación en bloque (legacy). */
+  acceptanceCriteria: string[];
+  /** Casos de prueba específicos de la historia extraídos del QA markdown
+   *  (secciones `## Happy path` y `## Edge cases`). El worker los usa para:
+   *   1. Inicializar milestones de QA en `criteriaProgress` (UI granular).
+   *   2. Pasarlos al verifier Layer 3 para evaluación per-test-case: el
+   *      verifier para cada caso (a) busca con grep si hay un test que lo
+   *      cubre, (b) lee el test encontrado, (c) corre el test runner del
+   *      repo, (d) emite verdict per-case. Mismo patrón que
+   *      `acceptanceCriteria` pero para el criterio DoD `tests-passing`.
+   *  Array vacío si la story no tiene sección QA o el parser no encontró
+   *  ## Happy path / ## Edge cases — el verifier degrada a evaluación en
+   *  bloque (legacy "¿pasa pnpm test?"). */
+  qaTestCases?: QaTestCase[];
+  /** Requerimientos técnicos extraídos de la sección TL del markdown
+   *  (`## Checklist de implementación`, `## Contrato`, `## Validaciones`,
+   *  `## Manejo de errores`). El worker los usa para evaluación per-item
+   *  del criterio DoD `technical-design`:
+   *   1. Pre-flight determinístico — grep en el repo por archivos,
+   *      endpoints, tipos, funciones mencionados en el item.
+   *   2. LLM verifier (Haiku) evalúa que el código efectivamente
+   *      implementa lo descrito (no solo que las keywords aparecen).
+   *  Array vacío si la story no tiene markdown técnico o el parser no
+   *  encontró ninguna sección — el verifier degrada a "no aplica". */
+  technicalRequirements?: TechnicalRequirement[];
+}
+
+/**
+ * Caso de prueba individual extraído del QA markdown de una story.
+ * `category` distingue happy path (debe haber al menos 1) de edge cases
+ * (típicamente 3-7 por story). Lo usa el verifier para reportar verdicts
+ * separados y la UI para renderizar checkmarks granulares.
+ */
+export interface QaTestCase {
+  /** 'happy' para el flujo principal del feature; 'edge' para casos límite,
+   *  errores, inputs vacíos, valores boundary, etc. */
+  category: 'happy' | 'edge';
+  /** Descripción del caso tal como fue escrita por el agente QA en el
+   *  markdown (e.g. "input vacío debe retornar 400"). Es el `label` que
+   *  ve el verifier y la UI. */
+  description: string;
+}
+
+/**
+ * Requerimiento técnico individual extraído del TL markdown de una story.
+ * `category` distingue entre las 4 secciones del TL markdown que el agente
+ * Tech Lead escribe en story-gen. Lo usa el verifier para reportar verdicts
+ * separados y la UI para renderizar checkmarks granulares per-item del TL.
+ */
+export interface TechnicalRequirement {
+  /** Sección del TL markdown donde apareció el item:
+   *   - 'checklist': bullet de `## Checklist de implementación` (tareas técnicas).
+   *   - 'contract':  bullet de `## Contrato` (endpoints, types, interfaces API).
+   *   - 'validation': bullet de `## Validaciones` (input/output validation rules).
+   *   - 'errors': bullet de `## Manejo de errores` (códigos, retries, fallbacks). */
+  category: 'checklist' | 'contract' | 'validation' | 'errors';
+  /** Descripción del item tal como fue escrita por el agente TL en el
+   *  markdown (e.g. "Implementar endpoint POST /api/auth/login"). Es el
+   *  `label` que ve el verifier y la UI. */
+  description: string;
 }
 
 /**
@@ -609,12 +767,19 @@ export interface CriterionVerdict {
  * El worker hace hasta MAX_DOD_ATTEMPTS iteraciones del loop "spawn claude
  * → verify DoD → si falla, retry con prompt enriquecido". Cada attempt
  * produce un `DodVerificationEntry`. El array completo se persiste en
- * `agent_runs.dodVerification` (Json column) y la UI extrae siempre el
- * último elemento para pintar el estado actual.
+ * `agent_runs.dodVerification` (Json column).
+ *
+ * SEMÁNTICA DE LECTURA (2026-05-11): la UI hace merge across all attempts
+ * con last-wins por `criterionId` para obtener el estado actual de cada
+ * criterio — ver `extractMergedVerdicts` en `apps/web/.../terminal/page.tsx`.
+ * NO leer "solo el último entry"; eso produce regresión visual durante
+ * POST `/progress` parciales (el último attempt arranca con verdicts
+ * vacíos y descartaría los del attempt anterior).
  *
  * El backend reescribe el array completo en cada POST `/progress` durante
  * la verificación parcial (UX progressive) y en `/complete` al cierre del
- * run — idempotente por sobreescritura, no necesita lógica de merge.
+ * run — idempotente por sobreescritura, no necesita lógica de merge en
+ * persistencia (el merge vive en el reader).
  */
 export interface DodVerificationEntry {
   /** Número de attempt (1-indexed). Útil para que la UI pinte la pestaña

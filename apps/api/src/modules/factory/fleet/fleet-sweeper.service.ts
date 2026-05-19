@@ -1,7 +1,10 @@
-import { Injectable, Logger } from '@nestjs/common';
+import {
+  Injectable,
+} from '@nestjs/common';
 import { Cron, CronExpression } from '@nestjs/schedule';
 import { FleetService } from './fleet.service';
 import { AgentRunService } from './agent-run.service';
+import { InjectPinoLogger, PinoLogger } from 'nestjs-pino';
 
 /**
  * Cron service que ejecuta dos tareas periódicas críticas:
@@ -19,11 +22,10 @@ import { AgentRunService } from './agent-run.service';
  */
 @Injectable()
 export class FleetSweeperService {
-  private readonly logger = new Logger(FleetSweeperService.name);
-
   constructor(
     private readonly fleet: FleetService,
     private readonly runs: AgentRunService,
+    @InjectPinoLogger(FleetSweeperService.name) private readonly logger: PinoLogger,
   ) {}
 
   @Cron(CronExpression.EVERY_MINUTE, { name: 'sweep-stale-nodes' })
@@ -31,7 +33,7 @@ export class FleetSweeperService {
     try {
       const count = await this.fleet.sweepStaleNodes();
       if (count > 0) {
-        this.logger.log(`[sweeper:nodes] cycle completed, markedOffline=${count}`);
+        this.logger.info({ count }, `[sweeper:nodes] cycle completed, markedOffline=${count}`);
       }
     } catch (err) {
       this.logger.error(
@@ -46,7 +48,7 @@ export class FleetSweeperService {
     try {
       const count = await this.runs.sweepStaleRuns();
       if (count > 0) {
-        this.logger.warn(`[sweeper:runs] cycle completed, abandoned=${count}`);
+        this.logger.warn({ count }, `[sweeper:runs] cycle completed, abandoned=${count}`);
       }
     } catch (err) {
       this.logger.error(

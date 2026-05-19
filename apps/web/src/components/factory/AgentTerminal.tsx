@@ -41,7 +41,13 @@ interface AgentTerminalProps {
   runOverride?: {
     ttydUrl: string | null;
     dod: { text: string; done: boolean }[];
-    milestones: { text: string; done: boolean }[];
+    /**
+     * Combinado de acceptance criteria (`source: 'story'`) y workflow
+     * milestones técnicos (`source: 'worker'`). El header renderiza dos
+     * pills separadas filtrando por source: "acceptance" (primaria) y
+     * "workflow" (secundaria, técnica).
+     */
+    milestones: { text: string; done: boolean; source: 'worker' | 'agent' | 'story' }[];
     prNumber: number | null;
     loading: boolean;
     error: string | null;
@@ -93,9 +99,12 @@ export function AgentTerminal({ agent, onClose, runOverride }: AgentTerminalProp
   const batch = state.factory.currentBatch;
 
   const [detailOpen, setDetailOpen] = useState(false);
-  const [activeBar, setActiveBar] = useState<'dod' | 'milestones' | null>(null);
+  // 'acceptance' = pill primaria (criterios de aceptación de la story)
+  // 'workflow'   = pill secundaria (milestones técnicos del worker)
+  // 'dod'        = catálogo DoD del operador (cross-cutting)
+  const [activeBar, setActiveBar] = useState<'dod' | 'acceptance' | 'workflow' | null>(null);
 
-  function toggleBar(bar: 'dod' | 'milestones') {
+  function toggleBar(bar: 'dod' | 'acceptance' | 'workflow') {
     setActiveBar((prev) => (prev === bar ? null : bar));
   }
 
@@ -250,7 +259,7 @@ export function AgentTerminal({ agent, onClose, runOverride }: AgentTerminalProp
             )}
             {batch?.branch && (
               <a
-                href={`https://github.com/DamballahWedo99/CENZONTLE/tree/${batch.branch}`}
+                href={`https://github.com/DamballahWedo99/AeroDemo-App/tree/${batch.branch}`}
                 target="_blank"
                 rel="noopener noreferrer"
                 className="flex items-center gap-1 text-[11px] font-mono text-muted-foreground hover:text-foreground transition-colors shrink-0"
@@ -283,27 +292,50 @@ export function AgentTerminal({ agent, onClose, runOverride }: AgentTerminalProp
                 </button>
               );
             })()}
-            {/* Milestones pill */}
-            {(() => {
-              // En modo run real, milestones vienen del worker via
-              // criteriaProgress (worker milestones + agente custom).
-              // En mock, son la heurística derivada del FactoryAgent.
-              const milestones = isRunMode
-                ? runOverride!.milestones
-                : deriveMilestones(story, agent);
-              const msDone = milestones.filter((c) => c.done).length;
+            {/* Acceptance criteria pill — pill PRIMARIA en run mode */}
+            {isRunMode && (() => {
+              const acceptance = runOverride!.milestones.filter((c) => c.source === 'story');
+              const acceptDone = acceptance.filter((c) => c.done).length;
+              // Si la story no trae acceptance criteria (vault sin parsear o
+              // legacy), escondemos la pill — `0/0` es UX confuso.
+              if (acceptance.length === 0) return null;
               return (
                 <button
-                  onClick={() => toggleBar('milestones')}
+                  onClick={() => toggleBar('acceptance')}
                   className={cn(
                     'flex items-center gap-1.5 rounded-full border px-2 py-0.5 text-[10px] transition-colors shrink-0',
-                    activeBar === 'milestones'
+                    activeBar === 'acceptance'
+                      ? 'border-emerald-500/50 bg-emerald-500/10 text-emerald-400'
+                      : 'border-border bg-muted/50 text-muted-foreground hover:text-foreground hover:bg-muted',
+                  )}
+                  title="Criterios de aceptación de la story — marcados per-criterio por el verifier"
+                >
+                  <span className="font-medium">{acceptDone}/{acceptance.length}</span>
+                  <span>acceptance</span>
+                </button>
+              );
+            })()}
+            {/* Workflow pill — pill SECUNDARIA (milestones técnicos del worker).
+                En mock, sigue siendo "milestones" del FactoryAgent legacy. */}
+            {(() => {
+              const items = isRunMode
+                ? runOverride!.milestones.filter((c) => c.source === 'worker')
+                : deriveMilestones(story, agent);
+              const doneCount = items.filter((c) => c.done).length;
+              if (items.length === 0) return null;
+              return (
+                <button
+                  onClick={() => toggleBar('workflow')}
+                  className={cn(
+                    'flex items-center gap-1.5 rounded-full border px-2 py-0.5 text-[10px] transition-colors shrink-0',
+                    activeBar === 'workflow'
                       ? 'border-blue-500/50 bg-blue-500/10 text-blue-400'
                       : 'border-border bg-muted/50 text-muted-foreground hover:text-foreground hover:bg-muted',
                   )}
+                  title={isRunMode ? 'Milestones técnicos del worker (clone, spawn, push, ...)' : 'Milestones'}
                 >
-                  <span className="font-medium">{msDone}/{milestones.length}</span>
-                  <span>milestones</span>
+                  <span className="font-medium">{doneCount}/{items.length}</span>
+                  <span>{isRunMode ? 'workflow' : 'milestones'}</span>
                 </button>
               );
             })()}
@@ -397,14 +429,32 @@ export function AgentTerminal({ agent, onClose, runOverride }: AgentTerminalProp
             title={`Terminal — ${agent.name}`}
           />
 
-          {/* Bottom bar — DoD or Milestones (mutually exclusive) */}
+          {/* Bottom bar — DoD / Acceptance / Workflow (mutually exclusive).
+              `acceptance` filtra source==='story' (criterios de la spec).
+              `workflow` filtra source==='worker' (milestones técnicos). */}
           {activeBar && (() => {
-            const items = activeBar === 'dod'
-              ? (isRunMode ? runOverride!.dod : deriveDod(agent))
-              : (isRunMode ? runOverride!.milestones : deriveMilestones(story, agent));
+            let items: { text: string; done: boolean }[];
+            let label: string;
+            let accentColor: string;
+            if (activeBar === 'dod') {
+              items = isRunMode ? runOverride!.dod : deriveDod(agent);
+              label = 'Definition of Done';
+              accentColor = 'text-cyan-400';
+            } else if (activeBar === 'acceptance') {
+              items = isRunMode
+                ? runOverride!.milestones.filter((c) => c.source === 'story')
+                : [];
+              label = 'Acceptance criteria';
+              accentColor = 'text-emerald-400';
+            } else {
+              // workflow
+              items = isRunMode
+                ? runOverride!.milestones.filter((c) => c.source === 'worker')
+                : deriveMilestones(story, agent);
+              label = 'Workflow milestones';
+              accentColor = 'text-blue-400';
+            }
             const doneCount = items.filter((c) => c.done).length;
-            const label = activeBar === 'dod' ? 'Definition of Done' : 'Milestones';
-            const accentColor = activeBar === 'dod' ? 'text-cyan-400' : 'text-blue-400';
             return (
               <div className="absolute bottom-0 left-0 right-0 z-10 flex items-center gap-3 px-4 py-2 bg-card/90 backdrop-blur-sm border-t border-border">
                 <span className={cn('text-[10px] font-medium uppercase tracking-wider shrink-0', accentColor)}>

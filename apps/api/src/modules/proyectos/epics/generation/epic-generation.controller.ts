@@ -6,7 +6,6 @@ import {
   Query,
   Req,
   Res,
-  Logger,
   ParseUUIDPipe,
   ForbiddenException,
   NotFoundException,
@@ -25,17 +24,17 @@ import { sanitizeForLog } from '../../../../common/utils/sanitize-llm-input.util
 import { setupSseHeartbeat } from '../../../../common/utils/sse-heartbeat.util';
 import { AgentRunRegistryService } from '../../../../common/services/agent-run-registry.service';
 import type { Request, Response } from 'express';
+import { InjectPinoLogger, PinoLogger } from 'nestjs-pino';
 
 @ApiTags('Épicas — Generación IA')
 @Controller('proyectos/epic-generation')
 export class EpicGenerationController {
-  private readonly logger = new Logger(EpicGenerationController.name);
-
   constructor(
     private readonly generation: EpicGenerationService,
     private readonly cache: ProposalCacheService,
     private readonly prisma: PrismaService,
     private readonly registry: AgentRunRegistryService,
+    @InjectPinoLogger(EpicGenerationController.name) private readonly logger: PinoLogger,
   ) {}
 
   /**
@@ -155,7 +154,7 @@ export class EpicGenerationController {
       if (user.role !== UserRole.AltaGerencia && !this.registry.isOwner(initiativeId, user.sub)) {
         throw new ForbiddenException('Solo el usuario que inició la generación puede cancelarla.');
       }
-      this.logger.log(`[cancel] aborting active run for ${initiativeId}`);
+      this.logger.info({ initiativeId }, `[cancel] aborting active run for ${initiativeId}`);
       this.registry.markCancelled(controller);
       controller.abort();
     }
@@ -208,7 +207,7 @@ export class EpicGenerationController {
     // CWE-117 (log injection) + CWE-532 (secrets in logs): doble defensa —
     // scrubSecrets redacta PATs/tokens, sanitizeForLog strip control chars + trunca.
     const promptForLog = query.prompt ? sanitizeForLog(scrubSecrets(query.prompt)) : '';
-    this.logger.log(`[generate] initiative=${initiativeId} prompt="${promptForLog}" count=${query.count ?? 5} webSearch=${webSearchEnabled}`);
+    this.logger.info({ initiativeId, promptForLog, webSearchEnabled }, `[generate] initiative=${initiativeId} prompt="${promptForLog}" count=${query.count ?? 5} webSearch=${webSearchEnabled}`);
 
     // Registramos el run ANTES de flushHeaders. ConflictException se
     // propaga como 409 JSON real si user excede cap o ya hay run activo.
@@ -240,7 +239,7 @@ export class EpicGenerationController {
       // red de seguridad si nadie regresa.
       if (clientDisconnected) return;
       stopHeartbeat();
-      this.logger.log(`[generate] Client disconnected — agent continues in background`);
+      this.logger.info(`[generate] Client disconnected — agent continues in background`);
       clientDisconnected = true;
     });
 
@@ -256,7 +255,7 @@ export class EpicGenerationController {
     const collectedProposals: ProposedEpic[] = [];
 
     await this.cache.initSession(initiativeId).catch((e) => {
-      this.logger.warn(`[cache] initSession failed: ${e?.message}`);
+      this.logger.warn({ message: e?.message }, `[cache] initSession failed: ${e?.message}`);
     });
 
     /** Wrapper defensivo: tras `req.close`, escribir al socket cerrado tira
@@ -267,7 +266,7 @@ export class EpicGenerationController {
       try {
         res.write(payload);
       } catch (e) {
-        this.logger.debug(`[generate] write failed (client gone): ${(e as Error)?.message}`);
+        this.logger.debug({ message: (e as Error)?.message }, `[generate] write failed (client gone): ${(e as Error)?.message}`);
       }
     };
 
@@ -291,7 +290,7 @@ export class EpicGenerationController {
         streamCompleted = true;
         stopHeartbeat();
         this.registry.unregister(user.sub, initiativeId, abortController);
-        this.logger.log(`[generate] SSE stream finalized for ${initiativeId} (clientDisconnected=${clientDisconnected})`);
+        this.logger.info({ initiativeId, clientDisconnected }, `[generate] SSE stream finalized for ${initiativeId} (clientDisconnected=${clientDisconnected})`);
         if (!res.writableEnded) res.end();
 
         if (this.registry.wasCancelled(abortController)) {
@@ -302,14 +301,14 @@ export class EpicGenerationController {
         // Persistimos el resultado completo SIEMPRE — incluso si el cliente
         // se desconectó. El cache contiene los eventos + proposals al regresar.
         this.cache.saveFullSession(initiativeId, collectedEvents, collectedProposals)
-          .then(() => this.logger.debug(`[cache] session saved: ${collectedProposals.length} proposals, ${collectedEvents.length} events`))
-          .catch((e) => this.logger.warn(`[cache] saveFullSession failed: ${e.message}`));
+          .then(() => this.logger.debug({ length: collectedProposals.length, collectedEvents_length: collectedEvents.length }, `[cache] session saved: ${collectedProposals.length} proposals, ${collectedEvents.length} events`))
+          .catch((e) => this.logger.warn({ message: e.message }, `[cache] saveFullSession failed: ${e.message}`));
       },
       error: (err) => {
         streamCompleted = true;
         stopHeartbeat();
         this.registry.unregister(user.sub, initiativeId, abortController);
-        this.logger.error(`[generate] SSE stream error: ${err?.message}`);
+        this.logger.error({ message: err?.message }, `[generate] SSE stream error: ${err?.message}`);
         safeWrite(`data: ${JSON.stringify({ type: 'error', message: 'Error interno' })}\n\n`);
         if (!res.writableEnded) res.end();
 

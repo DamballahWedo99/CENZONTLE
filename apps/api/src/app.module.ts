@@ -2,6 +2,8 @@ import { Module } from "@nestjs/common";
 import { ConfigModule } from "@nestjs/config";
 import { APP_GUARD } from "@nestjs/core";
 import { ThrottlerModule } from "@nestjs/throttler";
+import { LoggerModule } from "nestjs-pino";
+import { randomUUID } from "node:crypto";
 import { AuthAwareThrottlerGuard } from "./common/guards/auth-aware-throttler.guard";
 import { PrismaModule } from "./modules/prisma/prisma.module";
 import { RedisModule } from "./modules/redis/redis.module";
@@ -21,6 +23,100 @@ import { HealthController } from "./health.controller";
 @Module({
   imports: [
     ConfigModule.forRoot({ isGlobal: true }),
+    // Logging global con nestjs-pino. Reemplaza el NestJS Logger default por
+    // pino, que emite JSON estructurado nativo (parseable directo en Loki/
+    // Grafana sin `| logfmt`). Es ~5x más rápido que Winston/console.log y
+    // soporta object destructuring nativo:
+    //   logger.info({ event, runId, context }, 'mensaje legible')
+    //     → {"level":30, "time":..., "event":"...", "runId":"...", "msg":"..."}
+    //
+    // Diseño de la config:
+    //  - dev (NODE_ENV !== 'production'): pino-pretty para tail -f legible.
+    //  - prod: JSON puro a stdout. La plataforma (k8s, fly.io, render, etc.)
+    //    captura stdout y lo manda al log aggregator.
+    //  - level: 'debug' en dev (queremos ver todo), 'info' en prod (señal).
+    //  - genReqId: cada request HTTP recibe un req-id que se propaga via
+    //    AsyncLocalStorage a TODOS los logs emitidos durante el request.
+    //    Permite trace cross-service ("dame todos los logs del request X").
+    //  - redact: defensa en profundidad contra leak de secrets. Cualquier
+    //    `req.headers.authorization`, cookies, o tokens en query params NO
+    //    aparecen en stdout. Si un developer descuidado loggea `req` entero,
+    //    pino redacta antes de emitir — no hay forma de bypassear esto sin
+    //    cambiar el config.
+    //  - serializers: shortcut para que `req`/`res` se rendericen como
+    //    objetos compactos en lugar del dump entero del Express object
+    //    (que incluye internals que no aportan).
+    //  - customLogLevel: 4xx → warn, 5xx → error. Auto-clasifica responses
+    //    para que dashboards de error rate trabajen sin custom rules.
+    LoggerModule.forRoot({
+      pinoHttp: {
+        level: process.env.LOG_LEVEL ?? (process.env.NODE_ENV === 'production' ? 'info' : 'debug'),
+        transport:
+          process.env.NODE_ENV !== 'production'
+            ? {
+                target: 'pino-pretty',
+                options: {
+                  singleLine: true,
+                  colorize: true,
+                  translateTime: 'SYS:HH:MM:ss.l',
+                  ignore: 'pid,hostname,req,res,responseTime',
+                  messageFormat: '{context} {msg}',
+                },
+              }
+            : undefined,
+        genReqId: (req, res) => {
+          const existing = (req.headers['x-request-id'] as string | undefined)
+            ?? (req.headers['x-correlation-id'] as string | undefined);
+          const id = existing ?? randomUUID();
+          res.setHeader('x-request-id', id);
+          return id;
+        },
+        redact: {
+          paths: [
+            'req.headers.authorization',
+            'req.headers.cookie',
+            'req.headers["x-api-key"]',
+            'req.headers["x-worker-token"]',
+            'res.headers["set-cookie"]',
+            '*.password',
+            '*.token',
+            '*.apiKey',
+            '*.anthropicApiKey',
+            '*.cloneUrl', // contiene el GitHub token embebido
+          ],
+          censor: '[REDACTED]',
+        },
+        serializers: {
+          req: (req) => ({
+            id: req.id,
+            method: req.method,
+            url: req.url,
+            // No incluimos headers/body/query — vienen redacted arriba y
+            // típicamente son ruido en logs de aplicación.
+          }),
+          res: (res) => ({ statusCode: res.statusCode }),
+        },
+        customLogLevel: (_req, res, err) => {
+          if (err || res.statusCode >= 500) return 'error';
+          if (res.statusCode >= 400) return 'warn';
+          return 'info';
+        },
+        customSuccessMessage: (req, res) => {
+          return `${req.method} ${req.url} ${res.statusCode}`;
+        },
+        customErrorMessage: (req, res, err) => {
+          return `${req.method} ${req.url} ${res.statusCode} — ${err.message}`;
+        },
+        // Auto-exclude health checks del log spam. Mantiene observabilidad
+        // de problemas reales sin inundar de "GET /health 200" cada 10s.
+        autoLogging: {
+          ignore: (req) =>
+            req.url === '/health' ||
+            req.url === '/healthz' ||
+            req.url === '/metrics',
+        },
+      },
+    }),
     // Rate limiting global. El default protege CADA endpoint contra fan-out
     // de un mismo IP. Endpoints específicos (los 3 SSE generate) sobre-
     // escriben con un cap más estricto vía @Throttle().

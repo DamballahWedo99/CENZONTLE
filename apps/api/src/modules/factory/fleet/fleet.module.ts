@@ -1,4 +1,4 @@
-import { Module, forwardRef } from '@nestjs/common';
+import { Module } from '@nestjs/common';
 import { ScheduleModule } from '@nestjs/schedule';
 import { FleetController } from './fleet.controller';
 import { WorkerApiController } from './worker-api.controller';
@@ -10,10 +10,13 @@ import { WorkerAuthGuard } from './worker-auth.guard';
 import { AgentRunService } from './agent-run.service';
 import { OrgAnthropicConfigService } from './org-anthropic-config.service';
 import { ForgePromptBuilderService } from './forge-prompt-builder.service';
+import { ConflictResolverService } from './conflict-resolver.service';
+import { ForgePlannerService } from './forge-planner.service';
 import { ProyectosModule } from '../../proyectos/proyectos.module';
 import { VaultModule } from '../../vault/vault.module';
 import { GitHubModule } from '../github/github.module';
 import { DodModule } from '../dod/dod.module';
+import { FactoryAuthzModule } from '../authz/factory-authz.module';
 
 /**
  * FleetModule — gestión de la flota de cómputo del Forge.
@@ -25,6 +28,12 @@ import { DodModule } from '../dod/dod.module';
  *  - GitHubModule → AgentRunService usa GitHubService para resolver clone
  *    URL, crear integration branches, y abrir PRs cuando el worker reporta
  *    prBranchPushed=true (HITOS 2/4/5)
+ *  - DodModule → AgentRunService inyecta DoD criteria al prompt del agente.
+ *    Antes era forwardRef por ciclo con DodModule.assertCanManageFleet;
+ *    ahora dependencia simple porque DodModule importa FactoryAuthzModule
+ *    en su lugar (architecture-reviewer fix 2026-05-13).
+ *  - FactoryAuthzModule → FleetService delega assertCanManageFleet aquí
+ *    (callers existentes mantienen `this.fleet.assertCanManageFleet(user)`).
  *  - ScheduleModule.forRoot → habilita @Cron decorators (FleetSweeperService)
  */
 @Module({
@@ -32,11 +41,8 @@ import { DodModule } from '../dod/dod.module';
     ProyectosModule,
     VaultModule,
     GitHubModule,
-    // forwardRef rompe el ciclo: DodModule importa FleetModule (para
-    // assertCanManageFleet del controller), y FleetModule necesita
-    // DodService aquí para que AgentRunService inyecte DoD criteria al
-    // prompt del agente. NestJS resuelve la dependencia post-init.
-    forwardRef(() => DodModule),
+    DodModule,
+    FactoryAuthzModule,
     ScheduleModule.forRoot(),
   ],
   controllers: [FleetController, WorkerApiController, OrgAnthropicConfigController],
@@ -48,6 +54,8 @@ import { DodModule } from '../dod/dod.module';
     AgentRunService,
     OrgAnthropicConfigService,
     ForgePromptBuilderService,
+    ConflictResolverService,
+    ForgePlannerService,
   ],
   exports: [
     FleetService,
@@ -55,6 +63,8 @@ import { DodModule } from '../dod/dod.module';
     AgentRunService,
     OrgAnthropicConfigService,
     ForgePromptBuilderService,
+    ConflictResolverService,
+    ForgePlannerService,
   ],
 })
 export class FleetModule {}

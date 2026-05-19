@@ -11,6 +11,7 @@ import { ExecutionContext, ForbiddenException, NotFoundException } from '@nestjs
 import { AuthenticatedUser, UserRole } from '@cenzontle/shared';
 import { VaultAccessGuard } from './vault-access.guard';
 import { VaultConfigService } from '../vault-config.service';
+import { createMockPinoLogger } from '../../../common/testing/mock-pino-logger';
 
 type VaultPublic = {
   id: string;
@@ -68,7 +69,7 @@ describe('VaultAccessGuard — BOLA cross-vault (CWE-639)', () => {
       findAll: jest.fn(),
       findOne: jest.fn(),
     };
-    guard = new VaultAccessGuard(mockConfigs as unknown as VaultConfigService);
+    guard = new VaultAccessGuard(mockConfigs as unknown as VaultConfigService, createMockPinoLogger());
   });
 
   it('permite acceso al vault activo cuando user tiene pod permitido', async () => {

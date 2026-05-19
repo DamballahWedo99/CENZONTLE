@@ -1,9 +1,13 @@
-import { BadRequestException, Injectable, Logger } from '@nestjs/common';
+import {
+  BadRequestException,
+  Injectable,
+} from '@nestjs/common';
 import * as path from 'node:path';
 import * as fs from 'node:fs';
 import { homedir } from 'node:os';
 import { randomUUID } from 'node:crypto';
 import AdmZip from 'adm-zip';
+import { InjectPinoLogger, PinoLogger } from 'nestjs-pino';
 
 /**
  * Extensiones que consideramos "texto" — se descomprimen al vault para que
@@ -117,9 +121,9 @@ export interface ExtractedBundle {
 
 @Injectable()
 export class DesignBundleService {
-  private readonly logger = new Logger(DesignBundleService.name);
-
-  constructor() {
+  constructor(
+    @InjectPinoLogger(DesignBundleService.name) private readonly logger: PinoLogger,
+  ) {
     if (!fs.existsSync(BUNDLE_STORAGE_ROOT)) {
       fs.mkdirSync(BUNDLE_STORAGE_ROOT, { recursive: true });
     }
@@ -328,7 +332,7 @@ export class DesignBundleService {
     // el bundleKey apunta al archivo intacto.
     const bundleKey = await this.persistBundle(htmlBuffer, originalFilename, slug);
 
-    this.logger.log(
+    this.logger.info(
       `[design-bundle] Extracted standalone HTML: slug=${slug} rawSize=${htmlBuffer.length}b ` +
         `withBanner=${content.length}b filename="${originalFilename}"`,
     );
@@ -430,7 +434,7 @@ export class DesignBundleService {
       try {
         await fs.promises.unlink(fullPath);
       } catch (err: any) {
-        this.logger.warn(`[design-bundle] No se pudo borrar bundle ${bundleKey}: ${err?.message}`);
+        this.logger.warn({ bundleKey, message: err?.message }, `[design-bundle] No se pudo borrar bundle ${bundleKey}: ${err?.message}`);
       }
     }
   }
@@ -547,7 +551,7 @@ export class DesignBundleService {
       throw new Error(`Path escape en bundleKey: ${bundleKey}`);
     }
     await fs.promises.writeFile(fullPath, zipBuffer);
-    this.logger.log(`[design-bundle] Persisted ${bundleKey} (${zipBuffer.length} bytes)`);
+    this.logger.info({ bundleKey, length: zipBuffer.length }, `[design-bundle] Persisted ${bundleKey} (${zipBuffer.length} bytes)`);
     return bundleKey;
   }
 

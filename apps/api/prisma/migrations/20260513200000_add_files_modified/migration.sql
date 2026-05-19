@@ -1,0 +1,11 @@
+-- Add `filesModified` column to AgentRun.
+--
+-- Count de archivos únicos modificados en el diff entre el base branch del
+-- epic y el head branch del worker tras git push. Calculado por el worker
+-- via `git diff --name-only origin/<base>..HEAD | wc -l`. Visible en el
+-- AgentCard de la UI como métrica de "alcance del cambio" — permite que el
+-- operador vea de un vistazo si el agente tocó 1 archivo o 50.
+--
+-- NULL para rows pre-feature (compatible con runs existentes). El worker
+-- solo setea el campo cuando hay push exitoso (sandbox mode sin git → NULL).
+ALTER TABLE "agent_runs" ADD COLUMN "filesModified" INTEGER;

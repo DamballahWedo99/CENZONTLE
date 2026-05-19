@@ -3,10 +3,10 @@ import {
   ExecutionContext,
   ForbiddenException,
   Injectable,
-  Logger,
 } from '@nestjs/common';
 import { AuthenticatedUser, ROLE_PERMISSIONS, Permission } from '@cenzontle/shared';
 import { VaultConfigService } from '../vault-config.service';
+import { InjectPinoLogger, PinoLogger } from 'nestjs-pino';
 
 const ALLOWED_ACCESS_LEVELS = new Set(['owner', 'editor', 'viewer']);
 
@@ -22,9 +22,9 @@ const ALLOWED_ACCESS_LEVELS = new Set(['owner', 'editor', 'viewer']);
  */
 @Injectable()
 export class VaultAccessGuard implements CanActivate {
-  private readonly logger = new Logger(VaultAccessGuard.name);
-
-  constructor(private readonly vaultConfigs: VaultConfigService) {}
+  constructor(private readonly vaultConfigs: VaultConfigService,
+    @InjectPinoLogger(VaultAccessGuard.name) private readonly logger: PinoLogger,
+  ) {}
 
   async canActivate(context: ExecutionContext): Promise<boolean> {
     const request = context.switchToHttp().getRequest();

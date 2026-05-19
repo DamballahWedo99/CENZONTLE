@@ -1,4 +1,7 @@
-import { BadRequestException, Injectable, Logger } from '@nestjs/common';
+import {
+  BadRequestException,
+  Injectable,
+} from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { Prisma } from '@prisma/client';
 import Anthropic from '@anthropic-ai/sdk';
@@ -41,6 +44,7 @@ import { sanitizeUserPromptForLLM } from '../../../../common/utils/sanitize-llm-
 import { ChangelogService } from '../../changelog/changelog.service';
 import { DiagramCacheService } from './diagram-cache.service';
 import { AgentTokenSettingsService } from '../../../agent-token-settings/agent-token-settings.service';
+import { InjectPinoLogger, PinoLogger } from 'nestjs-pino';
 
 const MAX_TOOL_ITERATIONS = 20;
 // Sonnet 4.6 — soporta adaptive thinking + effort levels.
@@ -255,7 +259,6 @@ type EpicContext = {
 
 @Injectable()
 export class DiagramGenerationService {
-  private readonly logger = new Logger(DiagramGenerationService.name);
   private readonly client: Anthropic;
   private readonly tools: AgentTool[];
 
@@ -274,6 +277,7 @@ export class DiagramGenerationService {
     private readonly changelog: ChangelogService,
     private readonly vault: VaultService,
     private readonly tokenSettings: AgentTokenSettingsService,
+    @InjectPinoLogger(DiagramGenerationService.name) private readonly logger: PinoLogger,
   ) {
     const apiKey = this.config.get<string>('ANTHROPIC_API_KEY');
     if (!apiKey) {
@@ -323,7 +327,7 @@ export class DiagramGenerationService {
   ): Promise<EpicDiagram | null> {
     const cached = await this.diagramCache.getDiagram(epicId, type).catch(() => null);
     if (cached) {
-      this.logger.log(
+      this.logger.info(
         `[getCached] HIT Redis epic=${epicId} type=${type} id=${cached.id}`,
       );
       return cached;
@@ -331,18 +335,18 @@ export class DiagramGenerationService {
 
     // Fallback a Postgres: lee el diagrama persistido en epic.diagrams[].
     // Al hit, re-hidratamos Redis para que subsiguientes lecturas sean rápidas.
-    this.logger.log(
+    this.logger.info(
       `[getCached] MISS Redis epic=${epicId} type=${type} → fallback Postgres`,
     );
     const persisted = await this.getPreviousDiagram(epicId, type);
     if (persisted) {
-      this.logger.log(
+      this.logger.info(
         `[getCached] HIT Postgres fallback epic=${epicId} type=${type} id=${persisted.id} → re-hidrating Redis`,
       );
       this.diagramCache
         .saveDiagram(epicId, type, persisted)
         .then(() => {
-          this.logger.log(
+          this.logger.info(
             `[getCached] Redis re-hidration OK epic=${epicId} type=${type}`,
           );
         })
@@ -352,7 +356,7 @@ export class DiagramGenerationService {
           );
         });
     } else {
-      this.logger.log(
+      this.logger.info(
         `[getCached] MISS Postgres too — no diagram exists epic=${epicId} type=${type}`,
       );
     }
@@ -468,7 +472,7 @@ export class DiagramGenerationService {
     };
 
     await this.diagramCache.saveDiagram(epicId, type, reset);
-    this.logger.log(
+    this.logger.info(
       `Layout reset: epic=${epicId} type=${type} nodes=${reset.nodes.length}`,
     );
 
@@ -569,7 +573,7 @@ export class DiagramGenerationService {
     });
 
     await this.diagramCache.saveDiagram(epicId, type, updated);
-    this.logger.log(
+    this.logger.info(
       `Diagram edited and cached: epic=${epicId} type=${type} nodes=${updated.nodes.length} edges=${updated.edges.length}`,
     );
 
@@ -609,11 +613,11 @@ export class DiagramGenerationService {
       // el cancel).
       const errName = (err as { name?: string })?.name;
       if (errName === 'AbortError' || signal?.aborted) {
-        this.logger.log(`[generate] Agent aborted (signal): epic=${epicId} type=${type}`);
+        this.logger.info({ epicId, type }, `[generate] Agent aborted (signal): epic=${epicId} type=${type}`);
         subject.complete();
         return;
       }
-      this.logger.error(`Agent error: ${err.message}`, err.stack);
+      this.logger.error({ err }, `Agent error: ${err.message}`);
       // Surface specific auth failures so the operator knows the problem is
       // the Anthropic API key, not the agent logic.
       const status = (err as { status?: number })?.status;
@@ -663,7 +667,7 @@ export class DiagramGenerationService {
     const subject = new Subject<{ data: DiagramGenerationEvent }>();
 
     this.runIntegrationDocAgent(epicId, type, subject, signal, user).catch((err) => {
-      this.logger.error(`Integration doc agent error: ${err.message}`, err.stack);
+      this.logger.error({ err }, `Integration doc agent error: ${err.message}`);
       // Paridad con `generate()` en el mapeo de errores de API de Anthropic.
       // Los mensajes idénticos permiten que el frontend muestre el mismo
       // texto localizado sin branching por tipo de operación.
@@ -731,7 +735,7 @@ export class DiagramGenerationService {
     const previousDiagram = await this.getPreviousDiagram(epicId, type);
     const hadPreviousDiagram = previousDiagram !== null;
     const previousDocPath = previousDiagram?.integrationFlowDocPath ?? null;
-    this.logger.log(
+    this.logger.info(
       `[generate] Pre-check epic=${epicId} type=${type} hadPrevious=${hadPreviousDiagram}` +
         (hadPreviousDiagram
           ? ` previousId=${previousDiagram!.id} previousDocPath=${previousDocPath ?? 'none'}`
@@ -796,7 +800,7 @@ export class DiagramGenerationService {
     const activeBreakpoints: string[] = [];
     if (systemPromptChars >= 4096) activeBreakpoints.push('systemPrompt');
     if (contextBlockChars >= 4096) activeBreakpoints.push('contextBlock');
-    this.logger.log(
+    this.logger.info(
       `[DiagramAgent] ▶ loop start: systemPrompt=${systemPromptChars} chars (~${systemPromptEstTokens} tokens), contextBlock=${contextBlockChars} chars (~${contextBlockEstTokens} tokens). ` +
         `Cache ${activeBreakpoints.length > 0 ? `✅ activará en: [${activeBreakpoints.join(', ')}]` : '⚠️ NO activará (ambos < 1024 tokens)'}.`,
     );
@@ -862,7 +866,7 @@ export class DiagramGenerationService {
       // pasos). Referencia: docs.anthropic.com/api/messages#tool-choice.
       const shouldForceOutlineTool = forceOutlineNextTurn && !hasOutlined;
       if (shouldForceOutlineTool) {
-        this.logger.log(
+        this.logger.info(
           `[outline_flow] forcing tool_choice=outline_flow en turno ${iteration} (thinking desactivado para este turno)`,
         );
       }
@@ -950,7 +954,7 @@ export class DiagramGenerationService {
       }
       // Resumen agregado del stream: 1 línea por iter con totales (vs 5000+
       // líneas per-event que tenía antes). Suficiente para diagnóstico.
-      this.logger.log(
+      this.logger.info(
         `[DiagramAgent.iter${iteration}] 🏁 stream done — events=${evtCount} text_deltas=${textDeltaCount}(${totalTextChars}c) thinking_deltas=${thinkingDeltaCount}(${totalThinkingChars}c) duration=${Date.now() - iterStart}ms`,
       );
       // El SDK acumula los blocks internamente — finalMessage() los reconstruye
@@ -992,7 +996,7 @@ export class DiagramGenerationService {
       const toolUseBlocksCount = response.content.filter(
         (b: any) => b.type === 'tool_use',
       ).length;
-      this.logger.log(
+      this.logger.info(
         `[DiagramAgent] iter ${iteration} stop=${response.stop_reason} dur=${Date.now() - callStart}ms ` +
           `tokens(in=${inputTokens} out=${outputTokens} cache_read=${cacheRead} cache_create=${cacheCreate}) ` +
           `thinking_blocks=${thinkingBlocksCount} tool_calls=${toolUseBlocksCount}` +
@@ -1030,7 +1034,7 @@ export class DiagramGenerationService {
         const ratio = totalCacheCreate > 0
           ? (totalCacheRead / totalCacheCreate).toFixed(1)
           : '∞';
-        this.logger.log(
+        this.logger.info(
           `[DiagramAgent] ▣ run summary: iters=${iteration + 1} ` +
             `totals(in=${totalInputTokens} out=${totalOutputTokens} cache_read=${totalCacheRead} cache_create=${totalCacheCreate}) ` +
             `ratio_read_to_write=${ratio}:1 — target ≥4:1 (anti-thrashing OK).`,
@@ -1113,7 +1117,7 @@ export class DiagramGenerationService {
           const stepsPreview = (input.steps as string[])
             .map((s, i) => `${i + 1}.${s.slice(0, 40)}${s.length > 40 ? '…' : ''}`)
             .join(' | ');
-          this.logger.log(
+          this.logger.info(
             `[outline_flow] aceptado epic=${epicId} iter=${iteration} steps=${(input.steps as string[]).length} preview="${stepsPreview}"`,
           );
           const outlineBlock = '\n\n## Fase 0 — Outline del flujo\n\n' + (input.steps as string[]).map((s, i) => `${i + 1}. ${s}`).join('\n') + '\n';
@@ -1272,7 +1276,7 @@ export class DiagramGenerationService {
                   timestamp: writeTimestamp,
                 },
               });
-              this.logger.log(
+              this.logger.info(
                 `[generate] Documento de flujo escrito al vault path=${docPath} epic=${epicContext.id}`,
               );
             } catch (err) {
@@ -1282,7 +1286,7 @@ export class DiagramGenerationService {
               );
             }
           } else {
-            this.logger.log(
+            this.logger.info(
               `[generate] Agente no emitió integrationFlowMarkdown válido epic=${epicContext.id} — diagrama se persiste sin documento`,
             );
           }
@@ -1348,7 +1352,7 @@ export class DiagramGenerationService {
                 `[generate] REFUSED to delete suspicious previousDocPath — not within epic folder. path=${previousDocPath} epic=${epicId} expectedPrefix=${expectedPrefix}`,
               );
             } else {
-              this.logger.log(
+              this.logger.info(
                 `[generate] Deleting previous flow doc (regeneration) path=${previousDocPath} epic=${epicId}`,
               );
               await this.vault
@@ -1357,7 +1361,7 @@ export class DiagramGenerationService {
                   `chore(diagram): remove integration-flow doc of replaced ${type} diagram [${epicId}]`,
                 )
                 .then(() => {
-                  this.logger.log(
+                  this.logger.info(
                     `[generate] Previous flow doc deleted OK path=${previousDocPath} epic=${epicId}`,
                   );
                 })
@@ -1419,7 +1423,7 @@ export class DiagramGenerationService {
             const toolPromise = tool
               .executeMultimodal(toolBlock.input as Record<string, unknown>, ctx)
               .catch((err) => {
-                this.logger.warn(`Late rejection from ${tool.name}: ${err?.message}`);
+                this.logger.warn({ name: tool.name, message: err?.message }, `Late rejection from ${tool.name}: ${err?.message}`);
                 throw err;
               });
             const mm = await Promise.race([toolPromise, timer]);
@@ -1443,7 +1447,7 @@ export class DiagramGenerationService {
             const toolPromise = tool
               .execute(toolBlock.input as Record<string, unknown>, ctx)
               .catch((err) => {
-                this.logger.warn(`Late rejection from ${tool.name}: ${err?.message}`);
+                this.logger.warn({ name: tool.name, message: err?.message }, `Late rejection from ${tool.name}: ${err?.message}`);
                 throw err;
               });
             result = await Promise.race([toolPromise, timer]);
@@ -1470,7 +1474,7 @@ export class DiagramGenerationService {
         } catch (err) {
           timer.clear();
           const message = err instanceof Error ? err.message : String(err);
-          this.logger.warn(`Tool ${tool.name} failed: ${message}`);
+          this.logger.warn({ name: tool.name, message }, `Tool ${tool.name} failed: ${message}`);
           subject.next({
             data: {
               type: 'step_done',
@@ -1667,7 +1671,7 @@ export class DiagramGenerationService {
     const activeBreakpoints: string[] = [];
     if (systemPromptChars >= 4096) activeBreakpoints.push('systemPrompt');
     if (contextBlockChars >= 4096) activeBreakpoints.push('contextBlock');
-    this.logger.log(
+    this.logger.info(
       `[DiagramDoc] ▶ loop start: systemPrompt=${systemPromptChars} chars (~${systemPromptEstTokens} tokens), contextBlock=${contextBlockChars} chars (~${contextBlockEstTokens} tokens). ` +
         `Cache ${activeBreakpoints.length > 0 ? `✅ activará en: [${activeBreakpoints.join(', ')}]` : '⚠️ NO activará (ambos < 1024 tokens)'}.`,
     );
@@ -1810,7 +1814,7 @@ export class DiagramGenerationService {
       const toolUseBlocksCount = response.content.filter(
         (b: any) => b.type === 'tool_use',
       ).length;
-      this.logger.log(
+      this.logger.info(
         `[DiagramDoc] iter ${iteration} stop=${response.stop_reason} dur=${Date.now() - callStart}ms ` +
           `tokens(in=${inputTokens} out=${outputTokens} cache_read=${cacheRead} cache_create=${cacheCreate}) ` +
           `thinking_blocks=${thinkingBlocksCount} tool_calls=${toolUseBlocksCount}` +
@@ -1840,7 +1844,7 @@ export class DiagramGenerationService {
         const ratio = totalCacheCreate > 0
           ? (totalCacheRead / totalCacheCreate).toFixed(1)
           : '∞';
-        this.logger.log(
+        this.logger.info(
           `[DiagramDoc] ▣ run summary: iters=${iteration + 1} ` +
             `totals(in=${totalInputTokens} out=${totalOutputTokens} cache_read=${totalCacheRead} cache_create=${totalCacheCreate}) ` +
             `ratio_read_to_write=${ratio}:1 — target ≥4:1 (anti-thrashing OK).`,
@@ -2068,7 +2072,7 @@ export class DiagramGenerationService {
               timestamp: writeTimestamp,
             },
           });
-          this.logger.log(
+          this.logger.info(
             `[generateIntegrationDoc] documento backfill escrito path=${docPath} epic=${epicContext.id} steps=${validation.steps.length}`,
           );
 
@@ -2123,7 +2127,7 @@ export class DiagramGenerationService {
             const toolPromise = tool
               .executeMultimodal(toolBlock.input as Record<string, unknown>, ctx)
               .catch((err) => {
-                this.logger.warn(`Late rejection from ${tool.name}: ${err?.message}`);
+                this.logger.warn({ name: tool.name, message: err?.message }, `Late rejection from ${tool.name}: ${err?.message}`);
                 throw err;
               });
             const mm = await Promise.race([toolPromise, timer]);
@@ -2147,7 +2151,7 @@ export class DiagramGenerationService {
             const toolPromise = tool
               .execute(toolBlock.input as Record<string, unknown>, ctx)
               .catch((err) => {
-                this.logger.warn(`Late rejection from ${tool.name}: ${err?.message}`);
+                this.logger.warn({ name: tool.name, message: err?.message }, `Late rejection from ${tool.name}: ${err?.message}`);
                 throw err;
               });
             result = await Promise.race([toolPromise, timer]);
@@ -2174,7 +2178,7 @@ export class DiagramGenerationService {
         } catch (err) {
           timer.clear();
           const message = err instanceof Error ? err.message : String(err);
-          this.logger.warn(`Tool ${tool.name} failed: ${message}`);
+          this.logger.warn({ name: tool.name, message }, `Tool ${tool.name} failed: ${message}`);
           subject.next({
             data: {
               type: 'step_done',
@@ -3904,14 +3908,14 @@ ${safePrompt}
     // el modelo elegido no soporta `tool_choice: tool`. Default: habilitado.
     // Para desactivar: `DIAGRAM_LAYOUT_PASS_ENABLED=false`.
     if (process.env.DIAGRAM_LAYOUT_PASS_ENABLED === 'false') {
-      this.logger.log(
+      this.logger.info(
         `[layout_pass] skipped (DIAGRAM_LAYOUT_PASS_ENABLED=false) epic=${epicContext.id}`,
       );
       return diagram;
     }
 
     const startTime = Date.now();
-    this.logger.log(
+    this.logger.info(
       `[layout_pass] agente 2 iniciado epic=${epicContext.id} nodes=${diagram.nodes.length} edges=${diagram.edges.length}`,
     );
 
@@ -4056,7 +4060,7 @@ ${safePrompt}
         );
 
         const reasoningPreview = validation.reasoning.slice(0, 160);
-        this.logger.log(
+        this.logger.info(
           `[layout_pass] aceptado epic=${epicContext.id} iter=${iteration} reasoning="${reasoningPreview}" durationMs=${Date.now() - startTime}`,
         );
 
@@ -4335,7 +4339,7 @@ Output vía tool \`layout_pass\`:
         : [];
       const match = diagrams.find((d) => d.type === type);
       if (match) {
-        this.logger.log(
+        this.logger.info(
           `[getPreviousDiagram] from Postgres epic=${epicId} type=${type} id=${match.id}`,
         );
         return match;
@@ -4347,7 +4351,7 @@ Output vía tool \`layout_pass\`:
     }
     const fromRedis = await this.diagramCache.getDiagram(epicId, type).catch(() => null);
     if (fromRedis) {
-      this.logger.log(
+      this.logger.info(
         `[getPreviousDiagram] from Redis fallback epic=${epicId} type=${type} id=${fromRedis.id}`,
       );
     }
@@ -4405,7 +4409,7 @@ Output vía tool \`layout_pass\`:
       throw new Error(`persistAiDiagramToEpic: epic ${epicId} not found`);
     }
 
-    this.logger.log(
+    this.logger.info(
       `[persistAiDiagramToEpic] epic=${epicId} type=${diagram.type} id=${diagram.id} (atomic upsert)`,
     );
   }

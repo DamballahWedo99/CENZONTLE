@@ -1,8 +1,15 @@
 import 'dotenv/config';
-import { Inject, Injectable, InternalServerErrorException, Logger, NotFoundException, forwardRef } from '@nestjs/common';
+import {
+  Inject,
+  Injectable,
+  InternalServerErrorException,
+  NotFoundException,
+  forwardRef,
+} from '@nestjs/common';
 import { Octokit } from '@octokit/rest';
 import { VaultConfigService } from './vault-config.service';
 import { VaultCloneService } from './vault-clone.service';
+import { InjectPinoLogger, PinoLogger } from 'nestjs-pino';
 
 export interface VaultNote {
   path: string;
@@ -49,7 +56,6 @@ interface ActiveContext {
  */
 @Injectable()
 export class VaultService {
-  private readonly logger = new Logger(VaultService.name);
   private readonly cache = new Map<string, { note: VaultNote; expiresAt: number }>();
   private readonly cacheTtlMs = 60_000; // 60 segundos por nota
   private readonly configCacheTtlMs = 30_000; // 30 segundos por context activo
@@ -62,8 +68,9 @@ export class VaultService {
     // contra futuros cambios que lo introduzcan.
     @Inject(forwardRef(() => VaultCloneService))
     private readonly vaultClone: VaultCloneService,
+    @InjectPinoLogger(VaultService.name) private readonly logger: PinoLogger,
   ) {
-    this.logger.log('[ctor] VaultService initialized (dynamic config via VaultConfigService)');
+    this.logger.info('[ctor] VaultService initialized (dynamic config via VaultConfigService)');
   }
 
   /**
@@ -92,7 +99,7 @@ export class VaultService {
       expiresAt: Date.now() + this.configCacheTtlMs,
     };
     this.activeContext = ctx;
-    this.logger.log(`[getContext] refreshed context for ${ctx.owner}/${ctx.repo}@${ctx.branch}`);
+    this.logger.info({ owner: ctx.owner, repo: ctx.repo, branch: ctx.branch }, `[getContext] refreshed context for ${ctx.owner}/${ctx.repo}@${ctx.branch}`);
     return ctx;
   }
 
@@ -104,7 +111,7 @@ export class VaultService {
   invalidateActiveConfig(): void {
     this.activeContext = null;
     this.cache.clear();
-    this.logger.log('[invalidateActiveConfig] cleared active context + note cache');
+    this.logger.info('[invalidateActiveConfig] cleared active context + note cache');
   }
 
   /**
@@ -203,7 +210,7 @@ export class VaultService {
       return note;
     } catch (err: any) {
       if (err.status === 404) return null;
-      this.logger.error(`Error reading note ${path}`, err);
+      this.logger.error({ err }, `Error reading note ${path}`);
       throw new InternalServerErrorException(`Error leyendo ${path} del vault`);
     }
   }
@@ -249,7 +256,7 @@ export class VaultService {
   }
 
   private async writeNoteImpl(path: string, content: string, commitMessage: string, vaultId?: string): Promise<VaultNote> {
-    this.logger.log(`[writeNote] path=${path} contentLen=${content.length} vaultId=${vaultId ?? 'active'} msg="${commitMessage}"`);
+    this.logger.info({ path, length: content.length, commitMessage }, `[writeNote] path=${path} contentLen=${content.length} vaultId=${vaultId ?? 'active'} msg="${commitMessage}"`);
     const MAX_RETRIES = 3;
 
     for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
@@ -261,7 +268,8 @@ export class VaultService {
         if (attempt > 0 && !vaultId) this.cache.delete(path);
         const existing = await this.readNote(path, vaultId);
         if (attempt === 0) {
-          this.logger.log(`[writeNote] existing=${existing ? `sha=${existing.sha.slice(0, 8)}` : 'NEW'}`);
+          const existingSha = existing ? existing.sha.slice(0, 8) : null;
+          this.logger.info({ path, existingSha, isNew: !existing }, `[writeNote] existing=${existingSha ?? 'NEW'}`);
         }
 
         const res = await ctx.octokit.repos.createOrUpdateFileContents({
@@ -275,7 +283,7 @@ export class VaultService {
         });
 
         const newSha = res.data.content?.sha ?? '';
-        this.logger.log(
+        this.logger.info(
           `[writeNote] OK newSha=${newSha.slice(0, 8)}${attempt > 0 ? ` (after ${attempt} retry)` : ''}`,
         );
         const note: VaultNote = { path, content, sha: newSha, updatedAt: new Date().toISOString() };
@@ -302,14 +310,14 @@ export class VaultService {
           continue;
         }
 
-        this.logger.error(`[writeNote] FAILED path=${path} status=${err?.status} message=${err?.message}`);
+        this.logger.error({ path, status: err?.status, message: err?.message }, `[writeNote] FAILED path=${path} status=${err?.status} message=${err?.message}`);
         if (err?.response?.data) {
           const scrubbed = {
             message: err.response.data?.message,
             documentation_url: err.response.data?.documentation_url,
             status: err?.status,
           };
-          this.logger.error(`[writeNote] GitHub response: ${JSON.stringify(scrubbed)}`);
+          this.logger.error({ githubResponse: scrubbed, path }, '[writeNote] GitHub response error');
         }
         throw new InternalServerErrorException(`Error escribiendo ${path} al vault`);
       }
@@ -336,7 +344,7 @@ export class VaultService {
         if (attempt > 0 && !vaultId) this.cache.delete(path);
         const existing = await this.readNote(path, vaultId);
         if (!existing) {
-          this.logger.warn(`Attempted to delete non-existent note: ${path}`);
+          this.logger.warn({ path }, `Attempted to delete non-existent note: ${path}`);
           return;
         }
 
@@ -350,7 +358,7 @@ export class VaultService {
         });
 
         if (attempt > 0) {
-          this.logger.log(`[deleteNote] OK ${path} (after ${attempt} retry) vaultId=${vaultId ?? 'active'}`);
+          this.logger.info({ path, attempt }, `[deleteNote] OK ${path} (after ${attempt} retry) vaultId=${vaultId ?? 'active'}`);
         }
         // Solo invalidar cache + schedule clone para writes al activo.
         if (!vaultId) {
@@ -371,7 +379,7 @@ export class VaultService {
           continue;
         }
 
-        this.logger.error(`Error deleting note ${path}`, err);
+        this.logger.error({ err }, `Error deleting note ${path}`);
         throw new InternalServerErrorException(`Error eliminando ${path} del vault`);
       }
     }
@@ -400,7 +408,7 @@ export class VaultService {
         .map((item) => item.path);
     } catch (err: any) {
       if (err.status === 404) return [];
-      this.logger.error(`Error listing folder ${folder}`, err);
+      this.logger.error({ err }, `Error listing folder ${folder}`);
       throw new InternalServerErrorException(`Error listando ${folder} del vault`);
     }
   }
@@ -479,7 +487,7 @@ export class VaultService {
       return this.buildNestedTree(flat);
     } catch (err: any) {
       if (err.status === 404) return [];
-      this.logger.error(`Error listing tree for ${folder}`, err);
+      this.logger.error({ err }, `Error listing tree for ${folder}`);
       throw new InternalServerErrorException(`Error listando árbol del vault`);
     }
   }
@@ -654,7 +662,7 @@ export class VaultService {
       };
     } catch (err: any) {
       if (err.status === 404) return null;
-      this.logger.error(`Error fetching commit ${sha}`, err);
+      this.logger.error({ err }, `Error fetching commit ${sha}`);
       return null;
     }
   }

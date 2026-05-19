@@ -15,6 +15,7 @@ jest.mock('@linear/sdk', () => ({ LinearClient: jest.fn() }));
 import { IntegrationsService } from './integrations.service';
 import { CryptoService } from '../vault/crypto.service';
 import { NotFoundException } from '@nestjs/common';
+import { createMockPinoLogger } from '../../common/testing/mock-pino-logger';
 
 type MockPrisma = {
   integrationConfig: {
@@ -53,7 +54,7 @@ function buildMocks() {
       publishStory: jest.fn(),
     }),
   };
-  const service = new IntegrationsService(prisma as any, crypto as any, factory as any);
+  const service = new IntegrationsService(prisma as any, crypto as any, factory as any, createMockPinoLogger());
   return { service, prisma, crypto, factory };
 }
 

@@ -1,9 +1,9 @@
 import {
   ConflictException,
   Injectable,
-  Logger,
   NotFoundException,
 } from '@nestjs/common';
+import { InjectPinoLogger, PinoLogger } from 'nestjs-pino';
 import { Prisma } from '@prisma/client';
 import {
   AGENT_RUN_ACTIVE_STATUSES,
@@ -16,6 +16,10 @@ import { OrgAnthropicConfigService } from './org-anthropic-config.service';
 import { ForgePromptBuilderService } from './forge-prompt-builder.service';
 import { GitHubService } from '../github/github.service';
 import { DodService } from '../dod/dod.service';
+import { ConflictResolverService } from './conflict-resolver.service';
+import { ForgePlannerService } from './forge-planner.service';
+import { AgentTokenSettingsService } from '../../agent-token-settings/agent-token-settings.service';
+import { StoriesService } from '../../proyectos/stories/stories.service';
 import { RunProgressDto } from './dto/run-progress.dto';
 import { RunCompleteDto } from './dto/run-complete.dto';
 
@@ -38,6 +42,79 @@ interface ClaimedStoryRow {
   epicId: string;
   title: string;
   podId: string;
+}
+
+/**
+ * Shape interno del retorno de `materializeClaim` — incluye todos los
+ * datos crudos para construir el `ClaimedStory` final FUERA del
+ * $transaction. `storyVaultPath`, `epicTitle`, `epicMarkdown` se exponen
+ * acá porque el caller los necesita para `readStoryContent` + `buildStoryPrompt`
+ * después del commit (qa+arch-reviewer 2026-05-12: HTTP calls fuera del lock).
+ */
+interface MaterializedClaim {
+  runId: string;
+  storyId: string;
+  storyTitle: string;
+  storyVaultPath: string | null;
+  epicId: string;
+  epicTitle: string;
+  epicMarkdown: string;
+  /**
+   * Diagrama de negocio de la épica serializado a texto legible para el
+   * agente. Toma el primer diagrama type='business' de `epic.diagrams` y
+   * lo formatea como lista numerada de pasos (si el diagrama tiene `steps`)
+   * o como descripción de nodos+edges (fallback). NULL si la épica no tiene
+   * diagrama de negocio.
+   *
+   * Sin esto, el agente improvisa la arquitectura del flujo en lugar de
+   * seguir el diseño aprobado por el equipo en story-gen.
+   */
+  epicBusinessDiagram: string | null;
+  /**
+   * Contexto del DAG — stories del MISMO epic que ya completaron antes que
+   * esta story arrancara. La integration branch del Forge ya tiene los
+   * commits de estas stories (via auto-merge post-completion), por lo que
+   * sus archivos están materializados en el workdir del worker. El backend
+   * inyecta esta lista al prompt para que el agente:
+   *   1. Sepa explícitamente cuáles stories existieron (no solo via ls).
+   *   2. Lea los archivos que produjeron ANTES de implementar (respeta
+   *      contratos previos, evita duplicación tipo epic 9311b334 donde
+   *      README re-creó API.md desde cero).
+   *   3. Distinga hard-deps (críticas, definidas en StoryDependency) de
+   *      siblings (informativas, completaron en el mismo epic).
+   *
+   * Ordenadas por completedAt DESC (más recientes primero) — facilita
+   * prioridad cuando hay muchas siblings.
+   */
+  completedSiblings: Array<{
+    storyId: string;
+    title: string;
+    /** True si esta story es hard-dep directa de la story actual
+     *  (existe StoryDependency con hardness='hard'). El prompt las
+     *  resalta como "OBLIGATORIO leer estos archivos". */
+    isHardDep: boolean;
+    prNumber: number | null;
+    filesModified: number | null;
+    /** Paths relativos producidos por esta story. Vacío si el run legacy
+     *  (pre-migration 20260515000000) — el agente sabe igual que la story
+     *  existió pero no qué archivos tocó. */
+    filesModifiedPaths: string[];
+    completedAt: string;
+  }>;
+  branch: string;
+  repoUrl: string | null;
+  baseBranch: string | null;
+  anthropicApiKey: string;
+  dodCriteria: Array<{ kind: string | null; text: string; description: string }>;
+  /** Modelo + effort del Forge Worker (coder agent CLI). Leído del singleton
+   *  AgentTokenSettings — configurable desde /factory/settings → Factory.
+   *  Pasados al worker en la response del claim para que reemplacen las env
+   *  vars del worker (que quedan como fallback legacy). */
+  forgeWorkerModel: string;
+  forgeWorkerEffort: string;
+  /** Modelo + effort del DoD Verifier (reviewer agent CLI). Mismo patrón. */
+  dodVerifierModel: string;
+  dodVerifierEffort: string;
 }
 
 /**
@@ -107,7 +184,45 @@ function redactServerSide(text: string | undefined | null): string | undefined {
  */
 @Injectable()
 export class AgentRunService {
-  private readonly logger = new Logger(AgentRunService.name);
+  /**
+   * Mutex per integration branch para serializar auto-merges concurrentes
+   * (defensa en profundidad — capa 1 de 2).
+   *
+   * Problema diagnosticado 2026-05-13: cuando dos stories de la misma wave
+   * terminan al mismo tiempo (~30s ± 1s con Haiku 4.5), ambas llaman
+   * `mergePullRequest()` casi simultáneamente al MISMO integration branch.
+   * GitHub serializa los merges con un lock pessimista per-target-branch, así
+   * que SOLO uno gana — el otro recibe `merged: false` con conflict, y la
+   * story queda en `in_review` aunque su DoD pasó.
+   *
+   * El mutex encadena promises por branch name: `Map<branch, Promise>`.
+   * Cada nueva llamada a `withMergeLock` espera a que termine la anterior
+   * antes de invocar su closure. Cleanup automático cuando la chain termina.
+   *
+   * Combinado con `mergeWithRetry` (capa 2), cubre tanto races internos
+   * (mismo backend process) como externos (humano mergea concurrente, otra
+   * replica en multi-instance, GitHub rate limit que causa merged=false).
+   */
+  private mergeChain = new Map<string, Promise<unknown>>();
+
+  /**
+   * Contador per-branch del número de stories esperando en `withMergeLock`.
+   * Cada entry sostiene su closure (runId, prNumber, commitTitle/Message) hasta
+   * que llega su turno — para waves grandes (~20+ stories paralelas) la
+   * memoria pico crece linealmente. NO es un leak permanente (todas liberan
+   * cuando termina la wave), pero un crecimiento sostenido sin liberarse
+   * indica un problema (entry hung, deadlock, GitHub API down). El log
+   * warning cuando excede `QUEUE_WARN_THRESHOLD` permite alertar en
+   * observabilidad. qa-reviewer WARN 2026-05-15.
+   */
+  private mergeChainDepth = new Map<string, number>();
+
+  /**
+   * Threshold para warning del depth de la chain. Una wave típica tiene
+   * <10 stories paralelas — alcanzar 8 indica load alto pero aún esperado.
+   * Sostenido >>8 alerta de problema operacional.
+   */
+  private static readonly MERGE_CHAIN_WARN_THRESHOLD = 8;
 
   constructor(
     private readonly prisma: PrismaService,
@@ -115,7 +230,439 @@ export class AgentRunService {
     private readonly promptBuilder: ForgePromptBuilderService,
     private readonly github: GitHubService,
     private readonly dod: DodService,
+    private readonly stories: StoriesService,
+    private readonly conflictResolver: ConflictResolverService,
+    private readonly planner: ForgePlannerService,
+    private readonly agentTokens: AgentTokenSettingsService,
+    // Logger general del service. Para logs del context engineering
+    // específicamente, usamos `forgeClaimLogger` con namespace separado
+    // que produce eventos `forge.claim.*` queryables en Loki/Grafana.
+    @InjectPinoLogger(AgentRunService.name)
+    private readonly logger: PinoLogger,
+    @InjectPinoLogger('forge.claim')
+    private readonly forgeClaimLogger: PinoLogger,
   ) {}
+
+  /**
+   * Serializa la ejecución de `fn` por `branch` — cualquier otra llamada a
+   * `withMergeLock` con el mismo branch espera a que esta termine antes de
+   * arrancar. Implementación in-memory; si en prod hay multi-replica, este
+   * mutex NO sincroniza cross-instance — el retry de mergeWithRetry compensa.
+   */
+  private async withMergeLock<T>(branch: string, fn: () => Promise<T>): Promise<T> {
+    const previous = this.mergeChain.get(branch) ?? Promise.resolve();
+    // `.catch()` swallow errors del anterior — la chain no debe romperse por
+    // un fallo previo, solo serializa el orden de ejecución.
+    const newChain = previous.catch(() => undefined).then(fn);
+    this.mergeChain.set(branch, newChain);
+
+    // Tracking de queue depth para observabilidad. Cada `withMergeLock` corre
+    // mientras espera su turno, sosteniendo su closure (~kbs por entry). Para
+    // waves chicas (<8) es despreciable; sostenido alto indica problema
+    // operacional (entry hung, deadlock, GitHub API down).
+    const depthAfterInsert = (this.mergeChainDepth.get(branch) ?? 0) + 1;
+    this.mergeChainDepth.set(branch, depthAfterInsert);
+    if (depthAfterInsert >= AgentRunService.MERGE_CHAIN_WARN_THRESHOLD) {
+      this.logger.warn(
+        {
+          event: 'fleet.merge_chain.high_depth',
+          branch,
+          depth: depthAfterInsert,
+          threshold: AgentRunService.MERGE_CHAIN_WARN_THRESHOLD,
+        },
+        `mergeChain depth elevado: ${depthAfterInsert} stories esperando lock en branch=${branch}. ` +
+          `Cada entry sostiene su closure (runId/prNumber/etc) hasta su turn — ` +
+          `memoria pico crece linealmente. Sostenido alto sugiere stories hung en el lock o load anómalo.`,
+      );
+    }
+
+    try {
+      return await newChain;
+    } finally {
+      // Cleanup del depth counter (siempre decrementa, incluso si fn throw).
+      const depthAfterRemove = (this.mergeChainDepth.get(branch) ?? 1) - 1;
+      if (depthAfterRemove <= 0) {
+        this.mergeChainDepth.delete(branch);
+      } else {
+        this.mergeChainDepth.set(branch, depthAfterRemove);
+      }
+      // Cleanup del chain ref: solo eliminar si nadie se enqueueó después de mí.
+      if (this.mergeChain.get(branch) === newChain) {
+        this.mergeChain.delete(branch);
+      }
+    }
+  }
+
+  /**
+   * Retry con backoff exponencial para `mergePullRequest` (defensa en
+   * profundidad — capa 2 de 2). Cubre fallas residuales que el mutex no
+   * puede prevenir:
+   *  - Multi-replica del backend (sin Redis lock cross-instance)
+   *  - Race con merges externos (humano mergea PR via GitHub UI)
+   *  - GitHub rate limit transient
+   *  - `merged: false` por sync delay en GitHub (head SHA no advanced aún)
+   *
+   * Retries: 3 attempts con sleep 1s, 2s, 4s (exponential backoff). Si los
+   * 3 fallan, propaga el último error al caller (que cae a 'in_review').
+   */
+  /**
+   * Alinea el HEAD branch del PR con su base actualizado ANTES del merge.
+   *
+   * Motivación (2026-05-15): stories paralelas de la misma wave clonan del
+   * integration branch en T0. La primera mergea OK y avanza el integration
+   * a T1. Las siguientes intentan mergear su head (todavía en T0) → GitHub
+   * responde "merge conflicts" aunque no haya overlap real de archivos. El
+   * `mergeWithRetry` reintentaba el merge 3 veces idénticamente, fallando
+   * idénticamente — el conflict no es transient.
+   *
+   * Esta función llama `pulls.updateBranch` (equivalente al click "Update
+   * branch" en GitHub UI) que mergea el base dentro del head. Si los archivos
+   * no overlap, GitHub auto-resuelve y el siguiente merge es fast-forward.
+   * Si overlap real, throw inmediato (caller cae a in_review).
+   *
+   * Retry policy diferencial:
+   *  - 5xx, network, rate limit → reintenta hasta MAX_ATTEMPTS con backoff.
+   *  - 422 conflict real (`isMergeConflict=true`) → throw inmediato, NO
+   *    retry. El conflict es persistente, esperar no lo resuelve.
+   *  - 4xx no-conflict (permisos, etc.) → throw inmediato.
+   *
+   * DEBE llamarse DENTRO del `withMergeLock` para que la operación
+   * (update + merge) sea atómica per integration branch — sin el lock, otra
+   * story podría mergear entre nuestro update y nuestro merge, dejando el
+   * head stale de nuevo.
+   */
+  private async updateBranchToBaseWithRetry(
+    runId: string,
+    prNumber: number,
+  ): Promise<void> {
+    const MAX_ATTEMPTS = 3;
+    const BACKOFF_MS = [1000, 2000, 4000];
+    let lastErr: Error = new Error('unreachable');
+    for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+      try {
+        const result = await this.github.updatePullRequestBranch(prNumber);
+        if (attempt > 1) {
+          this.logger.info(
+            `[run:${runId}] updateBranch.retry.success: PR #${prNumber} alineado con base en attempt ${attempt}/${MAX_ATTEMPTS}: ${result.message}`,
+          );
+        } else {
+          this.logger.info(
+            `[run:${runId}] updateBranch.ok: PR #${prNumber} alineado con base: ${result.message}`,
+          );
+        }
+        // Post-updateBranch: poll mergeable_state hasta resuelto ANTES de
+        // permitir que el caller invoque mergeWithRetry. updateBranch retorna
+        // 202 (Accepted, async) — GitHub encola el merge interno y no
+        // actualiza el SHA del head inmediatamente. Si mergeWithRetry corre
+        // con head stale, falla con "merge conflicts" aunque updateBranch
+        // hubiera resuelto el problema. El poll detecta propagación completa
+        // (mergeable_state in clean/unstable/has_hooks) o failure terminal
+        // (dirty=conflict real post-update, blocked=branch protection,
+        // draft=no mergeable). qa-reviewer HIGH 2026-05-15: sin esto, el
+        // primer attempt de mergeWithRetry (zero delay) corría con state
+        // pre-propagación y el race ahí era real.
+        await this.pollMergeableStateAfterUpdate(runId, prNumber);
+        return;
+      } catch (err) {
+        lastErr = err as Error;
+        const isConflict = (err as Error & { isMergeConflict?: boolean }).isMergeConflict === true;
+        if (isConflict) {
+          // Conflict real (archivos overlap). NO retry — el conflict es
+          // persistente, esperar no lo resuelve. Throw inmediato para que
+          // el caller caiga a `in_review` con razón clara.
+          this.logger.warn(
+            `[run:${runId}] updateBranch.conflict: PR #${prNumber} tiene conflict real de archivos. ` +
+              `Skipeando retries (conflict no es transient). Story → in_review.`,
+          );
+          throw lastErr;
+        }
+        if (attempt === MAX_ATTEMPTS) {
+          this.logger.error(
+            `[run:${runId}] updateBranch.retry.exhausted: PR #${prNumber} falló los ${MAX_ATTEMPTS} attempts. ` +
+              `Último error: ${lastErr.message}`,
+          );
+          throw lastErr;
+        }
+        const sleepMs = BACKOFF_MS[attempt - 1];
+        this.logger.warn(
+          `[run:${runId}] updateBranch.retry: PR #${prNumber} attempt ${attempt}/${MAX_ATTEMPTS} failed ` +
+            `(${lastErr.message}). Sleeping ${sleepMs}ms antes de reintentar...`,
+        );
+        await new Promise((r) => setTimeout(r, sleepMs));
+      }
+    }
+    throw lastErr;
+  }
+
+  /**
+   * Polls `pulls.get` hasta que GitHub confirme que `mergeable_state` está
+   * resuelto post-`updateBranch`. Necesario porque `pulls.updateBranch`
+   * retorna 202 Accepted (operación async encolada), no 200 Done — el SHA
+   * del head no se actualiza inmediatamente y `mergeWithRetry` corriendo
+   * con state stale falla con "merge conflicts" aunque el update hubiera
+   * resuelto el problema.
+   *
+   * Outcomes:
+   *  - `mergeable_state in {clean, unstable, has_hooks}`: ready, return.
+   *  - `mergeable_state === 'dirty'`: conflict REAL post-update (raro pero
+   *    posible si race con commit out-of-band). Throw isMergeConflict.
+   *  - `mergeable_state in {blocked, draft}`: state terminal no recuperable
+   *    (branch protection, PR en draft). Throw sin isMergeConflict (no es
+   *    conflict de archivos pero tampoco transient — caller cae a in_review).
+   *  - `mergeable_state in {unknown, behind} | null`: continue polling.
+   *  - Timeout (POLL_MAX × POLL_INTERVAL_MS = 5s): log warning, return.
+   *    mergeWithRetry tiene 3 retries con backoff que cubren ~7s extra
+   *    si la propagación tarda — defensive, no fail loud.
+   *
+   * Polls separados por 500ms para no saturar la API rate-limit (5000/hr
+   * por PAT). 10 polls = 10 reads/run en el peor caso, despreciable.
+   */
+  private async pollMergeableStateAfterUpdate(
+    runId: string,
+    prNumber: number,
+  ): Promise<void> {
+    const POLL_MAX = 10;
+    const POLL_INTERVAL_MS = 500;
+    const READY_STATES = new Set(['clean', 'unstable', 'has_hooks']);
+    const TERMINAL_FAIL_STATES = new Set(['dirty', 'blocked', 'draft']);
+
+    for (let i = 1; i <= POLL_MAX; i++) {
+      await new Promise((r) => setTimeout(r, POLL_INTERVAL_MS));
+      const status = await this.github.getPullRequestStatus(prNumber);
+      const state = status.mergeableState;
+
+      if (state && READY_STATES.has(state)) {
+        this.logger.info(
+          `[run:${runId}] updateBranch.poll.ready: PR #${prNumber} mergeable_state=${state} ` +
+            `en poll ${i}/${POLL_MAX} (~${i * POLL_INTERVAL_MS}ms post-update)`,
+        );
+        return;
+      }
+
+      if (state && TERMINAL_FAIL_STATES.has(state)) {
+        this.logger.warn(
+          `[run:${runId}] updateBranch.poll.terminal: PR #${prNumber} mergeable_state=${state} ` +
+            `post-update. Story → in_review (NO retry, state terminal).`,
+        );
+        throw Object.assign(
+          new Error(
+            `PR #${prNumber}: post-updateBranch mergeable_state=${state}`,
+          ),
+          // Solo marcamos isMergeConflict para 'dirty' — 'blocked'/'draft'
+          // no son conflicts de archivos pero igual son no-recuperables.
+          // Tratarlos como conflicts evita retries pointless en
+          // updateBranchToBaseWithRetry si ese caller estuviera retrying
+          // (en este path no aplica porque ya estamos post-success).
+          { isMergeConflict: state === 'dirty' },
+        );
+      }
+      // unknown, behind, null → GitHub aún computando, continue polling.
+    }
+
+    // Timeout: no fail loud — mergeWithRetry siguiente puede compensar con
+    // sus propios 3 retries (backoff 1s/2s/4s = ~7s extra). Log warning para
+    // detectar latencia anómala en observabilidad.
+    this.logger.warn(
+      `[run:${runId}] updateBranch.poll.timeout: PR #${prNumber} no resolvió ` +
+        `mergeable_state en ${POLL_MAX * POLL_INTERVAL_MS}ms — procediendo a ` +
+        `merge anyway, confiando en retries de mergeWithRetry como fallback.`,
+    );
+  }
+
+  /**
+   * Poll variant para POST-resolver-push (bug #5 fix 2026-05-17).
+   *
+   * Cuando el ConflictResolverService pushea su resolución al head branch
+   * del PR, GitHub necesita tiempo para invalidar su cache de
+   * `mergeable_state` y recomputarlo contra el nuevo head. Si el caller
+   * intenta `pulls.merge` API inmediatamente, GitHub responde 405 "Pull
+   * Request has merge conflicts" con el estado anterior STALE — aunque el
+   * push fue exitoso y el merge YA NO tiene conflict real.
+   *
+   * Caso de uso real (visto en seed-conflict-stress-test-minimal iter 6):
+   *   22:39:58 resolver push sha=ad552b4 (B1+B2 integrado correctamente)
+   *   22:39:59 re-merge API → 405 "merge conflicts" (state cache stale)
+   *   ~22:40:30 merge manual OK (GitHub ya invalidó cache)
+   *
+   * Diferencias vs `pollMergeableStateAfterUpdate`:
+   *   - NO throw cuando state='dirty' — el resolver acaba de pushear, si
+   *     GitHub reporta dirty puede ser cache stale residual. Log warn y
+   *     continúa polling. Si timeout con dirty persistente, el siguiente
+   *     mergeWithRetry verá el conflict real y lo manejará.
+   *   - NO throw cuando state='blocked'/'draft' — esos son terminales pero
+   *     este path post-resolver no debería entrar ahí (el resolver no
+   *     toca branch protection ni draft state). Si pasa, log warn.
+   *   - Solo retorna early cuando ALCANZA un READY state. Sino, timeout +
+   *     log + return (siempre intentamos merge anyway, el retry lo cubre).
+   *
+   * Polling: 1s × 10 = 10s max wait. Es overhead aceptable post-resolver
+   * (corremos esto solo cuando hubo conflict — caso minoritario).
+   */
+  private async pollMergeableStateAfterResolverPush(
+    runId: string,
+    prNumber: number,
+  ): Promise<void> {
+    const POLL_MAX = 10;
+    const POLL_INTERVAL_MS = 1000;
+    const READY_STATES = new Set(['clean', 'unstable', 'has_hooks']);
+
+    for (let i = 1; i <= POLL_MAX; i++) {
+      await new Promise((r) => setTimeout(r, POLL_INTERVAL_MS));
+      const status = await this.github.getPullRequestStatus(prNumber);
+      const state = status.mergeableState;
+
+      if (state && READY_STATES.has(state)) {
+        this.logger.info(
+          {
+            event: 'merge.post_resolver_push.poll.ready',
+            runId,
+            prNumber,
+            mergeableState: state,
+            pollNum: i,
+            elapsedMs: i * POLL_INTERVAL_MS,
+          },
+          `[run:${runId}] post-resolver poll ready: PR #${prNumber} mergeable_state=${state} ` +
+            `tras ${i * POLL_INTERVAL_MS}ms — procediendo a re-merge.`,
+        );
+        return;
+      }
+      // unknown, behind, dirty, blocked, draft, null → continue polling.
+      // No throw — confiamos en el resolver que pushó algo válido, y el
+      // siguiente mergeWithRetry maneja el error real si lo hubiera.
+    }
+
+    this.logger.warn(
+      { event: 'merge.post_resolver_push.poll.timeout', runId, prNumber, timeoutMs: POLL_MAX * POLL_INTERVAL_MS },
+      `[run:${runId}] post-resolver poll timeout: PR #${prNumber} no alcanzó ` +
+        `mergeable_state ready en ${POLL_MAX * POLL_INTERVAL_MS}ms — procediendo a ` +
+        `re-merge anyway (mergeWithRetry compensa con sus retries internos).`,
+    );
+  }
+
+  /**
+   * Merge wrapper con retry chain (3 attempts, backoff 1s/2s/4s).
+   *
+   * El `allowConflictRetry` flag controla el short-circuit del fix #2:
+   *  - `false` (default): primer attempt con `isMergeConflict=true` aborta
+   *    inmediato. Usado en el merge ORIGINAL post-`run.complete` — un
+   *    conflict acá es señal de overlap real de archivos, esperar no lo
+   *    resuelve. El catch externo invoca al ConflictResolverService.
+   *  - `true`: ignora el short-circuit, retry todo error incluido
+   *    conflict. Usado en el re-merge POST-resolver-push (fix #5
+   *    2026-05-17), donde un 405 inicial puede ser cache stale de
+   *    GitHub que se resuelve solo tras los backoffs (1s/2s/4s extra).
+   */
+  private async mergeWithRetry(
+    runId: string,
+    prNumber: number,
+    commitTitle: string,
+    commitMessage: string,
+    allowConflictRetry = false,
+  ): Promise<{ merged: boolean; sha: string | null }> {
+    const MAX_ATTEMPTS = 3;
+    const BACKOFF_MS = [1000, 2000, 4000];
+    let lastErr: Error = new Error('unreachable');
+    for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+      try {
+        const result = await this.github.mergePullRequest({
+          prNumber,
+          commitTitle,
+          commitMessage,
+        });
+        if (result.merged) {
+          if (attempt > 1) {
+            this.logger.info(
+              `[run:${runId}] merge.retry.success: PR #${prNumber} mergeó en attempt ${attempt}/${MAX_ATTEMPTS}`,
+            );
+          }
+          return result;
+        }
+        // GitHub respondió 200 OK con merged=false (race condition, branch
+        // protection, status checks failed). Tratamos como fail retryable.
+        throw new Error(
+          `GitHub returned merged=false (sha=${result.sha ?? 'null'}); race con otro merge o branch protection.`,
+        );
+      } catch (err) {
+        lastErr = err as Error;
+
+        // Short-circuit cuando el error es conflict REAL: retry no lo va a
+        // resolver (los conflicts son persistentes, no transient). Throw
+        // INMEDIATO para que el caller (completeRun) lo capture y invoque al
+        // ConflictResolverService sin desperdiciar 7s en retries + GitHub
+        // API quota. La marca `isMergeConflict=true` viene de
+        // `github.mergePullRequest()` cuando detecta status 405/409/422 con
+        // mensaje de conflict (post-fix 2026-05-17 — antes el flag no se
+        // setteaba en este path y el resolver jamás se invocaba).
+        const isConflict = (lastErr as Error & { isMergeConflict?: boolean }).isMergeConflict === true;
+        if (isConflict && !allowConflictRetry) {
+          this.logger.info(
+            { event: 'merge.retry.skip_conflict', runId, prNumber, attempt },
+            `[run:${runId}] merge.retry skipped: PR #${prNumber} es conflict real — propagando inmediato para ConflictResolverService`,
+          );
+          throw lastErr;
+        }
+        if (isConflict && allowConflictRetry && attempt < MAX_ATTEMPTS) {
+          this.logger.info(
+            { event: 'merge.retry.conflict_allowed', runId, prNumber, attempt },
+            `[run:${runId}] merge.retry post-resolver: PR #${prNumber} conflict en attempt ${attempt}/${MAX_ATTEMPTS} — probable cache stale GitHub, reintentar tras backoff`,
+          );
+          // Caer al backoff normal en lugar de skip.
+        }
+
+        if (attempt === MAX_ATTEMPTS) {
+          this.logger.error(
+            `[run:${runId}] merge.retry.exhausted: PR #${prNumber} falló los ${MAX_ATTEMPTS} attempts. ` +
+              `Último error: ${lastErr.message}`,
+          );
+          throw lastErr;
+        }
+        const sleepMs = BACKOFF_MS[attempt - 1];
+        this.logger.warn(
+          `[run:${runId}] merge.retry: PR #${prNumber} attempt ${attempt}/${MAX_ATTEMPTS} failed ` +
+            `(${lastErr.message}). Sleeping ${sleepMs}ms antes de reintentar...`,
+        );
+        await new Promise((r) => setTimeout(r, sleepMs));
+      }
+    }
+    throw lastErr;
+  }
+
+  /**
+   * Borra la branch remota tras un merge exitoso si la config global lo permite
+   * (`BranchStrategyConfig.autoDeleteForgeBranch=true`, default true).
+   *
+   * Best-effort: el delete NUNCA debe romper el flow del caller. Si falla
+   * (network, branch protection, token sin permisos), log warn y seguimos.
+   * `deleteBranch` ya es idempotente con 404/422.
+   *
+   * Lee la config singleton directamente con Prisma (PK fija `id='global'`)
+   * para evitar la circular dependency entre FleetModule y BranchStrategyModule
+   * (este último importa FleetModule para `assertCanManageFleet`).
+   */
+  private async cleanupBranchIfEnabled(
+    branchName: string,
+    runId: string,
+    context: 'story' | 'integration',
+  ): Promise<void> {
+    try {
+      const config = await this.prisma.branchStrategyConfig.findUnique({
+        where: { id: 'global' },
+        select: { autoDeleteForgeBranch: true },
+      });
+      if (!config?.autoDeleteForgeBranch) return;
+
+      await this.github.deleteBranch(branchName);
+      this.logger.info(
+        { event: 'forge.cleanup.branch_deleted', runId, branchName, context },
+        `[run:${runId}] ${context} branch eliminada tras merge: ${branchName}`,
+      );
+    } catch (err) {
+      this.logger.warn(
+        { event: 'forge.cleanup.branch_delete_failed', runId, branchName, context, err: (err as Error).message },
+        `[run:${runId}] cleanup de ${context} branch '${branchName}' falló (non-fatal): ${(err as Error).message}`,
+      );
+    }
+  }
 
   /**
    * Atomicamente reclama UNA historia ready para el nodo dado, respetando
@@ -198,8 +745,9 @@ export class AgentRunService {
     // claimando en paralelo) — claims back-to-back desde 1 nodo se
     // vuelven secuenciales bajo este lock, lo cual es aceptable (claim
     // es una operación rápida).
+    let materialized: MaterializedClaim | null;
     try {
-      return await this.prisma.$transaction(async (tx) => {
+      materialized = await this.prisma.$transaction(async (tx) => {
         // 1) Lock la fila del compute_node — serializa claims per-node.
         const lockedNodes = await tx.$queryRaw<
           Array<{ id: string; totalSlots: number; retiredAt: Date | null }>
@@ -243,6 +791,27 @@ export class AgentRunService {
         //   StoryDependency.blockedById = "historia que bloquea" (el blocker)
         // Por eso: para candidata `s`, buscamos `dep.storyId = s.id` y
         // resolvemos blocker via `dep.blockedById`.
+        // Filtros del candidato (orden importa para legibilidad):
+        //  - epic enqueueada
+        //  - story no reclamada en este momento
+        //  - status NOT IN ('done', 'in_review'): excluye stories terminales
+        //    Y excluye in_review (PR abierto esperando humano O MOCK+merge-fail
+        //    bloqueando el DAG hasta resolución manual). Sin esta exclusión, una
+        //    story en in_review con claimedAt=NULL podría re-reclamarse y entrar
+        //    en loop infinito de attempts contra el mismo PR conflicting.
+        //  - NOT EXISTS predecesor con status != 'done': bloquea wave N+1
+        //    hasta que TODOS los predecesores estén done (= integration branch
+        //    actualizado en MOCK con merge OK, O humano mergeó en PROD).
+        //
+        // PARALELISMO INTRA-WAVE: stories de la misma wave (sin DAG dep entre
+        // ellas) corren EN PARALELO — es el value prop del Forge fleet. Si
+        // dos stories tocan archivos comunes (típico: package.json), el
+        // auto-merge maneja:
+        //   - Conflicts por TIMING (base avanzó) → updateBranch resuelve.
+        //   - Conflicts REALES (overlap código) → ConflictResolverService
+        //     intenta resolver con contexto de ambas stories antes de
+        //     fallar a in_review. Ver agent-run.service.ts callsite del
+        //     auto-merge para detalles.
         const claimedRows = await tx.$queryRaw<ClaimedStoryRow[]>`
           WITH ready_stories AS (
             SELECT s.id, s."epicId", s.title, s."podId"
@@ -250,7 +819,7 @@ export class AgentRunService {
             JOIN epics e ON s."epicId" = e.id
             WHERE e."enqueuedAt" IS NOT NULL
               AND s."claimedAt" IS NULL
-              AND s.status != 'done'
+              AND s.status NOT IN ('done', 'in_review')
               AND NOT EXISTS (
                 SELECT 1 FROM story_dependencies dep
                 JOIN stories blocker ON blocker.id = dep."blockedById"
@@ -281,6 +850,254 @@ export class AgentRunService {
       }
       throw err;
     }
+
+    if (!materialized) return null;
+
+    // ════════════════════════════════════════════════════════════════════
+    // Post-transaction enrichment (qa+arch-reviewer 2026-05-12)
+    // ════════════════════════════════════════════════════════════════════
+    //
+    // Hacemos HTTP a GitHub vault para leer el markdown de la story DESPUÉS
+    // del commit. Si estuviera dentro del $transaction, mantendría el lock
+    // `FOR UPDATE` sobre `compute_nodes` mientras esperamos respuesta de
+    // GitHub (200-800ms típico, hasta segundos bajo rate limit) y
+    // serializaría workers concurrentes innecesariamente.
+    //
+    // Si falla (vault no responde, vaultPath null, archivo borrado),
+    // `storyMarkdown = null` y el flow degrada al comportamiento previo
+    // (verifier evalúa `acceptance-criteria` en abstracto). Sin loss of
+    // liveness.
+    // Leemos las 3 secciones del vault (PO + Technical + QA). Antes solo
+    // pasábamos PO → el agente improvisaba arquitectura y tests porque
+    // ignoraba el trabajo del Tech Lead y del QA. Pasar las 3 secciones
+    // garantiza que el agente respete la arquitectura aprobada e implemente
+    // los tests específicos planificados.
+    // ════════════════════════════════════════════════════════════════════
+    // CONTEXT ENGINEERING — carga del contexto del agente
+    // ════════════════════════════════════════════════════════════════════
+    //
+    // Pipeline (sin logs intermedios — un solo log estructurado al final):
+    //   1. vault read → PO + Technical + QA markdowns
+    //   2. parsers   → acceptanceCriteria + qaTestCases
+    //   3. diagrama  → ya serializado en materialize
+    //   4. DAG       → ya cargado en materialize (completedSiblings)
+    //   5. prompt    → ensamblado final con todas las piezas
+    //
+    // Observabilidad: 2 logs estructurados con event keys queryables
+    // (`forge.claim.vault.*` y `forge.claim.prompt.built`) en vez de 5 logs
+    // sueltos. Sin ruido en hot paths.
+    let storyMarkdown: string | null = null;
+    let storyTechnicalMarkdown: string | null = null;
+    let storyQAMarkdown: string | null = null;
+    let vaultReadError: string | null = null;
+    if (materialized.storyVaultPath) {
+      try {
+        const content = await this.stories.readStoryContent(materialized.storyVaultPath);
+        storyMarkdown = content.po?.markdown || null;
+        storyTechnicalMarkdown = content.technical?.markdown || null;
+        storyQAMarkdown = content.qa?.markdown || null;
+      } catch (err) {
+        vaultReadError = (err as Error).message;
+      }
+    }
+
+    // Pseudo-advisor pre-CLI: invocamos el planner (Sonnet + Opus advisor via
+    // SDK) ANTES de construir el prompt para inyectar un plan estructurado
+    // como primera sección operativa. El planner es best-effort: si falla
+    // (API down, rate limit, timeout), retorna null y el prompt se construye
+    // sin plan — el coder igual ejecuta, solo sin la guía pre-pensada.
+    //
+    // Cost esperado por story: ~$0.12 (Sonnet ~$0.03 + Opus advisor ~$0.09).
+    // Cuando la story tiene contexto rico (PO+TL+QA markdowns), el plan
+    // típicamente identifica archivos a tocar, patrón arquitectural, 1-3
+    // decisiones críticas y gotchas — exactamente las decisiones difíciles
+    // donde el advisor Opus aporta valor sobre Sonnet solo.
+    const plannerResult = await this.planner.planStory({
+      runId: materialized.runId,
+      storyTitle: materialized.storyTitle,
+      epicTitle: materialized.epicTitle,
+      epicMarkdown: materialized.epicMarkdown,
+      epicBusinessDiagram: materialized.epicBusinessDiagram,
+      storyMarkdown,
+      storyTechnicalMarkdown,
+      storyQAMarkdown,
+    });
+
+    // Persistir plan + usage en el AgentRun para observabilidad:
+    //  - plannerPlan: visible en AgentDetailDrawer para forensics.
+    //  - plannerUsage: agregado a totalCostUsd del batch en getBatchDetail.
+    // Best-effort: si el update falla (race con sweeper, network), log warn
+    // y seguimos — el claim no se cae por un fallo de observabilidad.
+    if (plannerResult.plan || plannerResult.usage) {
+      try {
+        await this.prisma.agentRun.update({
+          where: { id: materialized.runId },
+          data: {
+            plannerPlan: plannerResult.plan,
+            plannerUsage: plannerResult.usage as unknown as Prisma.InputJsonValue,
+          },
+        });
+      } catch {
+        // Persist del plan/usage falló — non-fatal. El prompt YA recibió el
+        // plan inyectado (lo importante para el coder). Solo se pierde el
+        // record persistente del AgentRun en DB; el `forge.planner.done`
+        // previo ya contiene los tokens/cost para forensics. Silent skip.
+      }
+    }
+
+    // Construimos el prompt FUERA del transaction — string concatenation
+    // no afecta locks. Recibe las 4 piezas de contexto enriquecido cuando
+    // están disponibles (PO + Technical + QA + diagrama) + el DAG context
+    // + el plan del advisor (si el planner pudo generarlo).
+    const prompt = this.promptBuilder.buildStoryPrompt({
+      epicTitle: materialized.epicTitle,
+      epicMarkdown: materialized.epicMarkdown,
+      epicBusinessDiagram: materialized.epicBusinessDiagram,
+      storyTitle: materialized.storyTitle,
+      storyMarkdown,
+      storyTechnicalMarkdown,
+      storyQAMarkdown,
+      completedSiblings: materialized.completedSiblings,
+      dodCriteria: materialized.dodCriteria,
+      advisorPlan: plannerResult.plan,
+    });
+
+    // Parsers que escalan el contexto a granularidad per-criterion en el
+    // verifier:
+    //   - acceptanceCriteria → DoD `acceptance-criteria` (PO markdown).
+    //   - qaTestCases → DoD `tests-passing` (QA markdown).
+    //   - technicalRequirements → DoD `technical-design` (TL markdown).
+    // Mismo patrón cross-section: pre-flight determinístico + Sonnet judge.
+    const acceptanceCriteria = ForgePromptBuilderService.extractAcceptanceCriteria(storyMarkdown);
+    const qaTestCases = ForgePromptBuilderService.extractTestCases(storyQAMarkdown);
+    const technicalRequirements = ForgePromptBuilderService.extractTechnicalRequirements(
+      storyTechnicalMarkdown,
+    );
+
+    // ════════════════════════════════════════════════════════════════════
+    // OBSERVABILIDAD: 2 logs estructurados de hitos del context engineering
+    // ════════════════════════════════════════════════════════════════════
+    this.logVaultLoaded({
+      runId: materialized.runId,
+      storyId: materialized.storyId,
+      epicId: materialized.epicId,
+      vaultPath: materialized.storyVaultPath,
+      vaultReadError,
+      po: storyMarkdown,
+      technical: storyTechnicalMarkdown,
+      qa: storyQAMarkdown,
+    });
+
+    this.logPromptBuilt({
+      runId: materialized.runId,
+      storyId: materialized.storyId,
+      epicId: materialized.epicId,
+      promptChars: prompt.length,
+      po: storyMarkdown,
+      technical: storyTechnicalMarkdown,
+      qa: storyQAMarkdown,
+      epicBusinessDiagram: materialized.epicBusinessDiagram,
+      acceptanceCriteria,
+      qaTestCases,
+      technicalRequirements,
+      completedSiblings: materialized.completedSiblings,
+      dodCriteriaCount: materialized.dodCriteria.length,
+    });
+
+    // ════════════════════════════════════════════════════════════════════
+    // DEFENSIVE VALIDATION del payload antes de retornar al worker
+    // ════════════════════════════════════════════════════════════════════
+    //
+    // Si CUALQUIER campo crítico vino null/empty (bug en materializeClaim,
+    // OrgAnthropicConfig roto, vault read fail catastrófico que dejó prompt
+    // sin contenido), abortamos el claim ANTES de pasarle data corrupta al
+    // worker. El worker tiene su propio safety net pero detectarlo en el
+    // backend es más rápido (no consume slot del worker) + permite cleanup
+    // limpio del AgentRun + Story claim state.
+    //
+    // Threshold de `anthropicApiKey: 10`: las claves reales `sk-ant-...` son
+    // 100+ chars; 10 es conservador pero atrapa null/empty/dummy values.
+    // Threshold de `prompt: 100`: prompts reales son 8K-15K chars; 100 es el
+    // mismo guard que el worker usa para consistencia cross-side.
+    const missingFields: string[] = [];
+    if (!materialized.anthropicApiKey || materialized.anthropicApiKey.trim().length < 10) {
+      missingFields.push(`anthropicApiKey(len=${materialized.anthropicApiKey?.length ?? 0})`);
+    }
+    if (!materialized.storyTitle || materialized.storyTitle.trim().length === 0) {
+      missingFields.push('storyTitle');
+    }
+    if (!materialized.branch || materialized.branch.trim().length === 0) {
+      missingFields.push('branch');
+    }
+    if (!materialized.epicId) {
+      missingFields.push('epicId');
+    }
+    if (!prompt || prompt.trim().length < 100) {
+      missingFields.push(`prompt(len=${prompt?.length ?? 0})`);
+    }
+
+    if (missingFields.length > 0) {
+      this.logger.error(
+        {
+          event: 'claim.invalid_payload',
+          runId: materialized.runId,
+          storyId: materialized.storyId,
+          missingFields,
+        },
+        `Claim payload tiene campos críticos vacíos: ${missingFields.join(', ')} — abortando claim antes de retornar al worker (cleanup AgentRun + un-claim story)`,
+      );
+      // Cleanup: marcar AgentRun como failed + un-claim story para que pueda
+      // re-claim-ear otro worker en el próximo poll (en vez de quedar zombie).
+      try {
+        await this.prisma.$transaction([
+          this.prisma.agentRun.update({
+            where: { id: materialized.runId },
+            data: {
+              status: 'failed',
+              errorMessage: `Claim payload validation failed: ${missingFields.join(', ')}`,
+            },
+          }),
+          this.prisma.story.update({
+            where: { id: materialized.storyId },
+            data: { claimedAt: null, status: 'backlog' },
+          }),
+        ]);
+      } catch (cleanupErr) {
+        this.logger.error(
+          {
+            event: 'claim.invalid_payload.cleanup_failed',
+            runId: materialized.runId,
+            storyId: materialized.storyId,
+            error: (cleanupErr as Error).message,
+          },
+          'Cleanup post-validation falló — AgentRun queda zombie hasta sweeper TTL',
+        );
+      }
+      throw new ConflictException(
+        `Claim payload validation failed for story ${materialized.storyId}: ${missingFields.join(', ')}`,
+      );
+    }
+
+    return {
+      runId: materialized.runId,
+      storyId: materialized.storyId,
+      storyTitle: materialized.storyTitle,
+      storyMarkdown,
+      epicId: materialized.epicId,
+      branch: materialized.branch,
+      prompt,
+      repoUrl: materialized.repoUrl,
+      baseBranch: materialized.baseBranch,
+      anthropicApiKey: materialized.anthropicApiKey,
+      forgeWorkerModel: materialized.forgeWorkerModel,
+      forgeWorkerEffort: materialized.forgeWorkerEffort,
+      dodVerifierModel: materialized.dodVerifierModel,
+      dodVerifierEffort: materialized.dodVerifierEffort,
+      dodCriteria: materialized.dodCriteria,
+      acceptanceCriteria,
+      qaTestCases,
+      technicalRequirements,
+    };
   }
 
   /**
@@ -291,15 +1108,22 @@ export class AgentRunService {
    * mantener todo bajo el mismo $transaction. `tx` es el cliente Prisma
    * con el lock activo; cualquier throw aborta la transacción y revierte
    * tanto el `claimedAt=NOW()` como el `agentRun.create`.
+   *
+   * Retorna `MaterializedClaim` (internal type) con los datos crudos
+   * necesarios para construir el `ClaimedStory` final. El caller
+   * (`claimStory`) hace `readStoryContent` y `buildStoryPrompt` FUERA del
+   * transaction para no mantener locks mientras GitHub responde
+   * (qa+architecture-reviewer 2026-05-12: bajo carga concurrente la HTTP
+   * call de vault dentro del $transaction serializa workers).
    */
   private async materializeClaim(
     tx: Prisma.TransactionClient,
     nodeId: string,
     tokenId: string,
     claimedRows: ClaimedStoryRow[],
-  ): Promise<ClaimedStory | null> {
+  ): Promise<MaterializedClaim | null> {
     if (claimedRows.length === 0) {
-      this.logger.debug(`[claim] nodeId=${nodeId} → 204 noStoriesReady`);
+      this.logger.debug({ nodeId }, `[claim] nodeId=${nodeId} → 204 noStoriesReady`);
       return null;
     }
 
@@ -310,10 +1134,13 @@ export class AgentRunService {
     const branch = `forge/epic-${claimed.epicId.slice(0, 8)}/story-${claimed.id.slice(0, 8)}`;
 
     // Lee la story DENTRO de la transacción para construir el prompt.
+    // Incluimos `epic.diagrams` para serializar el diagrama de negocio y
+    // pasárselo al agente como contexto — sin esto el agente improvisa la
+    // arquitectura del flow en vez de seguir el diseño aprobado.
     const story = await tx.story.findUnique({
       where: { id: claimed.id },
       include: {
-        epic: { select: { id: true, title: true, markdown: true } },
+        epic: { select: { id: true, title: true, markdown: true, diagrams: true } },
       },
     });
     if (!story) {
@@ -367,21 +1194,21 @@ export class AgentRunService {
     // Inyectamos el catálogo de DoD configurado por el operador en
     // `/factory/settings/Definition of Done` para que el agente sepa qué
     // criterios bloquean el merge ANTES de empezar a trabajar. Solo los
-    // `enabled` (todos hoy, por construcción del modelo nuevo) — y solo
-    // los campos visibles al agente: `text` + `description`.
-    // Incluimos `kind` además de text/description porque el worker lo
-    // usa para mapear a verificación determinística (dod-verifier.ts).
-    // El prompt builder solo necesita text/description pero ignora kind
-    // cuando lo recibe — sin overhead.
+    // Lee todos los criterios del catálogo. Solo los campos visibles al
+    // agente: `text` + `description`. Incluimos `kind` además porque el
+    // worker lo usa para mapear a verificación determinística
+    // (dod-verifier.ts). El prompt builder solo necesita text/description
+    // pero ignora kind cuando lo recibe — sin overhead.
     const dodCriteria = (await this.dod.findAll())
-      .filter((c) => c.enabled)
       .map((c) => ({ kind: c.kind, text: c.text, description: c.description }));
-    const prompt = this.promptBuilder.buildStoryPrompt({
-      epicTitle: story.epic.title,
-      epicMarkdown: story.epic.markdown,
-      storyTitle: story.title,
-      dodCriteria,
-    });
+
+    // NOTA: NO leemos el markdown de la story acá. Se hace FUERA del
+    // $transaction en `claimStory` después del commit, para no mantener
+    // el `FOR UPDATE OF s SKIP LOCKED` lock mientras esperamos respuesta
+    // de GitHub vault (puede tardar 200-800ms; bajo carga concurrente
+    // eso serializaría workers innecesariamente — qa+arch-reviewer
+    // 2026-05-12). Solo pasamos el `vaultPath` al caller para que
+    // decida si necesita hacer el read.
 
     // ════════════════════════════════════════════════════════════════════
     // GIT INTEGRATION (HITOS 2/4/5) — resolver clone URL + asegurar
@@ -399,49 +1226,444 @@ export class AgentRunService {
     // sin PR. Esto preserva el flow E2E para validación sin GitHub setup.
     let repoUrl: string | null = null;
     let baseBranch: string | null = null;
+    let gitWiringError: string | null = null;
     try {
-      const { cloneUrl, defaultBranch } = await this.github.getCloneUrl();
+      const { cloneUrl } = await this.github.getCloneUrl();
+      // Modelo de 3 niveles del Forge:
+      //   main ← DEV ← forge/sprint-batch-{epicId}
+      // La integration branch DEBE crearse desde `dev` (la branch de integración
+      // pre-release), NO desde el `defaultBranch` del repo (que típicamente es
+      // `main` por config). Antes pasábamos `defaultBranch` aquí — bug crítico
+      // descubierto 2026-05-14 — y eso hacía que el PR consolidado contra `dev`
+      // fallara con "No common ancestor" porque la integration branch nacía
+      // desde main, no desde dev. Lectura directa del config porque el
+      // BranchStrategyService no está inyectado en este service.
+      const strategyConfig = await this.prisma.branchStrategyConfig.findUnique({
+        where: { id: 'global' },
+        select: { devBranch: true },
+      });
+      const devBranch = strategyConfig?.devBranch ?? 'dev';
       const integrationBranch = `forge/sprint-batch-${claimed.epicId.slice(0, 8)}`;
 
-      // Idempotente: si la integration branch ya existe (re-encole), retorna
-      // la existente. Si NO existe, la crea desde defaultBranch (DEV/main).
-      // Esto se hace ANTES de devolver al worker para garantizar que cuando
-      // el worker pushee `forge/epic-X/story-Y`, la base ya existe en remote.
+      // Idempotente: si la integration branch ya existe (creada en enqueue),
+      // retorna la existente. Si NO existe (enqueue falló por sandbox o el
+      // epic es legacy), la crea desde `devBranch` para que el flow normal
+      // de open-PR → squash-merge a dev funcione sin "No common ancestor".
       await this.github.createIntegrationBranch({
         branchName: integrationBranch,
-        devBranch: defaultBranch,
+        devBranch,
         epicId: claimed.epicId,
       });
 
       repoUrl = cloneUrl;
       baseBranch = integrationBranch;
-      this.logger.log(
-        `[claim:${agentRun.id}] git wired: integrationBranch=${integrationBranch} (from ${defaultBranch})`,
-      );
     } catch (err) {
-      // Sin code repo configurado, o error en GitHub API. Fallback a sandbox
-      // mode — el run sigue ejecutando localmente sin clone/push.
-      this.logger.warn(
-        `[claim:${agentRun.id}] git integration unavailable, falling back to sandbox mode: ${(err as Error).message}`,
-      );
+      // Sandbox fallback. El log estructurado abajo emite mode=sandbox +
+      // el error como field — no duplicamos un log aparte para "fallback".
+      gitWiringError = (err as Error).message;
     }
 
-    this.logger.log(
-      `[claim:${agentRun.id}] nodeId=${nodeId} tokenId=${tokenId.slice(0, 8)} → storyId=${claimed.id} epicId=${claimed.epicId} branch=${branch} mode=${repoUrl ? 'git' : 'sandbox'}`,
+    const epicBusinessDiagram = this.serializeBusinessDiagram(
+      story.epic.diagrams,
+      claimed.epicId,
     );
+
+    // Un log estructurado por claim (reemplaza 2 logs sueltos):
+    // `forge.claim.materialized` con identificadores + git mode + error.
+    const mode = repoUrl ? 'git' : 'sandbox';
+    this.forgeClaimLogger.info(
+      {
+        event: 'forge.claim.materialized',
+        runId: agentRun.id,
+        storyId: claimed.id,
+        epicId: claimed.epicId,
+        nodeId,
+        tokenIdShort: tokenId.slice(0, 8),
+        branch,
+        baseBranch,
+        mode,
+        diagram: {
+          present: epicBusinessDiagram !== null,
+          chars: epicBusinessDiagram?.length ?? 0,
+        },
+        ...(gitWiringError ? { gitError: gitWiringError } : {}),
+      },
+      `materialized run=${agentRun.id.slice(0, 8)} story=${claimed.id.slice(0, 8)} epic=${claimed.epicId.slice(0, 8)} mode=${mode}`,
+    );
+
+    // Carga del contexto del DAG: stories del MISMO epic que YA terminaron
+    // antes que esta historia arrancara. La integration branch tiene los
+    // commits de éstas (via auto-merge en `complete()`), por lo que sus
+    // archivos están materializados en el workdir del worker. Sin embargo
+    // el agente no sabe explícitamente cuáles existen — solo via `ls`. Acá
+    // las cargamos para inyectarlas al prompt con paths concretos.
+    //
+    // 1. Hard deps directas — relación StoryDependency hardness='hard'.
+    //    Son las que esta story EXPLÍCITAMENTE depende. El prompt las
+    //    resalta como "OBLIGATORIO leer estos archivos antes de implementar".
+    // 2. Otras stories completadas del epic — siblings informativos. El
+    //    agente debe ser consciente de su existencia pero no es bloqueante.
+    //
+    // Filter por `agentRuns.status='completed'` con `take: 1` (último run
+    // exitoso) para incluir paths del filesModifiedPaths. Stories con status
+    // 'in_review' (PR abierto pero no mergeado) NO entran porque la
+    // integration branch aún no tiene su trabajo.
+    const completedSiblings = await this.loadCompletedSiblingsForStory(
+      tx,
+      claimed.id,
+      claimed.epicId,
+    );
+
+    // Forge Worker + DoD Verifier config (singleton AgentTokenSettings) —
+    // leídos fuera del transaction porque NO afecta locks y el cache TTL=30s
+    // del service hace que el read sea casi siempre in-memory. Los 2 lecturas
+    // hit el mismo cache, así que efectivamente es 1 read.
+    const [forgeWorkerConfig, dodVerifierConfig] = await Promise.all([
+      this.agentTokens.getForgeWorker(),
+      this.agentTokens.getDodVerifier(),
+    ]);
 
     return {
       runId: agentRun.id,
       storyId: claimed.id,
       storyTitle: claimed.title,
+      storyVaultPath: story.vaultPath,
       epicId: claimed.epicId,
+      epicTitle: story.epic.title,
+      epicMarkdown: story.epic.markdown,
+      epicBusinessDiagram,
+      completedSiblings,
       branch,
-      prompt,
       repoUrl,
       baseBranch,
       anthropicApiKey,
       dodCriteria,
+      forgeWorkerModel: forgeWorkerConfig.model,
+      forgeWorkerEffort: forgeWorkerConfig.effort,
+      dodVerifierModel: dodVerifierConfig.model,
+      dodVerifierEffort: dodVerifierConfig.effort,
     };
+  }
+
+  // ════════════════════════════════════════════════════════════════════
+  // OBSERVABILIDAD — context engineering logs estructurados (pino-native)
+  // ════════════════════════════════════════════════════════════════════
+  //
+  // Estrategia: emitir UN log estructurado por hito significativo (no
+  // múltiples logs por fase secundaria). Cada log es JSON nativo via pino:
+  //   logger.info({ event, runId, context }, 'mensaje legible')
+  //     → { "level":30, "event":"...", "runId":"...", "context":{...}, "msg":"..."}
+  //
+  // Cada log tiene:
+  //   - `event`: clave estable queryable en Loki/Grafana (`forge.claim.*`).
+  //   - Identificadores (`runId`, `storyId`, `epicId`) para correlación.
+  //   - Metadata anidada por dominio (`context.po`, `context.dag`).
+  //   - Mensaje legible humano que sale como `msg` en JSON / pretty.
+  //
+  // Hitos cubiertos:
+  //   - `forge.claim.materialized`: claim row creado + git wiring outcome.
+  //   - `forge.claim.vault.loaded`: vault read del story content + outcome.
+  //   - `forge.claim.prompt.built`: snapshot completo de lo que recibió el
+  //     agente (sources, sizes, counts). Es EL log autoritativo para
+  //     responder "¿el agente recibió suficiente contexto?".
+  //   - `forge.claim.diagram.parse_failed`: diagrama corrupto (WARN).
+  //
+  // Niveles:
+  //   - INFO: estado normal del flow (claim ok, vault loaded, prompt built).
+  //   - WARN: degradación graciosa (vault no leíble, sandbox fallback).
+  //
+  // Queries de ejemplo:
+  //   {app="cenzontle-api"} | json | event="forge.claim.prompt.built" | completeness < 4
+  //   {app="cenzontle-api"} | json | event="forge.claim.vault.loaded" | outcome="failed"
+  //   {app="cenzontle-api"} | json | event="forge.claim.prompt.built" | context_dag_hardDeps > 0
+
+  /**
+   * Log del hito "vault content loaded". Discrete `outcome` field para
+   * queries simples ("runs donde el vault no se leyó"). Reemplaza 3 logs
+   * separados que existían antes — un único punto de telemetry.
+   */
+  private logVaultLoaded(input: {
+    runId: string;
+    storyId: string;
+    epicId: string;
+    vaultPath: string | null;
+    vaultReadError: string | null;
+    po: string | null;
+    technical: string | null;
+    qa: string | null;
+  }): void {
+    let outcome: 'loaded' | 'empty' | 'failed' | 'no-path';
+    if (!input.vaultPath) outcome = 'no-path';
+    else if (input.vaultReadError) outcome = 'failed';
+    else if (!input.po && !input.technical && !input.qa) outcome = 'empty';
+    else outcome = 'loaded';
+
+    const payload = {
+      event: 'forge.claim.vault.loaded',
+      runId: input.runId,
+      storyId: input.storyId,
+      epicId: input.epicId,
+      outcome,
+      vaultPath: input.vaultPath,
+      po: { chars: input.po?.length ?? 0, present: input.po !== null },
+      technical: { chars: input.technical?.length ?? 0, present: input.technical !== null },
+      qa: { chars: input.qa?.length ?? 0, present: input.qa !== null },
+      ...(input.vaultReadError ? { error: input.vaultReadError } : {}),
+    };
+    const msg = `vault.loaded outcome=${outcome} po=${payload.po.chars}ch tech=${payload.technical.chars}ch qa=${payload.qa.chars}ch`;
+
+    if (outcome === 'failed' || outcome === 'empty') {
+      this.forgeClaimLogger.warn(payload, msg);
+    } else {
+      this.forgeClaimLogger.info(payload, msg);
+    }
+  }
+
+  /**
+   * Log del hito "prompt built" — snapshot AUTORITATIVO de lo que recibió
+   * el agente. Cualquier debug del Forge ("¿por qué el agente improvisó la
+   * arquitectura?", "¿no vio la sección QA?") empieza por buscar este log
+   * y revisar el payload.
+   *
+   * Métrica clave para dashboards: `completeness` 0-5 = cuántas fuentes
+   * de contexto se inyectaron (po | technical | qa | diagram | dag_siblings).
+   * Si baja repentinamente → regresión en story-gen o vault corrupto.
+   *
+   * Queries (Grafana/Loki):
+   *   | json | event="forge.claim.prompt.built" | completeness < 4
+   *   | json | event="forge.claim.prompt.built" | context_dag_hardDeps > 0
+   *   | json | event="forge.claim.prompt.built" | context_po_criteriaCount == 0 | context_po_chars > 100
+   */
+  private logPromptBuilt(input: {
+    runId: string;
+    storyId: string;
+    epicId: string;
+    promptChars: number;
+    po: string | null;
+    technical: string | null;
+    qa: string | null;
+    epicBusinessDiagram: string | null;
+    acceptanceCriteria: string[];
+    qaTestCases: Array<{ category: 'happy' | 'edge'; description: string }>;
+    technicalRequirements: Array<{
+      category: 'checklist' | 'contract' | 'validation' | 'errors';
+      description: string;
+    }>;
+    completedSiblings: Array<{ isHardDep: boolean; filesModifiedPaths: string[] }>;
+    dodCriteriaCount: number;
+  }): void {
+    const happy = input.qaTestCases.filter((tc) => tc.category === 'happy').length;
+    const edge = input.qaTestCases.length - happy;
+    const trChecklist = input.technicalRequirements.filter((tr) => tr.category === 'checklist').length;
+    const trContract = input.technicalRequirements.filter((tr) => tr.category === 'contract').length;
+    const trValidation = input.technicalRequirements.filter((tr) => tr.category === 'validation').length;
+    const trErrors = input.technicalRequirements.filter((tr) => tr.category === 'errors').length;
+    const hard = input.completedSiblings.filter((s) => s.isHardDep).length;
+    const dagPaths = input.completedSiblings.reduce(
+      (sum, s) => sum + s.filesModifiedPaths.length,
+      0,
+    );
+    // `completeness` 0-5: count de fuentes de contexto con contenido.
+    // Métrica simple para alertar regresiones del context engineering.
+    const sources = {
+      po: input.po !== null,
+      technical: input.technical !== null,
+      qa: input.qa !== null,
+      businessDiagram: input.epicBusinessDiagram !== null,
+      dagSiblings: input.completedSiblings.length > 0,
+    };
+    const completeness = Object.values(sources).filter(Boolean).length;
+
+    const payload = {
+      event: 'forge.claim.prompt.built',
+      runId: input.runId,
+      storyId: input.storyId,
+      epicId: input.epicId,
+      promptChars: input.promptChars,
+      completeness,
+      sourcesTotal: 5,
+      sources,
+      context: {
+        po: { chars: input.po?.length ?? 0, criteriaCount: input.acceptanceCriteria.length },
+        technical: {
+          chars: input.technical?.length ?? 0,
+          requirements: {
+            total: input.technicalRequirements.length,
+            checklist: trChecklist,
+            contract: trContract,
+            validation: trValidation,
+            errors: trErrors,
+          },
+        },
+        qa: {
+          chars: input.qa?.length ?? 0,
+          testCases: { total: input.qaTestCases.length, happy, edge },
+        },
+        businessDiagram: {
+          present: input.epicBusinessDiagram !== null,
+          chars: input.epicBusinessDiagram?.length ?? 0,
+        },
+        dag: {
+          totalSiblings: input.completedSiblings.length,
+          hardDeps: hard,
+          totalPaths: dagPaths,
+        },
+        dodCriteria: { count: input.dodCriteriaCount },
+      },
+    };
+    const msg =
+      `prompt.built ${input.promptChars}ch completeness=${completeness}/5 ` +
+      `po=${payload.context.po.chars}ch(${input.acceptanceCriteria.length}AC) ` +
+      `tech=${payload.context.technical.chars}ch(${input.technicalRequirements.length}TR:${trChecklist}cl+${trContract}ct+${trValidation}vl+${trErrors}er) ` +
+      `qa=${payload.context.qa.chars}ch(${input.qaTestCases.length}TC:${happy}h+${edge}e) ` +
+      `diag=${payload.context.businessDiagram.chars}ch ` +
+      `dag=${input.completedSiblings.length}sib(${hard}hard,${dagPaths}paths) ` +
+      `dod=${input.dodCriteriaCount}crit`;
+
+    this.forgeClaimLogger.info(payload, msg);
+  }
+
+  /**
+   * Carga las stories del mismo epic que YA completaron exitosamente, con
+   * sus hard-deps marcadas. Se ejecuta DENTRO de la transacción del claim
+   * para garantizar consistency (la ventana es trivialmente pequeña — read-
+   * only de stories en estado terminal — pero respetamos el lock semantics).
+   *
+   * Ordena por completedAt DESC para que el agente vea primero las más
+   * recientes (típicamente las que producen el contrato más actual).
+   *
+   * Cap a 20 siblings para defenderse de epics legacy con cientos de stories
+   * — el prompt no escala bien a payloads gigantes y la utilidad marginal
+   * cae rápidamente después de las primeras 10-15 más recientes.
+   */
+  private async loadCompletedSiblingsForStory(
+    tx: Prisma.TransactionClient,
+    currentStoryId: string,
+    epicId: string,
+  ): Promise<MaterializedClaim['completedSiblings']> {
+    // Set de hard-deps de la story actual.
+    const hardDeps = await tx.storyDependency.findMany({
+      where: {
+        storyId: currentStoryId,
+        hardness: 'hard',
+      },
+      select: { blockedById: true },
+    });
+    const hardDepIds = new Set(hardDeps.map((d) => d.blockedById));
+
+    // Stories del mismo epic completadas (status=done; in_review excluido
+    // porque el PR aún no se mergeó al integration branch).
+    const siblings = await tx.story.findMany({
+      where: {
+        epicId,
+        id: { not: currentStoryId },
+        status: 'done',
+      },
+      select: {
+        id: true,
+        title: true,
+        agentRuns: {
+          where: { status: 'completed' },
+          orderBy: { completedAt: 'desc' },
+          take: 1,
+          select: {
+            prNumber: true,
+            filesModified: true,
+            filesModifiedPaths: true,
+            completedAt: true,
+          },
+        },
+      },
+      orderBy: { updatedAt: 'desc' },
+      take: 20,
+    });
+
+    return siblings
+      .filter((s) => s.agentRuns.length > 0 && s.agentRuns[0].completedAt)
+      .map((s) => {
+        const run = s.agentRuns[0];
+        return {
+          storyId: s.id,
+          title: s.title,
+          isHardDep: hardDepIds.has(s.id),
+          prNumber: run.prNumber,
+          filesModified: run.filesModified,
+          filesModifiedPaths: run.filesModifiedPaths ?? [],
+          completedAt: run.completedAt!.toISOString(),
+        };
+      });
+  }
+
+  /**
+   * Serializa el primer diagrama de negocio (`type === 'business'`) de la
+   * épica a texto legible para el agente Forge. JSON estructurado de nodes/
+   * edges es demasiado verboso para inyectar al prompt — formateamos el
+   * `steps` array como lista numerada (preferred path) o fallback a una
+   * descripción compacta de nodos + edges.
+   *
+   * NULL si la épica no tiene diagrama de negocio o el JSON está corrupto.
+   * Defensa: cualquier exception interna se silencia con warn — el agente
+   * sigue funcionando sin el diagrama, no es un blocker.
+   */
+  private serializeBusinessDiagram(diagramsJson: unknown, epicId: string): string | null {
+    try {
+      if (!Array.isArray(diagramsJson) || diagramsJson.length === 0) return null;
+      const diagrams = diagramsJson as Array<{
+        type?: string;
+        name?: string;
+        nodes?: Array<{ id: string; data?: { label?: string; type?: string } }>;
+        edges?: Array<{ source: string; target: string; label?: string }>;
+        steps?: Array<{ order: number; title: string; description: string }>;
+      }>;
+      const business = diagrams.find((d) => d?.type === 'business');
+      if (!business) return null;
+
+      const parts: string[] = [];
+      if (business.name) parts.push(`**${business.name}**`);
+
+      // Preferred: lista numerada de pasos (el agente QA + TL los redactaron
+      // como narrativa legible del flujo). Si no hay steps, caemos al
+      // dump compacto de nodos + edges.
+      if (Array.isArray(business.steps) && business.steps.length > 0) {
+        const sorted = [...business.steps].sort((a, b) => a.order - b.order);
+        parts.push(``, `### Flujo del diagrama:`);
+        for (const step of sorted) {
+          parts.push(`${step.order}. **${step.title}** — ${step.description}`);
+        }
+      } else if (Array.isArray(business.nodes) && business.nodes.length > 0) {
+        parts.push(``, `### Nodos:`);
+        for (const node of business.nodes) {
+          const label = node.data?.label ?? node.id;
+          const nodeType = node.data?.type ? ` (${node.data.type})` : '';
+          parts.push(`- ${label}${nodeType}`);
+        }
+        if (Array.isArray(business.edges) && business.edges.length > 0) {
+          // Mapea ids a labels para legibilidad humana.
+          const labelById = new Map<string, string>(
+            business.nodes.map((n) => [n.id, n.data?.label ?? n.id]),
+          );
+          parts.push(``, `### Conexiones (flow):`);
+          for (const edge of business.edges) {
+            const from = labelById.get(edge.source) ?? edge.source;
+            const to = labelById.get(edge.target) ?? edge.target;
+            const via = edge.label ? ` — ${edge.label}` : '';
+            parts.push(`- ${from} → ${to}${via}`);
+          }
+        }
+      }
+
+      return parts.length > 0 ? parts.join('\n') : null;
+    } catch (err) {
+      this.forgeClaimLogger.warn(
+        {
+          event: 'forge.claim.diagram.parse_failed',
+          epicId,
+          error: (err as Error).message,
+        },
+        `diagram.parse_failed epic=${epicId.slice(0, 8)} — ${(err as Error).message}`,
+      );
+      return null;
+    }
   }
 
   /**
@@ -483,7 +1705,10 @@ export class AgentRunService {
           : {}),
         // HITO 1.6: persist criteria progress (worker milestones + agent custom)
         ...(dto.criteriaProgress !== undefined
-          ? { criteriaProgress: dto.criteriaProgress as Prisma.InputJsonValue }
+          ? // Doble cast vía `unknown`: el DTO ahora es CriterionEventDto[] (validado),
+// pero TS no acepta cast directo a InputJsonValue porque DTOs no tienen
+// index signature. Mismo patrón que el cast de dodVerification abajo.
+{ criteriaProgress: dto.criteriaProgress as unknown as Prisma.InputJsonValue }
           : {}),
         // HITO 1.5: la primera vez que el worker reporta ttydUrl, lo persistimos
         // para que el frontend pueda mostrar iframe del terminal en vivo
@@ -506,10 +1731,30 @@ export class AgentRunService {
                 dto.dodVerification as unknown as Prisma.InputJsonValue,
             }
           : {}),
+        // Cost real-time: el worker manda generatorUsage parcial después de
+        // cada attempt completado (sin esperar al /complete). Permite que el
+        // card "Cost" de la UI suba attempt-por-attempt en vez de saltar 0 → N.
+        ...(dto.generatorUsage !== undefined
+          ? {
+              generatorUsage:
+                dto.generatorUsage as unknown as Prisma.InputJsonValue,
+            }
+          : {}),
       },
     });
 
-    this.logger.debug(`[run:${runId}] progress nodeId=${nodeId} status=${newStatus}`);
+    if (dto.generatorUsage !== undefined) {
+      // Log testigo del cost tracking — validado E2E 2026-05-12, downgrade a
+      // debug en cleanup 2026-05-19. El `completeRun.cost.received` final ya
+      // captura el agregado de la story.
+      this.logger.debug(
+        `[reportProgress:${runId}] cost.received: ` +
+          `attempts=${dto.generatorUsage.callsCount} ` +
+          `tokens=${dto.generatorUsage.totalInputTokens + dto.generatorUsage.totalOutputTokens} ` +
+          `cost=$${dto.generatorUsage.totalCostUsd.toFixed(4)}`,
+      );
+    }
+    this.logger.debug({ runId, nodeId, newStatus }, `[run:${runId}] progress nodeId=${nodeId} status=${newStatus}`);
   }
 
   /**
@@ -553,6 +1798,36 @@ export class AgentRunService {
     }
 
     const exitedClean = dto.exitCode === 0;
+    // SEC-03: gate server-side para forceCompletion. El flag del worker
+    // dispara mergePullRequest() real (squash merge irreversible vía Octokit).
+    // Sin gate, un worker token leakeado puede auto-mergear PRs arbitrarios
+    // saltándose el human review. Reglas:
+    //  - production (NODE_ENV=production): hard-deny SIEMPRE, ignora la env var
+    //  - dev/test: requiere FORGE_ALLOW_FORCE_COMPLETION=1 explícita
+    //
+    // El flujo MOCK end-to-end (DAG-vs-git-graph sync de wave anterior) sigue
+    // funcionando si el operador setea ambas vars: DOD_VERIFIER_MOCK=1 en el
+    // worker + FORGE_ALLOW_FORCE_COMPLETION=1 en el backend.
+    const forceCompletionAllowed =
+      process.env.NODE_ENV !== 'production' &&
+      process.env.FORGE_ALLOW_FORCE_COMPLETION === '1';
+    if (dto.forceCompletion === true && !forceCompletionAllowed) {
+      this.logger.warn(
+        `[run:${runId}] worker requested forceCompletion=true but server gate is closed ` +
+          `(NODE_ENV=${process.env.NODE_ENV ?? 'unset'}, ` +
+          `FORGE_ALLOW_FORCE_COMPLETION=${process.env.FORGE_ALLOW_FORCE_COMPLETION ?? 'unset'}). ` +
+          `Ignorando flag — story irá a in_review como en PROD.`,
+      );
+    }
+    // Calculados early porque el bloque auto-merge (DAG-vs-git-graph sync)
+    // necesita ambos. Sin auto-merge en MOCK las waves posteriores clonan un
+    // integration branch sin los outputs previos → conflictos divergentes.
+    // En PROD el merge queda al humano vía el PR abierto — comportamiento
+    // sin cambio. `integrationBranch` se computa una vez y se reutiliza
+    // tanto en PR creation como en el log del auto-merge.
+    const forceCompletion =
+      exitedClean && dto.forceCompletion === true && forceCompletionAllowed;
+    const integrationBranch = `forge/sprint-batch-${run.story.epic.id.slice(0, 8)}`;
 
     // ════════════════════════════════════════════════════════════════════
     // HITO 5 — PR creation via Octokit cuando worker reportó push exitoso
@@ -567,7 +1842,6 @@ export class AgentRunService {
     let prNumber: number | undefined = dto.prNumber; // legacy: worker pudo mandarlo
     let prUrl: string | undefined;
     if (exitedClean && dto.prBranchPushed && prNumber === undefined) {
-      const integrationBranch = `forge/sprint-batch-${run.story.epic.id.slice(0, 8)}`;
       const prTitle = `[Forge] ${run.story.title}`;
       const prBody = [
         `## Auto-generated by CENZONTLE Forge`,
@@ -581,6 +1855,10 @@ export class AgentRunService {
         `Revisores asignados (code-reviewer + security-reviewer) lo evaluarán antes del merge a la integration branch.`,
       ].join('\n');
 
+      this.logger.info(
+        `[run:${runId}] STORY_BLOCKED_BY_PR_CREATION attempt: ` +
+          `openStoryPullRequest(head=${run.branch}, base=${integrationBranch})`,
+      );
       try {
         const pr = await this.github.openStoryPullRequest({
           headBranch: run.branch,
@@ -590,30 +1868,284 @@ export class AgentRunService {
         });
         prNumber = pr.prNumber;
         prUrl = pr.htmlUrl;
-        this.logger.log(
-          `[run:${runId}] PR #${prNumber} abierto: ${prUrl}`,
+        this.logger.info(
+          `[run:${runId}] STORY_BLOCKED_BY_PR_CREATION resolved: PR #${prNumber} abierto en ${prUrl}`,
         );
       } catch (err) {
         // PR creation falló pero el push sí ocurrió. No marcamos failed —
         // el commit está safe en remote. Loggeamos para que un humano
-        // pueda re-intentar manualmente o un cron posterior.
+        // pueda re-intentar manualmente o un cron posterior. En MOCK mode
+        // el auto-merge tampoco corre (skip silencioso del DAG-sync), por
+        // lo que stories dependientes verán un base sin estos cambios.
+        //
+        // 2026-05-13: enriquecemos el log con status code + response body
+        // de GitHub (cuando son accesibles desde Octokit RequestError). Esto
+        // permite distinguir entre causa raíz comunes:
+        //   - 404 "Not Found" → base branch no existe en remote
+        //   - 422 "Validation Failed" → PR ya existe con mismo head, o head sin commits
+        //   - 403 "Bad credentials" → token sin permisos
+        //   - 429 / 403 X-RateLimit-Remaining=0 → rate limit
+        const e = err as Error & {
+          status?: number;
+          response?: { data?: unknown; status?: number };
+        };
+        const ghStatus = e.status ?? e.response?.status ?? 'unknown';
+        const ghResponseBody =
+          e.response?.data !== undefined
+            ? JSON.stringify(e.response.data).slice(0, 500)
+            : 'unavailable';
         this.logger.error(
-          `[run:${runId}] PR creation FAILED tras push exitoso: ${(err as Error).message}. ` +
-            `Commit safe en remote (${dto.commitSha?.slice(0, 7) ?? 'unknown'}). Re-intentar manualmente.`,
+          `[run:${runId}] STORY_BLOCKED_BY_PR_CREATION FAILED ` +
+            `head=${run.branch} base=${integrationBranch}: ` +
+            `${e.message} (githubStatus=${ghStatus}, githubResponse=${ghResponseBody}). ` +
+            `Commit safe en remote (${dto.commitSha?.slice(0, 7) ?? 'unknown'}). ` +
+            `Story va a quedar atascada hasta que un humano abra el PR manualmente o se re-intente. ` +
+            `Causa probable: base branch '${integrationBranch}' no existe en remote — verificar con ` +
+            `\`gh api repos/<owner>/<repo>/branches/${integrationBranch}\`.`,
         );
       }
     }
 
-    const movedToReview = exitedClean && prNumber !== undefined;
-    // SANDBOX MODE: si claude terminó limpio pero no hubo push (sin code
-    // repo configurado), avanzamos la historia a 'done' directamente para
-    // que el DAG fluya y los workers puedan reclamar dependientes.
-    // En modo git real, siempre debería haber prNumber (movedToReview=true);
-    // si fallé crear PR, queda como completed sin movimiento de story.
+    // ════════════════════════════════════════════════════════════════════
+    // DAG vs git-graph sync — auto-merge automático cross-story
+    // ════════════════════════════════════════════════════════════════════
+    //
+    // CAMBIO 2026-05-16 (fix bug crítico): este bloque AHORA corre en
+    // CUALQUIER modo (MOCK o real DoD verifier), no solo MOCK como antes.
+    // El gate previo `forceCompletion &&` causaba que en modo real (sin
+    // DOD_VERIFIER_MOCK=1) los PRs cross-story quedaran open silenciosamente
+    // — el ConflictResolverService NUNCA se ejecutaba para resolver
+    // overlaps comunes (package.json, .gitignore, etc.) en producción.
+    //
+    // Filosofía corregida del Forge:
+    //   - Story passes DoD → PR opens → AUTO-MERGE a sprint-batch  ← acá
+    //   - Sprint-batch acumula todo el trabajo del epic
+    //   - "Approve & Merge to DEV" botón = human gate FINAL para sprint-batch → DEV
+    //
+    // El human-in-loop NO es en cada story PR — es en el merge consolidado
+    // sprint-batch → DEV. Sin auto-merge cross-story, el DAG de stories
+    // dependientes (Wave N+1) ve un sprint-batch vacío y los stories de Wave
+    // N+1 fallan por no encontrar archivos de hard-deps.
+    //
+    // Gate ahora: solo requiere PR exists + push exitoso del worker. Si la
+    // resolución manual es deseada (e.g., epic experimental), el operador
+    // puede deshabilitar este path con env var (future enhancement) o
+    // configurar branch protection en sprint-batch (GitHub block merges).
+    //
+    // autoMergeOk: tracking explícito de si el auto-merge funcionó (sea por
+    // path happy o por ConflictResolverService Capa A/B). Si NO funcionó
+    // (race condition, conflict no resolvible, branch protection),
+    // el PR queda open y la story igual va a 'done' (per refactor semantics
+    // 2026-05-16). El operador debe revisar el PR manualmente.
+    let autoMergeOk = false;
+    if (prNumber !== undefined && dto.prBranchPushed) {
+      try {
+        // Defensa en profundidad contra race condition de auto-merge concurrente
+        // (diagnosticado 2026-05-13 con epics 95949b14 y 1ba4627e donde 2 stories
+        // de la misma wave terminaban al ~mismo segundo y solo 1 mergeó;
+        // refinado 2026-05-15 con epic f10c04b8 donde PR #98 falló por base
+        // stale tras merge de su hermana):
+        //   Capa 0 (updateBranch): pre-merge alinea head con base actualizado.
+        //     Cuando stories paralelas terminan en orden no-determinístico, la
+        //     primera mergea y avanza el integration branch — las siguientes
+        //     ven `mergeable_state: behind`. `updateBranch` resuelve ese
+        //     desfase de timing automáticamente cuando los archivos no
+        //     overlap. Si overlap real → throw isMergeConflict → in_review
+        //     honesto. SIN esta capa, conflicts de timing eran indistinguibles
+        //     de conflicts reales y todos caían a in_review.
+        //   Capa 1 (mutex): withMergeLock serializa update+merge como unidad
+        //     atómica al mismo integrationBranch dentro del proceso del backend.
+        //     Sin el lock, otra story podría mergear entre nuestro update y
+        //     nuestro merge, dejando head stale otra vez.
+        //   Capa 2 (retry): mergeWithRetry reintenta hasta 3 veces con backoff
+        //     1s/2s/4s ante fallos transient (multi-replica, races externos,
+        //     branch protection delay, GitHub rate limit). Post-updateBranch
+        //     el merge debería ser fast-forward, así que esto es defensive.
+        const mergeResult = await this.withMergeLock(integrationBranch, async () => {
+          // Capa 0: alinear head con base antes de mergear. Si conflict real,
+          // throw bubble-up al try/catch externo → cae a in_review.
+          await this.updateBranchToBaseWithRetry(runId, prNumber!);
+          // Capa 2: merge con retry. Post-update head está al día → fast-forward.
+          return this.mergeWithRetry(
+            runId,
+            prNumber!,
+            `[Forge] ${run.story.title} (#${prNumber})`,
+            `Auto-merged por Forge en MOCK mode (forceCompletion=true).\nRun: ${runId}`,
+          );
+        });
+        autoMergeOk = true;
+        this.logger.info(
+          `[run:${runId}] PR #${prNumber} auto-merged a ${integrationBranch} (sha=${mergeResult.sha?.slice(0, 7) ?? 'null'})`,
+        );
+        await this.cleanupBranchIfEnabled(run.branch, runId, 'story');
+      } catch (mergeErr) {
+        // Capa 3 (auto-resolve via ConflictResolverService) — preserva
+        // paralelismo intra-wave intentando resolver conflicts REALES de
+        // archivos cuando stories paralelas tocaron los mismos archivos
+        // structured (típico: package.json, .gitignore, jest.config.js).
+        //
+        // Solo intenta resolver si el error es `isMergeConflict=true`
+        // (conflict real, no transient). Para errores no-conflict
+        // (branch protection, token, etc.), salta directo al log+in_review.
+        //
+        // Si el resolver auto-mergea exitosamente con un commit determinístico,
+        // re-intenta el merge del PR (un solo intento — el head ya tiene
+        // los cambios del base, debe ser fast-forward). Si re-merge falla
+        // O resolver no pudo (archivo de código no resolvible por Capa A),
+        // cae al log+in_review como antes.
+        //
+        // Esto elimina el caso típico de "SETUP y TESTS ambos modificaron
+        // package.json paralelo → conflict real → in_review" sin sacrificar
+        // paralelismo. Capa B (Sonnet judge para código real) pendiente.
+        const isConflict = (mergeErr as Error & { isMergeConflict?: boolean }).isMergeConflict === true;
+        let resolved = false;
+        if (isConflict && prNumber !== undefined) {
+          try {
+            const creds = await this.github.getRepoCredentials();
+            const resolution = await this.conflictResolver.tryAutoResolve({
+              runId,
+              prNumber,
+              repoUrl: creds.repoUrl,
+              headBranch: run.branch,
+              baseBranch: integrationBranch,
+              githubToken: creds.token,
+            });
+
+            if (resolution.ok) {
+              this.logger.info(
+                `[run:${runId}] PR #${prNumber} auto-resolved: ${resolution.resolvedFiles?.join(', ') ?? 'no files'}. ` +
+                  `Re-intentando merge del PR...`,
+              );
+              // Bug #5 fix (2026-05-17): GitHub cache stale tras push del
+              // resolver causa que `pulls.merge` API responda 405 con state
+              // anterior durante ~3-10s post-push. Polleamos `mergeable_state`
+              // hasta que esté READY antes de intentar merge. Sin esto, el
+              // re-merge falla con 405 aunque el push fue exitoso y el conflict
+              // ya está resuelto. Validado E2E: PR #132 (Capa B Sonnet)
+              // requirió ~30s post-push para que GitHub re-evaluara — caía a
+              // in_review por timing, no por bug real del resolver.
+              await this.pollMergeableStateAfterResolverPush(runId, prNumber);
+
+              // Re-intentar merge ahora que el head tiene la resolución
+              // pusheada Y GitHub propagó el state. Usa el mismo mutex
+              // para serialización con otras stories del mismo integration
+              // branch. mergeWithRetry hace 3 attempts si state aún no
+              // propagó completamente (backoff 1s/2s/4s = 7s extra).
+              try {
+                const reMerge = await this.withMergeLock(integrationBranch, () =>
+                  this.mergeWithRetry(
+                    runId,
+                    prNumber,
+                    `[Forge] ${run.story.title} (#${prNumber})`,
+                    `Auto-merged por Forge tras conflict resolution (run ${runId}).`,
+                    // allowConflictRetry: true → bug #5 fix. Si el primer
+                    // attempt falla con 405 conflict puede ser cache stale
+                    // GitHub aún propagando el push del resolver. Retry con
+                    // backoff 1s/2s/4s = ~7s extra normalmente resuelve.
+                    true,
+                  ),
+                );
+                autoMergeOk = true;
+                resolved = true;
+                this.logger.info(
+                  `[run:${runId}] PR #${prNumber} auto-merged tras conflict resolution (sha=${reMerge.sha?.slice(0, 7) ?? 'null'})`,
+                );
+                await this.cleanupBranchIfEnabled(run.branch, runId, 'story');
+              } catch (reMergeErr) {
+                this.logger.error(
+                  `[run:${runId}] PR #${prNumber} re-merge post-resolution failed: ${(reMergeErr as Error).message}. ` +
+                    `Resolución pusheada pero PR sigue conflicting — humano debe investigar.`,
+                );
+              }
+            } else {
+              this.logger.info(
+                `[run:${runId}] PR #${prNumber} conflict no resolvible automáticamente: ${resolution.reason}. ` +
+                  `Cayendo a in_review.`,
+              );
+            }
+          } catch (resolverErr) {
+            this.logger.warn(
+              `[run:${runId}] PR #${prNumber} ConflictResolverService throw inesperado: ${(resolverErr as Error).message}. ` +
+                `Cayendo a in_review (mismo comportamiento que sin resolver).`,
+            );
+          }
+        }
+
+        if (!resolved) {
+          // Fallo tras agotar todos los retries Y respetando el mutex. Esto
+          // indica un problema NO transient (branch protection rule real,
+          // token sin permisos, conflict real no resolvible por Capa A) —
+          // propagación a 'in_review' es la decisión correcta porque no
+          // es una race recuperable.
+          this.logger.error(
+            `[run:${runId}] auto-merge del PR #${prNumber} FAILED tras retries: ${(mergeErr as Error).message}. ` +
+              `Story cae a 'in_review' (NO 'done') para bloquear stories dependientes hasta resolución manual del PR.`,
+          );
+        }
+      }
+    }
+
+    // Transición de la story según el outcome del run:
+    //  - movedToReview (variable name legacy): el worker terminó limpio + hay
+    //    PR + el worker pushó la branch. Status sale a 'done' (per semantics
+    //    refactor 2026-05-16) porque coder + DoD + PR push completados.
+    //    El auto-merge a sprint-batch ocurrió arriba (independiente de MOCK
+    //    o real mode tras fix 2026-05-16). Si autoMergeOk=true: PR mergeado,
+    //    sprint-batch tiene los commits. Si autoMergeOk=false: PR queda open
+    //    en GitHub para resolución humana, pero la story igual marca 'done'
+    //    para no bloquear el DAG (el sweeper detecta stuck-claimed por TTL).
+    //  - movedToDoneSandbox: sandbox path (sin push ni PR). Story 'done'
+    //    sin trabajo en remoto.
+    //  - El nombre 'in_review' queda RESERVADO para epic futuro de reviewer
+    //    agents (code-review/security/arch). Flow futuro:
+    //      done(coder) → in_review(reviewers corriendo) → released.
+    const movedToReview =
+      exitedClean && prNumber !== undefined && dto.prBranchPushed === true;
     const movedToDoneSandbox =
       exitedClean && !dto.prBranchPushed && prNumber === undefined;
     const finalStatus: AgentRunStatus = exitedClean ? 'completed' : 'failed';
     const now = new Date();
+
+    // ════════════════════════════════════════════════════════════════════
+    // DEBUG: snapshot completo del estado de decisión. Cualquier story que
+    // queda "in queue" después del review de acceptance criteria debería
+    // tener su trace acá. Si movedToReview=false Y movedToDoneSandbox=false
+    // con exitedClean=true → la story queda atascada (caso bug del usuario).
+    // ════════════════════════════════════════════════════════════════════
+    // Ambas branches reportan 'done' como expectedTransition tras el cambio
+    // de semantics 2026-05-16 (status='done' inmediato post-DoD + PR push).
+    const expectedTransition = movedToReview
+      ? 'done'
+      : movedToDoneSandbox
+        ? 'done'
+        : exitedClean
+          ? 'NO_TRANSITION_STUCK'
+          : 'NO_TRANSITION_FAILED';
+    this.logger.info(
+      `[completeRun:${runId}] decision: ` +
+        `exitCode=${dto.exitCode} exitedClean=${exitedClean} ` +
+        `prNumber=${prNumber ?? 'null'} prBranchPushed=${dto.prBranchPushed ?? false} ` +
+        `forceCompletion=${forceCompletion} autoMergeOk=${autoMergeOk} ` +
+        `attempts=${dto.attempts ?? 'undefined'} ` +
+        `→ movedToReview=${movedToReview} movedToDoneSandbox=${movedToDoneSandbox} ` +
+        `expectedTransition=${expectedTransition}`,
+    );
+
+    // Log testigo de cost tracking — validado E2E 2026-05-12. Downgrade a
+    // debug 2026-05-19: el feature ya está estable y el card Cost del batch
+    // detail muestra los valores agregados. Si hay regresión, levantar a info.
+    const generatorCost = dto.generatorUsage?.totalCostUsd ?? 0;
+    const generatorTokens = dto.generatorUsage
+      ? dto.generatorUsage.totalInputTokens + dto.generatorUsage.totalOutputTokens
+      : 0;
+    const generatorAttempts = dto.generatorUsage?.callsCount ?? 0;
+    const verifierAttemptsCount = dto.dodVerification?.length ?? 0;
+    this.logger.debug(
+      `[completeRun:${runId}] cost.received: ` +
+        `generator(present=${dto.generatorUsage !== undefined}, ` +
+        `attempts=${generatorAttempts}, tokens=${generatorTokens}, cost=$${generatorCost.toFixed(4)}) ` +
+        `verifier(attempts=${verifierAttemptsCount}, dodVerification.present=${dto.dodVerification !== undefined})`,
+    );
 
     // F-12 defense-in-depth: redact errorMessage y lastOutput antes de
     // persistir. Aunque el worker honesto ya lo hace, aquí blindamos
@@ -640,7 +2172,10 @@ export class AgentRunService {
           // puede traer marks adicionales que ocurrieron post-último-progress
           // (auto.commit, branch.pushed) si claude tardó <30s en terminar.
           ...(dto.criteriaProgress !== undefined
-            ? { criteriaProgress: dto.criteriaProgress as Prisma.InputJsonValue }
+            ? // Doble cast vía `unknown`: el DTO ahora es CriterionEventDto[] (validado),
+// pero TS no acepta cast directo a InputJsonValue porque DTOs no tienen
+// index signature. Mismo patrón que el cast de dodVerification abajo.
+{ criteriaProgress: dto.criteriaProgress as unknown as Prisma.InputJsonValue }
             : {}),
           // Tier 1 Harness: persistir attempts y verificación log estructurada
           // para visibility en UI (timeline de attempts + cuáles criterios
@@ -655,34 +2190,69 @@ export class AgentRunService {
                   dto.dodVerification as unknown as Prisma.InputJsonValue,
               }
             : {}),
+          // Generator usage (Haiku) — cost/tokens del agente que escribe el código.
+          // Separado del verifier (Sonnet) porque son modelos distintos. El
+          // backend suma ambos en getBatchDetail.
+          ...(dto.generatorUsage !== undefined
+            ? {
+                generatorUsage:
+                  dto.generatorUsage as unknown as Prisma.InputJsonValue,
+              }
+            : {}),
+          // Files modified — count del diff base..HEAD calculado por el worker
+          // post-push. Visible en el AgentCard como "X files".
+          ...(dto.filesModified !== undefined
+            ? { filesModified: dto.filesModified }
+            : {}),
+          // Files modified PATHS — lista exacta de archivos tocados.
+          // Inyectada en el prompt del próximo agente del DAG via
+          // `completedSiblings` cuando reclama una story que depende de
+          // ésta. Cap de seguridad: 200 paths (defensa contra runs masivos
+          // accidentales). El worker ya trunca antes de enviar; defensive
+          // depth: re-truncamos acá por si el DTO validator se evade.
+          ...(dto.filesModifiedPaths !== undefined
+            ? { filesModifiedPaths: dto.filesModifiedPaths.slice(0, 200) }
+            : {}),
         },
       }),
       // Transición de la historia depende del modo:
-      //  - movedToReview (con PR real): in_review (esperando reviewers + merge)
-      //  - movedToDoneSandbox (sin push, sandbox mode): done directo +
-      //    claimedAt=NULL para liberar el slot del DAG
+      //  - movedToReview (con PR real): 'done' tras refactor semantics 2026-05-16.
+      //    Antes era 'in_review' por convención, pero NO había reviewer agents
+      //    corriendo — el status era meramente "PR open awaiting nothing".
+      //    Ahora reservamos 'in_review' para el epic futuro donde reviewer
+      //    agents (code/security/arch) sí evaluarán. Por ahora: PR push +
+      //    DoD pass = done. El estado del PR mismo (merged/open/closed) se
+      //    consulta vía Octokit, NO se proyecta al status de la story.
+      //  - movedToDoneSandbox (sin push O MOCK+merge OK): done directo +
+      //    claimedAt=NULL para liberar el slot del DAG.
       //  - else (failed o PR creation falló): no se mueve, queda visible
-      //    como 'completed' run pero story sigue en su status anterior
-      ...(movedToReview
+      //    como 'completed' run pero story sigue en su status anterior.
+      ...(movedToReview || movedToDoneSandbox
         ? [
             this.prisma.story.update({
               where: { id: run.storyId },
-              data: { status: 'in_review' as const },
+              data: { status: 'done' as const, claimedAt: null },
             }),
           ]
-        : movedToDoneSandbox
-          ? [
-              this.prisma.story.update({
-                where: { id: run.storyId },
-                data: { status: 'done' as const, claimedAt: null },
-              }),
-            ]
-          : []),
+        : []),
     ]);
+
+    // Log granular del transition para forensics y queryability en Loki.
+    // Evento queryable: `story.status.done` por runId. Si en el epic futuro
+    // de reviewer agents se reintroduce 'in_review', habrá un evento paralelo
+    // `story.status.in_review` con su propio call site.
+    if (movedToReview || movedToDoneSandbox) {
+      this.logger.info(
+        `[run:${runId}] event=story.status.done storyId=${run.storyId} ` +
+          `prNumber=${prNumber ?? 'none'} prBranchPushed=${dto.prBranchPushed ?? false} ` +
+          `path=${movedToReview ? 'pr-flow' : 'sandbox-or-mock'} ` +
+          `(coder + DoD + PR push completados; reviewer agents son trabajo futuro)`,
+      );
+    }
 
     const durationMs = now.getTime() - run.startedAt.getTime();
     if (exitedClean) {
-      this.logger.log(
+      this.logger.info(
         `[run:${runId}] COMPLETE nodeId=${nodeId} prNumber=${prNumber ?? 'none'} prBranchPushed=${dto.prBranchPushed ?? false} movedToReview=${movedToReview} movedToDoneSandbox=${movedToDoneSandbox} duration=${durationMs}ms`,
       );
     } else {
@@ -691,6 +2261,45 @@ export class AgentRunService {
       // la versión REDACTADA (F-12) y sin echo del output del modelo.
       this.logger.error(
         `[run:${runId}] FAIL nodeId=${nodeId} exitCode=${dto.exitCode} errMsg="${(redactedErrorMessage ?? '').slice(0, 80)}" duration=${durationMs}ms`,
+      );
+    }
+
+    // ════════════════════════════════════════════════════════════════════
+    // DEBUG: detección explícita del caso "story atascada en queue". Si
+    // exitedClean=true (DoD pasó) pero NI movedToReview NI movedToDoneSandbox
+    // se activaron, la story NO transicionó. Esto es el bug del usuario:
+    // el operador ve la story "esperando" en la pipeline del Forge sin
+    // saber por qué. Este log WARN dispara una señal forense clara que
+    // permite reconstruir la cadena de decisiones en post-mortem.
+    //
+    // Causas conocidas que llevan acá:
+    //  - exitedClean=true + prBranchPushed=true + prNumber=undefined
+    //    → push exitoso pero PR creation falló en líneas 720-737. Story
+    //      queda con código en remote pero sin PR para mergear.
+    //  - exitedClean=true + prBranchPushed=false + prNumber=N
+    //    → PR existía de un run previo pero el worker actual no pushó.
+    //      Inconsistencia que indica bug en upstream del DTO.
+    //  - exitedClean=true + algún flag con valor inesperado (null, undefined)
+    //    → bug de validación del DTO. Acción: agregar guard en upstream.
+    //
+    // Acción del operador: revisar el log inmediatamente anterior
+    // `[completeRun:${runId}] decision: ...` para ver TODOS los flags.
+    // ════════════════════════════════════════════════════════════════════
+    if (exitedClean && !movedToReview && !movedToDoneSandbox) {
+      this.logger.warn(
+        `[run:${runId}] STORY_STUCK storyId=${run.storyId} ` +
+          `nodeId=${nodeId} ` +
+          `exitedClean=true PERO NI movedToReview NI movedToDoneSandbox. ` +
+          `Story queda en su status previo con claimedAt set. ` +
+          `Flags: prNumber=${prNumber ?? 'null'} prBranchPushed=${dto.prBranchPushed ?? false} ` +
+          `forceCompletion=${forceCompletion} autoMergeOk=${autoMergeOk}. ` +
+          `Causa probable: ${
+            dto.prBranchPushed && prNumber === undefined
+              ? 'push OK pero PR creation falló (revisar GitHub API logs upstream)'
+              : !dto.prBranchPushed && prNumber !== undefined
+                ? 'PR existe pero worker no reportó push — DTO inconsistente'
+                : 'condición de carrera o flag inconsistente'
+          }. Sweeper limpia abandoned a 10min; mientras, story bloqueada.`,
       );
     }
   }

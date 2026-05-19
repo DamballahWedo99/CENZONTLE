@@ -1,6 +1,5 @@
 import {
   Injectable,
-  Logger,
   OnModuleInit,
   BadRequestException,
   NotFoundException,
@@ -9,6 +8,7 @@ import { ConfigService } from '@nestjs/config';
 import { spawn } from 'node:child_process';
 import * as path from 'node:path';
 import * as fs from 'node:fs/promises';
+import { InjectPinoLogger, PinoLogger } from 'nestjs-pino';
 
 export interface GlobOpts {
   subDir?: string;
@@ -92,7 +92,6 @@ export interface ReadResult {
  */
 @Injectable()
 export class CodeSearchService implements OnModuleInit {
-  private readonly logger = new Logger(CodeSearchService.name);
   private readonly maxBytesPerFile: number;
   private readonly grepTimeoutMs: number;
 
@@ -215,7 +214,9 @@ export class CodeSearchService implements OnModuleInit {
     '.cer',
   ]);
 
-  constructor(private readonly config: ConfigService) {
+  constructor(private readonly config: ConfigService,
+    @InjectPinoLogger(CodeSearchService.name) private readonly logger: PinoLogger,
+  ) {
     // Coerción explícita: env vars llegan como string incluso cuando el generic
     // dice <number>. spawn() rechaza strings para su opción timeout.
     this.maxBytesPerFile = Number(this.config.get('CODE_REPOS_MAX_BYTES_PER_FILE')) || 262144;
@@ -228,7 +229,7 @@ export class CodeSearchService implements OnModuleInit {
     // para no mentir en el log si el problema es distinto.
     try {
       await this.spawnRg(['--version'], '/tmp');
-      this.logger.log('ripgrep binary found on PATH');
+      this.logger.info('ripgrep binary found on PATH');
     } catch (err: any) {
       const isNotFound = err?.code === 'ENOENT' || /ENOENT/.test(err?.message ?? '');
       if (isNotFound) {

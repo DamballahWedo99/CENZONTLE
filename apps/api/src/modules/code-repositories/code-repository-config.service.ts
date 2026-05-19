@@ -1,9 +1,15 @@
-import { Injectable, Logger, NotFoundException, BadRequestException, ConflictException } from '@nestjs/common';
+import {
+  Injectable,
+  NotFoundException,
+  BadRequestException,
+  ConflictException,
+} from '@nestjs/common';
 import { Octokit } from '@octokit/rest';
 import { Prisma, CodeRepository, CodeRepoCloneStatus } from '@prisma/client';
 import { AuthenticatedUser, UserRole } from '@cenzontle/shared';
 import { PrismaService } from '../prisma/prisma.service';
 import { CryptoService } from '../vault/crypto.service';
+import { InjectPinoLogger, PinoLogger } from 'nestjs-pino';
 
 /**
  * Representación pública de un code repository — nunca incluye el token
@@ -59,11 +65,10 @@ export interface CodeRepositoryUpdateInput {
  */
 @Injectable()
 export class CodeRepositoryConfigService {
-  private readonly logger = new Logger(CodeRepositoryConfigService.name);
-
   constructor(
     private prisma: PrismaService,
     private crypto: CryptoService,
+    @InjectPinoLogger(CodeRepositoryConfigService.name) private readonly logger: PinoLogger,
   ) {}
 
   // ─── Queries ───
@@ -179,7 +184,7 @@ export class CodeRepositoryConfigService {
       },
     });
 
-    this.logger.log(`[create] name="${repo.name}" owner=${repo.owner} repo=${repo.repo} autoActive=${count === 0}`);
+    this.logger.info({ name: repo.name, owner: repo.owner, repo: repo.repo }, `[create] name="${repo.name}" owner=${repo.owner} repo=${repo.repo} autoActive=${count === 0}`);
     return this.toPublic(repo);
   }
 
@@ -215,7 +220,7 @@ export class CodeRepositoryConfigService {
     }
 
     const repo = await this.prisma.codeRepository.update({ where: { id }, data });
-    this.logger.log(`[update] id=${id} fields=${Object.keys(data).join(',')}`);
+    this.logger.info({ id }, `[update] id=${id} fields=${Object.keys(data).join(',')}`);
     return this.toPublic(repo);
   }
 
@@ -227,7 +232,7 @@ export class CodeRepositoryConfigService {
     const existing = await this.prisma.codeRepository.findUnique({ where: { id } });
     if (!existing) throw new NotFoundException('Code repository no encontrado');
     await this.prisma.codeRepository.delete({ where: { id } });
-    this.logger.log(`[remove] id=${id} name="${existing.name}"`);
+    this.logger.info({ id, name: existing.name }, `[remove] id=${id} name="${existing.name}"`);
   }
 
   /**
@@ -239,7 +244,7 @@ export class CodeRepositoryConfigService {
     if (!existing) throw new NotFoundException('Code repository no encontrado');
     if (existing.isActive) return this.toPublic(existing);
     const updated = await this.prisma.codeRepository.update({ where: { id }, data: { isActive: true } });
-    this.logger.log(`[enable] id=${id} name="${updated.name}"`);
+    this.logger.info({ id, name: updated.name }, `[enable] id=${id} name="${updated.name}"`);
     return this.toPublic(updated);
   }
 
@@ -249,7 +254,7 @@ export class CodeRepositoryConfigService {
     if (!existing) throw new NotFoundException('Code repository no encontrado');
     if (!existing.isActive) return this.toPublic(existing);
     const updated = await this.prisma.codeRepository.update({ where: { id }, data: { isActive: false } });
-    this.logger.log(`[disable] id=${id} name="${updated.name}"`);
+    this.logger.info({ id, name: updated.name }, `[disable] id=${id} name="${updated.name}"`);
     return this.toPublic(updated);
   }
 
@@ -286,7 +291,7 @@ export class CodeRepositoryConfigService {
       where: { id },
       data: { forgeWritable: false },
     });
-    this.logger.log(`[forgeWritable.disable] id=${id} name="${updated.name}"`);
+    this.logger.info({ id, name: updated.name }, `[forgeWritable.disable] id=${id} name="${updated.name}"`);
     return this.toPublic(updated);
   }
 

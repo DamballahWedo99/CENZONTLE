@@ -1,8 +1,13 @@
-import { BadRequestException, Injectable, Logger, OnModuleDestroy } from '@nestjs/common';
+import {
+  BadRequestException,
+  Injectable,
+  OnModuleDestroy,
+} from '@nestjs/common';
 import { spawn, ChildProcess, execSync, execFileSync } from 'child_process';
 import { createServer } from 'net';
 import { resolve, normalize } from 'path';
 import { existsSync, appendFileSync, mkdirSync } from 'fs';
+import { InjectPinoLogger, PinoLogger } from 'nestjs-pino';
 
 // ---------------------------------------------------------------------------
 // Binary resolution — env var override > PATH lookup
@@ -73,7 +78,10 @@ interface TtydSession {
 
 @Injectable()
 export class TerminalService implements OnModuleDestroy {
-  private readonly logger = new Logger(TerminalService.name);
+  constructor(
+    @InjectPinoLogger(TerminalService.name) private readonly logger: PinoLogger,
+  ) {}
+
   private readonly sessions = new Map<string, TtydSession>();
   private nextPort = PORT_START;
 
@@ -143,9 +151,9 @@ export class TerminalService implements OnModuleDestroy {
       if (!existsSync(AUDIT_LOG_DIR)) mkdirSync(AUDIT_LOG_DIR, { recursive: true });
       appendFileSync(AUDIT_LOG_PATH, JSON.stringify(entry) + '\n');
     } catch (err) {
-      this.logger.warn(`Audit log write failed: ${(err as Error).message}`);
+      this.logger.warn({ message: (err as Error).message }, `Audit log write failed: ${(err as Error).message}`);
     }
-    this.logger.log(`[AUDIT] ${event} agent=${agentId}`);
+    this.logger.info({ event, agentId }, `[AUDIT] ${event} agent=${agentId}`);
   }
 
   getAuditLogPath(): string {
@@ -191,11 +199,11 @@ export class TerminalService implements OnModuleDestroy {
     const worktreePath = resolve(WORKTREE_ROOT, 'cenzontle', agentId);
 
     if (existsSync(worktreePath)) {
-      this.logger.log(`Worktree already exists at ${worktreePath}, reusing`);
+      this.logger.info({ worktreePath }, `Worktree already exists at ${worktreePath}, reusing`);
       return worktreePath;
     }
 
-    this.logger.log(`Creating worktree for agent ${agentId}: branch=${branch} path=${worktreePath}`);
+    this.logger.info({ agentId, branch, worktreePath }, `Creating worktree for agent ${agentId}: branch=${branch} path=${worktreePath}`);
 
     // Check if branch exists on remote or locally
     let branchExists = false;
@@ -221,7 +229,7 @@ export class TerminalService implements OnModuleDestroy {
       timeout: 30000,
     });
 
-    this.logger.log(`Worktree created at ${worktreePath}`);
+    this.logger.info({ worktreePath }, `Worktree created at ${worktreePath}`);
     return worktreePath;
   }
 
@@ -233,7 +241,7 @@ export class TerminalService implements OnModuleDestroy {
 
     if (!existsSync(worktreePath)) return;
 
-    this.logger.log(`Removing worktree for agent ${agentId} at ${worktreePath}`);
+    this.logger.info({ agentId, worktreePath }, `Removing worktree for agent ${agentId} at ${worktreePath}`);
     try {
       execFileSync(GIT_BIN, ['worktree', 'remove', '--force', worktreePath], {
         cwd: repoRoot,
@@ -241,7 +249,7 @@ export class TerminalService implements OnModuleDestroy {
         timeout: 15000,
       });
     } catch (err) {
-      this.logger.warn(`Failed to remove worktree: ${(err as Error).message}`);
+      this.logger.warn({ message: (err as Error).message }, `Failed to remove worktree: ${(err as Error).message}`);
     }
   }
 
@@ -270,7 +278,7 @@ export class TerminalService implements OnModuleDestroy {
 
     const existing = this.sessions.get(safeAgentId);
     if (existing) {
-      this.logger.log(`Session already active for agent ${safeAgentId} on port ${existing.port}`);
+      this.logger.info({ safeAgentId, port: existing.port }, `Session already active for agent ${safeAgentId} on port ${existing.port}`);
       return { port: existing.port, worktreePath: existing.worktreePath, branch: existing.branch };
     }
 
@@ -293,7 +301,7 @@ export class TerminalService implements OnModuleDestroy {
     // This prevents key binding changes from leaking across agents or the host.
     const tmuxSocket = `forge-${safeAgentId}`;
 
-    this.logger.log(
+    this.logger.info(
       `Starting ttyd+tmux session for agent ${safeAgentId} on port ${port} in ${effectiveWorkdir}` +
         (safeBranch ? ` (branch: ${safeBranch})` : ''),
     );
@@ -376,7 +384,7 @@ export class TerminalService implements OnModuleDestroy {
     try {
       await this.waitForTtyd(port);
     } catch (err) {
-      this.logger.error(`ttyd failed to start for agent ${safeAgentId}: ${(err as Error).message}`);
+      this.logger.error({ safeAgentId, message: (err as Error).message }, `ttyd failed to start for agent ${safeAgentId}: ${(err as Error).message}`);
       this.sessions.delete(safeAgentId);
       try { child.kill('SIGTERM'); } catch { /* best-effort */ }
       throw err;
@@ -390,19 +398,19 @@ export class TerminalService implements OnModuleDestroy {
     });
 
     child.stdout?.on('data', (chunk: Buffer) => {
-      this.logger.debug(`ttyd[${safeAgentId}] stdout: ${chunk.toString().trim()}`);
+      this.logger.debug({ safeAgentId }, `ttyd[${safeAgentId}] stdout: ${chunk.toString().trim()}`);
     });
     child.stderr?.on('data', (chunk: Buffer) => {
-      this.logger.debug(`ttyd[${safeAgentId}] stderr: ${chunk.toString().trim()}`);
+      this.logger.debug({ safeAgentId }, `ttyd[${safeAgentId}] stderr: ${chunk.toString().trim()}`);
     });
 
     child.on('error', (err: Error) => {
-      this.logger.error(`ttyd process error for agent ${safeAgentId}: ${err.message}`);
+      this.logger.error({ safeAgentId, message: err.message }, `ttyd process error for agent ${safeAgentId}: ${err.message}`);
       this.sessions.delete(safeAgentId);
     });
 
     child.on('exit', (code: number | null, signal: string | null) => {
-      this.logger.log(`ttyd exited for agent ${safeAgentId} — code=${code ?? 'null'} signal=${signal ?? 'null'}`);
+      this.logger.info({ safeAgentId }, `ttyd exited for agent ${safeAgentId} — code=${code ?? 'null'} signal=${signal ?? 'null'}`);
       this.sessions.delete(safeAgentId);
     });
 
@@ -416,14 +424,14 @@ export class TerminalService implements OnModuleDestroy {
   stopSession(agentId: string, removeWorktreeOnStop = false): void {
     const session = this.sessions.get(agentId);
     if (!session) {
-      this.logger.warn(`stopSession: no active session for agent ${agentId}`);
+      this.logger.warn({ agentId }, `stopSession: no active session for agent ${agentId}`);
       return;
     }
 
     // Use session.agentId (sanitized at startSession time) for all operations
     const safeId = session.agentId;
 
-    this.logger.log(`Stopping ttyd session for agent ${safeId} on port ${session.port}`);
+    this.logger.info({ safeId, port: session.port }, `Stopping ttyd session for agent ${safeId} on port ${session.port}`);
     this.sessions.delete(agentId);
 
     const durationMs = Date.now() - session.startedAt.getTime();
@@ -432,7 +440,7 @@ export class TerminalService implements OnModuleDestroy {
     try {
       session.process.kill('SIGTERM');
     } catch (err) {
-      this.logger.error(`Error sending SIGTERM: ${(err as Error).message}`);
+      this.logger.error({ message: (err as Error).message }, `Error sending SIGTERM: ${(err as Error).message}`);
     }
 
     try {
@@ -497,7 +505,7 @@ export class TerminalService implements OnModuleDestroy {
   sendKeys(agentId: string, keys: string): void {
     const session = this.sessions.get(agentId);
     if (!session) {
-      this.logger.warn(`sendKeys: no active session for agent ${agentId}`);
+      this.logger.warn({ agentId }, `sendKeys: no active session for agent ${agentId}`);
       return;
     }
 
@@ -508,9 +516,9 @@ export class TerminalService implements OnModuleDestroy {
         stdio: 'ignore',
         env,
       });
-      this.logger.debug(`Sent keys to agent ${session.agentId}: ${JSON.stringify(keys).slice(0, 80)}`);
+      this.logger.debug({ agentId: session.agentId }, `Sent keys to agent ${session.agentId}: ${JSON.stringify(keys).slice(0, 80)}`);
     } catch (err) {
-      this.logger.error(`Error sending keys to agent ${session.agentId}: ${(err as Error).message}`);
+      this.logger.error({ agentId: session.agentId, message: (err as Error).message }, `Error sending keys to agent ${session.agentId}: ${(err as Error).message}`);
     }
   }
 
@@ -554,7 +562,7 @@ export class TerminalService implements OnModuleDestroy {
   // -------------------------------------------------------------------------
 
   onModuleDestroy(): void {
-    this.logger.log(`Module destroy — stopping ${this.sessions.size} active session(s)`);
+    this.logger.info({ size: this.sessions.size }, `Module destroy — stopping ${this.sessions.size} active session(s)`);
     for (const agentId of [...this.sessions.keys()]) {
       this.stopSession(agentId);
     }

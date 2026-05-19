@@ -34,13 +34,11 @@ import type {
 } from '@cenzontle/shared';
 import {
   DEFAULT_BRANCH_STRATEGY,
-  DEFAULT_FACTORY_CONFIG,
 } from '@cenzontle/shared';
 import {
   Github,
   GitBranch,
   Server,
-  Bot,
   Brain,
   Eye,
   EyeOff,
@@ -48,6 +46,7 @@ import {
   Trash2,
   Loader2,
   Check,
+  CheckCircle2,
   Wifi,
   WifiOff,
   Settings,
@@ -66,6 +65,7 @@ import {
   RefreshCw,
   KeyRound,
   AlertOctagon,
+  AlertTriangle,
   GitPullRequest,
   PencilLine,
 } from 'lucide-react';
@@ -85,9 +85,12 @@ import {
   deleteComputeNode,
   getBranchStrategy,
   updateBranchStrategy,
+  getBranchGitState,
+  type BranchGitStateResponse,
   type ComputeNodeResponse,
   type ComputeNodeType,
 } from '@/lib/api/factory';
+import { AlignDevBranchDialog } from './AlignDevBranchDialog';
 import { ApiError } from '@/lib/api/client';
 import {
   listDodCriteria,
@@ -129,7 +132,6 @@ const SIDEBAR_ITEMS: SidebarItem[] = [
   { id: 'external-secrets', label: 'Secretos externos', icon: KeyRound, group: 'Integraciones' },
   { id: 'nodes', label: 'Nodos de cómputo', icon: Server, group: 'Infraestructura' },
   { id: 'kill-switch', label: 'Kill Switch del Forge', icon: AlertOctagon, group: 'Infraestructura' },
-  { id: 'agents', label: 'Agentes', icon: Bot, group: 'Automatización' },
   { id: 'agent-tokens', label: 'Tokens IA', icon: Brain, group: 'Automatización' },
   { id: 'anthropic-key', label: 'Anthropic API Key', icon: Brain, group: 'Automatización' },
   { id: 'dod', label: 'Definition of Done', icon: ClipboardCheck, group: 'Automatización' },
@@ -365,6 +367,29 @@ function BranchStrategySection() {
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
 
+  // Estado del git remote: dev y main existen + comparten historia. El
+  // backend lo expone vía /factory/branch-strategy/git-state. Mostramos un
+  // banner accionable cuando hay un problema arreglable (warning != null).
+  const [gitState, setGitState] = useState<BranchGitStateResponse | null>(null);
+  const [gitStateLoading, setGitStateLoading] = useState(false);
+  const [alignDialogOpen, setAlignDialogOpen] = useState(false);
+
+  // Carga el git state — separado del config porque toca GitHub API y puede
+  // tardar 1-3s. NO bloquea el form principal: si falla, simplemente no
+  // mostramos el banner (config sigue editable).
+  const refreshGitState = useCallback(async () => {
+    setGitStateLoading(true);
+    try {
+      const state = await getBranchGitState();
+      setGitState(state);
+    } catch {
+      // Silencio — el banner solo aparece cuando tenemos data confiable.
+      setGitState(null);
+    } finally {
+      setGitStateLoading(false);
+    }
+  }, []);
+
   // Hidrata desde el backend al montar. Si NO existe la fila aún (primer
   // arranque), el endpoint hace auto-seed con defaults — siempre devuelve
   // valores válidos, nunca null.
@@ -377,6 +402,8 @@ function BranchStrategySection() {
         setMainBranch(config.mainBranch);
         setPrefix(config.forgeBranchPrefix);
         setAutoDelete(config.autoDeleteForgeBranch);
+        // Después de cargar el config, validamos el git state en paralelo.
+        void refreshGitState();
       })
       .catch((err: unknown) => {
         if (err instanceof ApiError && err.status === 403) {
@@ -391,7 +418,7 @@ function BranchStrategySection() {
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [refreshGitState]);
 
   const handleSave = async () => {
     setSaving(true);
@@ -483,12 +510,201 @@ function BranchStrategySection() {
             </label>
           </div>
 
+          {/* Validación del git state — banner amarillo si dev y main no
+              comparten historia (caso típico tras setup huérfano de dev),
+              banner verde si todo OK. Solo mostramos si hay code repo
+              configurado (sin repo no aplica la validación). */}
+          {gitState?.repoConfigured && (
+            <BranchGitStatePanel
+              state={gitState}
+              loading={gitStateLoading}
+              onRefresh={() => void refreshGitState()}
+              onAlignClick={() => setAlignDialogOpen(true)}
+            />
+          )}
+
           <div className="mt-5 flex justify-end">
             <SaveButton saving={saving} onClick={() => void handleSave()} />
           </div>
         </>
       )}
+
+      {/* Dialog de step-up auth para el align. Se monta siempre que tengamos
+          state, controlado por `alignDialogOpen`. Sin esto, no podemos
+          renderear el dialog porque necesita los nombres de las branches. */}
+      {gitState?.repoConfigured && (
+        <AlignDevBranchDialog
+          open={alignDialogOpen}
+          onOpenChange={setAlignDialogOpen}
+          devBranch={gitState.devBranch}
+          mainBranch={gitState.mainBranch}
+          onAligned={() => {
+            // Re-validamos el git state inmediatamente — el banner debería
+            // pasar de "warning" a "OK" tras el align exitoso.
+            void refreshGitState();
+          }}
+        />
+      )}
     </SettingsCard>
+  );
+}
+
+/**
+ * Banner de validación del git state. Cuando dev y main NO comparten historia
+ * o alguna branch falta, mostramos un mensaje accionable con botón "Alinear".
+ * Cuando todo está OK, mostramos un check verde compacto para confirmar al
+ * operador que el setup está sano.
+ */
+function BranchGitStatePanel({
+  state,
+  loading,
+  onRefresh,
+  onAlignClick,
+}: {
+  state: BranchGitStateResponse;
+  loading: boolean;
+  onRefresh: () => void;
+  onAlignClick: () => void;
+}) {
+  if (state.warning) {
+    return (
+      <div className="mt-4 rounded-md border border-amber-500/30 bg-amber-500/10 px-4 py-3">
+        <div className="flex items-start gap-3">
+          <AlertTriangle className="h-4 w-4 mt-0.5 shrink-0 text-amber-400" />
+          <div className="flex-1 space-y-2">
+            <p className="text-xs font-medium text-amber-200">
+              Problema con el git state
+            </p>
+            <p className="text-[11px] text-amber-200/80 leading-relaxed">
+              {state.warning}
+            </p>
+            <div className="flex flex-wrap items-center gap-2 pt-1 text-[10px] text-amber-200/70 font-mono">
+              <span>
+                {state.devBranch}: {state.devSha?.slice(0, 7) ?? '—'}
+              </span>
+              <span>·</span>
+              <span>
+                {state.mainBranch}: {state.mainSha?.slice(0, 7) ?? '—'}
+              </span>
+              {state.compareStatus && (
+                <>
+                  <span>·</span>
+                  <span>compare: {state.compareStatus}</span>
+                </>
+              )}
+            </div>
+            <div className="flex items-center gap-2 pt-2">
+              {state.canAlignDev && (
+                <Button
+                  size="sm"
+                  variant="destructive"
+                  onClick={onAlignClick}
+                  disabled={loading}
+                  className="h-7 text-[11px]"
+                >
+                  Alinear {state.devBranch} con {state.mainBranch}
+                </Button>
+              )}
+              <Button
+                size="sm"
+                variant="ghost"
+                onClick={onRefresh}
+                disabled={loading}
+                className="h-7 text-[11px] text-amber-200 hover:text-amber-100"
+              >
+                {loading ? (
+                  <Loader2 className="h-3 w-3 mr-1.5 animate-spin" />
+                ) : (
+                  <RefreshCw className="h-3 w-3 mr-1.5" />
+                )}
+                Re-validar
+              </Button>
+            </div>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  // Estado OK — banner verde con resumen del git state. Mostramos un botón
+  // "Resetear dev a main" como acción manual disponible incluso cuando todo
+  // está alineado: útil cuando el operador quiere descartar trabajo en dev,
+  // sincronizar después de un release a main, o resolver un diverged/behind.
+  // Visualmente menos prominente que el banner amarillo (sin variant="destructive"
+  // explícito, color emerald-tinted) para no sugerir urgencia.
+  const isIdentical = state.compareStatus === 'identical';
+  const isDiverged =
+    state.compareStatus === 'diverged' || state.compareStatus === 'behind';
+  return (
+    <div className="mt-4 rounded-md border border-emerald-500/30 bg-emerald-500/10 px-4 py-3">
+      <div className="flex items-start gap-3">
+        <CheckCircle2 className="h-4 w-4 mt-0.5 shrink-0 text-emerald-400" />
+        <div className="flex-1 space-y-2">
+          <p className="text-xs font-medium text-emerald-200">
+            Git state OK
+          </p>
+          <p className="text-[11px] text-emerald-200/80 leading-relaxed">
+            <code className="font-mono">{state.devBranch}</code> y{' '}
+            <code className="font-mono">{state.mainBranch}</code> comparten
+            historia. El consolidated PR del Forge podrá mergearse correctamente.
+            {isDiverged && (
+              <>
+                {' '}<span className="text-amber-200/90">
+                  Nota: {state.devBranch} ha divergido de {state.mainBranch} (
+                  {state.compareStatus}) — puedes resetear si quieres que
+                  apunten al mismo commit.
+                </span>
+              </>
+            )}
+          </p>
+          <div className="flex flex-wrap items-center gap-2 pt-1 text-[10px] text-emerald-200/70 font-mono">
+            <span>
+              {state.devBranch}: {state.devSha?.slice(0, 7) ?? '—'}
+            </span>
+            <span>·</span>
+            <span>
+              {state.mainBranch}: {state.mainSha?.slice(0, 7) ?? '—'}
+            </span>
+            {state.compareStatus && (
+              <>
+                <span>·</span>
+                <span>compare: {state.compareStatus}</span>
+              </>
+            )}
+          </div>
+          <div className="flex items-center gap-2 pt-2">
+            <Button
+              size="sm"
+              variant="outline"
+              onClick={onAlignClick}
+              disabled={loading}
+              className="h-7 text-[11px] border-emerald-500/40 bg-transparent text-emerald-200 hover:bg-emerald-500/10 hover:text-emerald-100"
+              title={
+                isIdentical
+                  ? `Las branches ya apuntan al mismo commit. Resetear es no-op pero queda como audit entry.`
+                  : `Force-update de ${state.devBranch} para que apunte al HEAD de ${state.mainBranch}.`
+              }
+            >
+              Resetear {state.devBranch} a {state.mainBranch}
+            </Button>
+            <Button
+              size="sm"
+              variant="ghost"
+              onClick={onRefresh}
+              disabled={loading}
+              className="h-7 text-[11px] text-emerald-200 hover:text-emerald-100"
+            >
+              {loading ? (
+                <Loader2 className="h-3 w-3 mr-1.5 animate-spin" />
+              ) : (
+                <RefreshCw className="h-3 w-3 mr-1.5" />
+              )}
+              Re-validar
+            </Button>
+          </div>
+        </div>
+      </div>
+    </div>
   );
 }
 
@@ -2193,62 +2409,6 @@ function ComputeNodesSection() {
 }
 
 // ---------------------------------------------------------------------------
-// Section: Agents
-// ---------------------------------------------------------------------------
-
-function AgentsSection() {
-  const [maxConcurrent, setMaxConcurrent] = useState(DEFAULT_FACTORY_CONFIG.maxConcurrentAgents);
-  const [maxRetries, setMaxRetries] = useState(DEFAULT_FACTORY_CONFIG.maxRetriesPerStory);
-  const [saving, setSaving] = useState(false);
-
-  const handleSave = () => {
-    setSaving(true);
-    setTimeout(() => setSaving(false), 1000);
-  };
-
-  return (
-    <SettingsCard
-      title="Límites de agentes"
-      description="Controla la concurrencia y el comportamiento de reintentos de los agentes de la factory."
-    >
-      <div className="grid gap-4 sm:grid-cols-2">
-        <LabeledInput label="Max Concurrent Agents">
-          <Input
-            type="number"
-            min={1}
-            max={15}
-            value={maxConcurrent}
-            onChange={(e) => setMaxConcurrent(Math.min(15, Math.max(1, parseInt(e.target.value) || 1)))}
-            className={inputClasses}
-          />
-          <p className="mt-1.5 text-[10px] text-muted-foreground/50">
-            Limits the number of agents working simultaneously across all nodes (1-15)
-          </p>
-        </LabeledInput>
-
-        <LabeledInput label="Max Retries per Story">
-          <Input
-            type="number"
-            min={1}
-            max={5}
-            value={maxRetries}
-            onChange={(e) => setMaxRetries(Math.min(5, Math.max(1, parseInt(e.target.value) || 1)))}
-            className={inputClasses}
-          />
-          <p className="mt-1.5 text-[10px] text-muted-foreground/50">
-            After this many review rejections, the story is escalated to a human (1-5)
-          </p>
-        </LabeledInput>
-      </div>
-
-      <div className="mt-5 flex justify-end">
-        <SaveButton saving={saving} onClick={handleSave} />
-      </div>
-    </SettingsCard>
-  );
-}
-
-// ---------------------------------------------------------------------------
 // Section renderer
 // ---------------------------------------------------------------------------
 
@@ -2285,8 +2445,6 @@ interface DodCriterion {
   /** Descripción larga inyectada en el prompt del agente. REQUERIDA — todos
    *  los criterios deben tener descripción para dar contexto al agente. */
   description: string;
-  enabled: boolean;
-  required: boolean;
   position: number;
 }
 
@@ -2372,18 +2530,16 @@ function DodSection() {
     useSensor(KeyboardSensor, { coordinateGetter: sortableKeyboardCoordinates }),
   );
 
-  // Carga inicial desde el backend. Filtramos los `enabled=false` legacy
-  // (los seeds incluían 3 disabled — security-scan, perf-budget, accessibility)
-  // porque el modelo nuevo NO distingue: todo lo que está en la lista es
-  // activo y requerido por construcción. Los disabled persistidos se borran
-  // del backend al primer save de esta sesión.
+  // Carga inicial desde el backend. Todo lo que está en la lista es activo
+  // por construcción (los campos `enabled`/`required` se eliminaron en
+  // migration 20260512 — eran scaffolding sin UI).
   useEffect(() => {
     let cancelled = false;
     void (async () => {
       try {
         const result = await listDodCriteria();
         if (!cancelled) {
-          setCriteria(result.filter((c) => c.enabled));
+          setCriteria(result);
           setError(null);
         }
       } catch (err) {
@@ -2470,8 +2626,6 @@ function DodSection() {
           kind: null,
           text: trimmedText,
           description: trimmedDescription,
-          enabled: true,
-          required: true,
           position: prev.length,
         },
       ]);
@@ -2496,7 +2650,7 @@ function DodSection() {
       // Actualizamos state local con los criterios canónicos. dirty=false
       // porque el reset YA persistió server-side; lo que está en pantalla
       // matchea exactamente lo que está en DB.
-      setCriteria(result.filter((c) => c.enabled));
+      setCriteria(result);
       setDirty(false);
       // Si había algo siendo editado o creando, cerrar el dialog (su id
       // pudo haberse invalidado por el reset).
@@ -2511,21 +2665,18 @@ function DodSection() {
     setSaving(true);
     setError(null);
     try {
-      // Forzamos `enabled: true, required: true` SIEMPRE — el modelo nuevo
-      // no expone toggles, todo lo guardado es activo y bloquea el merge.
-      // El schema mantiene los campos por compatibilidad (sin migration
-      // necesaria si en el futuro decidimos reintroducir toggles).
+      // El modelo no expone toggles — todo lo guardado es activo por
+      // construcción. Los campos `enabled`/`required` se eliminaron en
+      // migration 20260512 por ser scaffolding sin UI.
       const result = await upsertDodCriteria(
         criteria.map((c) => ({
           kind: c.kind,
           text: c.text,
           description: c.description,
-          enabled: true,
-          required: true,
           position: c.position,
         })),
       );
-      setCriteria(result.filter((c) => c.enabled));
+      setCriteria(result);
       setDirty(false);
     } catch (err) {
       setError((err as Error).message);
@@ -2739,8 +2890,6 @@ function SectionContent({ section }: { section: SettingsSection }) {
       return <ComputeNodesSection />;
     case 'kill-switch':
       return <ForgeKillSwitchSection />;
-    case 'agents':
-      return <AgentsSection />;
     case 'agent-tokens':
       return <AgentTokensSection />;
     case 'anthropic-key':

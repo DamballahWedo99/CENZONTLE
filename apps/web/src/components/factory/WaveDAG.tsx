@@ -11,7 +11,6 @@ import {
   AlertCircle,
   Loader2,
   GitBranch,
-  Bot,
   RotateCcw,
 } from 'lucide-react';
 
@@ -114,16 +113,6 @@ interface DependencyEdge {
 }
 
 // ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
-
-function resolveAgentName(agentId: string | null, agents: { id: string; name: string }[]): string | null {
-  if (!agentId) return null;
-  const agent = agents.find((a) => a.id === agentId);
-  return agent?.name ?? agentId;
-}
-
-// ---------------------------------------------------------------------------
 // SVG Dependency Lines
 // ---------------------------------------------------------------------------
 
@@ -159,14 +148,28 @@ function DependencyArrows({
       const x2 = toRect.left - containerRect.left;
       const y2 = toRect.top + toRect.height / 2 - containerRect.top;
 
-      const midX = (x1 + x2) / 2;
+      // Control points tangenciales al nodo (estilo Sankey / dagre-d3): la
+      // curva SALE horizontal del borde derecho del origen y ENTRA horizontal
+      // al borde izquierdo del destino. Esto evita el giro abrupto que
+      // producían los control points en (midX, y1) y (midX, y2) — donde la
+      // tangente en cada extremo apuntaba hacia el centro en lugar de hacia
+      // afuera del nodo.
+      //
+      // Offset = dx/2 con piso de 40px: para curvas horizontales puras
+      // (y1 === y2) es matemáticamente una línea recta; para curvas con dy
+      // produce una S suave. El piso de 40px evita curvas degeneradas cuando
+      // los nodos están muy cerca horizontalmente.
+      const dx = x2 - x1;
+      const cpOffset = Math.max(Math.abs(dx) * 0.5, 40);
+      const cp1X = x1 + cpOffset;
+      const cp2X = x2 - cpOffset;
 
       // Check if target story is active
       const targetNode = container.querySelector(`[data-story-id="${edge.toId}"]`);
       const isActive = targetNode?.getAttribute('data-active') === 'true';
 
       newPaths.push({
-        d: `M ${x1} ${y1} C ${midX} ${y1}, ${midX} ${y2}, ${x2} ${y2}`,
+        d: `M ${x1} ${y1} C ${cp1X} ${y1}, ${cp2X} ${y2}, ${x2} ${y2}`,
         active: isActive,
       });
     }
@@ -233,13 +236,7 @@ function DependencyArrows({
 // Story Node
 // ---------------------------------------------------------------------------
 
-function StoryNode({
-  story,
-  agentName,
-}: {
-  story: FactoryStory;
-  agentName: string | null;
-}) {
+function StoryNode({ story }: { story: FactoryStory }) {
   const cfg = STATUS_CONFIG[story.status];
   const StatusIcon = cfg.icon;
   const isActive =
@@ -258,7 +255,7 @@ function StoryNode({
         isActive && 'shadow-[0_0_12px_-3px_rgba(59,130,246,0.2)]',
       )}
       role="listitem"
-      aria-label={`${story.tracker.externalKey}: ${story.title}, status ${cfg.label}`}
+      aria-label={`${story.title}, status ${cfg.label}`}
     >
       {/* Pulse ring for active stories */}
       {isActive && (
@@ -269,10 +266,10 @@ function StoryNode({
         />
       )}
 
-      {/* Header: key + status */}
-      <div className="flex items-center justify-between mb-1 relative z-10">
-        <span className="font-mono text-xs font-semibold text-foreground">{story.tracker.externalKey}</span>
-        <span className={cn('text-[11px] font-medium flex items-center gap-1', cfg.color)}>
+      {/* Title + status en la misma fila (flex-1 al title para truncado correcto) */}
+      <div className="flex items-center justify-between gap-2 relative z-10">
+        <p className="text-muted-foreground text-xs truncate flex-1 min-w-0">{story.title}</p>
+        <span className={cn('text-[11px] font-medium flex items-center gap-1 shrink-0', cfg.color)}>
           {StatusIcon && (
             <StatusIcon
               className={cn('h-3 w-3', isActive && 'animate-spin')}
@@ -283,26 +280,15 @@ function StoryNode({
         </span>
       </div>
 
-      {/* Title */}
-      <p className="text-muted-foreground text-xs truncate relative z-10">{story.title}</p>
-
-      {/* Footer: agent + retry */}
-      <div className="flex items-center justify-between mt-1.5 relative z-10">
-        {agentName ? (
-          <span className="flex items-center gap-1 text-[10px] text-muted-foreground/70">
-            <Bot className="h-3 w-3" aria-hidden="true" />
-            {agentName}
-          </span>
-        ) : (
-          <span className="text-[10px] text-muted-foreground/70">unassigned</span>
-        )}
-        {story.retryCount > 0 && (
+      {/* Retry indicator — solo se renderiza cuando hubo retries (info útil para diagnosis) */}
+      {story.retryCount > 0 && (
+        <div className="mt-1.5 relative z-10">
           <span className="flex items-center gap-0.5 text-[10px] text-amber-400 font-medium">
             <RotateCcw className="h-2.5 w-2.5" aria-hidden="true" />
             {story.retryCount}/{story.maxRetries}
           </span>
-        )}
-      </div>
+        </div>
+      )}
     </div>
   );
 }
@@ -311,7 +297,7 @@ function StoryNode({
 // Wave Column
 // ---------------------------------------------------------------------------
 
-function WaveColumn({ wave, agents }: { wave: WaveGroup; agents: { id: string; name: string }[] }) {
+function WaveColumn({ wave }: { wave: WaveGroup }) {
   const statusKey = wave.status;
   const wcfg = WAVE_STATUS_CONFIG[statusKey] ?? WAVE_STATUS_CONFIG.pending;
 
@@ -340,7 +326,6 @@ function WaveColumn({ wave, agents }: { wave: WaveGroup; agents: { id: string; n
           <StoryNode
             key={story.id}
             story={story}
-            agentName={resolveAgentName(story.agentId, agents)}
           />
         ))}
       </div>
@@ -366,7 +351,6 @@ interface WaveDAGProps {
 export function WaveDAG({ stories: propStories, batchName, batchBranch, batchWaves: propWaves }: WaveDAGProps = {}) {
   const { state } = useFactory();
   const stories = propStories ?? state.stories;
-  const agents = state.agents;
   const containerRef = useRef<HTMLDivElement>(null);
 
   const displayName = batchName ?? state.factory.currentBatch?.name;
@@ -460,22 +444,14 @@ export function WaveDAG({ stories: propStories, batchName, batchBranch, batchWav
       >
         <div
           ref={containerRef}
-          className="relative flex gap-6 min-w-max pb-2"
+          className="relative flex gap-16 min-w-max pb-2"
         >
           {/* SVG dependency arrows */}
           <DependencyArrows edges={edges} containerRef={containerRef} />
 
-          {waves.map((wave, idx) => (
+          {waves.map((wave) => (
             <div key={wave.number} className="flex items-start gap-0 relative z-10">
-              <WaveColumn wave={wave} agents={agents} />
-
-              {/* Connector between wave columns */}
-              {idx < waves.length - 1 && (
-                <div className="flex items-center self-center pt-10 px-2" aria-hidden="true">
-                  <div className="w-6 h-px bg-[#2A2A35]" />
-                  <div className="w-0 h-0 border-t-[4px] border-t-transparent border-b-[4px] border-b-transparent border-l-[6px] border-l-[#2A2A35]" />
-                </div>
-              )}
+              <WaveColumn wave={wave} />
             </div>
           ))}
         </div>

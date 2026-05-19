@@ -1,6 +1,10 @@
-import { Injectable, Logger, NotFoundException } from '@nestjs/common';
+import {
+  Injectable,
+  NotFoundException,
+} from '@nestjs/common';
 import { PrismaService } from '../../prisma/prisma.service';
 import { CryptoService } from '../../vault/crypto.service';
+import { InjectPinoLogger, PinoLogger } from 'nestjs-pino';
 
 /**
  * Service singleton para gestionar la API key de Anthropic a nivel de
@@ -16,12 +20,12 @@ import { CryptoService } from '../../vault/crypto.service';
  */
 @Injectable()
 export class OrgAnthropicConfigService {
-  private readonly logger = new Logger(OrgAnthropicConfigService.name);
   private static readonly SINGLETON_ID = 'global';
 
   constructor(
     private readonly prisma: PrismaService,
     private readonly crypto: CryptoService,
+    @InjectPinoLogger(OrgAnthropicConfigService.name) private readonly logger: PinoLogger,
   ) {}
 
   /**
@@ -84,7 +88,7 @@ export class OrgAnthropicConfigService {
       },
     });
 
-    this.logger.log(`[org-anthropic] key rotated by=${updatedBy} maskedKey=${maskedKey}`);
+    this.logger.info({ updatedBy, maskedKey }, `[org-anthropic] key rotated by=${updatedBy} maskedKey=${maskedKey}`);
   }
 
   /**

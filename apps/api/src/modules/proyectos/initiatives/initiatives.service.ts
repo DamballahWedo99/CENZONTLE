@@ -2,7 +2,6 @@ import {
   ConflictException,
   ForbiddenException,
   Injectable,
-  Logger,
   NotFoundException,
 } from '@nestjs/common';
 import { Prisma } from '@prisma/client';
@@ -25,6 +24,7 @@ import {
   type InitiativeRef,
 } from '../vault-paths';
 import { buildFrontmatter } from '../vault-frontmatter';
+import { InjectPinoLogger, PinoLogger } from 'nestjs-pino';
 
 const PENDING_TRACKER_SENTINEL = '__pending__';
 
@@ -50,13 +50,12 @@ interface InitiativeMarkdownData {
 
 @Injectable()
 export class InitiativesService {
-  private readonly logger = new Logger(InitiativesService.name);
-
   constructor(
     private prisma: PrismaService,
     private vault: VaultService,
     private vaultFolder: VaultFolderService,
     private integrationsService: IntegrationsService,
+    @InjectPinoLogger(InitiativesService.name) private readonly logger: PinoLogger,
   ) {}
 
   /**
@@ -171,7 +170,7 @@ export class InitiativesService {
     });
     await this.integrationsService.markSyncedAt(provider);
 
-    this.logger.log(
+    this.logger.info(
       `[ensureTracker] actor=${user.sub} initiative=${initiativeId} → ${tracker.externalKey}`,
     );
 
@@ -322,13 +321,13 @@ export class InitiativesService {
   }
 
   async create(dto: CreateInitiativeDto) {
-    this.logger.log(`[create] START name="${dto.name}"`);
+    this.logger.info({ name: dto.name }, `[create] START name="${dto.name}"`);
 
     const id = randomUUID();
     const ref: InitiativeRef = { id, name: dto.name };
     const vaultPath = initiativeIndexPath(ref);
     const definicionPath = initiativeDefinitionPath(ref);
-    this.logger.log(`[create] Generated vaultPath=${vaultPath} (+ definicion.md sibling)`);
+    this.logger.info({ vaultPath }, `[create] Generated vaultPath=${vaultPath} (+ definicion.md sibling)`);
 
     // Patrón paritario con épicas: el folder de la iniciativa contiene
     // `index.md` (sumario con links a hijos) y `definicion.md` (contenido
@@ -358,13 +357,13 @@ export class InitiativesService {
         `feat(initiative): create definicion "${dto.name}" [${id}]`,
       );
     } catch (err) {
-      this.logger.error(`[create] definicion.md write FAILED, rolling back index.md`, err);
+      this.logger.error({ err }, `[create] definicion.md write FAILED, rolling back index.md`);
       await this.vault
         .deleteNote(vaultPath, `revert(initiative): rollback create [${id}]`)
         .catch(() => {});
       throw err;
     }
-    this.logger.log(`[create] Vault writes OK (index + definicion)`);
+    this.logger.info(`[create] Vault writes OK (index + definicion)`);
 
     // 2. Create PG row (rollback vault on failure).
     try {
@@ -381,10 +380,10 @@ export class InitiativesService {
         },
         include: INITIATIVE_INCLUDE,
       });
-      this.logger.log(`[create] PG insert OK id=${initiative.id}`);
+      this.logger.info({ id: initiative.id }, `[create] PG insert OK id=${initiative.id}`);
       return initiative;
     } catch (err) {
-      this.logger.error(`[create] PG insert FAILED, rolling back vault: ${vaultPath}`, err);
+      this.logger.error({ err }, `[create] PG insert FAILED, rolling back vault: ${vaultPath}`);
       await Promise.all([
         this.vault
           .deleteNote(vaultPath, `revert(initiative): rollback create [${id}]`)
@@ -398,7 +397,7 @@ export class InitiativesService {
   }
 
   async update(id: string, dto: UpdateInitiativeDto) {
-    this.logger.log(`[update] START id=${id} fields=${Object.keys(dto).join(',')}`);
+    this.logger.info({ id }, `[update] START id=${id} fields=${Object.keys(dto).join(',')}`);
 
     const existing = await this.prisma.initiative.findUnique({ where: { id } });
     if (!existing) throw new NotFoundException('Iniciativa no encontrada');
@@ -421,7 +420,7 @@ export class InitiativesService {
         const oldFolder = initiativeFolderPath({ id: existing.id, name: existing.name });
         const newFolder = initiativeFolderPath({ id: existing.id, name: newName });
 
-        this.logger.log(`[update] Renaming folder: ${oldFolder} → ${newFolder}`);
+        this.logger.info({ oldFolder, newFolder }, `[update] Renaming folder: ${oldFolder} → ${newFolder}`);
 
         // Antes de mover, actualizamos el contenido del index.md con el nuevo
         // nombre/descripcion, asi la copia en el nuevo folder ya trae los datos
@@ -525,7 +524,7 @@ export class InitiativesService {
 
           if (writes.length > 0) await Promise.all(writes);
         }
-        this.logger.log(`[update] Vault write OK`);
+        this.logger.info(`[update] Vault write OK`);
       } else if ((nameChanged || descriptionChanged) && existing.vaultPath) {
         // vaultPath existe pero NO matchea ni isNewFormat ni isLegacy.
         // Caso edge: path malformado o de un formato futuro/desconocido.
@@ -551,7 +550,7 @@ export class InitiativesService {
       data,
       include: INITIATIVE_INCLUDE,
     });
-    this.logger.log(`[update] DONE id=${id}`);
+    this.logger.info({ id }, `[update] DONE id=${id}`);
     return result;
   }
 
@@ -577,14 +576,14 @@ export class InitiativesService {
     // manualmente como antes.
     if (initiative.vaultPath && isNewFormatVaultPath(initiative.vaultPath)) {
       const folder = initiativeFolderPath({ id: initiative.id, name: initiative.name });
-      this.logger.log(`[remove] Deleting folder (new format): ${folder}`);
+      this.logger.info({ folder }, `[remove] Deleting folder (new format): ${folder}`);
       await this.vaultFolder.deleteFolder(
         folder,
         `feat(initiative): delete "${initiative.name}" [${id}]`,
       );
     } else {
       // Legacy: borrado bottom-up archivo por archivo.
-      this.logger.log(`[remove] Legacy cleanup: ${initiative.epics.length} epics`);
+      this.logger.info({ length: initiative.epics.length }, `[remove] Legacy cleanup: ${initiative.epics.length} epics`);
       for (const epic of initiative.epics) {
         for (const story of epic.stories) {
           if (story.vaultPath) {
@@ -607,7 +606,7 @@ export class InitiativesService {
               `feat(epic): delete "${epic.title}" [${epic.id}] (cascade from initiative)`,
             )
             .catch((err) =>
-              this.logger.warn(`Failed to delete vault note ${epic.vaultPath}: ${err?.message}`),
+              this.logger.warn({ vaultPath: epic.vaultPath, message: err?.message }, `Failed to delete vault note ${epic.vaultPath}: ${err?.message}`),
             );
         }
       }
@@ -627,7 +626,7 @@ export class InitiativesService {
 
     // Postgres ON DELETE CASCADE borra epics + stories en DB.
     await this.prisma.initiative.delete({ where: { id } });
-    this.logger.log(
+    this.logger.info(
       `[remove] initiative=${id} done (${initiative.epics.length} epics, ${initiative.epics.reduce((n, e) => n + e.stories.length, 0)} stories)`,
     );
   }
@@ -752,7 +751,7 @@ export class InitiativesService {
       await this.prisma.$transaction([...epicUpdates, ...storyUpdates]);
     }
 
-    this.logger.log(
+    this.logger.info(
       `[cascadeVaultPathRename] updated ${epicUpdates.length} epics + ${storyUpdates.length} stories for initiative=${initiativeId} (atomic)`,
     );
   }

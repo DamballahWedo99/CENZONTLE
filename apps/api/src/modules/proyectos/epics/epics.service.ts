@@ -3,7 +3,6 @@ import {
   ConflictException,
   ForbiddenException,
   Injectable,
-  Logger,
   NotFoundException,
 } from '@nestjs/common';
 import { Prisma } from '@prisma/client';
@@ -60,6 +59,7 @@ import {
   parseDiscoveredDependencyMarkdown,
 } from './epic-markdown-builders';
 import { buildFrontmatter } from '../vault-frontmatter';
+import { InjectPinoLogger, PinoLogger } from 'nestjs-pino';
 
 const EPIC_INCLUDE = {
   initiative: { select: { id: true, name: true, status: true } },
@@ -126,8 +126,6 @@ const PENDING_TRACKER_SENTINEL = '__pending__';
 
 @Injectable()
 export class EpicsService {
-  private readonly logger = new Logger(EpicsService.name);
-
   constructor(
     private prisma: PrismaService,
     private vault: VaultService,
@@ -139,6 +137,7 @@ export class EpicsService {
     private designBundle: DesignBundleService,
     private authService: AuthService,
     private changelogService: ChangelogService,
+    @InjectPinoLogger(EpicsService.name) private readonly logger: PinoLogger,
   ) {}
 
   /**
@@ -191,7 +190,7 @@ export class EpicsService {
 
     const existingTracker = epic.tracker as unknown as TrackerReference | null;
     if (existingTracker?.externalId && existingTracker.externalId !== PENDING_TRACKER_SENTINEL) {
-      this.logger.log(
+      this.logger.info(
         `[publishToTracker] epic=${epicId} already published → ${existingTracker.externalKey}`,
       );
       return {
@@ -388,7 +387,7 @@ export class EpicsService {
         .filter((e): e is NonNullable<typeof e> => e !== null);
       if (linearEdges.length > 0) {
         const relResult = await trackerProvider.publishStoryRelations(linearEdges);
-        this.logger.log(
+        this.logger.info(
           `[publishToTracker] story relations: ok=${relResult.ok} failed=${relResult.failed.length}`,
         );
       }
@@ -400,7 +399,7 @@ export class EpicsService {
 
     await this.integrationsService.markSyncedAt(provider);
 
-    this.logger.log(
+    this.logger.info(
       `[publishToTracker] actor=${user.sub} epic=${epicId} → ${result.epicTracker.externalKey} ` +
         `(initiative=${initiativeResult.tracker.externalKey}${initiativeResult.alreadyPublished ? ' [reused]' : ' [new]'} ` +
         `stories ok=${result.storyTrackers.length} fail=${result.partialFailures.length})`,
@@ -512,7 +511,7 @@ export class EpicsService {
   }
 
   async create(dto: CreateEpicDto) {
-    this.logger.log(`[create] START title="${dto.title}" initiativeId=${dto.initiativeId}`);
+    this.logger.info({ title: dto.title, initiativeId: dto.initiativeId }, `[create] START title="${dto.title}" initiativeId=${dto.initiativeId}`);
 
     // Necesitamos la iniciativa padre para construir el epic folder anidado.
     const parent = await this.prisma.initiative.findUnique({
@@ -527,7 +526,7 @@ export class EpicsService {
 
     const indexPath = epicIndexPath(iniRef, epicRef);
     const definitionPath = epicDefinitionPath(iniRef, epicRef);
-    this.logger.log(`[create] Generated vaultPath=${indexPath}`);
+    this.logger.info({ indexPath }, `[create] Generated vaultPath=${indexPath}`);
 
     const markdown = dto.markdown ?? '';
     const indexMd = this.buildEpicIndexMarkdown({
@@ -555,11 +554,11 @@ export class EpicsService {
         `docs(epic): narrative definition [${id}]`,
       );
     } catch (err: any) {
-      this.logger.error(`[create] definicion.md failed, rolling back index.md`, err);
+      this.logger.error({ err }, `[create] definicion.md failed, rolling back index.md`);
       await this.vault.deleteNote(indexPath, `revert(epic): rollback [${id}]`).catch(() => {});
       throw err;
     }
-    this.logger.log(`[create] Vault writes OK (index + definicion)`);
+    this.logger.info(`[create] Vault writes OK (index + definicion)`);
 
     // 2. Create PG row (rollback ambos archivos on failure).
     try {
@@ -606,10 +605,10 @@ export class EpicsService {
         }
         return tx.epic.findUniqueOrThrow({ where: { id: created.id }, include: EPIC_INCLUDE });
       });
-      this.logger.log(`[create] PG insert OK id=${epic.id}`);
+      this.logger.info({ id: epic.id }, `[create] PG insert OK id=${epic.id}`);
       return mapEpic(epic);
     } catch (err) {
-      this.logger.error(`[create] PG insert FAILED, rolling back vault files`, err);
+      this.logger.error({ err }, `[create] PG insert FAILED, rolling back vault files`);
       await this.vault.deleteNote(definitionPath, `revert(epic): rollback [${id}]`).catch(() => {});
       await this.vault.deleteNote(indexPath, `revert(epic): rollback [${id}]`).catch(() => {});
       throw err;
@@ -617,7 +616,7 @@ export class EpicsService {
   }
 
   async update(id: string, dto: UpdateEpicDto, user: AuthenticatedUser) {
-    this.logger.log(`[update] START id=${id} fields=${Object.keys(dto).join(',')}`);
+    this.logger.info({ id }, `[update] START id=${id} fields=${Object.keys(dto).join(',')}`);
 
     const existing = await this.prisma.epic.findUnique({
       where: { id },
@@ -659,7 +658,7 @@ export class EpicsService {
         const oldFolder = epicFolderPath(iniRef, oldEpicRef);
         const newFolder = epicFolderPath(iniRef, newEpicRef);
 
-        this.logger.log(`[update] Renaming folder: ${oldFolder} → ${newFolder}`);
+        this.logger.info({ oldFolder, newFolder }, `[update] Renaming folder: ${oldFolder} → ${newFolder}`);
 
         // Reescribimos index + definicion con el contenido actualizado ANTES de mover.
         await this.rewriteEpicFilesBeforeMove(
@@ -762,7 +761,7 @@ export class EpicsService {
       }
       return tx.epic.findUniqueOrThrow({ where: { id }, include: EPIC_INCLUDE });
     });
-    this.logger.log(`[update] DONE id=${id}`);
+    this.logger.info({ id }, `[update] DONE id=${id}`);
     return mapEpic(epic);
   }
 
@@ -791,7 +790,7 @@ export class EpicsService {
       // historias/ con su contenido).
       const iniRef: InitiativeRef = { id: epic.initiative.id, name: epic.initiative.name };
       const folder = epicFolderPath(iniRef, { id: epic.id, title: epic.title });
-      this.logger.log(`[remove] Deleting folder (new format): ${folder}`);
+      this.logger.info({ folder }, `[remove] Deleting folder (new format): ${folder}`);
       await this.vaultFolder.deleteFolder(
         folder,
         `feat(epic): delete "${epic.title}" [${id}]`,
@@ -806,7 +805,7 @@ export class EpicsService {
               `feat(story): delete "${story.title}" [${story.id}] (cascade from epic)`,
             )
             .catch((err) =>
-              this.logger.warn(`Failed to delete vault note ${story.vaultPath}: ${err?.message}`),
+              this.logger.warn({ vaultPath: story.vaultPath, message: err?.message }, `Failed to delete vault note ${story.vaultPath}: ${err?.message}`),
             );
         }
       }
@@ -814,13 +813,13 @@ export class EpicsService {
         await this.vault
           .deleteNote(epic.vaultPath, `feat(epic): delete "${epic.title}" [${id}]`)
           .catch((err) =>
-            this.logger.warn(`Failed to delete vault note ${epic.vaultPath}: ${err?.message}`),
+            this.logger.warn({ vaultPath: epic.vaultPath, message: err?.message }, `Failed to delete vault note ${epic.vaultPath}: ${err?.message}`),
           );
       }
     }
 
     await this.prisma.epic.delete({ where: { id } });
-    this.logger.log(`[remove] epic=${id} done (${epic.stories.length} stories cascaded)`);
+    this.logger.info({ id, length: epic.stories.length }, `[remove] epic=${id} done (${epic.stories.length} stories cascaded)`);
   }
 
   // ─────────────────────────────────────────────────────────────────────
@@ -1009,7 +1008,7 @@ export class EpicsService {
       await this.prisma.$transaction(updates);
     }
 
-    this.logger.log(
+    this.logger.info(
       `[cascadeStoryVaultPaths] updated ${updates.length} stories for epic=${epicId} (atomic)`,
     );
   }
@@ -1181,7 +1180,7 @@ export class EpicsService {
             md,
             `docs(epic): write diagram ${kind} [${epicId}]`,
           );
-          this.logger.log(`[writeEpicArtifacts] diagrama ${kind} escrito → ${path}`);
+          this.logger.info({ kind, path }, `[writeEpicArtifacts] diagrama ${kind} escrito → ${path}`);
         }
       }
     }
@@ -1201,7 +1200,7 @@ export class EpicsService {
             md,
             `docs(epic): record dependency ${dep.title} [${epicId}]`,
           );
-          this.logger.log(`[writeEpicArtifacts] dependencia "${dep.title}" escrita → ${path}`);
+          this.logger.info({ title: dep.title, path }, `[writeEpicArtifacts] dependencia "${dep.title}" escrita → ${path}`);
         }
       }
     }
@@ -1229,7 +1228,7 @@ export class EpicsService {
             md,
             `docs(epic): record design ${design.name} [${epicId}]`,
           );
-          this.logger.log(`[writeEpicArtifacts] diseño "${design.name}" escrito → ${path}`);
+          this.logger.info({ name: design.name, path }, `[writeEpicArtifacts] diseño "${design.name}" escrito → ${path}`);
         }
       }
     }
@@ -1250,7 +1249,7 @@ export class EpicsService {
           md,
           `docs(epic): update qa matrix [${epicId}]`,
         );
-        this.logger.log(`[writeEpicArtifacts] qa-funcional escrita → ${path}`);
+        this.logger.info({ path }, `[writeEpicArtifacts] qa-funcional escrita → ${path}`);
       }
     }
 
@@ -1267,7 +1266,7 @@ export class EpicsService {
           md,
           `docs(epic): update epic qa matrix [${epicId}]`,
         );
-        this.logger.log(`[writeEpicArtifacts] qa-sistemica escrita → ${path}`);
+        this.logger.info({ path }, `[writeEpicArtifacts] qa-sistemica escrita → ${path}`);
       }
     }
   }
@@ -1516,7 +1515,7 @@ export class EpicsService {
     }));
     const finalMerged = [...merged, ...tableMapped];
 
-    this.logger.log(
+    this.logger.info(
       `[listDiscoveredDependencies] epic=${epicId} paths=${paths.length} parsed=${vaultDeps.length} parseFailures=${parseFailures} enrichedFromJsonb=${merged.filter((d) => jsonbById.has(d.id)).length} tableDeps=${tableMapped.length}`,
     );
     return finalMerged;
@@ -1579,7 +1578,7 @@ export class EpicsService {
     }
 
     const result = Array.from(byStoryId.values());
-    this.logger.log(
+    this.logger.info(
       `[listStoryDependencies] epic=${epicId} stories-with-deps=${result.length} total-edges=${edges.length}`,
     );
     return result;
@@ -1633,7 +1632,7 @@ export class EpicsService {
     const design = designs.find((d) => d.id === designId);
     if (!design) {
       // Idempotente: ya no está, nothing to clean.
-      this.logger.log(`[deleteDesign] design=${designId} ya no existe en epic=${epicId}, no-op`);
+      this.logger.info({ designId, epicId }, `[deleteDesign] design=${designId} ya no existe en epic=${epicId}, no-op`);
       return;
     }
 
@@ -1699,7 +1698,7 @@ export class EpicsService {
           }
         };
         walk(tree);
-        this.logger.log(
+        this.logger.info(
           `[deleteDesign] bundle cleanup epic=${epicId} design=${designId} files=${flatFiles.length} folder=${folder}`,
         );
         for (const file of flatFiles) {
@@ -1751,7 +1750,7 @@ export class EpicsService {
         updatedAt: new Date(),
       },
     });
-    this.logger.log(`[deleteDesign] epic=${epicId} design=${designId} cleanup completo`);
+    this.logger.info({ epicId, designId }, `[deleteDesign] epic=${epicId} design=${designId} cleanup completo`);
   }
 
   /**
@@ -1865,7 +1864,7 @@ export class EpicsService {
         `docs(design): bundle ${extracted.bundleSlug} → ${file.relativePath} [${epicId}]`,
       );
     }
-    this.logger.log(
+    this.logger.info(
       `[addDesignBundle] epic=${epicId} design=${designId} files=${extracted.textFiles.length} ` +
       `binaries=${extracted.binaryEntries.length} bundleKey=${extracted.bundleKey}`,
     );
@@ -1948,7 +1947,7 @@ export class EpicsService {
     approvedByName: string;
     comment: string | null;
   }> {
-    this.logger.log(`[approve:${role}] START epicId=${epicId} userId=${user.sub}`);
+    this.logger.info({ role, epicId, sub: user.sub }, `[approve:${role}] START epicId=${epicId} userId=${user.sub}`);
 
     const existing = await this.prisma.epic.findUnique({
       where: { id: epicId },
@@ -2071,7 +2070,7 @@ export class EpicsService {
       });
     });
 
-    this.logger.log(
+    this.logger.info(
       `[approve:${role}] OK epicId=${epicId} approvedBy=${user.sub}`,
     );
 

@@ -9,8 +9,12 @@ import { mockEpics } from '@/data/mock/proyectos/epics';
 import { mockInitiatives } from '@/data/mock/proyectos/initiatives';
 import { WaveDAG } from '@/components/factory/WaveDAG';
 import { AgentCard } from '@/components/factory/AgentCard';
+import { AgentDetailDrawer } from '@/components/factory/AgentDetailDrawer';
+import { StagingGateApprovalDialog } from '@/components/factory/StagingGateApprovalDialog';
+import { BatchPreviewButton } from '@/components/factory/BatchPreviewButton';
 import { AgentStatus, GateDecision, PipelineLayer, WaveStatus } from '@cenzontle/shared';
 import type { Epic, Initiative, FactoryAgent, FactoryStory, HumanGate, SprintBatch, Wave } from '@cenzontle/shared';
+import type { BatchDetailResponse } from '@/lib/api/factory';
 import {
   ArrowLeft,
   Bot,
@@ -19,7 +23,6 @@ import {
   ClipboardList,
   DollarSign,
   Eye,
-  FlaskConical,
   GitBranch,
   Hammer,
   LayoutList,
@@ -41,6 +44,210 @@ import {
   Target,
   Calendar,
 } from 'lucide-react';
+
+// ---------------------------------------------------------------------------
+// Mappers: BatchDetailResponse (backend real) → shapes que la UI espera
+// ---------------------------------------------------------------------------
+//
+// La UI fue diseñada contra `SprintBatch + FactoryStory[] + FactoryAgent[] +
+// HumanGate[]` (mocks del FactoryContext). Para reusar el componente con datos
+// REALES del endpoint `/factory/queue/:batchId/detail`, mapeamos el response
+// del backend a esos shapes — la UI queda 100% igual, solo cambia la fuente.
+//
+// Cosas que el backend NO modela todavía (mapeamos a placeholders sensatos):
+//   - HumanGate persistido → derivamos 1 gate sintético desde `awaitingHumanGate`
+//   - Test pass rate → 0 (no tenemos tests trackeados en DB)
+//   - Initiative info → no aplica (el SprintBatch no la requiere directamente)
+
+function mapBatchDetailToSprintBatch(data: BatchDetailResponse): SprintBatch {
+  const stories: FactoryStory[] = data.stories.map((s) => ({
+    id: s.id,
+    tracker: { provider: 'linear' as const, externalId: '', externalKey: '', externalUrl: '' },
+    title: s.title,
+    description: '',
+    waveNumber: s.waveNumber,
+    dependsOn: s.blockedByIds,
+    agentId: s.latestRun?.id ?? null,
+    prNumber: s.latestRun?.prNumber ?? null,
+    status: mapStoryStatusToAgentStatus(s.status, s.latestRun?.status),
+    storyPoints: s.storyPoints,
+    startedAt: s.latestRun?.startedAt ?? null,
+    completedAt: s.latestRun?.completedAt ?? null,
+    retryCount: 0,
+    maxRetries: 3,
+    tokens: 0,
+    cost: 0,
+  }));
+
+  // Waves: agrupar stories por waveNumber. Cada Wave necesita: number, name,
+  // status, storyIds. El status del wave deriva del status de sus stories.
+  const wavesMap = new Map<number, FactoryStory[]>();
+  for (const s of stories) {
+    const arr = wavesMap.get(s.waveNumber) ?? [];
+    arr.push(s);
+    wavesMap.set(s.waveNumber, arr);
+  }
+  const waves: Wave[] = Array.from(wavesMap.entries())
+    .sort(([a], [b]) => a - b)
+    .map(([num, ss]) => {
+      const allDone = ss.every((s) => s.status === AgentStatus.Done);
+      const anyActive = ss.some(
+        (s) =>
+          s.status === AgentStatus.Coding ||
+          s.status === AgentStatus.Testing ||
+          s.status === AgentStatus.CreatingPR,
+      );
+      const status: WaveStatus = allDone
+        ? WaveStatus.Completed
+        : anyActive
+          ? WaveStatus.Running
+          : WaveStatus.Pending;
+      return {
+        id: `wave-${data.batchId}-${num}`,
+        number: num,
+        status,
+        storyIds: ss.map((s) => s.id),
+        startedAt: null,
+        completedAt: null,
+      };
+    });
+
+  // branch name: si el backend confirmó forgeBranch, usamos ése (=branch
+  // real en GitHub). Si es null (sandbox real o branch aún sin crear),
+  // mostramos el nombre derivado por convención SOLO para display textual —
+  // pero `branchUrl` queda null para que el frontend NO renderice un link
+  // que apunta a un 404.
+  const branchName =
+    data.forgeBranch ?? `forge/sprint-batch-${data.batchId.slice(0, 8)}`;
+  // URL clickeable solo si tenemos repo configurado Y la branch existe en
+  // remote (ambos confirmados por el backend). Si falta cualquiera, el
+  // frontend muestra el name sin link (con tooltip explicativo).
+  const branchUrl =
+    data.repoUrl && data.forgeBranch
+      ? `${data.repoUrl}/tree/${data.forgeBranch}`
+      : null;
+
+  return {
+    id: data.batchId,
+    name: data.epicTitle,
+    epicId: data.epicId,
+    epicTitle: data.epicTitle,
+    tracker: { provider: 'linear' as const, externalId: '', externalKey: '', externalUrl: '' },
+    stories,
+    waves,
+    branch: branchName,
+    branchUrl,
+    status: data.storiesDone === data.storiesCount && data.storiesCount > 0 ? 'completed' : 'in-progress',
+    // Pipeline layer derivado del backend: si el Tech Lead ya aprobó el
+    // staging gate (`stagingApprovedAt` persistido), el batch ha avanzado
+    // a Staged. Sin este derive, después de aprobar el modal el badge del
+    // pipeline seguía en Forge hasta refresh manual.
+    currentLayer: data.stagingApprovedAt
+      ? PipelineLayer.Staging
+      : PipelineLayer.Forge,
+    agentCount: data.storiesInProgress,
+    priority: data.priority,
+    startedAt: data.runStartedAt ?? data.enqueuedAt,
+    // Deriva completedAt del máximo timestamp de las stories cuando TODAS están
+    // done. Sin esto, el card "Elapsed" sigue tickeando con Date.now() aunque
+    // el batch haya terminado hace tiempo (bug visible 2026-05-13: batch de 2m
+    // mostraba "1h 31m" creciendo monotónicamente). El backend NO setea este
+    // campo, así que el frontend lo deriva del estado real de stories.
+    completedAt: (() => {
+      if (data.storiesCount === 0 || data.storiesDone !== data.storiesCount) {
+        return null; // batch aún corriendo
+      }
+      // Todas las stories están done — tomar el max completedAt como momento
+      // del cierre del batch. Stories sin completedAt se ignoran (caso edge:
+      // story done por DB sin run completado, raro pero defensivo).
+      const completedTimestamps = stories
+        .map((s) => s.completedAt)
+        .filter((t): t is string => t !== null)
+        .map((t) => new Date(t).getTime());
+      if (completedTimestamps.length === 0) return null;
+      return new Date(Math.max(...completedTimestamps)).toISOString();
+    })(),
+    totalCost: data.totalCostUsd,
+    totalTokens: data.totalTokens,
+    totalTokensNew: data.totalTokensNew,
+    totalTokensCached: data.totalTokensCached,
+  };
+}
+
+function mapStoryStatusToAgentStatus(
+  storyStatus: string,
+  runStatus: string | undefined,
+): AgentStatus {
+  if (storyStatus === 'done') return AgentStatus.Done;
+  if (storyStatus === 'blocked') return AgentStatus.Error;
+  if (storyStatus === 'in_review') return AgentStatus.InReview;
+  if (storyStatus === 'qa') return AgentStatus.Testing;
+  if (runStatus === 'running' || runStatus === 'claimed') return AgentStatus.Coding;
+  if (runStatus === 'failed') return AgentStatus.Error;
+  return AgentStatus.Idle;
+}
+
+function mapBatchDetailToAgents(data: BatchDetailResponse): FactoryAgent[] {
+  // Un FactoryAgent sintético por cada story que tenga un latestRun activo.
+  // Esto es lo que la AgentCard / AgentList esperan para renderear.
+  return data.stories
+    .filter((s) => s.latestRun !== null)
+    .map((s) => {
+      const run = s.latestRun!;
+      // Duration: si el run ya terminó, completedAt - startedAt es fijo. Si
+      // sigue corriendo, calculamos contra Date.now() (la card no tiene timer
+      // tick propio así que muestra snapshot al render, no live).
+      const startedMs = new Date(run.startedAt).getTime();
+      const endedMs = run.completedAt
+        ? new Date(run.completedAt).getTime()
+        : Date.now();
+      const durationSeconds = Math.max(0, Math.floor((endedMs - startedMs) / 1000));
+      return {
+        id: run.id,
+        name: s.title,
+        storyId: s.id,
+        storyKey: `${s.id.slice(0, 8)}`,
+        status: mapStoryStatusToAgentStatus(s.status, run.status),
+        worktree: run.branch,
+        tmuxSession: `cenzontle-${run.id.slice(0, 8)}`,
+        startedAt: run.startedAt,
+        // Métricas reales del backend (antes hardcoded a 0). Default a 0/null
+        // para clientes legacy o runs sin datos persistidos (pre-feature).
+        duration: durationSeconds,
+        tokens: run.tokensNew ?? 0,
+        cost: run.costUsd ?? 0,
+        lastOutput: [],
+        currentFile: null,
+        linesWritten: 0,
+        testsRun: 0,
+        testsPassed: 0,
+        filesModified: run.filesModified ?? null,
+      };
+    });
+}
+
+function mapBatchDetailToGates(data: BatchDetailResponse): HumanGate[] {
+  // Emitimos un gate sintético cuando el batch llegó al estado de approval
+  // (todas las stories done o ya aprobado). El `decision` se deriva de
+  // `stagingApprovedAt` del backend — esa es la fuente de verdad ahora
+  // que el approval se persiste. Antes el gate siempre venía `Pending`
+  // y la card "Awaiting Approval" no desaparecía tras aprobar.
+  if (!data.awaitingHumanGate && !data.stagingApprovedAt) return [];
+  const approved = Boolean(data.stagingApprovedAt);
+  return [
+    {
+      id: `gate-staging-${data.batchId}`,
+      batchId: data.batchId,
+      type: 'staging',
+      decision: approved ? GateDecision.Approved : GateDecision.Pending,
+      reviewer: approved ? data.stagingApprovedByName ?? null : null,
+      notes: null,
+      qaReport: null,
+      requestedAt: data.runStartedAt ?? data.enqueuedAt,
+      decidedAt: data.stagingApprovedAt ?? null,
+    },
+  ];
+}
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -94,11 +301,30 @@ const STORY_STATUS_CONFIG: Record<
 // Helpers
 // ---------------------------------------------------------------------------
 
+/**
+ * Formatea conteo de tokens con sufijo K/M para legibilidad. Antes mostrábamos
+ * solo "X.YM tokens" lo cual daba "0.0M" para cualquier valor <100K — la mayoría
+ * de runs caen entre 10K-900K tokens y se veían como cero. Ahora:
+ *   < 1K        → "0 tokens" / "12 tokens" / "523 tokens"
+ *   1K - 999K   → "12.3K tokens" (1 decimal)
+ *   >= 1M       → "1.5M tokens" (1 decimal)
+ */
+function formatTokens(tokens: number): string {
+  if (tokens < 1000) return `${tokens} tokens`;
+  if (tokens < 1_000_000) return `${(tokens / 1000).toFixed(1)}K tokens`;
+  return `${(tokens / 1_000_000).toFixed(1)}M tokens`;
+}
+
 function formatDuration(seconds: number): string {
   const hrs = Math.floor(seconds / 3600);
   const mins = Math.floor((seconds % 3600) / 60);
-  if (hrs > 0) return `${hrs}h ${mins}m`;
-  return `${mins}m`;
+  const secs = seconds % 60;
+  // Formato compuesto con SEGUNDOS visibles — antes mostraba solo "2m" para
+  // un batch de 2m 35s, perdiendo 35s de información. El operador ahora ve
+  // el reloj subir Xm 1s → Xm 2s → ... cada segundo (vía timer tick).
+  if (hrs > 0) return `${hrs}h ${mins}m ${secs}s`;
+  if (mins > 0) return `${mins}m ${secs}s`;
+  return `${secs}s`;
 }
 
 function formatCost(cost: number): string {
@@ -296,6 +522,8 @@ function WaveList({ waves, stories, agents }: WaveDisplayProps) {
 
 interface AgentListProps {
   agents: FactoryAgent[];
+  stories: FactoryStory[];
+  batch: SprintBatch | null;
 }
 
 const AGENT_STATUS_STYLES: Record<AgentStatus, { label: string; color: string; bg: string }> = {
@@ -309,8 +537,29 @@ const AGENT_STATUS_STYLES: Record<AgentStatus, { label: string; color: string; b
   [AgentStatus.Error]: { label: 'Error', color: 'text-[#EF4444]', bg: 'bg-[#EF4444]/10' },
 };
 
-function AgentList({ agents }: AgentListProps) {
-  const router = useRouter();
+function AgentList({ agents, stories, batch }: AgentListProps) {
+  // Agent seleccionado por el botón info ⓘ. Null = drawer cerrado. Se cierra
+  // con la X del drawer, click en overlay o Escape (manejado por el componente).
+  const [infoAgent, setInfoAgent] = useState<FactoryAgent | null>(null);
+
+  // El badge dice "N active" SOLO cuando hay agents trabajando realmente
+  // (Coding/Testing/CreatingPR). Si todos terminaron, mostramos "N done"; si
+  // hay mix, "N total". Antes decía "N active" hardcoded incluso cuando todos
+  // habían finalizado — confundía al operador que veía "3 active" pero ningún
+  // worker corriendo.
+  const activeCount = agents.filter(
+    (a) =>
+      a.status === AgentStatus.Coding ||
+      a.status === AgentStatus.Testing ||
+      a.status === AgentStatus.CreatingPR,
+  ).length;
+  const allDone = agents.length > 0 && agents.every((a) => a.status === AgentStatus.Done);
+  const badgeLabel =
+    activeCount > 0
+      ? `${activeCount} active`
+      : allDone
+        ? `${agents.length} done`
+        : `${agents.length} total`;
 
   return (
     <section aria-label="Assigned Agents">
@@ -319,8 +568,8 @@ function AgentList({ agents }: AgentListProps) {
           <Bot className="h-3.5 w-3.5 text-cyan-400" />
         </div>
         <h2 className="text-sm font-semibold text-foreground">Assigned Agents</h2>
-        <span className="rounded-md bg-zinc-800 px-2 py-0.5 text-xs font-medium text-zinc-400">
-          {agents.length} active
+        <span className="rounded-md bg-muted px-2 py-0.5 text-xs font-medium text-muted-foreground">
+          {badgeLabel}
         </span>
         <span className="text-[10px] text-muted-foreground/70 ml-auto">Click to open terminal</span>
       </div>
@@ -336,10 +585,29 @@ function AgentList({ agents }: AgentListProps) {
             <AgentCard
               key={agent.id}
               agent={agent}
-              onClick={() => router.push(`/factory/agents?agent=${agent.id}`)}
+              onClick={() =>
+                window.open(
+                  `/factory/agents/${agent.id}/terminal`,
+                  '_blank',
+                  'noopener,noreferrer',
+                )
+              }
+              onInfoClick={() => setInfoAgent(agent)}
             />
           ))}
         </div>
+      )}
+
+      {/* Drawer con info detallada del agente — disparado por el botón ⓘ del card.
+          Story se resuelve via storyId del agent (mapping 1:1 en el current model). */}
+      {infoAgent && (
+        <AgentDetailDrawer
+          agent={infoAgent}
+          story={stories.find((s) => s.id === infoAgent.storyId) ?? null}
+          batch={batch}
+          open={infoAgent !== null}
+          onClose={() => setInfoAgent(null)}
+        />
       )}
     </section>
   );
@@ -353,18 +621,61 @@ interface MetricsCardsProps {
   batch: SprintBatch;
   stories: FactoryStory[];
   agents: FactoryAgent[];
-  testPassRate: number;
 }
 
-function MetricsCards({ batch, stories, agents, testPassRate }: MetricsCardsProps) {
+function MetricsCards({ batch, stories, agents }: MetricsCardsProps) {
   const doneStories = stories.filter((s) => s.status === AgentStatus.Done).length;
   const totalStories = stories.length;
 
+  // Tick state que fuerza re-render cada 1s MIENTRAS el batch está corriendo
+  // (completedAt === null). Sin esto, Date.now() se evalúa una sola vez en el
+  // primer render y el card queda congelado en "0m" — el operador piensa que
+  // está atascado y aborta innecesariamente. Cuando el batch termina, el
+  // interval se limpia y el cálculo queda fijo en completedAt.
+  const [, setLiveTick] = useState(0);
+  useEffect(() => {
+    if (batch.completedAt) return; // batch terminado → no tickear
+    const intervalId = setInterval(() => setLiveTick((n) => n + 1), 1000);
+    return () => clearInterval(intervalId);
+  }, [batch.completedAt]);
+
+  // Elapsed: si el batch ya terminó (completedAt set), congelar el cálculo en
+  // ese timestamp. Mientras corre, usamos Date.now() y el tick anterior fuerza
+  // que se re-evalúe cada segundo. Antes usábamos Date.now() siempre, lo que
+  // hacía que un batch de 2 minutos terminado hace 11h mostrara "11h 34m"
+  // creciendo monotónicamente con el reloj.
+  const endMs = batch.completedAt
+    ? new Date(batch.completedAt).getTime()
+    : Date.now();
   const elapsedSeconds = batch.startedAt
-    ? Math.floor((Date.now() - new Date(batch.startedAt).getTime()) / 1000)
+    ? Math.max(0, Math.floor((endMs - new Date(batch.startedAt).getTime()) / 1000))
     : 0;
 
-  const cards = [
+  // Token sub-text del card Cost. Si el backend mandó el split (totalTokensNew
+  // + totalTokensCached), mostramos ambos en una sola línea con el cached en
+  // color tenue para indicar que es secundario. Si no (cliente legacy o
+  // sin data), fallback al total único como antes.
+  const costSub: React.ReactNode =
+    batch.totalTokensNew !== undefined && batch.totalTokensCached !== undefined ? (
+      <>
+        <span>{formatTokens(batch.totalTokensNew)} new</span>
+        <span className="text-muted-foreground/50">
+          {' + '}
+          {formatTokens(batch.totalTokensCached)} cached
+        </span>
+      </>
+    ) : (
+      formatTokens(batch.totalTokens)
+    );
+
+  const cards: Array<{
+    label: string;
+    value: string;
+    sub: React.ReactNode;
+    Icon: typeof ClipboardList;
+    accent: string;
+    accentBg: string;
+  }> = [
     {
       label: 'Stories',
       value: `${doneStories}/${totalStories}`,
@@ -384,7 +695,7 @@ function MetricsCards({ batch, stories, agents, testPassRate }: MetricsCardsProp
     {
       label: 'Cost',
       value: formatCost(batch.totalCost),
-      sub: `${(batch.totalTokens / 1_000_000).toFixed(1)}M tokens`,
+      sub: costSub,
       Icon: DollarSign,
       accent: 'text-emerald-400',
       accentBg: 'bg-emerald-500/10',
@@ -397,18 +708,10 @@ function MetricsCards({ batch, stories, agents, testPassRate }: MetricsCardsProp
       accent: 'text-amber-400',
       accentBg: 'bg-amber-500/10',
     },
-    {
-      label: 'Tests',
-      value: `${testPassRate}%`,
-      sub: 'pass rate',
-      Icon: FlaskConical,
-      accent: testPassRate >= 90 ? 'text-emerald-400' : testPassRate >= 70 ? 'text-amber-400' : 'text-red-400',
-      accentBg: testPassRate >= 90 ? 'bg-emerald-500/10' : testPassRate >= 70 ? 'bg-amber-500/10' : 'bg-red-500/10',
-    },
   ];
 
   return (
-    <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-3" role="list" aria-label="Batch Metrics">
+    <div className="grid grid-cols-2 sm:grid-cols-4 gap-3" role="list" aria-label="Batch Metrics">
       {cards.map((card) => (
         <div
           key={card.label}
@@ -460,6 +763,9 @@ function formatGateTimestamp(iso: string): string {
 function PendingGateCard({ gate, batchBranch, onDecision }: { gate: HumanGate; batchBranch: string; onDecision: (gateId: string, decision: GateDecision, notes: string) => void }) {
   const [notes, setNotes] = useState('');
   const [isExpanded, setIsExpanded] = useState(true);
+  // Staging gate dispara dialog de step-up auth con password — solo TechLead
+  // puede aprobar. Release gate (futuro) puede tener su propio flow.
+  const [stagingDialogOpen, setStagingDialogOpen] = useState(false);
   const cfg = GATE_DECISION_CONFIG[gate.decision];
   const GateIcon = cfg.Icon;
 
@@ -509,7 +815,18 @@ function PendingGateCard({ gate, batchBranch, onDecision }: { gate: HumanGate; b
 
         <div className="flex items-center gap-2">
           <button
-            onClick={() => onDecision(gate.id, GateDecision.Approved, notes)}
+            onClick={() => {
+              // Staging gate: requiere step-up auth con password + role TechLead.
+              // Abrimos el dialog en vez de dispatchar directo. El onApproved
+              // callback del dialog (más abajo) dispara onDecision para que el
+              // state local mueva el batch a Staged.
+              if (gate.type === 'staging') {
+                setStagingDialogOpen(true);
+                return;
+              }
+              // Release gate u otros: dispatch directo por ahora (no implementado).
+              onDecision(gate.id, GateDecision.Approved, notes);
+            }}
             className="flex-1 inline-flex items-center justify-center gap-2 rounded-lg bg-emerald-500/15 border border-emerald-500/30 px-4 py-2.5 text-sm font-medium text-emerald-400 hover:bg-emerald-500/25 transition-colors"
           >
             <CheckCircle className="h-4 w-4" aria-hidden="true" />
@@ -530,6 +847,26 @@ function PendingGateCard({ gate, batchBranch, onDecision }: { gate: HumanGate; b
           </button>
         </div>
       </div>
+
+      {/* Dialog de step-up auth para staging gate. Solo se renderea cuando
+          gate.type === 'staging' y el user clickeó Approve. El backend valida
+          password + role TechLead + mergea PR a DEV. El callback onApproved
+          dispara onDecision para que el state local mueva el batch a Staged. */}
+      {gate.type === 'staging' && (
+        <StagingGateApprovalDialog
+          open={stagingDialogOpen}
+          onOpenChange={setStagingDialogOpen}
+          batchId={gate.batchId}
+          initialNotes={notes}
+          onApproved={() => {
+            // Dispatch local — el reducer cambia currentLayer a Staging y
+            // mueve el batch a la columna Staged del Pipeline Board. El
+            // próximo poll de listQueue verá `stagingApprovedAt` persistido
+            // en DB y confirmará el state.
+            onDecision(gate.id, GateDecision.Approved, notes);
+          }}
+        />
+      )}
     </div>
   );
 }
@@ -695,14 +1032,23 @@ function EpicInfoDrawer({ batch, epic, initiative, open, onClose }: {
             </div>
             <div className="flex items-center justify-between">
               <span className="text-xs text-muted-foreground/60">Branch</span>
-              <a
-                href={`https://github.com/DamballahWedo99/CENZONTLE/tree/${batch.branch}`}
-                target="_blank"
-                rel="noopener noreferrer"
-                className="font-mono text-[11px] text-blue-400 hover:text-blue-300 hover:underline transition-colors"
-              >
-                {batch.branch}
-              </a>
+              {batch.branchUrl ? (
+                <a
+                  href={batch.branchUrl}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="font-mono text-[11px] text-blue-400 hover:text-blue-300 hover:underline transition-colors"
+                >
+                  {batch.branch}
+                </a>
+              ) : (
+                <span
+                  className="font-mono text-[11px] text-muted-foreground/70"
+                  title="La branch aún no existe en remote — se creará cuando el repo del Forge esté disponible o el primer agente pushee."
+                >
+                  {batch.branch}
+                </span>
+              )}
             </div>
             <div className="flex items-center justify-between">
               <span className="flex items-center gap-1.5 text-xs text-muted-foreground/60">
@@ -805,15 +1151,39 @@ function EpicInfoDrawer({ batch, epic, initiative, open, onClose }: {
 
 interface BatchDetailProps {
   batchId: string;
+  /**
+   * Si está set, sobrescribe los datos del state mock con datos REALES
+   * del backend (endpoint `/factory/queue/:batchId/detail`). El layout y
+   * el styling del componente se preservan 100% — solo cambia la fuente
+   * de datos. Cuando NO se pasa, el componente sigue funcionando con los
+   * mocks de FactoryContext (compatibilidad con callers legacy).
+   */
+  realBatchData?: BatchDetailResponse;
+  /**
+   * Callback que dispara un re-fetch del batch detail. Lo invocamos tras
+   * acciones que cambian state persistido en backend (ej. staging gate
+   * approval) para que el UI refleje el nuevo estado al instante sin
+   * esperar al siguiente polling tick. Si no se provee, el caller depende
+   * del polling para refrescar.
+   */
+  onRefetchRequested?: () => void;
 }
 
-export function BatchDetail({ batchId }: BatchDetailProps) {
+export function BatchDetail({ batchId, realBatchData, onRefetchRequested }: BatchDetailProps) {
   const { state, dispatch, computed } = useFactory();
   // Use mock data directly — factory pages are outside ProyectosProvider
   const proyectosEpics = mockEpics;
   const proyectosInitiatives = mockInitiatives;
 
   const handleGateDecision = useCallback((gateId: string, decision: GateDecision, notes: string) => {
+    // Para el flow REAL (realBatchData), el backend ya persistió el approval
+    // y el state debe venir del próximo fetch. Disparamos el refetch ahora
+    // para que el cambio se vea inmediato — sin esperar 5s del polling.
+    if (realBatchData) {
+      onRefetchRequested?.();
+      return;
+    }
+    // Legacy mock flow: actualizamos el state local porque no hay backend.
     const gate = state.gates.find((g) => g.id === gateId);
     if (!gate) return;
     dispatch({
@@ -841,20 +1211,26 @@ export function BatchDetail({ batchId }: BatchDetailProps) {
         },
       });
     }
-  }, [state.gates, state.factory, dispatch]);
+  }, [realBatchData, onRefetchRequested, state.gates, state.factory, dispatch]);
 
-  const batch = useMemo(
-    () => state.factory.activeBatches.find((b) => b.id === batchId) ?? null,
-    [state.factory.activeBatches, batchId],
-  );
+  // Cuando `realBatchData` está set, derivamos batch + stories + agents +
+  // gates desde el response REAL del backend. Sino, fallback al state mock
+  // de FactoryContext (compatibilidad con uso legacy).
+  const batch = useMemo<SprintBatch | null>(() => {
+    if (realBatchData) {
+      return mapBatchDetailToSprintBatch(realBatchData);
+    }
+    return state.factory.activeBatches.find((b) => b.id === batchId) ?? null;
+  }, [realBatchData, state.factory.activeBatches, batchId]);
 
   // Get the full batch with waves from currentBatch if it matches, otherwise use activeBatches entry
   const fullBatch = useMemo<SprintBatch | null>(() => {
+    if (realBatchData) return batch; // real data ya viene completo
     if (state.factory.currentBatch?.id === batchId) {
       return state.factory.currentBatch;
     }
     return batch;
-  }, [state.factory.currentBatch, batch, batchId]);
+  }, [realBatchData, state.factory.currentBatch, batch, batchId]);
 
   // Collect all story IDs from the batch's waves
   const batchStoryIds = useMemo<Set<string>>(() => {
@@ -874,30 +1250,30 @@ export function BatchDetail({ batchId }: BatchDetailProps) {
 
   // Filter stories belonging to this batch
   const batchStories = useMemo<FactoryStory[]>(() => {
+    if (realBatchData) {
+      // Stories ya vienen embebidas en el SprintBatch sintético
+      return fullBatch?.stories ?? [];
+    }
     if (batchStoryIds.size === 0) return state.stories;
     return state.stories.filter((s) => batchStoryIds.has(s.id));
-  }, [state.stories, batchStoryIds]);
+  }, [realBatchData, fullBatch, state.stories, batchStoryIds]);
 
   // Filter agents that are working on stories in this batch
   const batchAgents = useMemo<FactoryAgent[]>(() => {
+    if (realBatchData) {
+      // Derivamos agents sintéticos desde latestRun de cada story
+      return mapBatchDetailToAgents(realBatchData);
+    }
     const storyIdSet = new Set(batchStories.map((s) => s.id));
     return state.agents.filter((a) => a.storyId !== null && storyIdSet.has(a.storyId));
-  }, [state.agents, batchStories]);
-
-  // Compute test pass rate from tests related to batch stories
-  const testPassRate = useMemo(() => {
-    const storyIdSet = new Set(batchStories.map((s) => s.id));
-    const relevantTests = state.tests.filter(
-      (t) => t.storyId === null || storyIdSet.has(t.storyId),
-    );
-    const totalCases = relevantTests.reduce((sum, t) => sum + t.total, 0);
-    const passedCases = relevantTests.reduce((sum, t) => sum + t.passed, 0);
-    return totalCases > 0 ? Math.round((passedCases / totalCases) * 100) : 0;
-  }, [state.tests, batchStories]);
+  }, [realBatchData, state.agents, batchStories]);
 
   // Filter human gates belonging to this batch.
   // Release gate only shows after staging gate is approved (sequential approval flow).
   const batchGates = useMemo<HumanGate[]>(() => {
+    if (realBatchData) {
+      return mapBatchDetailToGates(realBatchData);
+    }
     const all = state.gates.filter((g) => g.batchId === batchId);
     const stagingGate = all.find((g) => g.type === 'staging');
     const stagingApproved = stagingGate?.decision === GateDecision.Approved;
@@ -905,7 +1281,7 @@ export function BatchDetail({ batchId }: BatchDetailProps) {
       if (g.type === 'release' && !stagingApproved) return false;
       return true;
     });
-  }, [state.gates, batchId]);
+  }, [realBatchData, state.gates, batchId]);
 
   if (!fullBatch) {
     return (
@@ -973,12 +1349,36 @@ export function BatchDetail({ batchId }: BatchDetailProps) {
             </div>
           </div>
 
-          {/* Right: pipeline pills + branch badge */}
+          {/* Right: pipeline pills + preview button + branch badge */}
           <div className="flex items-center gap-4 shrink-0">
             <PipelinePills currentLayer={fullBatch.currentLayer} />
+            {/* Botón de preview: a la izquierda del branch indicator.
+                Spawnea local dev server (clone + pnpm dev / npx serve) y
+                abre la URL en una nueva tab. Disabled cuando no hay branch
+                aún (pre-push del Forge). */}
+            <BatchPreviewButton
+              batchId={fullBatch.id}
+              disabled={!fullBatch.branchUrl}
+            />
             <div className="flex items-center gap-2 rounded-lg border border-border bg-card px-3 py-2">
               <GitBranch className="h-3.5 w-3.5 text-muted-foreground/70" aria-hidden="true" />
-              <a href={`https://github.com/DamballahWedo99/CENZONTLE/tree/${fullBatch.branch}`} target="_blank" rel="noopener noreferrer" className="font-mono text-xs text-blue-400 hover:text-blue-300 hover:underline transition-colors">{fullBatch.branch}</a>
+              {fullBatch.branchUrl ? (
+                <a
+                  href={fullBatch.branchUrl}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="font-mono text-xs text-blue-400 hover:text-blue-300 hover:underline transition-colors"
+                >
+                  {fullBatch.branch}
+                </a>
+              ) : (
+                <span
+                  className="font-mono text-xs text-muted-foreground/70"
+                  title="La branch aún no existe en GitHub — se creará al recibir el primer push del Forge o cuando el repo se active."
+                >
+                  {fullBatch.branch}
+                </span>
+              )}
             </div>
           </div>
         </div>
@@ -989,7 +1389,6 @@ export function BatchDetail({ batchId }: BatchDetailProps) {
         batch={fullBatch}
         stories={batchStories}
         agents={batchAgents}
-        testPassRate={testPassRate}
       />
 
       {/* ---- Pipeline ---- */}
@@ -1006,7 +1405,7 @@ export function BatchDetail({ batchId }: BatchDetailProps) {
       />
 
       {/* ---- Agents ---- */}
-      <AgentList agents={batchAgents} />
+      <AgentList agents={batchAgents} stories={batchStories} batch={fullBatch} />
 
       {/* ---- Epic Info Drawer ---- */}
       <EpicInfoDrawer

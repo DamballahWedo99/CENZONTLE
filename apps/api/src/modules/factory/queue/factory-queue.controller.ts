@@ -1,4 +1,5 @@
 import {
+  Body,
   Controller,
   Get,
   Post,
@@ -10,6 +11,7 @@ import { ApiTags, ApiOperation } from '@nestjs/swagger';
 import { type AuthenticatedUser } from '@cenzontle/shared';
 import { CurrentUser } from '../../auth/decorators';
 import { FactoryQueueService } from './factory-queue.service';
+import { ApproveStagingGateDto } from './dto/approve-staging-gate.dto';
 
 @ApiTags('Factory Queue')
 @Controller('factory/queue')
@@ -36,5 +38,34 @@ export class FactoryQueueController {
     @CurrentUser() user: AuthenticatedUser,
   ) {
     return this.queueService.enqueueEpic(epicId, user);
+  }
+
+  @Get(':batchId/detail')
+  @ApiOperation({
+    summary:
+      'Detalle completo de un batch del Forge para el dashboard /factory/batch/:id. Incluye stories con sus statuses + agentRuns activos + cost agregado + Wave DAG derivado de story dependencies. Reemplaza el dashboard mock previo.',
+  })
+  detail(
+    @Param('batchId') batchId: string,
+    @CurrentUser() user: AuthenticatedUser,
+  ) {
+    return this.queueService.getBatchDetail(batchId, user);
+  }
+
+  @Post(':batchId/approve-staging')
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({
+    summary:
+      'Aprueba el staging gate de un batch — mergea el consolidated PR a DEV y mueve el batch a Staged. Requiere step-up auth (password + role TechLead).',
+  })
+  approveStaging(
+    @Param('batchId') batchId: string,
+    @Body() dto: ApproveStagingGateDto,
+    @CurrentUser() user: AuthenticatedUser,
+  ) {
+    return this.queueService.approveStagingGate(batchId, user, {
+      password: dto.password,
+      notes: dto.notes,
+    });
   }
 }
