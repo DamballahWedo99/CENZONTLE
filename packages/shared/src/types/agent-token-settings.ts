@@ -137,6 +137,10 @@ export interface AgentTokenSettings {
   dodVerifierModel: ForgeWorkerModel;
   dodVerifierEffort: ForgeWorkerEffortLevel;
 
+  // DoD retry loop — máximo de intentos del enforcement loop del worker.
+  // 1 = una sola pasada (verificador no-bloqueante). >1 activa reintentos.
+  dodMaxAttempts: number;
+
   updatedAt: string;
   updatedBy: string | null;
 }
@@ -162,6 +166,7 @@ export const DEFAULT_AGENT_TOKEN_SETTINGS: Omit<AgentTokenSettings, 'updatedAt' 
   forgeWorkerEffort: 'high',
   dodVerifierModel: 'claude-haiku-4-5-20251001',
   dodVerifierEffort: 'low',
+  dodMaxAttempts: 1,
 };
 
 /** Bounds usados tanto en server (validation) como en client (input min/max). */

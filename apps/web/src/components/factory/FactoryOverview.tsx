@@ -21,6 +21,7 @@ import {
 } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip';
+import { Skeleton } from '@/components/ui/skeleton';
 import { useFactory } from '@/context/FactoryContext';
 import { getShortId } from '@/lib/short-id';
 import { useEffectiveResourcePool } from '@/hooks/use-effective-resource-pool';
@@ -866,6 +867,52 @@ function ResourcePoolDrawer({ pool, open, onClose }: { pool: ResourcePool; open:
 // Main Component
 // ---------------------------------------------------------------------------
 
+/**
+ * Card placeholder del Pipeline Board mientras la queue carga. Imita la forma
+ * de `KanbanBatchCard` (título, badge, progress bar, footer de stats).
+ */
+function KanbanCardSkeleton() {
+  return (
+    <div className="rounded-lg border border-border bg-card p-3.5">
+      <Skeleton className="h-4 w-3/4" />
+      <div className="flex items-center gap-2 mt-2.5">
+        <Skeleton className="h-3 w-14" />
+        <Skeleton className="h-4 w-16 rounded-full" />
+      </div>
+      <Skeleton className="h-1 w-full mt-3 rounded-full" />
+      <div className="flex items-center gap-3 mt-3">
+        <Skeleton className="h-3 w-8" />
+        <Skeleton className="h-3 w-12" />
+        <Skeleton className="h-3 w-12 ml-auto" />
+      </div>
+    </div>
+  );
+}
+
+/**
+ * Conteo de skeleton cards por columna del board. Un patrón fijo no-uniforme
+ * se ve más natural que N cards idénticas en cada columna.
+ */
+const CARDS_PER_SKELETON_COLUMN = [2, 3, 1, 2, 1];
+
+/**
+ * Columna del Pipeline Board en estado de carga: el header real (la config de
+ * la columna se conoce al instante, no necesita skeleton) + N card skeletons.
+ */
+function KanbanColumnSkeleton({ column, index }: { column: KanbanColumn; index: number }) {
+  const cardCount = CARDS_PER_SKELETON_COLUMN[index] ?? 1;
+  return (
+    <div className="flex flex-col">
+      <KanbanColumnHeader column={column} count={0} />
+      <div className="flex-1 flex flex-col gap-2 rounded-lg p-2 border border-border/50 bg-muted/10">
+        {Array.from({ length: cardCount }).map((_, i) => (
+          <KanbanCardSkeleton key={i} />
+        ))}
+      </div>
+    </div>
+  );
+}
+
 export function FactoryOverview() {
   const { state } = useFactory();
 
@@ -1060,9 +1107,14 @@ export function FactoryOverview() {
         </button>
       </div>
 
-      {/* Kanban board */}
+      {/* Kanban board — skeletons mientras la primera hidratación de la queue
+          está en vuelo (state.queueLoading); luego, el board real. */}
       <div className="grid grid-cols-5 gap-3 min-w-[900px]" style={{ minHeight: 'calc(100vh - 160px)' }}>
-        {KANBAN_COLUMNS.map((column) => {
+        {state.queueLoading
+          ? KANBAN_COLUMNS.map((column, i) => (
+              <KanbanColumnSkeleton key={column.id} column={column} index={i} />
+            ))
+          : KANBAN_COLUMNS.map((column) => {
           const data = kanbanData.get(column.id);
           const activeCards = data?.active ?? [];
           const queuedCards = data?.queued ?? [];

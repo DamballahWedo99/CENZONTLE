@@ -554,6 +554,35 @@ export interface CriterionEvent {
   completedAt?: string;
 }
 
+/**
+ * Un secreto externo (API key de terceros: Stripe, Twilio, Amadeus, …)
+ * desencriptado para inyección runtime en el worker del Forge. Se forwardea
+ * en cada `ClaimedStory` desde el almacén `ExternalSecret`, que vive
+ * encriptado at-rest con AES-256-GCM.
+ *
+ * Contrato de seguridad:
+ *  - `value` es PLAINTEXT. Nunca se persiste en disco salvo el `.env`
+ *    efímero del workdir (modo 0600, gitignoreado vía `.git/info/exclude`,
+ *    borrado antes del `git add -A`). Fuera de eso vive solo en RAM
+ *    durante el run.
+ *  - Nunca se loguea: el worker y el backend loguean `name`/`vendor`,
+ *    jamás `value`.
+ *  - El output del agente se redacta por el valor literal exacto antes de
+ *    enviarse al backend (ver `makeRedactor` en `apps/worker/src/lib/secrets.ts`)
+ *    — los secretos de terceros tienen formato arbitrario y no matchean
+ *    los patrones por prefijo del worker.
+ */
+export interface ExternalSecretForWorker {
+  /** Identificador estilo env var, ej `STRIPE_API_KEY`. Único en la org.
+   *  El worker lo usa como nombre de la env var y como key en el `.env`. */
+  name: string;
+  /** Valor plaintext desencriptado. Ver el contrato de seguridad arriba. */
+  value: string;
+  /** Vendor (Stripe, Twilio, …) — solo para logs/diagnóstico, nunca
+   *  afecta la inyección. Null si el secret no registró vendor. */
+  vendor: string | null;
+}
+
 export interface ClaimedStory {
   /** UUID del AgentRun creado en el INSERT del claim. Identifica al run
    *  para llamadas subsiguientes de progress/complete. */
@@ -589,6 +618,19 @@ export interface ClaimedStory {
    *  encriptada. El worker lo pasa al spawn de claude como env var.
    *  NUNCA se persiste en disco — solo en RAM durante el run. */
   anthropicApiKey: string;
+  /** Todos los `ExternalSecret` registrados en la org, desencriptados.
+   *  El worker los inyecta como env vars (para SDKs `process.env`-based:
+   *  Stripe/Twilio/AWS) y como un `.env` efímero en el workdir (para
+   *  frameworks file-based: Next.js/Vite), tanto en el spawn de `claude`
+   *  como en los comandos del DoD verifier. Array vacío si la org no tiene
+   *  secrets registrados.
+   *
+   *  OPCIONAL en el contrato a propósito: el backend siempre lo envía, pero
+   *  durante un deploy parcial un worker nuevo puede recibir un claim de un
+   *  backend viejo que no incluye el campo — el worker degrada a `[]` con
+   *  `claimed.externalSecrets ?? []`. Ver el contrato de seguridad en
+   *  `ExternalSecretForWorker`. */
+  externalSecrets?: ExternalSecretForWorker[];
   /** Modelo del coder agent (CLI claude `--model`). Configurado desde
    *  `/factory/settings → Factory`. Worker lo usa con prioridad sobre
    *  `process.env.CLAUDE_MODEL` (que queda como fallback legacy). */
@@ -604,6 +646,11 @@ export interface ClaimedStory {
   /** Effort del DoD Verifier (CLI `--effort`). Default 'low' — checks
    *  atómicos no requieren thinking. Prioridad sobre DOD_VERIFIER_EFFORT. */
   dodVerifierEffort: string;
+  /** Tope de intentos del DoD enforcement loop del worker (AgentTokenSettings
+   *  → tab Factory). 1 = una sola pasada; >1 activa reintentos ante error
+   *  duro o criterios sin cumplir. OPCIONAL: un worker nuevo con un claim de
+   *  un backend viejo lo recibe `undefined` → degrada a 1 (una pasada). */
+  dodMaxAttempts?: number;
   /** Tier 1 Harness — catálogo de criterios DoD configurado por el operador
    *  en `/factory/settings/Definition of Done`. El worker los usa para correr
    *  verificación determinística post-claude (ver `dod-verifier.ts`). Solo

@@ -1,0 +1,58 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# Loki — reglas de alerta de la API CENZONTLE
+# ─────────────────────────────────────────────────────────────────────────────
+#
+# Formato: reglas de alerta estilo Prometheus para el RULER de Loki. El mismo
+# formato lo aceptan Grafana (alertas gestionadas sobre un datasource Loki),
+# Grafana Cloud y Grafana Mimir — así que esta regla sirve sea cual sea el
+# camino que uses.
+#
+# Cómo cargarla, según tu setup:
+#   • Loki self-hosted con ruler → montá este archivo en el directorio de reglas
+#     del ruler (`ruler.storage` local / `-ruler.rule-path`) y recargá Loki.
+#   • Grafana (UI)               → Alerting → New alert rule → datasource Loki,
+#     y copiá el `expr`, el `for`, los `labels` y las `annotations` de abajo.
+#
+# ⚠️  AJUSTAR el selector de stream `{service="cenzontle-api"}` al label real con
+#     que tu pipeline de logs (Promtail / Grafana Alloy / el shipper de tu
+#     plataforma) etiqueta los logs de la API. Puede ser `app`, `container`,
+#     `job`, `namespace`, etc. — este repo no incluye la config del shipper, así
+#     que el selector de abajo es un placeholder razonable, no un valor real.
+#
+# Contexto: la API loguea en JSON (pino, ver app.module.ts). El rate limiter
+# usa `ResilientThrottlerStorage`, que emite un `warn` cuando pierde Redis y cae
+# a modo FAIL-OPEN — los caps de rate-limiting quedan DESACTIVADOS (los requests
+# pasan sin throttle) hasta que Redis vuelva. Esta alerta hace esa degradación
+# de un control de seguridad visible y accionable, en vez de un log que nadie
+# mira. El log ya está rate-limitado a 1 línea / 30s del lado de la app.
+
+groups:
+  - name: cenzontle-api-rate-limiter
+    rules:
+      - alert: RateLimiterFailOpen
+        # Cuenta las líneas que contienen "FAIL-OPEN" en los últimos 5m. Ese
+        # string es exclusivo del log de `ResilientThrottlerStorage.noteDegraded()`,
+        # así que el line-filter `|= "FAIL-OPEN"` alcanza sin parsear el JSON.
+        # Variante más precisa (opcional), si tu pipeline conserva el JSON:
+        #   {service="cenzontle-api"} | json | context = "ResilientThrottlerStorage"
+        expr: |
+          sum(count_over_time({service="cenzontle-api"} |= "FAIL-OPEN" [5m])) > 0
+        # `for: 0m` — alertar apenas aparece la primera línea. Un control de
+        # seguridad caído, aunque sea brevemente, vale un aviso; el rate-limit
+        # del log (1/30s) ya evita el spam. Si el equipo lo encuentra ruidoso
+        # ante blips de <30s, subir el umbral a `> 1` exige degradación sostenida.
+        for: 0m
+        labels:
+          severity: warning
+          component: rate-limiter
+          service: cenzontle-api
+        annotations:
+          summary: "Rate limiter de la API CENZONTLE en modo FAIL-OPEN"
+          description: >-
+            ResilientThrottlerStorage no puede alcanzar Redis: el rate limiting
+            está temporalmente DESACTIVADO — los requests pasan sin throttle,
+            incluido el cap anti-brute-force del login. La API sigue sirviendo
+            normalmente (fail-open es por diseño). Acción: revisar la salud de
+            Redis (REDIS_HOST / REDIS_PORT) y la conectividad de la API; al
+            volver Redis los caps se re-activan solos, sin redeploy. La alerta
+            se auto-resuelve ~5m después de la última línea FAIL-OPEN.

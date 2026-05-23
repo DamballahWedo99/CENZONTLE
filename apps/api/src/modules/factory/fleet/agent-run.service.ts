@@ -10,6 +10,7 @@ import {
   AGENT_RUN_TERMINAL_STATUSES,
   type AgentRunStatus,
   type ClaimedStory,
+  type ExternalSecretForWorker,
 } from '@cenzontle/shared';
 import { PrismaService } from '../../prisma/prisma.service';
 import { OrgAnthropicConfigService } from './org-anthropic-config.service';
@@ -20,6 +21,9 @@ import { ConflictResolverService } from './conflict-resolver.service';
 import { ForgePlannerService } from './forge-planner.service';
 import { AgentTokenSettingsService } from '../../agent-token-settings/agent-token-settings.service';
 import { StoriesService } from '../../proyectos/stories/stories.service';
+import { ExternalSecretsService } from '../../external-secrets/external-secrets.service';
+import { computeRunStats } from '../queue/run-stats';
+import { classifySecretDependencies } from './secret-deps';
 import { RunProgressDto } from './dto/run-progress.dto';
 import { RunCompleteDto } from './dto/run-complete.dto';
 
@@ -32,6 +36,52 @@ export type { ClaimedStory } from '@cenzontle/shared';
  * vez tarda más de 5min, pero hay headroom para historias arquitecturales.
  */
 const STALE_RUN_MS = 10 * 60 * 1000;
+
+/**
+ * SEC (security-reviewer 2026-05-22, Finding 2 / CWE-601, CWE-1021):
+ *
+ * Valida que una URL de ttyd reportada por un worker apunte a un host
+ * INTERNO. El frontend embebe ese valor en `<iframe src>`; un worker
+ * comprometido podía reportar `http://attacker.com/…` y conseguir phishing
+ * dentro del panel del dashboard. El `@IsUrl` del DTO ya bloquea schemes
+ * peligrosos (`javascript:`, `data:`, `file:`); esta función es la segunda
+ * barrera — bloquea hosts EXTERNOS antes de persistir.
+ *
+ * Allowlist (case-insensitive):
+ *   - localhost / 127.0.0.0/8 / ::1 (loopback IPv4 e IPv6)
+ *   - 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16 (RFC 1918)
+ *   - 169.254.0.0/16, fe80::/10 (link-local)
+ *   - fc00::/7 (IPv6 unique local)
+ *
+ * Cualquier otro host (FQDN público, IP pública) → rechazado.
+ */
+function isInternalTtydUrl(rawUrl: string): boolean {
+  let parsed: URL;
+  try {
+    parsed = new URL(rawUrl);
+  } catch {
+    return false;
+  }
+  if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') return false;
+  // URL.hostname devuelve IPv6 con o sin brackets según el runtime — normalizar.
+  let host = parsed.hostname.toLowerCase();
+  if (host.startsWith('[') && host.endsWith(']')) host = host.slice(1, -1);
+  // localhost + IPv4/IPv6 loopback
+  if (host === 'localhost' || host === '0.0.0.0') return true;
+  if (host === '::1' || host === '0:0:0:0:0:0:0:1') return true;
+  if (/^127\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(host)) return true;
+  // IPv4 RFC 1918
+  if (/^10\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(host)) return true;
+  if (/^192\.168\.\d{1,3}\.\d{1,3}$/.test(host)) return true;
+  if (/^172\.(1[6-9]|2\d|3[01])\.\d{1,3}\.\d{1,3}$/.test(host)) return true;
+  // IPv4 link-local (169.254.0.0/16)
+  if (/^169\.254\.\d{1,3}\.\d{1,3}$/.test(host)) return true;
+  // IPv6 link-local (fe80::/10) — primer nibble del 2° byte ∈ {8, 9, a, b}
+  if (/^fe[89ab][0-9a-f]:/.test(host)) return true;
+  // IPv6 unique local (fc00::/7) — primer byte fc o fd
+  if (/^f[cd][0-9a-f]{2}:/.test(host)) return true;
+  return false;
+}
 
 /**
  * Result type del raw SQL de claim. Una historia reclamada (o null si no hay
@@ -105,6 +155,22 @@ interface MaterializedClaim {
   repoUrl: string | null;
   baseBranch: string | null;
   anthropicApiKey: string;
+  /**
+   * Todos los `ExternalSecret` de la org, desencriptados — se forwardean al
+   * worker en el `ClaimedStory`. Cargados con el client propio de
+   * `ExternalSecretsService` (NO `tx`): es un READ de otra tabla que no
+   * afecta la atomicidad del INSERT de `agent_runs`. Array vacío válido
+   * (org sin secrets registrados) — NO es un campo crítico del payload.
+   */
+  externalSecrets: ExternalSecretForWorker[];
+  /**
+   * Dependencias técnicas de la historia que requieren credencial, son
+   * BLOQUEANTES (`isBlocking`) y NO tienen secret vinculado
+   * (`linkedSecretId == null`). Si la lista no está vacía, el caller
+   * `claimStory` rechaza el claim y escala la historia a `blocked` — el
+   * agente no puede implementar contra una credencial inexistente.
+   */
+  blockingSecretGaps: Array<{ vendor: string | null; title: string }>;
   dodCriteria: Array<{ kind: string | null; text: string; description: string }>;
   /** Modelo + effort del Forge Worker (coder agent CLI). Leído del singleton
    *  AgentTokenSettings — configurable desde /factory/settings → Factory.
@@ -115,6 +181,9 @@ interface MaterializedClaim {
   /** Modelo + effort del DoD Verifier (reviewer agent CLI). Mismo patrón. */
   dodVerifierModel: string;
   dodVerifierEffort: string;
+  /** Tope de intentos del DoD enforcement loop del worker (singleton
+   *  AgentTokenSettings → tab Factory). 1 = una sola pasada. */
+  dodMaxAttempts: number;
 }
 
 /**
@@ -165,9 +234,23 @@ const SERVER_REDACTION_PATTERNS: Array<[RegExp, string]> = [
   [/Bearer\s+[A-Za-z0-9._-]{20,}/g, 'Bearer [REDACTED]'],
 ];
 
-function redactServerSide(text: string | undefined | null): string | undefined {
+function redactServerSide(
+  text: string | undefined | null,
+  secretValues: readonly string[] = [],
+): string | undefined {
   if (text == null) return undefined;
   let out = text;
+  // Pasada 1 — valores exactos de los secretos externos del org. Los
+  // secretos de terceros (Amadeus/Twilio/etc.) tienen formato arbitrario y
+  // no matchean los patrones por prefijo de abajo: hay que redactar por el
+  // valor literal. Solo valores >= 8 chars — uno más corto sobre-redactaría.
+  // `split`/`join` = reemplazo literal del substring (sin interpretación regex).
+  for (const value of secretValues) {
+    if (value.length >= 8) {
+      out = out.split(value).join('[REDACTED]');
+    }
+  }
+  // Pasada 2 — patrones por prefijo (claves con formato conocido).
   for (const [pattern, replacement] of SERVER_REDACTION_PATTERNS) {
     out = out.replace(pattern, replacement);
   }
@@ -227,6 +310,7 @@ export class AgentRunService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly orgAnthropicConfig: OrgAnthropicConfigService,
+    private readonly externalSecrets: ExternalSecretsService,
     private readonly promptBuilder: ForgePromptBuilderService,
     private readonly github: GitHubService,
     private readonly dod: DodService,
@@ -733,6 +817,15 @@ export class AgentRunService {
       return null;
     }
 
+    // Secretos externos del org — desencriptados FUERA del `$transaction` de
+    // claim (qa+architecture-reviewer 2026-05-21). Es un READ de otra tabla;
+    // hacerlo dentro del tx mantendría abierta la conexión + el lock
+    // `FOR UPDATE` de `compute_nodes` durante el findMany + las N
+    // desencriptaciones AES. `getAllPlaintext` omite defensivamente cualquier
+    // secret corrupto; `[]` es válido (org sin secrets). Se pasa a
+    // `materializeClaim` como parámetro.
+    const externalSecrets = await this.externalSecrets.getAllPlaintext();
+
     // ATOMIC CAP + CLAIM (qa-reviewer F-B 2026-05-06).
     //
     // El check anterior (count seguido de UPDATE en queries separadas)
@@ -794,14 +887,20 @@ export class AgentRunService {
         // Filtros del candidato (orden importa para legibilidad):
         //  - epic enqueueada
         //  - story no reclamada en este momento
-        //  - status NOT IN ('done', 'in_review'): excluye stories terminales
-        //    Y excluye in_review (PR abierto esperando humano O MOCK+merge-fail
-        //    bloqueando el DAG hasta resolución manual). Sin esta exclusión, una
-        //    story en in_review con claimedAt=NULL podría re-reclamarse y entrar
-        //    en loop infinito de attempts contra el mismo PR conflicting.
-        //  - NOT EXISTS predecesor con status != 'done': bloquea wave N+1
-        //    hasta que TODOS los predecesores estén done (= integration branch
-        //    actualizado en MOCK con merge OK, O humano mergeó en PROD).
+        //  - status NOT IN ('done', 'in_review', 'blocked'): excluye stories
+        //    terminales. in_review = PR abierto esperando humano (O MOCK+merge-fail
+        //    bloqueando el DAG hasta resolución manual). blocked = run falló y
+        //    escaló a humano — re-reclamarla automáticamente repetiría el
+        //    fallo; el retry es una acción humana explícita (botón en el merge
+        //    view). Sin estas exclusiones, una story con claimedAt=NULL podría
+        //    re-reclamarse sola.
+        //  - NOT EXISTS predecesor sin RESOLVER: bloquea wave N+1 hasta que
+        //    TODOS los predecesores hard lleguen a un estado TERMINAL — 'done'
+        //    (merge OK) o 'blocked' (el predecesor falló). 'blocked' cuenta
+        //    como resuelto (2026-05-21): el fallo de una historia NO debe
+        //    dejar atascadas para siempre a sus dependientes. El orden del DAG
+        //    se preserva (esperan a que el blocker termine), pero el error NO
+        //    se propaga — la dependiente corre igual y decide por sus méritos.
         //
         // PARALELISMO INTRA-WAVE: stories de la misma wave (sin DAG dep entre
         // ellas) corren EN PARALELO — es el value prop del Forge fleet. Si
@@ -819,13 +918,13 @@ export class AgentRunService {
             JOIN epics e ON s."epicId" = e.id
             WHERE e."enqueuedAt" IS NOT NULL
               AND s."claimedAt" IS NULL
-              AND s.status NOT IN ('done', 'in_review')
+              AND s.status NOT IN ('done', 'in_review', 'blocked')
               AND NOT EXISTS (
                 SELECT 1 FROM story_dependencies dep
                 JOIN stories blocker ON blocker.id = dep."blockedById"
                 WHERE dep."storyId" = s.id
                   AND dep.hardness = 'hard'
-                  AND blocker.status != 'done'
+                  AND blocker.status NOT IN ('done', 'blocked')
               )
             ORDER BY e."enqueuedAt" ASC, s."createdAt" ASC
             LIMIT 1
@@ -838,7 +937,13 @@ export class AgentRunService {
           RETURNING stories.id, stories."epicId", stories.title, stories."podId"
         `;
 
-        return await this.materializeClaim(tx, nodeId, tokenId, claimedRows);
+        return await this.materializeClaim(
+          tx,
+          nodeId,
+          tokenId,
+          claimedRows,
+          externalSecrets,
+        );
       });
     } catch (err) {
       // Sentinel: el INSERT chocó con el unique constraint de seguridad
@@ -852,6 +957,68 @@ export class AgentRunService {
     }
 
     if (!materialized) return null;
+
+    // ════════════════════════════════════════════════════════════════════
+    // GATE — dependencias técnicas bloqueantes sin credencial vinculada
+    // ════════════════════════════════════════════════════════════════════
+    //
+    // `materializeClaim` separó las `StoryTechnicalDependency` de la historia:
+    // las `requiresCredential && isBlocking && linkedSecretId == null` quedaron
+    // en `blockingSecretGaps`. Una historia así NO puede correr — el código que
+    // el agente escriba referenciaría una credencial que no existe y los tests
+    // que la toquen fallarían. La escalamos a humano: el operador registra el
+    // secret en `/factory/settings → Secretos externos` (lo que vincula la dep
+    // por vendor) y re-encola la historia.
+    //
+    // Se chequea ACÁ, antes del planner (~$0.12/story), para no gastar tokens
+    // en una historia que va a quedar `blocked` igual. Reusa el mismo patrón
+    // de cleanup+throw que la validación defensiva de más abajo.
+    if (materialized.blockingSecretGaps.length > 0) {
+      const gapsDesc = materialized.blockingSecretGaps
+        .map((g) => `"${g.title}"${g.vendor ? ` (${g.vendor})` : ''}`)
+        .join(', ');
+      this.logger.error(
+        {
+          event: 'claim.blocking_secret_gap',
+          runId: materialized.runId,
+          storyId: materialized.storyId,
+          gaps: materialized.blockingSecretGaps,
+        },
+        `Historia tiene dependencias técnicas bloqueantes sin credencial ` +
+          `vinculada: ${gapsDesc} — abortando claim, escalando la historia a ` +
+          `'blocked' para revisión humana`,
+      );
+      try {
+        await this.prisma.$transaction([
+          this.prisma.agentRun.update({
+            where: { id: materialized.runId },
+            data: {
+              status: 'failed',
+              errorMessage: `Blocking credential dependencies without linked secret: ${gapsDesc}`,
+            },
+          }),
+          this.prisma.story.update({
+            where: { id: materialized.storyId },
+            data: { claimedAt: null, status: 'blocked' },
+          }),
+        ]);
+      } catch (cleanupErr) {
+        this.logger.error(
+          {
+            event: 'claim.blocking_secret_gap.cleanup_failed',
+            runId: materialized.runId,
+            storyId: materialized.storyId,
+            error: (cleanupErr as Error).message,
+          },
+          'Cleanup post-gate falló — AgentRun queda zombie hasta sweeper TTL',
+        );
+      }
+      throw new ConflictException(
+        `Story ${materialized.storyId} blocked: requiere credenciales no ` +
+          `provisionadas (${gapsDesc}). Registrá el/los secret(s) en Factory ` +
+          `settings y re-encolá la historia.`,
+      );
+    }
 
     // ════════════════════════════════════════════════════════════════════
     // Post-transaction enrichment (qa+arch-reviewer 2026-05-12)
@@ -1046,8 +1213,14 @@ export class AgentRunService {
         },
         `Claim payload tiene campos críticos vacíos: ${missingFields.join(', ')} — abortando claim antes de retornar al worker (cleanup AgentRun + un-claim story)`,
       );
-      // Cleanup: marcar AgentRun como failed + un-claim story para que pueda
-      // re-claim-ear otro worker en el próximo poll (en vez de quedar zombie).
+      // Cleanup: marcar AgentRun como failed + story como `blocked`.
+      // `missingFields` valida campos del DB (title/markdown/etc.) — un fallo
+      // así NO es transitorio: re-claimar la misma story produce el mismo
+      // fallo de validación. Antes se devolvía a 'backlog' (re-claimable),
+      // lo que loopeaba claim→fail→backlog→claim quemando overhead. Ahora
+      // 'blocked' escala a humano, igual que un run fallido (qa-reviewer
+      // 2026-05-19). El operador corrige el contenido de la story y la
+      // re-encola manualmente.
       try {
         await this.prisma.$transaction([
           this.prisma.agentRun.update({
@@ -1059,7 +1232,7 @@ export class AgentRunService {
           }),
           this.prisma.story.update({
             where: { id: materialized.storyId },
-            data: { claimedAt: null, status: 'backlog' },
+            data: { claimedAt: null, status: 'blocked' },
           }),
         ]);
       } catch (cleanupErr) {
@@ -1089,10 +1262,12 @@ export class AgentRunService {
       repoUrl: materialized.repoUrl,
       baseBranch: materialized.baseBranch,
       anthropicApiKey: materialized.anthropicApiKey,
+      externalSecrets: materialized.externalSecrets,
       forgeWorkerModel: materialized.forgeWorkerModel,
       forgeWorkerEffort: materialized.forgeWorkerEffort,
       dodVerifierModel: materialized.dodVerifierModel,
       dodVerifierEffort: materialized.dodVerifierEffort,
+      dodMaxAttempts: materialized.dodMaxAttempts,
       dodCriteria: materialized.dodCriteria,
       acceptanceCriteria,
       qaTestCases,
@@ -1121,6 +1296,7 @@ export class AgentRunService {
     nodeId: string,
     tokenId: string,
     claimedRows: ClaimedStoryRow[],
+    externalSecrets: ExternalSecretForWorker[],
   ): Promise<MaterializedClaim | null> {
     if (claimedRows.length === 0) {
       this.logger.debug({ nodeId }, `[claim] nodeId=${nodeId} → 204 noStoriesReady`);
@@ -1185,6 +1361,48 @@ export class AgentRunService {
     // (no `tx`) — pero como solo es READ y no modifica estado relacionado,
     // no afecta la atomicidad de nuestro escrito.
     const anthropicApiKey = await this.orgAnthropicConfig.getApiKeyPlaintext();
+
+    // `externalSecrets` llega como parámetro: se desencripta FUERA del
+    // `$transaction` (ver `claimStory`) para no mantener locks abiertos
+    // durante el findMany + las desencriptaciones AES.
+
+    // Dependencias técnicas de la historia que requieren credencial. El gate
+    // post-tx de `claimStory` rechaza el claim si alguna es BLOQUEANTE y no
+    // tiene secret vinculado — el agente no puede implementar (ni el verifier
+    // testear) contra una credencial que no existe. Leído con `tx` para que
+    // sea consistente con el snapshot de la story recién lockeada.
+    const technicalDependencies = await tx.storyTechnicalDependency.findMany({
+      where: { storyId: claimed.id },
+      select: {
+        title: true,
+        vendor: true,
+        requiresCredential: true,
+        isBlocking: true,
+        linkedSecretId: true,
+      },
+    });
+    // Clasificación pura (unit-testeada en `secret-deps.spec.ts`): parte las
+    // deps en gaps bloqueantes (abortan el claim en `claimStory`) vs
+    // no-bloqueantes (solo log de advertencia).
+    const { blockingGaps, nonBlockingGaps } = classifySecretDependencies(
+      technicalDependencies,
+    );
+    for (const gap of nonBlockingGaps) {
+      // Requiere credencial pero NO es bloqueante: no aborta el claim, solo
+      // deja rastro queryable para diagnóstico operacional.
+      this.forgeClaimLogger.warn(
+        {
+          event: 'forge.claim.unlinked_secret_dep',
+          runId: agentRun.id,
+          storyId: claimed.id,
+          epicId: claimed.epicId,
+          depTitle: gap.title,
+          depVendor: gap.vendor,
+        },
+        `dependencia técnica "${gap.title}" requiere credencial pero no tiene ` +
+          `secret vinculado (no bloqueante — el claim procede)`,
+      );
+    }
 
     // Construye el prompt vía ForgePromptBuilderService. Antes era un
     // helper privado en este service (architecture-reviewer F-04
@@ -1286,9 +1504,13 @@ export class AgentRunService {
           present: epicBusinessDiagram !== null,
           chars: epicBusinessDiagram?.length ?? 0,
         },
+        // Solo NOMBRES de secrets — nunca valores (contrato de seguridad
+        // de `ExternalSecretForWorker`).
+        externalSecretsCount: externalSecrets.length,
+        externalSecretNames: externalSecrets.map((s) => s.name),
         ...(gitWiringError ? { gitError: gitWiringError } : {}),
       },
-      `materialized run=${agentRun.id.slice(0, 8)} story=${claimed.id.slice(0, 8)} epic=${claimed.epicId.slice(0, 8)} mode=${mode}`,
+      `materialized run=${agentRun.id.slice(0, 8)} story=${claimed.id.slice(0, 8)} epic=${claimed.epicId.slice(0, 8)} mode=${mode} secrets=${externalSecrets.length}`,
     );
 
     // Carga del contexto del DAG: stories del MISMO epic que YA terminaron
@@ -1337,11 +1559,14 @@ export class AgentRunService {
       repoUrl,
       baseBranch,
       anthropicApiKey,
+      externalSecrets,
+      blockingSecretGaps: blockingGaps,
       dodCriteria,
       forgeWorkerModel: forgeWorkerConfig.model,
       forgeWorkerEffort: forgeWorkerConfig.effort,
       dodVerifierModel: dodVerifierConfig.model,
       dodVerifierEffort: dodVerifierConfig.effort,
+      dodMaxAttempts: dodVerifierConfig.maxAttempts,
     };
   }
 
@@ -1691,6 +1916,35 @@ export class AgentRunService {
     const newStatus: AgentRunStatus =
       run.status === 'claimed' ? 'running' : (run.status as AgentRunStatus);
 
+    // F-12 defense-in-depth: el backend redacta lastOutput aunque el worker
+    // ya lo haya hecho. Cargamos los valores de los secretos del org para
+    // redactar también por valor exacto (los de terceros no tienen prefijo
+    // que los patrones atrapen). Solo si hay lastOutput — evita el query
+    // cuando el progress no trae output.
+    const progressSecretValues =
+      dto.lastOutput !== undefined
+        ? (await this.externalSecrets.getAllPlaintext()).map((s) => s.value)
+        : [];
+
+    // SEC (Finding 2): validar ttydUrl contra allowlist de hosts internos
+    // antes de persistir. Si el worker reporta una URL no-interna (host
+    // externo, scheme peligroso, parsing fail), se descarta + log WARN; el
+    // row mantiene el ttydUrl previo (o null) intacto. El log es la única
+    // forma para el operador de diagnosticar por qué el iframe del terminal
+    // queda en blanco — sin él, fallo silencioso.
+    let safeTtydUrl: string | undefined;
+    if (dto.ttydUrl !== undefined) {
+      if (isInternalTtydUrl(dto.ttydUrl)) {
+        safeTtydUrl = dto.ttydUrl;
+      } else {
+        this.logger.warn(
+          `[run:${runId}] ttydUrl rechazado por security policy: ` +
+            `'${dto.ttydUrl.slice(0, 120)}' no es URL interna ` +
+            `(loopback / RFC 1918 / link-local). NO se persiste.`,
+        );
+      }
+    }
+
     await this.prisma.agentRun.update({
       where: { id: runId },
       data: {
@@ -1701,7 +1955,7 @@ export class AgentRunService {
         // (regex incomplete, worker malicioso, output de un proceso hijo
         // que claude no redactó), aquí se quedan fuera de la DB.
         ...(dto.lastOutput !== undefined
-          ? { lastOutput: redactServerSide(dto.lastOutput) }
+          ? { lastOutput: redactServerSide(dto.lastOutput, progressSecretValues) }
           : {}),
         // HITO 1.6: persist criteria progress (worker milestones + agent custom)
         ...(dto.criteriaProgress !== undefined
@@ -1710,9 +1964,11 @@ export class AgentRunService {
 // index signature. Mismo patrón que el cast de dodVerification abajo.
 { criteriaProgress: dto.criteriaProgress as unknown as Prisma.InputJsonValue }
           : {}),
-        // HITO 1.5: la primera vez que el worker reporta ttydUrl, lo persistimos
-        // para que el frontend pueda mostrar iframe del terminal en vivo
-        ...(dto.ttydUrl !== undefined ? { ttydUrl: dto.ttydUrl } : {}),
+        // HITO 1.5 + SEC (Finding 2): persistimos el ttydUrl solo si pasó la
+        // allowlist de hosts internos en `safeTtydUrl` (ver arriba el bloque
+        // de validación). Si fue rechazado, ya se logueó WARN y aquí
+        // simplemente no escribimos — el row queda con su ttydUrl previo.
+        ...(safeTtydUrl !== undefined ? { ttydUrl: safeTtydUrl } : {}),
         // Tier 1 Harness — UX progressive (2026-05-11): el worker manda
         // dodVerification parcial después de verificar cada criterio para
         // que la UI muestre checkmarks incrementales (1/N, 2/N, ...) en
@@ -1772,8 +2028,12 @@ export class AgentRunService {
    *    "todos los slots se usen dinámicamente". Cuando Sprint 3 traiga
    *    Octokit real, restauramos el flow normal: prNumber set → in_review
    *    (revisión humana), sin prNumber → considerar fallo.
-   *  - exitCode ≠ 0 → run.status='failed', story.status no cambia, el
-   *    sweeper eventualmente dejará claimedAt=NULL para retry manual
+   *  - exitCode ≠ 0 → run.status='failed'. SOLO esa story pasa a 'blocked'
+   *    (estado terminal que escala al merge gate humano). Sin cascada
+   *    (Q7 2026-05-21): las historias descendientes del DAG NO se bloquean
+   *    — el fallo no se propaga, cada una corre y decide por sus méritos.
+   *    NO hay re-claim automático de la story fallida: el retry es una
+   *    acción humana explícita (botón "Reintentar" en el merge view).
    */
   async completeRun(runId: string, nodeId: string, dto: RunCompleteDto): Promise<void> {
     const run = await this.prisma.agentRun.findUnique({
@@ -1839,9 +2099,15 @@ export class AgentRunService {
     // marcamos failed — el run sigue como completed y dejamos `prNumber=null`
     // para que un cron/retry posterior pueda re-intentar. La defensa: el
     // commit ya está en remote, no se pierde trabajo.
-    let prNumber: number | undefined = dto.prNumber; // legacy: worker pudo mandarlo
+    // SEC (security-reviewer 2026-05-22, Finding 1 / CWE-639): el prNumber
+    // SOLO se setea internamente por `openStoryPullRequest` abajo — NUNCA
+    // se acepta del worker. Aceptarlo del payload permitía a un worker
+    // comprometido pasar el ID de un PR cualquiera del repo y el bloque de
+    // auto-merge lo squash-mergeaba sin verificación de pertenencia (bypass
+    // de human review + branch protection). El campo se borró del DTO.
+    let prNumber: number | undefined = undefined;
     let prUrl: string | undefined;
-    if (exitedClean && dto.prBranchPushed && prNumber === undefined) {
+    if (exitedClean && dto.prBranchPushed) {
       const prTitle = `[Forge] ${run.story.title}`;
       const prBody = [
         `## Auto-generated by CENZONTLE Forge`,
@@ -2149,11 +2415,26 @@ export class AgentRunService {
 
     // F-12 defense-in-depth: redact errorMessage y lastOutput antes de
     // persistir. Aunque el worker honesto ya lo hace, aquí blindamos
-    // contra workers maliciosos / regex skips.
-    const redactedErrorMessage = redactServerSide(dto.errorMessage);
-    const redactedLastOutput = redactServerSide(dto.lastOutput);
+    // contra workers maliciosos / regex skips. Cargamos los valores de los
+    // secretos del org para redactar también por valor exacto — los de
+    // terceros tienen formato arbitrario y los patrones por sí solos no los
+    // atrapan.
+    const completeSecretValues = (
+      await this.externalSecrets.getAllPlaintext()
+    ).map((s) => s.value);
+    const redactedErrorMessage = redactServerSide(
+      dto.errorMessage,
+      completeSecretValues,
+    );
+    const redactedLastOutput = redactServerSide(
+      dto.lastOutput,
+      completeSecretValues,
+    );
 
-    await this.prisma.$transaction([
+    // Tipo explícito del array: las ramas condicionales arman distintos
+    // tipos de PrismaPromise (story.update vs agentRun.update); la anotación
+    // evita que TS intente unificarlos en un tuple homogéneo y falle.
+    const txOps: Prisma.PrismaPromise<unknown>[] = [
       this.prisma.agentRun.update({
         where: { id: runId },
         data: {
@@ -2225,8 +2506,15 @@ export class AgentRunService {
       //    consulta vía Octokit, NO se proyecta al status de la story.
       //  - movedToDoneSandbox (sin push O MOCK+merge OK): done directo +
       //    claimedAt=NULL para liberar el slot del DAG.
-      //  - else (failed o PR creation falló): no se mueve, queda visible
-      //    como 'completed' run pero story sigue en su status anterior.
+      //  - !exitedClean (run falló — exit≠0): SOLO esa story pasa a 'blocked'.
+      //    blocked es TERMINAL: el SQL de claimStory excluye la story como
+      //    candidata (no auto-retry) PERO la acepta como blocker resuelto, así
+      //    que sus dependientes del DAG corren igual. blocked cuenta para
+      //    awaitingHumanGate → el batch llega al merge gate. El operador ve la
+      //    story en el merge view ("Stories sin completar") y decide:
+      //    reintentar o cerrar el sprint asumiendo la brecha.
+      //  - else (exitedClean pero sin transición — PR creation falló): no se
+      //    mueve, queda en su status anterior (caso atascado, log WARN abajo).
       ...(movedToReview || movedToDoneSandbox
         ? [
             this.prisma.story.update({
@@ -2234,8 +2522,32 @@ export class AgentRunService {
               data: { status: 'done' as const, claimedAt: null },
             }),
           ]
-        : []),
-    ]);
+        : !exitedClean
+          ? [
+              // Q7 (2026-05-21): SIN cascada. Un run fallido marca 'blocked'
+              // SOLO su propia story — las descendientes hard del DAG ya NO
+              // se bloquean en cascada. El fallo de una historia no es deuda
+              // de las que dependen de ella: el orden del DAG se respeta
+              // igual (claimStory acepta un blocker 'blocked' como resuelto),
+              // así que las dependientes corren con normalidad y deciden por
+              // sus propios méritos. El merge gate igual se alcanza — cada
+              // descendiente llega a su propio estado terminal.
+              // updateMany (no .update): el guard `status NOT IN
+              // ('done','in_review')` evita que un run viejo que reporta su
+              // fallo tarde degrade una story que otro run ya completó
+              // (carrera con retry manual / sweeper — qa-reviewer 2026-05-21).
+              // updateMany no lanza si 0 filas matchean; .update sí lo haría.
+              this.prisma.story.updateMany({
+                where: {
+                  id: run.storyId,
+                  status: { notIn: ['done', 'in_review'] },
+                },
+                data: { status: 'blocked' as const, claimedAt: null },
+              }),
+            ]
+          : []),
+    ];
+    await this.prisma.$transaction(txOps);
 
     // Log granular del transition para forensics y queryability en Loki.
     // Evento queryable: `story.status.done` por runId. Si en el epic futuro
@@ -2247,6 +2559,14 @@ export class AgentRunService {
           `prNumber=${prNumber ?? 'none'} prBranchPushed=${dto.prBranchPushed ?? false} ` +
           `path=${movedToReview ? 'pr-flow' : 'sandbox-or-mock'} ` +
           `(coder + DoD + PR push completados; reviewer agents son trabajo futuro)`,
+      );
+    } else if (!exitedClean) {
+      // Evento queryable en Loki: `story.status.blocked` por runId. Marca el
+      // momento en que un fallo del agente escala a decisión humana (gate).
+      this.logger.info(
+        `[run:${runId}] event=story.status.blocked storyId=${run.storyId} ` +
+          `exitCode=${dto.exitCode} ` +
+          `(run falló — story marcada blocked, escala al merge gate humano)`,
       );
     }
 
@@ -2321,13 +2641,57 @@ export class AgentRunService {
           select: {
             id: true,
             title: true,
-            epic: { select: { id: true, title: true } },
+            storyPoints: true,
+            tracker: true,
+            epic: { select: { id: true, title: true, tracker: true } },
+            // Historias que bloquean a ésta (deps duras/blandas del DAG).
+            // El drawer las muestra en la fila "Depends on".
+            blockedBy: {
+              select: {
+                blockedBy: {
+                  select: { id: true, title: true, tracker: true },
+                },
+              },
+            },
           },
         },
         node: { select: { id: true, name: true, type: true } },
       },
     });
     if (!run) return null;
+
+    // Cost + tokens-new del run — generator + verifier + planner. Reusa el
+    // helper compartido `computeRunStats` para que el AgentDetailDrawer sume
+    // EXACTAMENTE lo mismo que el AgentCard (vía `getBatchDetail`): antes este
+    // callsite omitía el cost del verifier e incluía cache_read en tokens.
+    const runStats = computeRunStats(run);
+
+    // Tracker key de la story (Json `{ externalKey?, ... }`).
+    const storyTracker = run.story.tracker as Record<string, unknown> | null;
+    const storyTrackerKey =
+      storyTracker && typeof storyTracker.externalKey === 'string'
+        ? storyTracker.externalKey
+        : null;
+
+    // Tracker key del epic (Json `{ externalKey?, ... }`).
+    const epicTracker = run.story.epic.tracker as Record<string, unknown> | null;
+    const epicTrackerKey =
+      epicTracker && typeof epicTracker.externalKey === 'string'
+        ? epicTracker.externalKey
+        : null;
+
+    // Stories de las que ésta depende → { key, title } para el drawer.
+    const dependsOn = run.story.blockedBy.map((dep) => {
+      const depTracker = dep.blockedBy.tracker as Record<string, unknown> | null;
+      return {
+        key:
+          depTracker && typeof depTracker.externalKey === 'string'
+            ? depTracker.externalKey
+            : null,
+        title: dep.blockedBy.title,
+      };
+    });
+
     return {
       runId: run.id,
       status: run.status as AgentRunStatus,
@@ -2355,6 +2719,17 @@ export class AgentRunService {
       nodeId: run.node.id,
       nodeName: run.node.name,
       nodeType: run.node.type,
+      // Métricas reales del run — consumidas por el AgentDetailDrawer.
+      durationMs: run.completedAt
+        ? run.completedAt.getTime() - run.startedAt.getTime()
+        : null,
+      costUsd: runStats.costUsd,
+      tokensNew: runStats.tokensNew,
+      filesModified: run.filesModified,
+      storyPoints: run.story.storyPoints,
+      storyTrackerKey,
+      epicTrackerKey,
+      dependsOn,
     };
   }
 

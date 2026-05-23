@@ -17,6 +17,7 @@ import { VaultModule } from '../../vault/vault.module';
 import { GitHubModule } from '../github/github.module';
 import { DodModule } from '../dod/dod.module';
 import { FactoryAuthzModule } from '../authz/factory-authz.module';
+import { ExternalSecretsModule } from '../../external-secrets/external-secrets.module';
 
 /**
  * FleetModule — gestión de la flota de cómputo del Forge.
@@ -34,6 +35,10 @@ import { FactoryAuthzModule } from '../authz/factory-authz.module';
  *    en su lugar (architecture-reviewer fix 2026-05-13).
  *  - FactoryAuthzModule → FleetService delega assertCanManageFleet aquí
  *    (callers existentes mantienen `this.fleet.assertCanManageFleet(user)`).
+ *  - ExternalSecretsModule → AgentRunService inyecta ExternalSecretsService
+ *    para desencriptar los secrets del org (getAllPlaintext) y forwardearlos
+ *    al worker en cada claim-story. Sin ciclo: ExternalSecretsModule solo
+ *    importa PrismaModule + VaultModule.
  *  - ScheduleModule.forRoot → habilita @Cron decorators (FleetSweeperService)
  */
 @Module({
@@ -43,6 +48,7 @@ import { FactoryAuthzModule } from '../authz/factory-authz.module';
     GitHubModule,
     DodModule,
     FactoryAuthzModule,
+    ExternalSecretsModule,
     ScheduleModule.forRoot(),
   ],
   controllers: [FleetController, WorkerApiController, OrgAnthropicConfigController],

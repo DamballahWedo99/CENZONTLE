@@ -28,7 +28,18 @@ import {
  *    en 10min sin progress
  */
 export class RunCompleteDto {
-  @ApiProperty({ description: 'Exit code del proceso claude', minimum: 0, maximum: 255 })
+  @ApiProperty({
+    description:
+      'Exit code reportado por el worker. 0 = run OK: Claude terminó limpio. ' +
+      'El verificador del DoD es NO BLOQUEANTE — sus verdicts viajan en ' +
+      'dodVerification como warn y NO afectan este código (ya no existe el ' +
+      'antiguo 65 "DoD failure"). No-cero = run fallido → la story pasa a ' +
+      '"blocked": 127 spawn fail, 143 kill del backend, 124 timeout, ' +
+      '69 fallo de clone del repo, 74 fallo de push / fuga de secretos ' +
+      'pre-push, o el código real con que Claude crasheó.',
+    minimum: 0,
+    maximum: 255,
+  })
   @IsInt()
   @Min(0)
   @Max(255)
@@ -52,11 +63,19 @@ export class RunCompleteDto {
   @MaxLength(40)
   commitSha?: string;
 
-  @ApiPropertyOptional({ description: 'PR creado al completar exitosamente (legacy, ahora lo crea el backend)', minimum: 1 })
-  @IsOptional()
-  @IsInt()
-  @Min(1)
-  prNumber?: number;
+  // SEC FIX (security-reviewer 2026-05-22, Finding 1 / CWE-639, CWE-863):
+  //
+  // El campo `prNumber` fue ELIMINADO del payload aceptado del worker. Antes
+  // permitía que un worker (token leakeado / comprometido) enviara el `prNumber`
+  // de CUALQUIER PR open del repo activo — el backend lo aceptaba, saltaba la
+  // apertura legítima del PR via Octokit, y caía directo al auto-merge
+  // (squash, irreversible) bypaseando branch protection y human review.
+  //
+  // El backend ya abre el PR siempre internamente vía `openStoryPullRequest`
+  // con `headBranch: run.branch` trusted. El `prNumber` autoritativo se
+  // persiste en `agent_runs.prNumber` desde la respuesta de Octokit. El
+  // worker (runner.ts:1669) ya no envía este campo desde 2026-04 — removerlo
+  // del DTO no rompe ningún flujo legítimo.
 
   @ApiPropertyOptional({
     description:

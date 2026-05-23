@@ -2,7 +2,7 @@ import { execFile } from 'child_process';
 import { promises as fs } from 'fs';
 import { join } from 'path';
 import { promisify } from 'util';
-import type { CriterionVerdict } from '@cenzontle/shared';
+import type { CriterionVerdict, ExternalSecretForWorker } from '@cenzontle/shared';
 import { logger } from './logger.js';
 import {
   runVerifierAgent,
@@ -25,6 +25,7 @@ import {
 const VERIFIER_BATCH_ENABLED = (process.env.DOD_VERIFIER_BATCH ?? '1') === '1';
 import { preflightTestCase } from './qa-preflight.js';
 import { preflightTechnicalRequirement } from './tl-preflight.js';
+import { buildSecretEnv, makeRedactor } from './secrets.js';
 
 // Re-export para callers internos del worker que importaban desde aquí.
 // El tipo canónico vive en `@cenzontle/shared` desde 2026-05-11
@@ -239,6 +240,7 @@ async function runVerifier(
   kind: string,
   label: string,
   spec: VerifierSpec,
+  secrets: ExternalSecretForWorker[],
 ): Promise<CriterionVerdict> {
   const config = await spec.precheck(workdir);
   if ('skip' in config) {
@@ -269,6 +271,11 @@ async function runVerifier(
       const result = await execFileAsync(cmd.binary, cmd.args, {
         cwd: workdir,
         env: {
+          // Secretos externos del org PRIMERO — las env vars fijas van
+          // después para pisarlas siempre (defensa final). Da a los comandos
+          // del verifier (`pnpm test`/`lint`/etc.) acceso al servicio
+          // externo de la historia.
+          ...buildSecretEnv(secrets),
           HOME: process.env.HOME ?? '',
           PATH: process.env.PATH ?? '',
           USER: process.env.USER ?? '',
@@ -438,6 +445,18 @@ export async function verifyDoDCriteria(
      */
     dodVerifierModel?: string;
     dodVerifierEffort?: string;
+    /**
+     * Secretos externos del org (Stripe/Twilio/Amadeus/…). Se inyectan en
+     * el `env` de los comandos del verifier Layer 1 (`pnpm test`/`lint`) y
+     * en el `env` de los spawns del verifier agent Layer 3 — NUNCA en
+     * ningún prompt. Paridad con el coder: los tests del repo pueden tocar
+     * el servicio externo. Array vacío si la org no tiene secrets.
+     *
+     * PRECONDICIÓN: deben venir ya saneados por `sanitizeExternalSecrets`
+     * (el runner lo hace una vez, antes de armar este contexto). Este módulo
+     * NO vuelve a sanear — solo redacta el output e inyecta el env.
+     */
+    externalSecrets: ExternalSecretForWorker[];
   },
   /**
    * Callback opcional para UX progressive (2026-05-11). El verifier lo
@@ -459,6 +478,26 @@ export async function verifyDoDCriteria(
   // criterio `acceptance-criteria` se evalúa per-criterio (loop abajo).
   const verdicts: CriterionVerdict[] = [];
 
+  // Redacción de los verdicts antes de que SALGAN de esta función. El
+  // `output`/`reason`/`command` de un verdict puede contener el valor de un
+  // secreto externo: el verifier Layer 1 corre `pnpm test`/`lint` con los
+  // secretos en el env y captura su stdout crudo en `output`; el verifier
+  // agent Layer 3 puede echar un secreto en su reasoning y eso queda en
+  // `reason`. Sin esto, esos valores llegan crudos a `agent_runs.dodVerification`
+  // (DB), al iframe de la UI y al retry-prompt del coder. Redactamos en los
+  // DOS puntos de salida — `fireProgress` y el `return` — así cubrimos todo
+  // verdict sin importar cuál de los múltiples push-sites lo generó
+  // (security-reviewer BLOCK 2026-05-21).
+  const redactVerdictText = makeRedactor(
+    agentContext.externalSecrets.map((s) => s.value),
+  );
+  const redactVerdict = (v: CriterionVerdict): CriterionVerdict => ({
+    ...v,
+    command: v.command ? redactVerdictText(v.command) : v.command,
+    output: v.output ? redactVerdictText(v.output) : v.output,
+    reason: v.reason ? redactVerdictText(v.reason) : v.reason,
+  });
+
   // Helper local: dispara onProgress de forma segura. Un fallo del POST
   // al backend (red, 5xx) NO debe romper la verificación — solo loggear.
   //
@@ -473,7 +512,7 @@ export async function verifyDoDCriteria(
   const fireProgress = async () => {
     if (!onProgress) return;
     try {
-      await onProgress([...verdicts]);
+      await onProgress(verdicts.map(redactVerdict));
     } catch (err) {
       logger.warn(
         { event: 'dod.verify.progress.error', err: (err as Error).message },
@@ -630,7 +669,13 @@ export async function verifyDoDCriteria(
 
     if (spec) {
       // Layer 1: Deterministic check. Corre subprocess.
-      const verdict = await runVerifier(workdir, c.kind!, c.text, spec);
+      const verdict = await runVerifier(
+        workdir,
+        c.kind!,
+        c.text,
+        spec,
+        agentContext.externalSecrets,
+      );
       logger.info(
         {
           event: 'dod.verify.layer1',
@@ -895,7 +940,7 @@ export async function verifyDoDCriteria(
   //   |= "forge.verify.completed" | unwrap tl_preflight_missing
   emitVerifierSummary(verdicts, agentContext);
 
-  return verdicts;
+  return verdicts.map(redactVerdict);
 }
 
 /**
@@ -1045,6 +1090,8 @@ async function callVerifierAgent(
     anthropicApiKey: string;
     dodVerifierModel?: string;
     dodVerifierEffort?: string;
+    /** Secretos externos del org — propagados al spawn del verifier agent. */
+    externalSecrets: ExternalSecretForWorker[];
   },
 ): Promise<CriterionVerdict> {
   const verdict: VerifierAgentVerdict = await runVerifierAgent({
@@ -1054,6 +1101,7 @@ async function callVerifierAgent(
     storyMarkdown: agentContext.storyMarkdown,
     branch: agentContext.branch,
     anthropicApiKey: agentContext.anthropicApiKey,
+    externalSecrets: agentContext.externalSecrets,
     model: agentContext.dodVerifierModel,
     effort: agentContext.dodVerifierEffort,
   });
@@ -1137,6 +1185,8 @@ async function callVerifierAgentBatch(
     anthropicApiKey: string;
     dodVerifierModel?: string;
     dodVerifierEffort?: string;
+    /** Secretos externos del org — propagados al spawn del verifier agent. */
+    externalSecrets: ExternalSecretForWorker[];
   },
 ): Promise<CriterionVerdict[]> {
   if (criteria.length === 0) return [];
@@ -1155,6 +1205,7 @@ async function callVerifierAgentBatch(
     storyMarkdown: agentContext.storyMarkdown,
     branch: agentContext.branch,
     anthropicApiKey: agentContext.anthropicApiKey,
+    externalSecrets: agentContext.externalSecrets,
     model: agentContext.dodVerifierModel,
     effort: agentContext.dodVerifierEffort,
   });
@@ -1229,33 +1280,11 @@ export function extractPassedCriteria(verdicts: CriterionVerdict[]): CriterionVe
 }
 
 /**
- * Construye el prompt para un retry attempt. Aplica los principios del
- * research:
- *
- *   - Output literal del comando que falló se inyecta directo (no se
- *     sintetiza ni se traduce). Anthropic, Augment Code, Addy Osmani
- *     coinciden: los modelos auto-corrigen mejor con error verbatim que
- *     con resumen humano.
- *   - "NO repitas la misma estrategia" — chain of fallbacks (OpenAI o3):
- *     instrucción explícita para cambiar approach evita doom loop.
- *   - Pre-pendeamos al prompt original (que ya tiene el contexto completo
- *     de épica + story + DoD) en vez de reconstruirlo desde cero. Single
- *     source of truth — el backend ya generó el contexto bien.
- *
- * @param originalPrompt El prompt que el backend envió en el primer claim.
- *        Tiene épica + story + DoD + workflow. Lo reusamos al pie de página.
- * @param failedVerdicts Verdicts del verifier con status='failed'. Cada uno
- *        trae command + output literal + reason.
- * @param attemptNumber Cuál intento es ahora (2 = segundo, 3 = tercero, etc.)
- * @param maxAttempts Cuántos intentos máximo antes de fail permanente.
- */
-/**
  * Construye el prompt de retry QUIRÚRGICO (surgical incremental retry).
  *
  * Diseño 2026-05-17 — reemplaza el approach anterior "destructive retry" que
  * concatenaba `originalPrompt` completo al final, causando que el agente
- * re-implementara desde cero y regresionara criterios que ya pasaban (doom
- * loop por construcción).
+ * re-implementara desde cero y regresionara criterios que ya pasaban.
  *
  * El nuevo prompt:
  *   1. Le dice EXPLÍCITAMENTE al agente cuánto progreso preservó (N de M).
@@ -1269,15 +1298,12 @@ export function extractPassedCriteria(verdicts: CriterionVerdict[]): CriterionVe
  *      el fix de un criterio rompería otro que ya pasaba.
  *
  * Resultado esperado: el agente trata cada retry como una operación quirúrgica
- * incremental, NO como un "do it all again, but better". Esto elimina la causa
- * raíz del doom loop por regresión (cf. session 2026-05-17 — A2 dayjs).
+ * incremental, NO como un "do it all again, but better".
  *
  * @param storyTitle Título corto de la story (10-100 chars). Aparece arriba
  *        como recordatorio del scope sin reenviar el AC completo.
  * @param storyContext (opcional) Resumen corto de la story (≤500 chars) si
- *        el agente necesita más contexto del que da el título. Por default
- *        omitido: la mayoría de stories tienen título suficientemente
- *        descriptivo y los archivos ya commiteados son la fuente de verdad.
+ *        el agente necesita más contexto del que da el título.
  * @param failedVerdicts Verdicts del verifier con status='failed'. Cada uno
  *        trae command + output literal + reason. Solo estos serán el SCOPE
  *        del retry.
@@ -1330,9 +1356,9 @@ export function buildRetryPrompt(input: {
     `1. **USAR Read ANTES de Write/Edit**: confirmá el estado actual del archivo antes de modificarlo. NO asumas que recordás lo que escribiste antes.`,
     `2. **Cambios mínimos**: el menor diff posible que satisfaga los criterios fallidos. Si un cambio de 3 líneas funciona, NO reemplaces el archivo entero.`,
     `3. **NO toques los archivos relacionados con criterios que ya pasan** (listados abajo como "PRESERVAR"). Si tu fix requiere tocar uno de esos, primero verificá con Read que el cambio NO rompe lo que ya funciona.`,
-    `4. **OBLIGATORIO antes de Edit/Write en archivos PRESERVED**: si un archivo aparece en el bloque "🛡️ Archivos referenciados por criterios PRESERVED" abajo, DEBÉS (a) hacer Read del archivo completo, (b) identificar qué sección/función/línea cubre el criterio passed, (c) modificar SOLO lo necesario sin tocar esa sección, (d) re-leer post-Edit para verificar que no rompiste nada. Si saltás este paso, vas a generar regresión (passedCount baja → doom loop detectado → run abortado).`,
+    `4. **OBLIGATORIO antes de Edit/Write en archivos PRESERVED**: si un archivo aparece en el bloque "🛡️ Archivos referenciados por criterios PRESERVED" abajo, DEBÉS (a) hacer Read del archivo completo, (b) identificar qué sección/función/línea cubre el criterio passed, (c) modificar SOLO lo necesario sin tocar esa sección, (d) re-leer post-Edit para verificar que no rompiste nada.`,
     `5. **Si no podés fixear el criterio X sin romper el criterio Y (que ya pasa)**: NO commits. Dejá un comentario en tu output explicando el conflicto y deja la branch como estaba. Mejor fail honesto que regresión silenciosa.`,
-    `6. **Si llegás al intento ${maxAttempts} sin arreglar todo, el run se marca fallido y un humano investiga** — no te quedes en doom loop.`,
+    `6. **Si llegás al intento ${maxAttempts} sin arreglar todo, los criterios sin cumplir quedan como deuda visible (warn) y la historia igual avanza** — no te quedes dando vueltas.`,
     ``,
     preservedSection,
     ``,
@@ -1344,11 +1370,6 @@ export function buildRetryPrompt(input: {
   ].join('\n');
 }
 
-/**
- * Renderea los verdicts PASADOS como contexto de "no tocar". Truncado para
- * no inflar el prompt: solo label + evidencia (paths) si la hay. Si la lista
- * tiene más de 15 items, agrupa los primeros 10 y muestra count de los demás.
- */
 /**
  * Extrae paths de archivo del `output` field de un verdict — los verifiers
  * embeben evidencias como bullet list:
@@ -1380,6 +1401,11 @@ function extractEvidencePathsFromOutput(output: string | null): string[] {
   return Array.from(paths);
 }
 
+/**
+ * Renderea los verdicts PASADOS como contexto de "no tocar". Truncado para
+ * no inflar el prompt: solo label + evidencia (paths) si la hay. Si la lista
+ * tiene más de 15 items, agrupa los primeros 15 y muestra count de los demás.
+ */
 function renderPreservedSection(passed: CriterionVerdict[]): string {
   if (passed.length === 0) {
     return [
@@ -1398,7 +1424,7 @@ function renderPreservedSection(passed: CriterionVerdict[]): string {
   // deduplicada) — los exponemos al final como bloque "ARCHIVOS A NO ROMPER".
   // Fix 2026-05-18 contra regresiones: antes el coder solo veía labels sin
   // saber qué archivos relacionados, así que al editar para fixear failed
-  // criteria rompía criteria que ya pasaban. Ver doom loop "REGRESIÓN".
+  // criteria rompía criteria que ya pasaban.
   //
   // Los evidence paths viven embebidos en el `output` field como texto plano
   // (formato "Evidencias examinadas por el verifier...:\n  - path1\n  - path2").
@@ -1492,7 +1518,10 @@ function renderFailedSection(failed: CriterionVerdict[]): string {
 
 /**
  * Truncate a string to max chars, agregando "… (truncated N chars)" al final
- * si se truncó. Helper compartido por renderFailedSection y renderPreservedSection.
+ * si se truncó. Helper compartido por `renderFailedSection` /
+ * `renderPreservedSection`, los wrappers `callVerifierAgent` /
+ * `callVerifierAgentBatch` y los bloques per-item del verifier para acotar
+ * labels/reasons/outputs.
  *
  * También sirve como defensa-en-profundidad contra los MaxLength del backend
  * DTO (label≤500, reason≤2000, output≤4000, command≤500) — si pasamos un

@@ -11,6 +11,7 @@ import {
   AuthenticatedUser,
   UserRole,
   epicMarkdownHasAllHeadings,
+  type DoomLoopKind,
 } from '@cenzontle/shared';
 import { PrismaService } from '../../prisma/prisma.service';
 import { AuthService } from '../../auth/auth.service';
@@ -18,6 +19,10 @@ import { ChangelogService } from '../../proyectos/changelog/changelog.service';
 import { assertUserCanAccessEpicPods } from '../../proyectos/epics/epic-access.util';
 import { BranchStrategyService } from '../branch-strategy/branch-strategy.service';
 import { GitHubService } from '../github/github.service';
+import { extractFailureInfo } from './failure-info';
+import { isAwaitingHumanGate } from './gate-readiness';
+import { computeRunStats } from './run-stats';
+import { classifyStoryRetryability } from './retry-eligibility';
 
 /**
  * Detail completo de un batch — usado por el dashboard `/factory/batch/:id`.
@@ -101,7 +106,11 @@ export interface BatchStoryRun {
   prNumber: number | null;
   exitCode: number | null;
   errorMessage: string | null;
-  startedAt: string;
+  /** ISO timestamp del inicio del run, o null durante la ventana entre
+   *  INSERT (status='claimed') y transición a 'running'. El mapper hace
+   *  `?.toISOString() ?? null` — el wire CAN return null (qa-reviewer
+   *  2026-05-19; type lie pre-existente corregido). */
+  startedAt: string | null;
   completedAt: string | null;
   /** Cost del run en USD — suma del generator + sus verifier calls. */
   costUsd: number;
@@ -112,6 +121,32 @@ export interface BatchStoryRun {
   /** Archivos modificados en el diff base..HEAD calculado por el worker
    *  post-push. NULL si el run no llegó a push (sandbox, push falló). */
   filesModified: number | null;
+  /** Cuántos attempts del DoD enforcement loop ejecutó el worker.
+   *  1 = primer intento clean. 2-3 = el agente necesitó retries tras fallar
+   *  verificación. NULL si el run nunca llegó al verifier (claimed→failed
+   *  por error temprano). UI lo usa para distinguir "fallo limpio" vs
+   *  "agente atorado". */
+  attempts: number | null;
+  /** Si el worker abortó por doom loop, qué tipo:
+   *  - 'regression': passedCount bajó entre attempts (agente rompió criterios
+   *    que antes pasaban — daño activo, escalación inmediata)
+   *  - 'stagnation': passedCount no aumentó (atorado en mismos criterios)
+   *  - null: no fue doom loop (otro tipo de fallo, o no falló)
+   *  Detección centralizada en `detectDoomLoopKind` de @cenzontle/shared
+   *  para que worker y queue compartan el mismo contrato del errorMessage. */
+  doomLoopKind: DoomLoopKind | null;
+  /** Checklist COMPLETA del DoD — todos los criterios con su veredicto final
+   *  (passed/failed/skipped), merge-ado across attempts con last-wins por
+   *  criterionId. Vacío solo si el run nunca llegó al verifier o
+   *  dodVerification es null. El merge view la renderiza como checklist para
+   *  que el TechLead vea qué se cumplió y qué no — no solo los fallos.
+   *  `reason` lleva el motivo en los failed/skipped; vacío en los passed. */
+  criteria: Array<{
+    id: string;
+    label: string;
+    status: 'passed' | 'failed' | 'skipped';
+    reason: string;
+  }>;
 }
 
 export interface EnqueuedBatch {
@@ -524,26 +559,22 @@ export class FactoryQueueService {
           }
         }
 
-        // awaitingHumanGate: la épica completó TODAS sus stories — done O
-        // in_review (PR abierto esperando merge). Eso significa que ya no
-        // hay trabajo de agentes pendiente: el siguiente paso es el humano
-        // (mergear PRs y/o approval para pasar a Staged). El frontend usa
-        // este campo para mantenerla en la columna FORGE del Pipeline Board
-        // (no regresarla a IN QUEUE cuando los slots se liberan).
-        //
-        // storiesCount > 0 es defensa contra el caso degenerado de épica
-        // encolada sin stories (no debería pasar, pero `0===0` sería
-        // trivially true).
+        // awaitingHumanGate: todas las stories en estado terminal (done,
+        // in_review o blocked). Lógica unificada con getBatchDetail en
+        // `isAwaitingHumanGate` — ver gate-readiness.ts para el detalle.
         const storiesCount = e.stories.length;
-        const awaitingHumanGate =
-          storiesCount > 0 && storiesDone + storiesInReview === storiesCount;
+        const awaitingHumanGate = isAwaitingHumanGate(
+          e.stories.map((s) => s.status),
+        );
 
-        // completedAt: solo set cuando TODAS las stories están done (no
-        // in_review — eso significa esperando merge humano, no done). El card
-        // del Pipeline freeza el reloj usando este timestamp.
-        const allStoriesDone = storiesCount > 0 && storiesDone === storiesCount;
+        // completedAt: el momento de cierre del batch — congela el reloj del
+        // card del Pipeline. El Forge "terminó" cuando todas las stories
+        // están en estado terminal (= awaitingHumanGate), INCLUIDAS las
+        // `blocked`. Antes la condición era solo `done`, así que un batch con
+        // una story bloqueada dejaba el reloj corriendo para siempre
+        // (bug 2026-05-20). latestRunCompletedAt ya incluye los runs `failed`.
         const completedAtIso =
-          allStoriesDone && latestRunCompletedAt
+          awaitingHumanGate && latestRunCompletedAt
             ? latestRunCompletedAt.toISOString()
             : null;
 
@@ -809,61 +840,14 @@ export class FactoryQueueService {
       currentWave++;
     }
 
-    // Helper: extrae cost+tokens-new per-run, derivando de generatorUsage +
-    // dodVerification del run. El AgentCard usa estos números para mostrar
-    // métricas reales (no del batch entero — granularidad por agente).
-    const computeRunStats = (run: {
-      generatorUsage: unknown;
-      dodVerification: unknown;
-      plannerUsage: unknown;
-      filesModified: number | null;
-    }): { costUsd: number; tokensNew: number; filesModified: number | null } => {
-      let costUsd = 0;
-      let tokensNew = 0;
-      // Generator
-      const gen = run.generatorUsage as Record<string, unknown> | null;
-      if (gen && typeof gen === 'object') {
-        if (typeof gen.totalCostUsd === 'number') costUsd += gen.totalCostUsd;
-        if (typeof gen.totalInputTokens === 'number') tokensNew += gen.totalInputTokens;
-        if (typeof gen.totalOutputTokens === 'number') tokensNew += gen.totalOutputTokens;
-        if (typeof gen.totalCacheCreationInputTokens === 'number')
-          tokensNew += gen.totalCacheCreationInputTokens;
-      }
-      // Verifier
-      const dod = run.dodVerification;
-      if (Array.isArray(dod)) {
-        for (const attemptEntry of dod) {
-          const verdicts = (attemptEntry as { verdicts?: unknown } | null)?.verdicts;
-          if (!Array.isArray(verdicts)) continue;
-          for (const v of verdicts) {
-            const usage = (v as { usage?: unknown } | null)?.usage;
-            if (!usage || typeof usage !== 'object') continue;
-            const u = usage as Record<string, unknown>;
-            if (typeof u.totalCostUsd === 'number') costUsd += u.totalCostUsd;
-            if (typeof u.inputTokens === 'number') tokensNew += u.inputTokens;
-            if (typeof u.outputTokens === 'number') tokensNew += u.outputTokens;
-            if (typeof u.cacheCreationInputTokens === 'number')
-              tokensNew += u.cacheCreationInputTokens;
-          }
-        }
-      }
-      // Planner (pre-CLI advisor — 2026-05-18)
-      const planner = run.plannerUsage as Record<string, unknown> | null;
-      if (planner && typeof planner === 'object') {
-        if (typeof planner.totalCostUsd === 'number') costUsd += planner.totalCostUsd;
-        if (typeof planner.executorTokensIn === 'number') tokensNew += planner.executorTokensIn;
-        if (typeof planner.executorTokensOut === 'number') tokensNew += planner.executorTokensOut;
-        if (typeof planner.advisorTokensIn === 'number') tokensNew += planner.advisorTokensIn;
-        if (typeof planner.advisorTokensOut === 'number') tokensNew += planner.advisorTokensOut;
-      }
-      return { costUsd, tokensNew, filesModified: run.filesModified };
-    };
-
     // Construir stories del response con su wave + estado del agentRun
     // más reciente (el array viene ordered desc por startedAt).
     const stories: BatchStoryDetail[] = epic.stories.map((s) => {
       const latestRun = s.agentRuns[0] ?? null;
       const runStats = latestRun ? computeRunStats(latestRun) : null;
+      const failureInfo = latestRun
+        ? extractFailureInfo(latestRun.dodVerification, latestRun.errorMessage)
+        : null;
       return {
         id: s.id,
         title: s.title,
@@ -893,6 +877,9 @@ export class FactoryQueueService {
                 costUsd: runStats.costUsd,
                 tokensNew: runStats.tokensNew,
                 filesModified: runStats.filesModified,
+                attempts: failureInfo?.attempts ?? null,
+                doomLoopKind: failureInfo?.doomLoopKind ?? null,
+                criteria: failureInfo?.criteria ?? [],
               }
             : null,
       };
@@ -907,7 +894,11 @@ export class FactoryQueueService {
       0,
     );
     const storiesCount = epic.stories.length;
-    const awaitingHumanGate = storiesCount > 0 && storiesDone === storiesCount;
+    // awaitingHumanGate: lógica unificada con listQueue en isAwaitingHumanGate
+    // (gate-readiness.ts). Antes este callsite divergía — contaba solo `done`.
+    const awaitingHumanGate = isAwaitingHumanGate(
+      epic.stories.map((s) => s.status),
+    );
 
     // Lazy ensure de la integration branch en GitHub. Hay épicas (caso
     // descubierto en producción) que fueron encoladas cuando el repo aún no
@@ -1140,7 +1131,13 @@ export class FactoryQueueService {
     }
     const isRetryAfterPartialApproval = epic.stagingApprovedAt !== null;
 
-    // 4. Estado: TODAS las stories deben estar done o in_review (awaitingHumanGate).
+    // 4. Estado: TODAS las stories deben estar en estado TERMINAL — done,
+    //    in_review o blocked (= awaitingHumanGate). Una story `blocked` (su
+    //    run falló) NO impide aprobar: se mergea a DEV CON su deuda técnica
+    //    (se resuelve en staging) — el frontend exige un checkbox de
+    //    confirmación explícita cuando hay stories blocked. Lo que SÍ bloquea
+    //    el approve es trabajo aún EN CURSO (claimed/running) o sin arrancar
+    //    (backlog/todo/in_progress) — el Forge debe terminar de procesarlas.
     //    Solo verificamos esto en el approval ORIGINAL — en retries asumimos
     //    que el batch ya fue evaluado como completo (la decisión humana se
     //    persistió en el primer intento). Si stories retroceden post-approval
@@ -1150,15 +1147,26 @@ export class FactoryQueueService {
     //    GitHub branch protection si lo necesita.
     if (!isRetryAfterPartialApproval) {
       const storiesCount = epic.stories.length;
-      const completedCount = epic.stories.filter(
-        (s) => s.status === 'done' || s.status === 'in_review',
+      const terminalCount = epic.stories.filter(
+        (s) =>
+          s.status === 'done' ||
+          s.status === 'in_review' ||
+          s.status === 'blocked',
       ).length;
-      if (storiesCount === 0 || completedCount !== storiesCount) {
+      if (storiesCount === 0 || terminalCount !== storiesCount) {
         throw new BadRequestException(
-          `El batch no está listo para aprobar: ${completedCount}/${storiesCount} ` +
-            `stories completadas (done o in_review). El Forge debe terminar primero.`,
+          `El batch no está listo para aprobar: ${terminalCount}/${storiesCount} ` +
+            `stories en estado terminal (done, in_review o blocked). ` +
+            `El Forge debe terminar de procesar las stories en curso primero.`,
         );
       }
+      // Modelo "merge con deuda": NO hay floor de "al menos 1 story done".
+      // El Forge mergea a DEV todo lo que produjo —incluso un batch donde
+      // todas las stories llevan deuda técnica— y esa deuda (criterios DoD
+      // sin cerrar) se resuelve en la etapa de STAGING, no antes. Bloquear
+      // el merge por deuda detendría el flujo, que es justo lo contrario
+      // del diseño. El único gate es que el Forge haya TERMINADO (el
+      // terminalCount check de arriba), no que haya tenido éxito.
     }
 
     // 5. Step-up auth: password contra Auth0. Throw UnauthorizedException
@@ -1456,4 +1464,180 @@ export class FactoryQueueService {
       consolidatedPrMergedAt: consolidatedPrMergedAt?.toISOString() ?? null,
     };
   }
+
+  /**
+   * Reintenta una story que terminó con deuda técnica (run failed / doom loop /
+   * criterios DoD sin cerrar). La dispara un humano desde el merge view del
+   * dashboard, después de corregir la causa raíz del fallo — por ejemplo:
+   * vincular un secreto externo faltante en /factory/settings, o arreglar la
+   * branch base del repo.
+   *
+   * Es el equivalente UI del script `reset-story-status.js`:
+   *  - story.status → 'backlog', claimedAt → null  ⇒ el worker la re-claim en
+   *    el próximo poll y re-ejecuta el flujo COMPLETO del Forge (el agente la
+   *    re-implementa + corre el DoD). Consume tokens reales de la API.
+   *  - los AgentRun activos (claimed/running) de esa story se cierran a
+   *    'failed' para no dejar runs zombie en la queue.
+   *
+   * NO es un re-verify barato: el worker no tiene modo "solo DoD" — cada
+   * attempt del runner es spawn-claude → verify. Por eso el retry es una
+   * acción humana explícita (gateada por un ConfirmDialog en el frontend),
+   * consistente con el comentario de `completeRun` en agent-run.service.ts:
+   * "NO hay re-claim automático: el retry ... es una acción humana explícita".
+   *
+   * Validaciones:
+   *  - el batch existe y el user tiene acceso al pod del epic (CWE-639).
+   *  - la story pertenece a ESE batch — no se puede reintentar una story de
+   *    otro epic pasando un storyId arbitrario.
+   *  - la story está en un estado reintentable — ni 'done' (terminal-exitoso)
+   *    ni 'backlog' idle (ya en cola). Ver `classifyStoryRetryability`.
+   *
+   * Concurrencia: el reset de la story usa CAS (compare-and-swap) dentro de la
+   * transacción — si un worker la claimea/completa, o un retry corre en
+   * paralelo, entre el read y el write, el CAS falla con 409 sin corromper el
+   * row. Mismo patrón que `approveStagingGate`.
+   */
+  async retryStory(
+    batchId: string,
+    storyId: string,
+    user: AuthenticatedUser,
+  ): Promise<{
+    storyId: string;
+    storyTitle: string;
+    previousStatus: string;
+    status: string;
+    abandonedRunCount: number;
+  }> {
+    // 1. Cargar el epic del batch + SOLO la story target (el `where` filtra
+    //    in-query para no traer todas las stories del epic).
+    const epic = await this.prisma.epic.findFirst({
+      where: { enqueuedBatchId: batchId },
+      include: {
+        pods: { select: { podId: true } },
+        stories: {
+          where: { id: storyId },
+          select: { id: true, title: true, status: true, claimedAt: true },
+        },
+      },
+    });
+    if (!epic) {
+      throw new NotFoundException(`Batch ${batchId} no encontrado`);
+    }
+
+    // 2. Pod access — consistente con getBatchDetail / approveStagingGate.
+    assertUserCanAccessEpicPods(
+      user,
+      epic.pods.map((p) => p.podId),
+    );
+
+    // 3. La story debe pertenecer a este batch. Si no existe, o el storyId es
+    //    de otro epic, el `where` anidado no la trajo → 404 (sin distinguir
+    //    el caso para no leakear existencia de stories de otros pods).
+    const story = epic.stories[0];
+    if (!story) {
+      throw new NotFoundException(
+        `Story ${storyId} no encontrada en el batch ${batchId}`,
+      );
+    }
+
+    // 4. Validar que la story está en un estado reintentable. La lógica pura
+    //    vive en `classifyStoryRetryability` (unit-testeada): rechaza 'done'
+    //    (terminal-exitoso) y 'backlog' idle (ya en cola — un retry sería un
+    //    no-op que ensuciaría el changelog con una entrada fantasma). El botón
+    //    del frontend solo aparece para stories con deuda, pero el endpoint se
+    //    valida igual (defensa contra llamadas directas a la API).
+    const eligibility = classifyStoryRetryability(story.status, story.claimedAt);
+    if (!eligibility.retryable) {
+      throw new ConflictException(
+        eligibility.reason ?? 'La story no se puede reintentar.',
+      );
+    }
+
+    // 5. Reset + cierre de runs zombie en una transacción: o todo o nada.
+    const abandonMessage =
+      `Run abandonado: retry manual de la story disparado por ` +
+      `${user.email ?? user.sub} desde el dashboard.`;
+    let abandonedRunCount = 0;
+
+    await this.prisma.$transaction(async (tx) => {
+      // 5a. Reset la story → claimable, vía CAS (compare-and-swap). El `where`
+      //     exige que el row siga EXACTAMENTE como lo leímos (status +
+      //     claimedAt): si un worker la claimeó/completó, o un retry paralelo
+      //     ya la reseteó entre el read y este write, `count===0` → 409 +
+      //     rollback. El UPDATE además toma el row lock por el resto de la tx,
+      //     serializando contra claims concurrentes. Va PRIMERO: si el CAS
+      //     falla no tocamos runs ni changelog. Mismo patrón anti-race que
+      //     approveStagingGate. backlog + claimedAt=null es la única
+      //     combinación que la query de claim acepta:
+      //     status NOT IN (done,in_review,blocked) AND claimedAt IS NULL.
+      const reset = await tx.story.updateMany({
+        where: {
+          id: story.id,
+          status: story.status,
+          claimedAt: story.claimedAt,
+        },
+        data: { status: 'backlog', claimedAt: null },
+      });
+      if (reset.count === 0) {
+        throw new ConflictException(
+          `El estado de la story "${story.title}" cambió mientras se ` +
+            `procesaba el retry (¿un worker la tomó, o ya se reintentó en ` +
+            `paralelo?). Recargá el batch y revisá.`,
+        );
+      }
+
+      // 5b. Cerrar AgentRuns activos (claimed/running) → failed. Sin esto un
+      //     run en vuelo quedaría zombie y su completeRun() posterior chocaría
+      //     contra el run nuevo. (Mismo recipe que reset-story-status.js.)
+      const abandoned = await tx.agentRun.updateMany({
+        where: {
+          storyId: story.id,
+          status: { in: ['running', 'claimed'] },
+        },
+        data: {
+          status: 'failed',
+          errorMessage: abandonMessage,
+          completedAt: new Date(),
+        },
+      });
+      abandonedRunCount = abandoned.count;
+
+      // 5c. ChangelogEntry para audit — el retry reabre un estado terminal y
+      //     consume tokens; debe quedar registrado quién lo disparó. Dentro
+      //     del tx: si el changelog falla, el reset se revierte (no hay reset
+      //     sin audit trail) — mismo invariante que approveStagingGate.
+      await tx.changelogEntry.create({
+        data: {
+          entityType: 'story',
+          entityId: story.id,
+          entityTitle: story.title,
+          action: 'retried',
+          field: 'status',
+          oldValue: story.status,
+          newValue: 'backlog',
+          changedById: user.sub,
+          changedByName: user.name ?? user.email ?? user.sub,
+        },
+      });
+    });
+
+    this.logger.info(
+      `[story.retry:${batchId}] story=${storyId} ` +
+        `"${story.title}" ${story.status} → backlog ` +
+        `requestedBy=${user.email ?? user.sub} ` +
+        `abandonedRuns=${abandonedRunCount}`,
+    );
+
+    return {
+      storyId: story.id,
+      storyTitle: story.title,
+      previousStatus: story.status,
+      status: 'backlog',
+      abandonedRunCount,
+    };
+  }
 }
+
+// extractFailureInfo + FailureInfo se movieron a `./failure-info.ts`
+// (2026-05-19) para que sean unit-testeables sin arrastrar la cadena de
+// imports pesada de este service (GitHub/Octokit ESM que Jest no transpila).

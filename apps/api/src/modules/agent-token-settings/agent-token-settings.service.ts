@@ -134,12 +134,21 @@ export class AgentTokenSettingsService {
    * El worker pasa los valores como override al `runVerifierAgent` y
    * `runVerifierAgentBatch` (fallback a env vars DOD_VERIFIER_MODEL/EFFORT).
    */
-  async getDodVerifier(): Promise<{ model: ForgeWorkerModel; effort: ForgeWorkerEffortLevel }> {
+  async getDodVerifier(): Promise<{
+    model: ForgeWorkerModel;
+    effort: ForgeWorkerEffortLevel;
+    /** Tope de intentos del DoD enforcement loop del worker. */
+    maxAttempts: number;
+  }> {
     // No log aquí — el worker emite `dod.verifier_agent.spawn_config` con el
     // valor autoritativo aplicado al spawn del verifier. Loggear el read
     // backend genera ruido redundante (cleanup 2026-05-19).
     const s = await this.get();
-    return { model: s.dodVerifierModel, effort: s.dodVerifierEffort };
+    return {
+      model: s.dodVerifierModel,
+      effort: s.dodVerifierEffort,
+      maxAttempts: s.dodMaxAttempts,
+    };
   }
 
   /**
@@ -177,6 +186,7 @@ export class AgentTokenSettingsService {
     forgeWorkerEffort: string;
     dodVerifierModel: string;
     dodVerifierEffort: string;
+    dodMaxAttempts: number;
     updatedAt: Date;
     updatedBy: string | null;
   }): AgentTokenSettingsPublic {
@@ -221,6 +231,9 @@ export class AgentTokenSettingsService {
       // porque el verifier hace checks atómicos baratos).
       dodVerifierModel: forgeModel(row.dodVerifierModel),
       dodVerifierEffort: forgeEffort(row.dodVerifierEffort),
+      // Clamp defensivo 1..3 — defense in depth contra basura en BD; el
+      // valor gobierna un loop, un número salvaje quemaría tokens.
+      dodMaxAttempts: Math.min(3, Math.max(1, row.dodMaxAttempts)),
       updatedAt: row.updatedAt.toISOString(),
       updatedBy: row.updatedBy,
     };

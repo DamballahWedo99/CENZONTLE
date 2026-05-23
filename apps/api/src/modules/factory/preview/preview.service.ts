@@ -740,8 +740,10 @@ export class PreviewService {
         '--yes',
         'serve',
         '--listen',
-        // `serve` acepta host:port para bindear a interfaz específica.
-        `${SAFE_BIND_HOST}:${instance.port}`,
+        // `serve` exige un endpoint CON scheme: `tcp://host:port` para
+        // bindear a una interfaz específica. Un `host:port` pelado lo
+        // rechaza con "Unknown --listen endpoint scheme (protocol)".
+        `tcp://${SAFE_BIND_HOST}:${instance.port}`,
         '--no-clipboard',
         instance.workdir,
       ];

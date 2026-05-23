@@ -115,4 +115,17 @@ export class UpdateAgentTokenSettingsDto {
   })
   @IsOptional() @IsIn(FORGE_WORKER_EFFORT_LEVELS as unknown as string[])
   dodVerifierEffort?: ForgeWorkerEffortLevel;
+
+  // ════════════════════════════════════════════════════════════════════
+  // DoD retry loop
+  // ════════════════════════════════════════════════════════════════════
+
+  @ApiPropertyOptional({
+    minimum: 1,
+    maximum: 3,
+    description:
+      'Máximo de intentos del DoD enforcement loop del worker. 1 = una sola pasada (verificador no-bloqueante, criterios sin cumplir = warn). >1 activa los reintentos ante error duro o criterios sin cumplir. El doom loop (cortar el run tras 2 turnos seguidos estancado o con regresión) SOLO opera con dodMaxAttempts=3 — con cap=2 nunca llega a ejecutarse porque el último attempt detiene el loop antes de que el contador de turnos malos consecutivos alcance el threshold.',
+  })
+  @IsOptional() @IsInt() @Min(1) @Max(3)
+  dodMaxAttempts?: number;
 }

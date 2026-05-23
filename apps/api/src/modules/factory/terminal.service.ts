@@ -70,6 +70,16 @@ interface TtydSession {
   worktreePath: string | null; // non-null if we created a worktree
   branch: string | null;
   startedAt: Date;
+  /**
+   * `false` mientras el ttyd arranca; `true` cuando `waitForTtyd` confirmó
+   * que sirve HTTP. La sesión se registra en el Map ANTES de que ttyd esté
+   * listo (para que el check `existing` sirva de lock anti-concurrencia),
+   * pero no debe ser observable hasta que `ready` sea `true`: `getSession`
+   * y `getSessions` la ocultan, y un `startSession` concurrente espera.
+   * Sin esto, un caller obtendría la URL de un ttyd que aún no escucha y el
+   * iframe daría "connection refused".
+   */
+  ready: boolean;
 }
 
 // ---------------------------------------------------------------------------
@@ -278,8 +288,43 @@ export class TerminalService implements OnModuleDestroy {
 
     const existing = this.sessions.get(safeAgentId);
     if (existing) {
-      this.logger.info({ safeAgentId, port: existing.port }, `Session already active for agent ${safeAgentId} on port ${existing.port}`);
-      return { port: existing.port, worktreePath: existing.worktreePath, branch: existing.branch };
+      // Sesión ya lista — reusar directo (idempotencia de startSession).
+      if (existing.ready) {
+        this.logger.info({ safeAgentId, port: existing.port }, `Session already active for agent ${safeAgentId} on port ${existing.port}`);
+        return { port: existing.port, worktreePath: existing.worktreePath, branch: existing.branch };
+      }
+      // Sesión a medio crear: otro `startSession` concurrente la registró en
+      // el Map pero su ttyd aún no sirve HTTP. Esperamos a que arranque antes
+      // de devolverla — así el caller nunca recibe una URL que daría
+      // "connection refused". `waitForTtyd` sobre el mismo puerto es read-only
+      // (solo hace fetch HEAD), seguro de correr en paralelo al del creador.
+      this.logger.info(
+        { safeAgentId, port: existing.port },
+        `Session for agent ${safeAgentId} still starting — waiting for ttyd on port ${existing.port}`,
+      );
+      // `waitForTtyd` puede fallar: que ese ttyd nunca sirva, o que el
+      // creador lo aborte. NO propagamos ese error directo — lo que decide
+      // el resultado es el estado FINAL del Map (abajo), no el del puerto
+      // concreto que esperábamos. Caso clave: si el creador falla y un tercer
+      // `startSession` deja una sesión nueva en OTRO puerto, esperar el
+      // puerto viejo agota el timeout aunque ya exista una sesión sana.
+      try {
+        await this.waitForTtyd(existing.port);
+      } catch {
+        // Tragado a propósito — ver el re-fetch de abajo.
+      }
+      // RE-LEER el Map. Durante la espera el creador pudo fallar y borrar la
+      // sesión (su catch hace sessions.delete), el ttyd pudo morir, o un
+      // tercer `startSession` pudo dejar una sesión NUEVA (en otro puerto).
+      // No devolvemos la referencia `existing` capturada — apuntaría a datos
+      // stale. Devolvemos lo que el Map tenga `ready` AHORA; si no hay nada
+      // listo, la creación falló de verdad.
+      const settled = this.sessions.get(safeAgentId);
+      if (!settled || !settled.ready) {
+        throw new Error(`Session for agent ${safeAgentId} failed to start`);
+      }
+      this.logger.info({ safeAgentId, port: settled.port }, `Session already active for agent ${safeAgentId} on port ${settled.port}`);
+      return { port: settled.port, worktreePath: settled.worktreePath, branch: settled.branch };
     }
 
     const safeWorkdir = this.sanitizeWorkdir(workdir);
@@ -360,6 +405,17 @@ export class TerminalService implements OnModuleDestroy {
       LANG: 'en_US.UTF-8',
       LC_ALL: 'en_US.UTF-8',
     };
+    // AUTH: este terminal es uso INTERACTIVO de Claude Code por un humano —
+    // debe autenticarse con la cuenta claude.ai del operador, NO con la API
+    // key. El backend lleva ANTHROPIC_API_KEY en su entorno (apps/api/.env,
+    // necesaria para otras partes del Forge); sin sanearla, el `claude` hijo
+    // la heredaría y, junto al token de claude.ai del usuario, dispararía el
+    // "Auth conflict" de la CLI ("Both a token and an API key are set").
+    // La quitamos del env del child. NOTA: los workers REALES del Forge
+    // corren en procesos aparte (apps/worker) y SÍ deben usar la API key
+    // (uso automatizado — la suscripción ahí violaría los ToS de Anthropic);
+    // esos NO pasan por este TerminalService, así que no se ven afectados.
+    delete childEnv.ANTHROPIC_API_KEY;
 
     const child = spawn(TTYD_BIN, ttydArgs, {
       cwd: effectiveWorkdir,
@@ -376,6 +432,9 @@ export class TerminalService implements OnModuleDestroy {
       worktreePath,
       branch: safeBranch,
       startedAt: new Date(),
+      // ttyd recién spawneado — aún no sirve HTTP. `waitForTtyd` (abajo) lo
+      // marcará `ready` cuando confirme que escucha.
+      ready: false,
     };
 
     this.sessions.set(safeAgentId, session);
@@ -383,6 +442,9 @@ export class TerminalService implements OnModuleDestroy {
     // Wait for ttyd to be ready — clean up zombie session on failure
     try {
       await this.waitForTtyd(port);
+      // ttyd ya sirve HTTP — recién ahora la sesión es observable por
+      // getSession/getSessions y por un `startSession` concurrente.
+      session.ready = true;
     } catch (err) {
       this.logger.error({ safeAgentId, message: (err as Error).message }, `ttyd failed to start for agent ${safeAgentId}: ${(err as Error).message}`);
       this.sessions.delete(safeAgentId);
@@ -531,14 +593,20 @@ export class TerminalService implements OnModuleDestroy {
     branch: string | null; startedAt: string; url: string;
   } | null {
     const session = this.sessions.get(agentId);
-    if (!session) return null;
+    // `!session.ready`: la sesión está registrada en el Map pero su ttyd aún
+    // no sirve HTTP. La tratamos como "no hay sesión" — devolver su URL haría
+    // que el caller monte un iframe contra un ttyd que da "connection refused".
+    if (!session || !session.ready) return null;
     return {
       port: session.port,
       workdir: session.workdir,
       worktreePath: session.worktreePath,
       branch: session.branch,
       startedAt: session.startedAt.toISOString(),
-      url: `http://localhost:${session.port}`,
+      // 127.0.0.1 explícito (no `localhost`): ttyd bindea `-i 127.0.0.1` y en
+      // sistemas donde `localhost` resuelve a IPv6 (::1) primero el iframe
+      // fallaría siempre.
+      url: `http://127.0.0.1:${session.port}`,
     };
   }
 
@@ -546,15 +614,19 @@ export class TerminalService implements OnModuleDestroy {
     agentId: string; port: number; workdir: string; worktreePath: string | null;
     branch: string | null; startedAt: string; url: string;
   }> {
-    return [...this.sessions.values()].map((s) => ({
-      agentId: s.agentId,
-      port: s.port,
-      workdir: s.workdir,
-      worktreePath: s.worktreePath,
-      branch: s.branch,
-      startedAt: s.startedAt.toISOString(),
-      url: `http://localhost:${s.port}`,
-    }));
+    return [...this.sessions.values()]
+      // Solo sesiones con ttyd ya sirviendo — una a medio arrancar no es
+      // observable (mismo criterio que getSession).
+      .filter((s) => s.ready)
+      .map((s) => ({
+        agentId: s.agentId,
+        port: s.port,
+        workdir: s.workdir,
+        worktreePath: s.worktreePath,
+        branch: s.branch,
+        startedAt: s.startedAt.toISOString(),
+        url: `http://127.0.0.1:${s.port}`,
+      }));
   }
 
   // -------------------------------------------------------------------------

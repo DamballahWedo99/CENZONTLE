@@ -14,8 +14,6 @@ import {
   DollarSign,
   FileCode2,
   TestTube2,
-  CheckCircle2,
-  Circle,
   Layers,
   Link2,
   RefreshCw,
@@ -28,6 +26,7 @@ import {
   ChevronRight,
 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
+import type { RunDrawerDetail } from '@/lib/api/factory';
 
 // =============================================================================
 // Props
@@ -41,6 +40,12 @@ export interface AgentDetailDrawerProps {
   onClose: () => void;
   /** Real worktree path from the backend terminal session, if available. */
   worktreePath?: string | null;
+  /**
+   * Datos reales del run del Forge. Presente solo en la página
+   * `/factory/agents/:runId/terminal`; cuando está, el drawer ignora los
+   * `story`/`batch` mock y renderiza los datos reales del run.
+   */
+  runDetail?: RunDrawerDetail | null;
 }
 
 // =============================================================================
@@ -226,39 +231,6 @@ function GaugeBar({
   );
 }
 
-// Success criteria checklist item
-function CriteriaItem({
-  text,
-  done,
-}: {
-  text: string;
-  done: boolean;
-}) {
-  return (
-    <li className="flex items-start gap-2">
-      {done ? (
-        <CheckCircle2
-          className="mt-0.5 h-3.5 w-3.5 shrink-0 text-green-400"
-          aria-hidden="true"
-        />
-      ) : (
-        <Circle
-          className="mt-0.5 h-3.5 w-3.5 shrink-0 text-muted-foreground/40"
-          aria-hidden="true"
-        />
-      )}
-      <span
-        className={cn(
-          'text-xs leading-relaxed',
-          done ? 'text-muted-foreground line-through' : 'text-foreground/80',
-        )}
-      >
-        {text}
-      </span>
-    </li>
-  );
-}
-
 // =============================================================================
 // DoD: Definition of Done — automatic technical criteria based on agent state
 // =============================================================================
@@ -363,7 +335,13 @@ export function AgentDetailDrawer({
   open,
   onClose,
   worktreePath: externalWorktreePath,
+  runDetail = null,
 }: AgentDetailDrawerProps) {
+  // Run mode: el drawer renderiza datos reales del AgentRun en lugar de los
+  // `story`/`batch` mock del FactoryContext. Mock mode (runDetail == null)
+  // queda EXACTAMENTE como el comportamiento legacy.
+  const isRunMode = runDetail !== null;
+
   // Close on Escape key
   const handleKeyDown = useCallback(
     (e: KeyboardEvent) => {
@@ -378,9 +356,9 @@ export function AgentDetailDrawer({
   }, [handleKeyDown]);
 
   // Derived values
-  const statusCfg = STATUS_MAP[agent.status];
-  const criteria = deriveDod(agent);
-  const mission = deriveMission(story, agent);
+  const mission = isRunMode
+    ? `Implement ${runDetail.storyTitle}.`
+    : deriveMission(story, agent);
 
   const testPassRate =
     agent.testsRun > 0
@@ -400,20 +378,15 @@ export function AgentDetailDrawer({
   const costPerPoint =
     story && story.storyPoints > 0 ? agent.cost / story.storyPoints : 0;
 
-  // Gauge: cost efficiency — normalise against a "good" baseline of $0.50 / point
-  const costEfficiencyPct = costPerPoint > 0
-    ? Math.max(0, 100 - (costPerPoint / 0.5) * 100)
-    : 100;
-
-  // Gauge: speed — normalise against 10 lines/min as a good pace
-  const speedPct = Math.min(100, (linesPerMinute / 10) * 100);
-
   const worktreePath = externalWorktreePath
     ?? (agent.worktree.startsWith('/worktrees/')
       ? agent.worktree
       : `/worktrees/${agent.storyKey?.toLowerCase() ?? agent.id}`);
 
-  const branchName = batch?.branch ?? `forge/${agent.id}`;
+  // Branch: en run mode viene del run real; en mock del batch legacy.
+  const branchName = isRunMode
+    ? runDetail.branch
+    : (batch?.branch ?? `forge/${agent.id}`);
 
   // Dependencies: get tracker keys from dependsOn story IDs when possible
   const dependencyLabels: string[] = story?.dependsOn ?? [];
@@ -554,8 +527,28 @@ export function AgentDetailDrawer({
               </h3>
 
               <div className="rounded-lg border border-border bg-muted/20 divide-y divide-border">
-                {/* Epic — no link: SprintBatch lacks epicId, tracker key doesn't match route param */}
-                {batch && (
+                {/* Epic (run mode) — datos reales del run */}
+                {isRunMode && (
+                  <div className="flex items-center justify-between gap-3 px-3.5 py-2.5">
+                    <div className="flex items-center gap-1.5 text-xs text-muted-foreground min-w-0">
+                      <Layers className="h-3 w-3 shrink-0" aria-hidden="true" />
+                      <span className="shrink-0">Epic</span>
+                    </div>
+                    <div className="flex items-center gap-1.5 min-w-0 justify-end">
+                      <span className="text-xs text-foreground/85 truncate">
+                        {runDetail.epicTitle}
+                      </span>
+                      {runDetail.epicTrackerKey && (
+                        <span className="shrink-0 rounded bg-muted px-1.5 py-0.5 font-mono text-[10px] text-muted-foreground">
+                          {runDetail.epicTrackerKey}
+                        </span>
+                      )}
+                    </div>
+                  </div>
+                )}
+
+                {/* Epic (mock) — no link: SprintBatch lacks epicId, tracker key doesn't match route param */}
+                {!isRunMode && batch && (
                   <div className="flex items-center justify-between gap-3 px-3.5 py-2.5">
                     <div className="flex items-center gap-1.5 text-xs text-muted-foreground min-w-0">
                       <Layers className="h-3 w-3 shrink-0" aria-hidden="true" />
@@ -572,8 +565,56 @@ export function AgentDetailDrawer({
                   </div>
                 )}
 
-                {/* Story */}
-                {story && (
+                {/* Story (run mode) — título + tracker key + story points reales */}
+                {isRunMode && (
+                  <div className="flex items-center justify-between gap-3 px-3.5 py-2.5">
+                    <div className="flex items-center gap-1.5 text-xs text-muted-foreground min-w-0">
+                      <ChevronRight className="h-3 w-3 shrink-0" aria-hidden="true" />
+                      <span className="shrink-0">Story</span>
+                    </div>
+                    <div className="flex items-center gap-1.5 min-w-0 justify-end">
+                      <span className="text-xs text-foreground/85 truncate">
+                        {runDetail.storyTitle}
+                      </span>
+                      {runDetail.storyTrackerKey && (
+                        <span className="shrink-0 rounded bg-muted px-1.5 py-0.5 font-mono text-[10px] text-muted-foreground">
+                          {runDetail.storyTrackerKey}
+                        </span>
+                      )}
+                      <span className="shrink-0 rounded bg-blue-500/10 px-1.5 py-0.5 text-[10px] font-medium text-blue-400">
+                        {runDetail.storyPoints} pts
+                      </span>
+                    </div>
+                  </div>
+                )}
+
+                {/* Dependencies (run mode) — historias bloqueadoras del run */}
+                {isRunMode && (
+                  <div className="flex items-start justify-between gap-3 px-3.5 py-2.5">
+                    <div className="flex items-center gap-1.5 text-xs text-muted-foreground shrink-0">
+                      <Link2 className="h-3 w-3 shrink-0" aria-hidden="true" />
+                      <span>Depends on</span>
+                    </div>
+                    <div className="flex flex-wrap justify-end gap-1">
+                      {runDetail.dependsOn.length > 0 ? (
+                        runDetail.dependsOn.map((dep, i) => (
+                          <span
+                            key={dep.key ?? `${dep.title}-${i}`}
+                            className="rounded bg-muted px-1.5 py-0.5 font-mono text-[10px] text-muted-foreground"
+                            title={dep.title}
+                          >
+                            {dep.key ?? dep.title}
+                          </span>
+                        ))
+                      ) : (
+                        <span className="text-xs text-muted-foreground/50">none</span>
+                      )}
+                    </div>
+                  </div>
+                )}
+
+                {/* Story (mock) */}
+                {!isRunMode && story && (
                   <a
                     href={`/proyectos/historias/${story.id}`}
                     onClick={(e) => e.stopPropagation()}
@@ -666,100 +707,153 @@ export function AgentDetailDrawer({
                 Performance
               </h3>
 
-              <div className="grid grid-cols-2 gap-2">
-                <MetricCard
-                  icon={Clock}
-                  label="Duration"
-                  value={formatDuration(agent.duration)}
-                />
-                <MetricCard
-                  icon={Zap}
-                  label="Tokens"
-                  value={formatTokens(agent.tokens)}
-                />
-                <MetricCard
-                  icon={DollarSign}
-                  label="Cost"
-                  value={`$${agent.cost.toFixed(2)}`}
-                />
-                <MetricCard
-                  icon={FileCode2}
-                  label="Lines Written"
-                  value={String(agent.linesWritten)}
-                />
-                <MetricCard
-                  icon={TestTube2}
-                  label="Tests"
-                  value={`${agent.testsPassed}/${agent.testsRun}`}
-                  sub={agent.testsRun > 0 ? `${testPassRate}% pass rate` : undefined}
-                />
-                <MetricCard
-                  icon={Target}
-                  label="Test Pass Rate"
-                  value={agent.testsRun > 0 ? `${testPassRate}%` : '—'}
-                  valueClass={agent.testsRun > 0 ? testPassRateClass : undefined}
-                />
-              </div>
+              {isRunMode ? (
+                /* Run mode: métricas reales del AgentRun. Sin Lines/Tests
+                   (el worker no los reporta) — en su lugar Files modified,
+                   Attempts del DoD loop y conteo DoD passed/total. */
+                <div className="grid grid-cols-2 gap-2">
+                  <MetricCard
+                    icon={Clock}
+                    label="Duration"
+                    value={
+                      runDetail.durationMs !== null
+                        ? formatDuration(Math.round(runDetail.durationMs / 1000))
+                        : '—'
+                    }
+                  />
+                  <MetricCard
+                    icon={Zap}
+                    label="Tokens"
+                    value={formatTokens(runDetail.tokensNew)}
+                  />
+                  <MetricCard
+                    icon={DollarSign}
+                    label="Cost"
+                    value={`$${runDetail.costUsd.toFixed(2)}`}
+                  />
+                  <MetricCard
+                    icon={FileCode2}
+                    label="Files modified"
+                    value={String(runDetail.filesModified ?? 0)}
+                  />
+                  <MetricCard
+                    icon={RefreshCw}
+                    label="Attempts"
+                    value={String(runDetail.attempts)}
+                    valueClass={runDetail.attempts > 1 ? 'text-amber-400' : undefined}
+                  />
+                  <MetricCard
+                    icon={Target}
+                    label="DoD"
+                    value={`${runDetail.dodPassed}/${runDetail.dodTotal}`}
+                    valueClass={
+                      runDetail.dodTotal > 0 && runDetail.dodPassed === runDetail.dodTotal
+                        ? 'text-green-400'
+                        : undefined
+                    }
+                  />
+                </div>
+              ) : (
+                <div className="grid grid-cols-2 gap-2">
+                  <MetricCard
+                    icon={Clock}
+                    label="Duration"
+                    value={formatDuration(agent.duration)}
+                  />
+                  <MetricCard
+                    icon={Zap}
+                    label="Tokens"
+                    value={formatTokens(agent.tokens)}
+                  />
+                  <MetricCard
+                    icon={DollarSign}
+                    label="Cost"
+                    value={`$${agent.cost.toFixed(2)}`}
+                  />
+                  <MetricCard
+                    icon={FileCode2}
+                    label="Lines Written"
+                    value={String(agent.linesWritten)}
+                  />
+                  <MetricCard
+                    icon={TestTube2}
+                    label="Tests"
+                    value={`${agent.testsPassed}/${agent.testsRun}`}
+                    sub={agent.testsRun > 0 ? `${testPassRate}% pass rate` : undefined}
+                  />
+                  <MetricCard
+                    icon={Target}
+                    label="Test Pass Rate"
+                    value={agent.testsRun > 0 ? `${testPassRate}%` : '—'}
+                    valueClass={agent.testsRun > 0 ? testPassRateClass : undefined}
+                  />
+                </div>
+              )}
             </section>
 
             {/* ------------------------------------------------------------- */}
             {/* 4. Efficiency Gauges                                            */}
             {/* ------------------------------------------------------------- */}
-            <section aria-labelledby="section-efficiency">
-              <h3
-                id="section-efficiency"
-                className="mb-2.5 flex items-center gap-1.5 text-[11px] font-semibold uppercase tracking-widest text-muted-foreground/70"
-              >
-                <TrendingUp className="h-3 w-3" aria-hidden="true" />
-                Efficiency
-              </h3>
+            {/* Solo en mock mode: Speed (lines/min) y Quality (test pass rate)
+                dependen de líneas escritas y tests, métricas que el worker del
+                Forge no reporta. En run mode se omite la sección entera. */}
+            {!isRunMode && (
+              <section aria-labelledby="section-efficiency">
+                <h3
+                  id="section-efficiency"
+                  className="mb-2.5 flex items-center gap-1.5 text-[11px] font-semibold uppercase tracking-widest text-muted-foreground/70"
+                >
+                  <TrendingUp className="h-3 w-3" aria-hidden="true" />
+                  Efficiency
+                </h3>
 
-              <div className="rounded-lg border border-border bg-muted/20 px-4 py-3.5 space-y-3.5">
-                {story && story.storyPoints > 0 && (
+                <div className="rounded-lg border border-border bg-muted/20 px-4 py-3.5 space-y-3.5">
+                  {story && story.storyPoints > 0 && (
+                    <GaugeBar
+                      label="Cost efficiency"
+                      value={costPerPoint}
+                      max={0.5}
+                      unit="$/pt"
+                      colorClass={
+                        costPerPoint <= 0.2
+                          ? 'bg-green-500'
+                          : costPerPoint <= 0.4
+                            ? 'bg-amber-400'
+                            : 'bg-red-500'
+                      }
+                    />
+                  )}
+
                   <GaugeBar
-                    label="Cost efficiency"
-                    value={costPerPoint}
-                    max={0.5}
-                    unit="$/pt"
+                    label="Speed"
+                    value={parseFloat(linesPerMinute.toFixed(2))}
+                    max={10}
+                    unit="lines/min"
                     colorClass={
-                      costPerPoint <= 0.2
+                      linesPerMinute >= 7
                         ? 'bg-green-500'
-                        : costPerPoint <= 0.4
+                        : linesPerMinute >= 3
+                          ? 'bg-blue-400'
+                          : 'bg-muted-foreground/40'
+                    }
+                  />
+
+                  <GaugeBar
+                    label="Quality"
+                    value={testPassRate}
+                    max={100}
+                    unit="%"
+                    colorClass={
+                      testPassRate >= 90
+                        ? 'bg-green-500'
+                        : testPassRate >= 70
                           ? 'bg-amber-400'
                           : 'bg-red-500'
                     }
                   />
-                )}
-
-                <GaugeBar
-                  label="Speed"
-                  value={parseFloat(linesPerMinute.toFixed(2))}
-                  max={10}
-                  unit="lines/min"
-                  colorClass={
-                    linesPerMinute >= 7
-                      ? 'bg-green-500'
-                      : linesPerMinute >= 3
-                        ? 'bg-blue-400'
-                        : 'bg-muted-foreground/40'
-                  }
-                />
-
-                <GaugeBar
-                  label="Quality"
-                  value={testPassRate}
-                  max={100}
-                  unit="%"
-                  colorClass={
-                    testPassRate >= 90
-                      ? 'bg-green-500'
-                      : testPassRate >= 70
-                        ? 'bg-amber-400'
-                        : 'bg-red-500'
-                  }
-                />
-              </div>
-            </section>
+                </div>
+              </section>
+            )}
 
 
             {/* Bottom padding so last section isn't flush with edge */}

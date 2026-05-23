@@ -4,7 +4,7 @@ import {
   NotFoundException,
 } from '@nestjs/common';
 import type { Prisma } from '@prisma/client';
-import type { ExternalSecret } from '@cenzontle/shared';
+import type { ExternalSecret, ExternalSecretForWorker } from '@cenzontle/shared';
 import { PrismaService } from '../prisma/prisma.service';
 import { CryptoService } from '../vault/crypto.service';
 import { CreateExternalSecretDto } from './dto/create-external-secret.dto';
@@ -48,8 +48,11 @@ function normalizeTitle(title: string): string {
  * vía `CryptoService` (reutiliza `VAULT_ENCRYPTION_KEY`).
  *
  * Contrato de seguridad:
- *  - `getByName()` es el ÚNICO método que devuelve plaintext. Inyectable
- *    en servicios runtime (ej: payment gateway). Nunca expuesto vía HTTP.
+ *  - `getByName()` y `getAllPlaintext()` son los ÚNICOS métodos que
+ *    devuelven plaintext, ambos solo para inyección runtime: `getByName`
+ *    para servicios backend (ej: payment gateway); `getAllPlaintext` para
+ *    forwardear los secrets al worker del Forge en cada claim. Ninguno se
+ *    expone vía HTTP.
  *  - El controller CRUD siempre devuelve `maskedValue` — nunca plaintext.
  *  - Logs y error messages no incluyen el plaintext.
  *
@@ -189,6 +192,43 @@ export class ExternalSecretsService {
       iv: row.tokenIv,
       authTag: row.tokenAuthTag,
     });
+  }
+
+  /**
+   * **Runtime consumption (worker del Forge)**: desencripta TODOS los
+   * secrets registrados en la org y los devuelve como `ExternalSecretForWorker[]`.
+   * Lo consume `AgentRunService.materializeClaim` para forwardear los
+   * secrets en cada claim — el agente coder y el DoD verifier los inyectan
+   * como env vars + `.env` efímero en el workdir.
+   *
+   * Defensivo: si un secret falla la desencriptación (key rotada, dato
+   * corrupto), se OMITE con `logger.error` en vez de propagar la excepción.
+   * Un secret corrupto no debe romper el claim entero ni privar al worker
+   * del resto de los secrets — mismo patrón defensivo que `toResponseMasked`.
+   *
+   * Nunca expuesto vía HTTP: igual que `getByName`, solo inyección runtime.
+   */
+  async getAllPlaintext(): Promise<ExternalSecretForWorker[]> {
+    const rows = await this.prisma.externalSecret.findMany({
+      orderBy: [{ vendor: 'asc' }, { name: 'asc' }],
+    });
+    const result: ExternalSecretForWorker[] = [];
+    for (const row of rows) {
+      try {
+        const value = this.crypto.decrypt({
+          ciphertext: row.tokenCiphertext,
+          iv: row.tokenIv,
+          authTag: row.tokenAuthTag,
+        });
+        result.push({ name: row.name, value, vendor: row.vendor });
+      } catch (err) {
+        this.logger.error(
+          `[getAllPlaintext] decrypt falló para secret name=${row.name} id=${row.id} — ` +
+            `omitido del claim: ${(err as Error)?.message ?? err}`,
+        );
+      }
+    }
+    return result;
   }
 
   // ── Internals ─────────────────────────────────────────────────────────

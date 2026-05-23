@@ -1,7 +1,9 @@
 import { execFile, spawn } from 'child_process';
 import { promisify } from 'util';
+import type { ExternalSecretForWorker } from '@cenzontle/shared';
 import { logger } from './logger.js';
 import { wrapWithSandbox } from './sandbox.js';
+import { buildSecretEnv, makeRedactor } from './secrets.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -509,6 +511,13 @@ export async function runVerifierAgent(input: {
   model?: string;
   /** Override del effort del verifier. Mismo patrón que `model`. */
   effort?: string;
+  /**
+   * Secretos externos del org. Se inyectan en el `env` del spawn del
+   * verifier agent — NUNCA en el prompt — para que los comandos que el
+   * verifier corre al juzgar criterios (`pnpm test`, scripts, etc.) tengan
+   * acceso al servicio externo de la historia. Paridad con el coder agent.
+   */
+  externalSecrets: ExternalSecretForWorker[];
 }): Promise<VerifierAgentVerdict> {
   // Resolución model + effort en cascada: claim → env → default.
   const verifierModel = input.model ?? VERIFIER_MODEL;
@@ -610,6 +619,12 @@ export async function runVerifierAgent(input: {
   }
   const spawnStartedAt = Date.now();
 
+  // Redactor para los logs forenses de abajo — el stdout/stderr del verifier
+  // agent puede contener el valor de un secreto externo (el agente corre con
+  // los secretos en el env). Los tails que logueamos pasan por acá antes de
+  // ir al logger (security-reviewer BLOCK 2026-05-21).
+  const redactText = makeRedactor(input.externalSecrets.map((s) => s.value));
+
   return new Promise<VerifierAgentVerdict>((resolve) => {
     let stdout = '';
     let stderr = '';
@@ -619,6 +634,9 @@ export async function runVerifierAgent(input: {
     const child = spawn(sandboxed.bin, sandboxed.args, {
       cwd: input.workdir,
       env: {
+        // Secretos externos del org PRIMERO — las env vars fijas van
+        // después para pisarlas siempre. Van al `env`, jamás al prompt.
+        ...buildSecretEnv(input.externalSecrets),
         HOME: process.env.HOME ?? '',
         PATH: process.env.PATH ?? '',
         USER: process.env.USER ?? '',
@@ -677,8 +695,8 @@ export async function runVerifierAgent(input: {
             signal,
             stdoutLength: stdoutBytes,
             stderrLength: stderr.length,
-            stdoutTail: stdout.slice(-500),
-            stderrTail: stderr.slice(-500),
+            stdoutTail: redactText(stdout.slice(-500)),
+            stderrTail: redactText(stderr.slice(-500)),
           },
           'Verifier agent timeout',
         );
@@ -707,9 +725,9 @@ export async function runVerifierAgent(input: {
             measuredDurationMs,
             stdoutLength: stdoutBytes,
             stderrLength: stderr.length,
-            stdoutTail: stdout.slice(-500),
-            stderrTail: stderr.slice(-500),
-            stderrHead: stderr.length > 500 ? stderr.slice(0, 500) : null,
+            stdoutTail: redactText(stdout.slice(-500)),
+            stderrTail: redactText(stderr.slice(-500)),
+            stderrHead: stderr.length > 500 ? redactText(stderr.slice(0, 500)) : null,
           },
           `Verifier agent exit ${exitCode}${signal ? ` (signal=${signal})` : ''}`,
         );
@@ -735,8 +753,8 @@ export async function runVerifierAgent(input: {
             criterion: input.criterion.text,
             measuredDurationMs,
             err: (err as Error).message,
-            stdoutHead: stdout.slice(0, 300),
-            stdoutTail: stdout.slice(-300),
+            stdoutHead: redactText(stdout.slice(0, 300)),
+            stdoutTail: redactText(stdout.slice(-300)),
           },
           'Verifier agent output (CLI wrapper) no parseable — cambio de formato del CLI o spawn corrupto',
         );
@@ -792,7 +810,7 @@ export async function runVerifierAgent(input: {
           {
             event: 'dod.verifier_agent.verdict_parse_fail',
             criterion: input.criterion.text,
-            modelOutputTail: modelOutput.slice(-500),
+            modelOutputTail: redactText(modelOutput.slice(-500)),
           },
           'Verifier agent emitió texto pero el JSON verdict no parseó',
         );
@@ -1037,7 +1055,7 @@ function extractBatchJsonVerdicts(output: string): BatchVerdictRaw[] | null {
       const entries = Object.entries(parsed);
       if (entries.length > 0) {
         const looksLikeVerdictsMap = entries.every(
-          ([_k, v]) =>
+          ([, v]) =>
             v !== null &&
             typeof v === 'object' &&
             ('passed' in (v as object) || 'reason' in (v as object)),
@@ -1061,7 +1079,7 @@ function extractBatchJsonVerdicts(output: string): BatchVerdictRaw[] | null {
 
   // 2. Code fence ```json {...} ``` o ```json [...] ```
   // Capturamos tanto `{...}` como `[...]` para cubrir shapes A, B y C
-  const fenceMatch = trimmed.match(/```(?:json)?\s*([\{\[][\s\S]*?[\}\]])\s*```/);
+  const fenceMatch = trimmed.match(/```(?:json)?\s*([{[][\s\S]*?[}\]])\s*```/);
   if (fenceMatch) {
     const fenced = tryParse(fenceMatch[1]);
     if (fenced && fenced.length > 0) return fenced;
@@ -1154,6 +1172,11 @@ export async function runVerifierAgentBatch(input: {
   model?: string;
   /** Override del effort del verifier. Fallback a env. */
   effort?: string;
+  /**
+   * Secretos externos del org — inyectados en el `env` del spawn batch
+   * (nunca en el prompt). Ver `runVerifierAgent` para el rationale.
+   */
+  externalSecrets: ExternalSecretForWorker[];
 }): Promise<Map<string, VerifierAgentVerdict>> {
   // Resolución cascada: claim → env → default.
   const verifierModel = input.model ?? VERIFIER_MODEL;
@@ -1209,6 +1232,7 @@ export async function runVerifierAgentBatch(input: {
       storyMarkdown: input.storyMarkdown,
       branch: input.branch,
       anthropicApiKey: input.anthropicApiKey,
+      externalSecrets: input.externalSecrets,
       model: input.model,
       effort: input.effort,
     });
@@ -1267,6 +1291,9 @@ export async function runVerifierAgentBatch(input: {
     `Batch verifier: evaluando ${input.criteria.length} criterios en 1 sesión`,
   );
 
+  // Redactor para los logs forenses — mismo rationale que `runVerifierAgent`.
+  const redactText = makeRedactor(input.externalSecrets.map((s) => s.value));
+
   return new Promise<Map<string, VerifierAgentVerdict>>((resolve) => {
     let stdout = '';
     let stderr = '';
@@ -1276,6 +1303,9 @@ export async function runVerifierAgentBatch(input: {
     const child = spawn(sandboxed.bin, sandboxed.args, {
       cwd: input.workdir,
       env: {
+        // Secretos externos del org PRIMERO — las env vars fijas van
+        // después para pisarlas siempre. Van al `env`, jamás al prompt.
+        ...buildSecretEnv(input.externalSecrets),
         HOME: process.env.HOME ?? '',
         PATH: process.env.PATH ?? '',
         USER: process.env.USER ?? '',
@@ -1364,7 +1394,7 @@ export async function runVerifierAgentBatch(input: {
             event: 'dod.verifier_agent.batch_cli_parse_fail',
             count: input.criteria.length,
             err: (err as Error).message,
-            stdoutTail: stdout.slice(-500),
+            stdoutTail: redactText(stdout.slice(-500)),
           },
           'Batch verifier CLI wrapper no parseable',
         );
@@ -1423,8 +1453,8 @@ export async function runVerifierAgentBatch(input: {
         // y permita debug post-mortem. Sin head solo veíamos los últimos
         // 800 chars — si el modelo emitió un wrapper de prosa largo seguido
         // del JSON, no veíamos lo que estaba antes del posible JSON.
-        const head = modelOutput.slice(0, 400);
-        const tail = modelOutput.slice(-800);
+        const head = redactText(modelOutput.slice(0, 400));
+        const tail = redactText(modelOutput.slice(-800));
         logger.warn(
           {
             event: 'dod.verifier_agent.batch_verdicts_parse_fail',

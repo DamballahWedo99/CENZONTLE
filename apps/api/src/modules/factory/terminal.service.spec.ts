@@ -702,7 +702,9 @@ describe('TerminalService', () => {
       expect(session).toMatchObject({
         port: 7681,
         branch: 'feat/CENZ-42',
-        url: 'http://localhost:7681',
+        // 127.0.0.1 explícito: ttyd bindea `-i 127.0.0.1`; `localhost` podría
+        // resolver a IPv6 (::1) y dar "connection refused".
+        url: 'http://127.0.0.1:7681',
       });
       expect(session!.worktreePath).toBe(expectedWorktreePath('agent-1'));
       expect(session!.startedAt).toMatch(/^\d{4}-\d{2}-\d{2}T/);

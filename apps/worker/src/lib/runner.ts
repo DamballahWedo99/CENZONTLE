@@ -22,16 +22,20 @@ import {
   extractPassedCriteria,
   type CriterionVerdict,
 } from './dod-verifier.js';
-
-/**
- * Tier 1 Harness — máximo de attempts del DoD enforcement loop. Cada attempt
- * incluye: spawn claude → verify DoD → si falla, retry-prompt + nuevo spawn.
- * 3 es el sweet spot: cubre casos comunes (typo de import, test edge missed,
- * lint nit) sin gastar demasiado en casos donde el agente está perdido. Más
- * de 3 típicamente indica problema de spec, no problema de implementación —
- * mejor escalate a humano.
- */
-const MAX_DOD_ATTEMPTS = 3;
+import {
+  sanitizeExternalSecrets,
+  buildSecretEnv,
+  serializeDotenv,
+  makeRedactor,
+  scanDiffForSecrets,
+} from './secrets.js';
+import {
+  resolveMaxDodAttempts,
+  evaluateDoomLoop,
+  INITIAL_DOOM_LOOP_STATE,
+  DOOM_LOOP_THRESHOLD,
+  type DoomLoopState,
+} from './dod-retry.js';
 
 /**
  * Lista hardcoded de milestones técnicos del worker (workflow del run).
@@ -66,6 +70,7 @@ const execFileAsync = promisify(execFile);
 async function git(
   args: string[],
   cwd: string,
+  maxBuffer = 10 * 1024 * 1024,
 ): Promise<{ stdout: string; stderr: string }> {
   return execFileAsync('git', args, {
     cwd,
@@ -78,12 +83,58 @@ async function git(
       // RÁPIDO con código no-cero, no que se quede esperando un prompt.
       GIT_TERMINAL_PROMPT: '0',
     },
-    maxBuffer: 10 * 1024 * 1024, // 10MB suficiente para clone output
+    // Default 10MB cubre el output del clone; el escaneo pre-push lo amplía
+    // — un diff grande legítimo no debe fallar-cerrado el push.
+    maxBuffer,
   });
 }
 
 // Re-export para compat con callers que importaban desde aquí.
 export type { ClaimedStory } from '@cenzontle/shared';
+
+/**
+ * Redacta credenciales embebidas en una URL de clone/remote del texto de un
+ * error de git. Cuando `git clone`/`git push` falla por auth, git suele
+ * incluir la URL completa en su mensaje — p.ej.
+ * `fatal: Authentication failed for 'https://x-access-token:TOKEN@github.com/o/r.git'`.
+ * Si esa URL trae un token embebido, el mensaje crudo lo filtraría: el worker
+ * lo manda al backend (se persiste en `agent_runs.errorMessage` y se muestra
+ * en la UI) y lo loguea. Extraemos user/password de `repoUrl` y los
+ * reemplazamos por '***'; si la URL traía credenciales (o no se pudo
+ * parsear), reemplazamos además la URL completa como defensa extra. Un
+ * `repoUrl` limpio (sin token) se deja intacto — no es secreto y oculta
+ * qué repo falló sería peor UX.
+ *
+ * Exportada para test unitario (secrets-críticos → cobertura explícita).
+ */
+export function redactRepoUrlCredentials(
+  text: string,
+  repoUrl: string | null,
+): string {
+  if (!text || !repoUrl) return text;
+  let out = text;
+  let hadCredentials = false;
+  try {
+    const u = new URL(repoUrl);
+    // Redactamos cualquier credencial no vacía. La heurística anterior de
+    // `length >= 4` para evitar "ruido de substrings" filtraba tokens
+    // legítimos de 1-3 chars (el sanitizer del DTO no garantiza longitud
+    // mínima en `repoUrl`, y proveedores custom pueden usar tokens cortos
+    // como passwords HTTP Basic). Preferir falsos positivos benignos
+    // (substring común redactado) antes que filtrar una credencial real.
+    for (const cred of [u.password, u.username]) {
+      if (cred && cred.length >= 1) {
+        out = out.split(cred).join('***');
+        hadCredentials = true;
+      }
+    }
+  } catch {
+    // repoUrl no parseable como URL — no podemos extraer user/pass; por
+    // seguridad asumimos que PUEDE traer credenciales y redactamos entero.
+    hadCredentials = true;
+  }
+  return hadCredentials ? out.split(repoUrl).join('<repo-url>') : out;
+}
 
 /**
  * Threshold ms — kill el proceso `claude` si excede esta duración. Sprint
@@ -104,42 +155,6 @@ const PROGRESS_INTERVAL_MS = 30_000;
  * del backend acepta hasta 8000 chars; cortamos las últimas N líneas.
  */
 const MAX_OUTPUT_BYTES = 8000;
-
-/**
- * Patrones de redacción aplicados al output ANTES de escribirlo al log
- * file (que el frontend lee via tail -f) Y antes de enviarlo al backend
- * (security-reviewer F-02 2026-05-06). Claude rutinariamente echo'ea
- * comandos como `git push https://x-access-token:<TOKEN>@github.com/...`,
- * env dumps, etc. Sin esto, los secretos del worker host terminan en
- * `agent_runs.lastOutput` (DB), en logs del API y visibles en el iframe.
- */
-const REDACTION_PATTERNS: Array<[RegExp, string]> = [
-  // Anthropic / OpenAI / generic sk- keys (incluye sk-proj-AB-CD- con dashes)
-  [/sk-ant-[a-zA-Z0-9_-]+/g, 'sk-ant-[REDACTED]'],
-  [/sk-[a-zA-Z0-9_-]{20,}/g, 'sk-[REDACTED]'],
-  [/sk_live_[a-zA-Z0-9]{20,}/g, 'sk_live_[REDACTED]'], // Stripe live secret
-  [/rk_live_[a-zA-Z0-9]{20,}/g, 'rk_live_[REDACTED]'], // Stripe restricted key
-  // GitHub
-  [/ghp_[A-Za-z0-9]{30,}/g, 'ghp_[REDACTED]'],
-  [/github_pat_[A-Za-z0-9_]{22,}/g, 'github_pat_[REDACTED]'],
-  [/gho_[A-Za-z0-9]{30,}/g, 'gho_[REDACTED]'], // OAuth tokens
-  [/ghs_[A-Za-z0-9]{30,}/g, 'ghs_[REDACTED]'], // server-to-server
-  // GitLab
-  [/glpat-[A-Za-z0-9_-]{20,}/g, 'glpat-[REDACTED]'],
-  // AWS
-  [/(AKIA|ASIA)[A-Z0-9]{16}/g, '[AWS_ACCESS_KEY_REDACTED]'],
-  // Slack
-  [/xox[abposr]-[A-Za-z0-9-]{10,}/g, 'xox[REDACTED]'],
-  // Google API
-  [/AIza[0-9A-Za-z_-]{35}/g, 'AIza[REDACTED]'],
-  // Credenciales en URLs (cubre x-access-token: y user:pass@ genérico)
-  [/x-access-token:[^@\s]+@/g, 'x-access-token:[REDACTED]@'],
-  [/(https?|postgres|postgresql|mongodb|redis|amqp|mysql):\/\/[^:\s]+:[^@\s]+@/g, '$1://[CREDS_REDACTED]@'],
-  // Worker tokens del propio fleet
-  [/worker_[a-z2-7]{20,}/g, 'worker_[REDACTED]'],
-  // JWT en headers Bearer (genérico)
-  [/Bearer\s+[A-Za-z0-9._-]{20,}/g, 'Bearer [REDACTED]'],
-];
 
 /**
  * Resuelve el binario `claude` del PATH. Asume que el usuario lo tiene
@@ -226,13 +241,17 @@ export async function runStory(
       );
       try {
         await client.post(`/factory/workers/runs/${runId}/complete`, {
-          exitCode: -1,
-          prNumber: null,
+          // 64 = EX_USAGE (BSD sysexits): el claim payload del backend vino
+          // malformado. No-cero → el backend marca la story 'blocked'.
+          exitCode: 64,
           prBranchPushed: false,
-          commitSha: null,
-          attempts: 0,
+          // `prNumber` y `commitSha` se omiten: aborto PRE-spawn, no hubo
+          // commit ni rama; `prNumber` además fue removido del DTO por el
+          // security fix de 2026-05-22 (CWE-639 / CWE-863).
+          // `attempts` también se omite: el RunCompleteDto exige
+          // `attempts >= 1` cuando está presente y aún no hubo pasada del DoD.
           forceCompletion: true,
-          error: `Invalid claimed field: ${name} is empty or invalid (length=${typeof value === 'string' ? value.length : 0})`,
+          errorMessage: `Invalid claimed field: ${name} is empty or invalid (length=${typeof value === 'string' ? value.length : 0})`,
         });
       } catch (err) {
         logger.error(
@@ -257,13 +276,17 @@ export async function runStory(
     );
     try {
       await client.post(`/factory/workers/runs/${runId}/complete`, {
-        exitCode: -1,
-        prNumber: null,
+        // 64 = EX_USAGE (BSD sysexits): claim payload malformado. No-cero →
+        // el backend marca la story 'blocked'.
+        exitCode: 64,
         prBranchPushed: false,
-        commitSha: null,
-        attempts: 0,
+        // `prNumber` y `commitSha` se omiten: aborto PRE-spawn, no hubo
+        // commit ni rama; `prNumber` además fue removido del DTO por el
+        // security fix de 2026-05-22.
+        // `attempts` también se omite: el RunCompleteDto exige
+        // `attempts >= 1` cuando está presente y aún no hubo pasada del DoD.
         forceCompletion: true,
-        error: `Empty or trivial prompt (length=${prompt?.length ?? 0}) — claim contract violation`,
+        errorMessage: `Empty or trivial prompt (length=${prompt?.length ?? 0}) — claim contract violation`,
       });
     } catch (err) {
       logger.error(
@@ -287,6 +310,36 @@ export async function runStory(
   logger.debug({ event: 'workdir.created', runId, workdir }, 'Workdir prepared');
 
   // ════════════════════════════════════════════════════════════════════════
+  // SECRETOS EXTERNOS — credenciales del org forwarded en el claim
+  // ════════════════════════════════════════════════════════════════════════
+  //
+  // El backend forwardea TODOS los `ExternalSecret` del org en cada claim.
+  // `claimed.externalSecrets ?? []` defiende contra un backend desincronizado
+  // que no envíe el campo (mismo patrón defensivo que `dodCriteria ?? []`).
+  // `sanitizeExternalSecrets` descarta nombres reservados o inválidos.
+  //
+  // `redact` redacta el output del agente por el valor literal de cada
+  // secreto — los de terceros no matchean los patrones por prefijo. Se usa
+  // en `appendFormattedToLog`, el único sink hacia el log file y el backend.
+  const safeSecrets = sanitizeExternalSecrets(claimed.externalSecrets ?? []);
+  const redact = makeRedactor(safeSecrets.map((s) => s.value));
+  // True solo si ESTE worker escribió un `.env` efímero — gatea el borrado
+  // pre-commit para no eliminar un `.env` que el repo target ya trackeaba.
+  let wroteEphemeralDotenv = false;
+  if (safeSecrets.length > 0) {
+    logger.info(
+      {
+        event: 'run.secrets.loaded',
+        runId,
+        // Solo NOMBRES — nunca valores.
+        secretNames: safeSecrets.map((s) => s.name),
+        count: safeSecrets.length,
+      },
+      `${safeSecrets.length} secreto(s) externo(s) disponible(s) para el run`,
+    );
+  }
+
+  // ════════════════════════════════════════════════════════════════════════
   // HITO 1.6 — Tracking de criterios/milestones del run
   // ════════════════════════════════════════════════════════════════════════
   //
@@ -304,42 +357,14 @@ export async function runStory(
     source: 'worker',
   }));
 
-  // Story acceptance criteria (los del seed, parseados por el backend del
-  // vault). Cada criterio es UNA entry con `source: 'story'`. Inicializan
-  // en `pending` y el verifier Layer 3 per-criterio los marca individualmente
-  // (completed/failed) según el verdict de Sonnet. Estos son los milestones
-  // que el operador ve como pill PRIMARIA "acceptance" en la UI.
-  const storyCriteria: CriterionEvent[] = (claimed.acceptanceCriteria ?? []).map(
-    (text, i) => ({
-      id: `story.ac-${i + 1}`,
-      label: text,
-      status: 'pending',
-      source: 'story',
-    }),
-  );
-
-  // Per-test-case milestones del QA markdown. Cada caso del seed (Happy
-  // path o Edge case) se renderiza como pill individual en el drawer. El
-  // verifier emite UN verdict por test case (kind='tests-passing') con
-  // `label` que matchea uno-a-uno con `storyCriteria.label` acá — match
-  // por label en el onProgress sync abajo marca cada milestone individual.
-  //
-  // Sin estos rows, la UI no mostraba progreso granular de los per-case
-  // verdicts: el dodVerification log los registraba pero el storyCriteria
-  // (pill PRIMARIA "acceptance") quedaba sin sync (qa-reviewer WARN
-  // 2026-05-15).
-  for (let i = 0; i < (claimed.qaTestCases ?? []).length; i++) {
-    const tc = claimed.qaTestCases![i];
-    const label = tc.category === 'happy'
-      ? `Happy path: ${tc.description}`
-      : `Edge case: ${tc.description}`;
-    storyCriteria.push({
-      id: `story.tc-${i + 1}`,
-      label,
-      status: 'pending',
-      source: 'story',
-    });
-  }
+  // Milestones de la story que el verifier marca individualmente (pill
+  // PRIMARIA en la UI). Tras 2026-05-21 el verificador del Forge SOLO revisa
+  // la solución técnica (definicion-tecnica.md): los acceptance criteria y
+  // los casos de QA se verifican en etapas POSTERIORES del pipeline (review
+  // y QA Testing). Por eso ya no se crean los milestones `story.ac-*` ni
+  // `story.tc-*` — mostrarlos en `pending` para siempre sería engañoso.
+  // Solo quedan los `story.tl-*` que el bloque de abajo construye.
+  const storyCriteria: CriterionEvent[] = [];
 
   // Per-item milestones del TL markdown. Mismo patrón: cada requirement
   // (checklist/contract/validation/errors) se renderiza individual. El
@@ -368,8 +393,12 @@ export async function runStory(
     status: 'in_progress' | 'completed' | 'failed',
   ): void => {
     // Buscar primero en workerCriteria, luego en storyCriteria. IDs son
-    // distintos (worker: workdir.ready/repo.cloned/...; story: story.ac-N)
-    // así que no hay colisión, pero priorizamos el lookup para early-exit.
+    // distintos (worker: `workdir.ready` / `repo.cloned` / `branch.pushed`...;
+    // story: `story.tl-N` para los milestones de la solución técnica que el
+    // verifier del Forge marca). Los antiguos `story.ac-*` y `story.tc-*` se
+    // dejaron de emitir tras 2026-05-21 (verificación de AC + QA se mueve a
+    // etapas posteriores del pipeline). No hay colisión de IDs, pero
+    // priorizamos workerCriteria para early-exit en el caso común.
     let target: CriterionEvent[] | null = null;
     let idx = workerCriteria.findIndex((c) => c.id === id);
     if (idx !== -1) target = workerCriteria;
@@ -448,22 +477,116 @@ export async function runStory(
         `Repo clonado y checked out a ${branch}`,
       );
     } catch (err) {
-      // Clone falló (network, token inválido, branch no existe, etc.). NO
-      // abortamos el run — caemos a sandbox mode. La story igual avanzará
-      // si claude crea archivos, pero sin push/PR. Marca explícito en logs
-      // para forensics.
+      // Q5 (2026-05-21): el clone del repo es un prerrequisito DURO. Si el
+      // repo estaba configurado (repoUrl != null) pero el clone falla
+      // —token inválido, branch base inexistente, red caída— NO hay nada
+      // que el agente pueda hacer: correr claude en un workdir vacío solo
+      // produciría basura y quemaría tokens. Es un ERROR del run: lo
+      // reportamos con exit code no-cero y abortamos antes de spawnear
+      // claude. El backend marca la story 'blocked' para revisión humana.
       markCriterion('repo.cloned', 'failed');
+      // El error de git puede incluir la URL del clone con el token embebido
+      // (los fallos de auth la imprimen literal). Redactar ANTES de loguear o
+      // mandar al backend — si no, el token del repo se filtra a la DB/UI.
+      // `execFile` puede llenar `.message`, `.stderr` o ambos según la
+      // plataforma; concatenamos los dos para que el redactor no deje
+      // escapar un token presente solo en uno de los dos canales.
+      const rawCloneErr = err as Error & { stderr?: string };
+      const cloneErrCombined = `${rawCloneErr.message ?? ''}${rawCloneErr.stderr ? ` :: ${rawCloneErr.stderr}` : ''}`.trim();
+      const cloneErrMsg = redactRepoUrlCredentials(cloneErrCombined, repoUrl);
       logger.error(
-        {
-          event: 'git.clone.fail',
-          runId,
-          error: (err as Error).message,
-        },
-        `Clone failed, falling back to sandbox mode`,
+        { event: 'git.clone.fail', runId, error: cloneErrMsg },
+        `Clone del repo falló — abortando el run con error (ya no hay sandbox fallback)`,
       );
-      // Limpia y recrea workdir vacío para que claude corra fresh.
-      await fs.rm(workdir, { recursive: true, force: true });
-      await fs.mkdir(workdir, { recursive: true });
+      try {
+        await client.post(`/factory/workers/runs/${runId}/complete`, {
+          // 69 = EX_UNAVAILABLE (BSD sysexits): el recurso (repo) no está
+          // disponible. Distinto de 127 (spawn) / 124 (timeout) / 143 (kill).
+          exitCode: 69,
+          prBranchPushed: false,
+          // `prNumber` y `commitSha` se omiten: aún no hubo commit ni rama.
+          // `prNumber` además fue removido del DTO por el security fix.
+          errorMessage: `Repo clone failed: ${cloneErrMsg.slice(0, 500)}`,
+          criteriaProgress: buildCriteriaPayload(),
+        });
+      } catch (reportErr) {
+        logger.error(
+          {
+            event: 'git.clone.fail.report_fail',
+            runId,
+            error: (reportErr as Error).message,
+          },
+          'No se pudo reportar el fallo de clone — el sweeper marcará el run abandoned',
+        );
+      }
+      await fs.rm(workdir, { recursive: true, force: true }).catch(() => undefined);
+      return;
+    }
+  }
+
+  // ════════════════════════════════════════════════════════════════════════
+  // SECRETOS EXTERNOS — `.env` efímero en el workdir
+  // ════════════════════════════════════════════════════════════════════════
+  //
+  // Además de las env vars del spawn (para SDKs `process.env`-based), un
+  // `.env` cubre los frameworks file-based (Next.js/Vite leen `.env` del
+  // cwd). Se escribe con modo 0600 (solo el owner lee) y se gitignorea
+  // local-only vía `.git/info/exclude` — eso NO modifica archivos trackeados
+  // ni contamina el PR. El `.env` además se borra explícitamente antes del
+  // `git add -A` (más abajo). En sandbox mode (sin `.git`) el `.env` vive en
+  // el workdir temporal y lo limpia el `fs.rm(workdir)` final.
+  //
+  // Si el repo target YA trackea un `.env`, NO lo tocamos — el agente recibe
+  // las credenciales por env var igual.
+  if (safeSecrets.length > 0) {
+    let writeDotenv = true;
+    if (cloneSucceeded) {
+      try {
+        const tracked = await git(['ls-files', '.env'], workdir);
+        if (tracked.stdout.trim().length > 0) {
+          writeDotenv = false;
+          logger.warn(
+            { event: 'run.secrets.dotenv.skip_tracked', runId },
+            `El repo target ya trackea un .env — no se sobreescribe; los ` +
+              `secretos van solo por env var`,
+          );
+        }
+      } catch {
+        // `git ls-files` falló — procedemos a escribir el `.env`.
+      }
+    }
+    if (writeDotenv) {
+      try {
+        await fs.writeFile(
+          join(workdir, '.env'),
+          serializeDotenv(safeSecrets),
+          { mode: 0o600 },
+        );
+        wroteEphemeralDotenv = true;
+        if (cloneSucceeded) {
+          // gitignore LOCAL-ONLY: `.git/info/exclude` no es un archivo
+          // trackeado, así que no aparece en el diff del PR.
+          await fs.appendFile(
+            join(workdir, '.git', 'info', 'exclude'),
+            '\n.env\n.env.local\n',
+          );
+        }
+        logger.info(
+          { event: 'run.secrets.dotenv.written', runId, count: safeSecrets.length },
+          `.env efímero escrito (${safeSecrets.length} secreto(s), modo 0600)`,
+        );
+      } catch (err) {
+        // No-fatal: las env vars del spawn siguen siendo el canal autoritativo.
+        logger.warn(
+          {
+            event: 'run.secrets.dotenv.write_fail',
+            runId,
+            error: (err as Error).message,
+          },
+          `No se pudo escribir el .env efímero (non-fatal — los secretos van ` +
+            `por env var igual)`,
+        );
+      }
     }
   }
 
@@ -626,42 +749,96 @@ export async function runStory(
   // expuesto a `claude -p --dangerously-skip-permissions` que tiene tools
   // sin gate y puede `bash -c 'env'` para exfiltrar.
   //
+  // El `env` del spawn SÍ incluye `...buildSecretEnv(safeSecrets)` — pero
+  // eso NO viola F-05: no es el environment del HOST, son los `ExternalSecret`
+  // del org que el backend resolvió y scopeó para ESTE claim, y que el agente
+  // necesita para implementar la historia. Que el agente pueda verlos
+  // (`bash -c env`) es inherente y aceptado — igual que `ANTHROPIC_API_KEY`:
+  // el sandbox protege el HOST, no oculta del agente las credenciales de su
+  // propia historia. La fuga real (persistencia) la cubren la redacción del
+  // output por valor exacto y el gitignore + borrado del `.env` efímero.
+  //
   // SECURITY (F-06 2026-05-06): wrapWithSandbox envuelve el spawn con
   // sandbox-exec (macOS) o firejail (Linux) para denegar lectura de
   // ~/.ssh, ~/.aws, ~/.config/gh, etc. Mitiga prompt injection vía
   // epic.markdown que intentara leer credenciales del worker host.
   // Sin sandbox disponible → throw, salvo FACTORY_WORKER_ALLOW_NO_SANDBOX=1.
   // ════════════════════════════════════════════════════════════════════
-  // Tier 1 Harness — DoD enforcement loop
+  // DoD — enforcement loop con retry cap configurable
   // ════════════════════════════════════════════════════════════════════
   //
-  // El run NO termina hasta que TODOS los criterios determinísticos del DoD
-  // pasen, O hasta que excedamos MAX_DOD_ATTEMPTS, O hasta que detectemos
-  // doom loop (el passedCount no aumentó entre attempts — el agente está
-  // atorado en los mismos criterios fallidos).
+  // El loop corre hasta `maxDodAttempts` pasadas. `maxDodAttempts` viene
+  // del claim (`claimed.dodMaxAttempts`, configurado en AgentTokenSettings
+  // → tab Factory) clampeado a [1, 3]; 1 = una sola pasada (sin retries).
   //
   // Cada attempt:
-  //   1. Spawn claude con prompt (original primer attempt; retry-prompt en
-  //      retries con output literal del fallo previo)
-  //   2. Esperar close → exitCode
-  //   3. Si exitCode != 0, killed o killByBackend → break (no es DoD failure,
-  //      es agent failure — escalate sin reintentar)
-  //   4. Verify DoD: corre subprocess para criterios determinísticos
-  //   5. Si todos pasan → break con success
-  //   6. Si falla algún criterio:
-  //      - Si attempt < MAX y no es doom loop → build retry-prompt + continúa
-  //      - Sino → break con failure detallado
-  // Defensive: backend de versión vieja podría no enviar dodCriteria en
-  // ClaimedStory (campo agregado en Tier 1). Default a [] preserva el
-  // comportamiento legacy (skip verifier, run termina como antes).
-  const dodCriteriaSafe = claimed.dodCriteria ?? [];
+  //   1. Spawn claude (prompt del claim en el attempt 1; retry-prompt
+  //      quirúrgico en los retries DoD).
+  //   2. Esperar close → exitCode.
+  //   3. HARD-ERROR: si claude crasheó / exit≠0 / timeout-kill / spawn-fail:
+  //      - si quedan attempts → retry desde cero con el prompt ORIGINAL
+  //        (un crash NO es un problema del DoD).
+  //      - si es el último attempt → break: error del run.
+  //      `killByBackend` NUNCA reintenta — el run ya es terminal server-side.
+  //   4. Verify DoD: corre el verifier (NO bloqueante).
+  //   5. DoD-WARN: si el verifier encontró criterios fallidos Y quedan
+  //      attempts → re-spawn con retry-prompt quirúrgico y continúa. Si es
+  //      el último attempt o no hay fallidos → el run completa: el verifier
+  //      sigue siendo NO bloqueante (los fallidos remanentes son warns,
+  //      exitCode 0, la historia avanza). Los retries solo le dan a claude
+  //      más tiros para limpiar el DoD antes de que los warns queden fijos.
+  //
+  // Doom loop (red de seguridad): 2 turnos verificados seguidos sin progreso
+  // —estancamiento o regresión— cortan el run y lo escalan a humano (ver el
+  // bloque `evaluateDoomLoop` abajo). Defensive: un backend de versión vieja
+  // podría no enviar dodCriteria en ClaimedStory (campo agregado en Tier 1).
+  // Default a [] preserva el comportamiento legacy (skip verifier, run
+  // termina como antes).
+  //
+  // Filtro 2026-05-21: el verificador del Forge SOLO revisa la solución
+  // técnica. `tests-passing` (QA) se verifica en la etapa QA Testing y
+  // `acceptance-criteria` en el review — etapas POSTERIORES del pipeline.
+  // Se descartan acá para que el verifier de esta etapa no los evalúe.
+  const maxDodAttempts = resolveMaxDodAttempts(claimed.dodMaxAttempts);
+  // `clamped` = el valor crudo del claim difería del resuelto (fuera de rango
+  // o fraccionario). NO es "clamped" cuando el claim no trajo el campo —
+  // eso es un default, no un ajuste. Es la señal de que la config aplicada
+  // NO coincide con lo que el operador puso en la UI (ej. desync de versión).
+  const dodAttemptsClamped =
+    typeof claimed.dodMaxAttempts === 'number' &&
+    Number.isFinite(claimed.dodMaxAttempts) &&
+    claimed.dodMaxAttempts !== maxDodAttempts;
+  logger.info(
+    {
+      event: 'dod.attempts.resolved',
+      runId,
+      maxDodAttempts,
+      claimedValue: claimed.dodMaxAttempts ?? null,
+      clamped: dodAttemptsClamped,
+    },
+    `DoD enforcement loop: hasta ${maxDodAttempts} attempt(s)` +
+      (maxDodAttempts === 1 ? ' (una sola pasada, sin retries)' : '') +
+      (dodAttemptsClamped
+        ? ` (⚠ claim pidió ${claimed.dodMaxAttempts}, ajustado a ${maxDodAttempts})`
+        : ''),
+  );
+  const dodCriteriaSafe = (claimed.dodCriteria ?? []).filter(
+    (c) => c.kind !== 'tests-passing' && c.kind !== 'acceptance-criteria',
+  );
   const verificationLog: Array<{ attempt: number; verdicts: CriterionVerdict[] }> = [];
-  let previousPassedCount: number | null = null;
+  // Prompt del spawn actual. Empieza con el `prompt` del claim; tras una
+  // pasada con criterios fallidos, se reemplaza por un retry-prompt quirúrgico.
   let currentPrompt = prompt;
-  let dodPassed = false;
+  let claudeCompletedOk = false;
   let lastVerdicts: CriterionVerdict[] = [];
   let totalAttempts = 0;
   let dodFailureReason: string | null = null;
+  // Doom loop — `doomLoopState` acarrea el baseline del passedCount y el
+  // contador de turnos malos entre attempts verificados (forma definida en
+  // dod-retry.ts). `doomLooped` marca que el run se cortó por estancamiento/
+  // regresión (fuerza un exit code no-cero → escala a humano).
+  let doomLoopState: DoomLoopState = INITIAL_DOOM_LOOP_STATE;
+  let doomLooped = false;
   // exitCode + spawnError sobreviven al final del loop para reportarse en complete.
   let exitCode = -1;
   const spawnError: { value: Error | null } = { value: null };
@@ -681,14 +858,38 @@ export async function runStory(
   // reemplaza por el autoritativo del SDK en el perAttempt array.
   let runningTokens: GeneratorRunningTokens | null = null;
 
-  for (let attempt = 1; attempt <= MAX_DOD_ATTEMPTS; attempt++) {
+  for (let attempt = 1; attempt <= maxDodAttempts; attempt++) {
     totalAttempts = attempt;
 
     if (attempt > 1) {
       logger.info(
-        { event: 'dod.retry', runId, attempt, maxAttempts: MAX_DOD_ATTEMPTS },
-        `DoD retry attempt ${attempt}/${MAX_DOD_ATTEMPTS}`,
+        { event: 'dod.retry', runId, attempt, maxAttempts: maxDodAttempts },
+        `DoD enforcement loop — attempt ${attempt}/${maxDodAttempts}`,
       );
+    }
+
+    // === Reset de los flags de error per-attempt ===
+    //
+    // `exitCode`, `spawnError`, `killed` y `sigkillFallbackHandle` son
+    // function-scoped (sobreviven al loop para reportarse en /complete).
+    // Con retries, un attempt previo pudo haberlos seteado: hay que volver
+    // a su estado neutro ANTES de spawnear de nuevo, o un crash viejo se
+    // arrastraría al attempt actual. `killByBackend` NO se resetea — una
+    // vez que el backend declara el run terminal, lo es para siempre (el
+    // loop hace break, nunca reintenta sobre killByBackend).
+    if (attempt > 1) {
+      exitCode = -1;
+      spawnError.value = null;
+      killed = false;
+      if (sigkillFallbackHandle) {
+        clearTimeout(sigkillFallbackHandle);
+        sigkillFallbackHandle = null;
+      }
+      // Milestones del worker: volver `claude.spawned`/`claude.exited` a
+      // 'in_progress' — un attempt previo los marcó 'completed' y, sin esto,
+      // la UI mostraría "Claude terminó" mientras el retry vuelve a correr.
+      markCriterion('claude.spawned', 'in_progress');
+      markCriterion('claude.exited', 'in_progress');
     }
 
     // === Wrap claude args con sandbox para este attempt ===
@@ -739,6 +940,12 @@ export async function runStory(
       child = spawn(sandboxed.bin, sandboxed.args, {
         cwd: workdir,
         env: {
+          // Secretos externos del org PRIMERO en el spread. Las env vars
+          // fijas van DESPUÉS para que SIEMPRE las pisen — defensa final
+          // contra un nombre que, pese a `sanitizeExternalSecrets`, colida
+          // con una var fija. Ver el bloque SECURITY F-05 arriba para por
+          // qué este spread no es el `...process.env` prohibido.
+          ...buildSecretEnv(safeSecrets),
           HOME: process.env.HOME ?? '',
           PATH: process.env.PATH ?? '',
           USER: process.env.USER ?? '',
@@ -758,9 +965,9 @@ export async function runStory(
       break;
     }
 
-    if (attempt === 1) {
-      markCriterion('claude.spawned', 'completed');
-    }
+    // Cada attempt marca el milestone — con retries, el spawn del attempt
+    // 2+ también debe reflejarse (el reset de arriba lo volvió a 'in_progress').
+    markCriterion('claude.spawned', 'completed');
     logger.info(
       {
         event: 'run.spawn',
@@ -792,7 +999,10 @@ export async function runStory(
       // refactor futuro removía la redacción de appendToBuffer (que conceptualmente
       // solo debería gestionar el ring buffer), outputBuffer quedaría con secretos.
       // BUG-01 fix: caller pre-redacta, appendToBuffer asume input ya redactado.
-      const redacted = redactSecrets(formatted);
+      // `redact` redacta tanto los patrones por prefijo como el valor literal
+      // de cada secreto externo del org — cubre el log file, el outputBuffer
+      // y por ende todos los `lastOutput` que van al backend.
+      const redacted = redact(formatted);
       appendToBuffer(outputBuffer, redacted);
       fs.appendFile(logFilePath, redacted, 'utf-8').catch((err) => {
         logger.warn(
@@ -1046,21 +1256,36 @@ export async function runStory(
     clearInterval(progressTimer);
     if (sigkillFallbackHandle) clearTimeout(sigkillFallbackHandle);
 
-    // Marcamos `claude.exited` SIEMPRE que tengamos un exitCode definitivo:
-    //  - Si dodPassed=true en el attempt actual → no habrá más spawns
-    //  - Si attempt === MAX_DOD_ATTEMPTS → es el último attempt, no habrá retry
-    //  - Si exitCode !== 0 → claude falló, no habrá retry (los retries son por DoD fail con exitCode=0)
-    // Esto evita el bug donde el milestone queda 'pending' aunque el run
-    // termine exitosamente (badge UI mostraba "10/12" en runs que pasaron OK).
-    const isFinalAttempt = attempt === MAX_DOD_ATTEMPTS || dodPassed || exitCode !== 0;
+    // Detectamos un fallo DURO de claude (crash, exit≠0, timeout-kill,
+    // spawn-fail) para decidir abajo si reintentamos o cerramos. Lo
+    // computamos ANTES de marcar el milestone porque el marcado depende
+    // de si este es el attempt FINAL.
+    const claudeHardError =
+      !!spawnError.value || killByBackend || killed || exitCode !== 0;
+    // `killByBackend` nunca reintenta — el run ya es terminal server-side
+    // (un re-spawn + /complete posterior chocaría con 409/410). El resto
+    // de los fallos duros sí reintentan si quedan attempts.
+    const willRetryHardError =
+      claudeHardError && !killByBackend && attempt < maxDodAttempts;
+
+    // Marcamos `claude.exited` SOLO cuando NO va a haber otro spawn:
+    //  - exit limpio (exitCode === 0) → no hay retry posible por crash;
+    //    el DoD-warn retry re-spawnea pero el milestone se re-marcará igual.
+    //  - es el attempt final (`attempt === maxDodAttempts`).
+    //  - fallo duro que NO va a reintentar (killByBackend, o sin budget).
+    // Si va a reintentar por crash, dejamos el milestone como está — el
+    // próximo attempt lo marcará. Evita que el badge UI muestre 'failed'
+    // en un run que después se recupera en el retry.
+    const isFinalAttempt =
+      attempt === maxDodAttempts || exitCode === 0 || (claudeHardError && !willRetryHardError);
     if (isFinalAttempt) {
       markCriterion('claude.exited', exitCode === 0 ? 'completed' : 'failed');
     }
 
     await refreshOutputFromFile();
 
-    // === Si claude falló (no exit limpio), abortamos sin verificar DoD ===
-    if (spawnError.value || killByBackend || killed || exitCode !== 0) {
+    // === Si claude falló (no exit limpio): retry-desde-cero o abort ===
+    if (claudeHardError) {
       // Log estructurado del crash con TODO el contexto disponible para forensics
       // (qa-validation 2026-05-11). Anteriormente el reason text era el único
       // registro — sin signal ni tail del output, debugar crashes silenciosos
@@ -1077,11 +1302,32 @@ export async function runStory(
           killed,
           killByBackend,
           spawnError: spawnError.value?.message ?? null,
+          willRetry: willRetryHardError,
           logFilePath,
           lastOutputTail,
         },
-        `claude attempt ${attempt} terminó código=${exitCode}${claudeSignal ? ` signal=${claudeSignal}` : ''}${killed ? ' (killed by timeout)' : ''}${killByBackend ? ' (killed by backend)' : ''}`,
+        `claude attempt ${attempt} terminó código=${exitCode}${claudeSignal ? ` signal=${claudeSignal}` : ''}${killed ? ' (killed by timeout)' : ''}${killByBackend ? ' (killed by backend)' : ''}${willRetryHardError ? ' — reintentando desde cero' : ''}`,
       );
+      // === HARD-ERROR retry: un crash NO es un problema del DoD ===
+      //
+      // Si quedan attempts, reintentamos la corrida desde cero con el
+      // prompt ORIGINAL (no el retry-prompt quirúrgico: ese asume que
+      // claude completó y dejó trabajo parcial; un crash puede no haber
+      // dejado nada usable). El reset de flags al inicio del próximo
+      // attempt limpia `exitCode`/`spawnError`/`killed`.
+      if (willRetryHardError) {
+        logger.info(
+          { event: 'dod.retry.hard_error', runId, attempt, nextAttempt: attempt + 1 },
+          `claude falló duro en attempt ${attempt} — retry desde cero con el prompt original (attempt ${attempt + 1}/${maxDodAttempts})`,
+        );
+        currentPrompt = prompt;
+        // Un crash NO es un "turno malo" del DoD — no produjo verdicts.
+        // Reinicia el baseline del doom loop: el próximo attempt verificado
+        // arranca una cadena nueva (no se compara a través del crash).
+        doomLoopState = INITIAL_DOOM_LOOP_STATE;
+        continue;
+      }
+      // Último attempt (o killByBackend) — fail como hasta hoy.
       dodFailureReason =
         dodFailureReason ??
         (killByBackend
@@ -1094,7 +1340,7 @@ export async function runStory(
 
     // === Sin DoD configurado → trust + break ===
     if (dodCriteriaSafe.length === 0) {
-      dodPassed = true;
+      claudeCompletedOk = true;
       logger.info(
         { event: 'dod.skip', runId, reason: 'no criteria configured' },
         'DoD skipped (catálogo vacío)',
@@ -1131,6 +1377,10 @@ export async function runStory(
         technicalRequirements: claimed.technicalRequirements ?? [],
         branch,
         anthropicApiKey,
+        // Secretos externos del org — el verifier los inyecta en el env de
+        // `pnpm test`/`lint`/etc. y en sus propios spawns (paridad con el
+        // coder: los tests del repo pueden tocar el servicio externo).
+        externalSecrets: safeSecrets,
         // Forward del modelo/effort del DoD verifier desde el claim del backend
         // (configurados en /factory/settings → Factory). Si no vienen (claim
         // legacy o desync de versiones), el verifier cae a env vars.
@@ -1145,17 +1395,11 @@ export async function runStory(
         // marca el milestone individual en `criteriaProgress` que se reporta
         // al backend en el mismo POST de progress.
         //
-        // SIN incluir tests-passing y technical-design (legacy, solo
-        // acceptance-criteria), los verdicts per-item de esos kinds quedaban
-        // sin sync — el dodVerification log los persistía pero la pill
-        // PRIMARIA del drawer no se actualizaba progresivamente. La UX de
-        // "checkmarks incrementales" no se cumplía para tests-passing ni
-        // technical-design (qa-reviewer WARN 2026-05-15).
-        const SYNCABLE_KINDS = new Set([
-          'acceptance-criteria',
-          'tests-passing',
-          'technical-design',
-        ]);
+        // El verifier del Forge solo emite verdicts `technical-design`
+        // (los kinds `acceptance-criteria` y `tests-passing` se filtran de
+        // `dodCriteriaSafe`). El sync por label marca los milestones
+        // `story.tl-*` progresivamente conforme Sonnet emite cada verdict.
+        const SYNCABLE_KINDS = new Set(['technical-design']);
         for (const v of partialVerdicts) {
           if (!v.kind || !SYNCABLE_KINDS.has(v.kind)) continue;
           const target = storyCriteria.find((sc) => sc.label === v.label);
@@ -1213,73 +1457,6 @@ export async function runStory(
         }
       },
     );
-    // === Skip-regression detection (qa-reviewer HIGH 2026-05-11) ===
-    //
-    // El verifier emite `skipped` cuando le falta tooling (ej. no encuentra
-    // `package.json` para `pnpm test`). Eso es honesto cuando el environment
-    // NUNCA tuvo la tooling. Pero si en attempt N el criterio reportó
-    // `failed` (el environment SÍ tenía tooling, solo falló la verificación)
-    // y en attempt N+1 el MISMO criterio reporta `skipped`, eso significa
-    // que el agente eliminó las precondiciones — descalificando al juez en
-    // vez de pasar la prueba. Tratamos esa "regresión skipped" como `failed`
-    // para que `hasFailedCriteria` y el doom loop la cuenten correctamente.
-    // Sin esta protección, el agente puede marcar el run como exitoso
-    // simplemente borrando `package.json`.
-    //
-    // SOLO aplica a criterios con `kind !== null` (verifiers determinísticos:
-    // tests-passing, lint, type-check, etc.) — su `criterionId` es estable
-    // entre attempts. Para `kind === null` (custom criteria) el `criterionId`
-    // viene del texto del criterio en `.cenzontle-criteria.json`, que el
-    // agente puede legítimamente renombrar/reorganizar entre attempts;
-    // tratarlo como bypass sería false positive de cleanup legítimo
-    // (qa-reviewer Q3).
-    //
-    // Ejecutamos ANTES del `verificationLog.push` para que (a) el log
-    // persistido nunca contenga el `skipped` espurio (elimina ventana
-    // de crash que dejaría DB inconsistente — qa-reviewer Q1), y (b) la
-    // semántica de "el bloque muta el array local, después se pushea"
-    // sea lineal sin action-at-distance (qa-reviewer Q4).
-    if (verificationLog.length >= 1) {
-      const previousByCriterion = new Map(
-        verificationLog[verificationLog.length - 1].verdicts.map(
-          (v) => [v.criterionId, v.status] as const,
-        ),
-      );
-      const degraded: Array<{
-        criterionId: string;
-        kind: string | null;
-        originalReason: string;
-      }> = [];
-      for (const v of verdicts) {
-        if (
-          v.kind !== null &&
-          v.status === 'skipped' &&
-          previousByCriterion.get(v.criterionId) === 'failed'
-        ) {
-          const originalReason = v.reason ?? '(sin reason)';
-          degraded.push({
-            criterionId: v.criterionId,
-            kind: v.kind,
-            originalReason,
-          });
-          v.status = 'failed';
-          v.reason = `Skip regresión — criterio era 'failed' en attempt ${attempt - 1} y ahora reporta 'skipped'. El agente eliminó las precondiciones del verifier. Razón original del skip: "${originalReason}". Tratado como fallo para evitar bypass del DoD.`;
-        }
-      }
-      if (degraded.length > 0) {
-        logger.warn(
-          {
-            event: 'dod.skip_regression',
-            runId,
-            attempt,
-            degradedCount: degraded.length,
-            degraded,
-          },
-          `${degraded.length} criterio(s) degradado(s) de 'skipped' a 'failed' por skip regresión: ${degraded.map((d) => d.criterionId).join(', ')}`,
-        );
-      }
-    }
-
     verificationLog.push({ attempt, verdicts });
     lastVerdicts = verdicts;
 
@@ -1295,131 +1472,93 @@ export async function runStory(
         failed: failedCount,
         skipped: skippedCount,
       },
-      `DoD verification: ${passedCount} passed, ${failedCount} failed, ${skippedCount} skipped`,
+      failedCount > 0
+        ? `DoD review: ${failedCount} criterio(s) con observaciones (warn, NO bloqueante) — ${passedCount} ok, ${skippedCount} saltados`
+        : `DoD review: ${passedCount} ok, ${skippedCount} saltados`,
     );
 
-    if (!hasFailedCriteria(verdicts)) {
-      dodPassed = true;
-      logger.info(
-        { event: 'dod.pass', runId, attempt },
-        `DoD verification PASSED en attempt ${attempt}`,
-      );
-      break;
-    }
+    // === Doom loop — 2 turnos seguidos sin progreso cortan el run ===
+    //
+    // La policy pura vive en `dod-retry.ts:evaluateDoomLoop` (testeada en
+    // aislamiento, sin stubs). Acá solo se acarrea el estado (`doomLoopState`),
+    // se emite la observabilidad y se decide el `break`.
+    //
+    // "Turno malo" = el passedCount NO subió respecto al attempt previo:
+    // estancamiento (delta === 0) o regresión (delta < 0 — el agente rompió
+    // criterios que ya pasaban). 2 turnos malos CONSECUTIVOS → el agente está
+    // atorado: se corta el loop y el run escala a humano (NO es
+    // completar-con-warns — `doomLooped` fuerza un exit code no-cero).
+    //
+    // Requiere 2 comparaciones de passedCount → con cap=3 evalúa tras el
+    // attempt 3 (si los attempts 2 y 3 fueron malos); con cap<=2 nunca
+    // dispara; con cap=1 ni siquiera hay loop.
+    //
+    // ORDEN CRÍTICO: este bloque va ANTES del retry DoD-warn de abajo. El
+    // doom loop tiene precedencia — si dispara, el `break` corta el run; un
+    // turno estancado con criterios fallidos NO debe degradar a un retry
+    // ordinario. No reordenar estos dos bloques.
+    const prevPassedForLog = doomLoopState.previousPassedCount;
+    const doomEval = evaluateDoomLoop(doomLoopState, passedCount);
+    doomLoopState = doomEval.state;
 
-    // === Doom loop detection — el agente está atorado si passedCount no aumenta ===
-    //
-    // Heurística (2026-05-11): comparamos passedCount entre attempts. Si N+1
-    // no pasó más criterios que N, el agente está girando en círculos sobre
-    // los mismos criterios fallidos — escalamos a humano. Reemplaza la
-    // heurística anterior "mismos archivos modificados" que daba falso
-    // positivo en tasks one-file (crear FORGE_TEST.md → ambos attempts
-    // tocan el mismo archivo aunque progresen). El passedCount captura
-    // progreso real del DoD, no churn de filenames.
-    //
-    // Asimetría regresión vs estancamiento (qa-validation 2026-05-11):
-    //   - REGRESIÓN (delta < 0): el agente rompió criterios que antes
-    //     pasaban — señal categórica de daño activo. Dispara SIN grace
-    //     desde attempt 2 porque darle más retries deja que destruya
-    //     más cosas. Validado empíricamente: run que mostró delta=-1 en
-    //     attempt 2 también crasheó claude en attempt 3 (la "grace" no
-    //     rescató, solo aplazó).
-    //   - ESTANCAMIENTO (delta === 0): puede ser legítimo en criterios
-    //     non-deterministic (Layer 3 que no puede confirmar). Aplicamos
-    //     grace: solo dispara desde attempt 3 si sigue estancado, dando
-    //     al agente 1 retry adicional para encontrar un camino distinto.
-    //   - PROGRESO (delta > 0): continúa siempre, sin doom loop.
-    //
-    // Exempt parse failures (2026-05-16 post run 3e84db29): verdicts con
-    // `verifierError: 'verdict.parse.failed'` NO son regresión real del
-    // agente — son fallos del verifier mismo (batch JSON drift). Si la
-    // "regresión" desaparece tras sumar de vuelta esos verdicts como
-    // "indeterminados", continuamos con el retry porque el agente puede
-    // estar OK y el problema es del verifier. Logueamos warning específico
-    // para detectar parse_fail recurrente como bug del verifier.
-    const parseFailureCount = verdicts.filter(
-      (v) =>
-        v.status === 'failed' &&
-        typeof v.reason === 'string' &&
-        v.reason.includes('verdict.parse.failed'),
-    ).length;
-    // "Effective passedCount" = passedCount + parseFailureCount. Trata los
-    // parse failures como indeterminados (no como fails legítimos) para el
-    // cálculo de la regresión.
-    const effectivePassedCount = passedCount + parseFailureCount;
-    const isRegression =
-      previousPassedCount !== null && effectivePassedCount < previousPassedCount;
-    const isStagnation =
-      attempt >= 3 &&
-      previousPassedCount !== null &&
-      effectivePassedCount === previousPassedCount;
-    // Si HABRÍA sido regresión sin el exempt, logueamos para detectar bug
-    // recurrente del verifier (parse_fail > 0 repetido en runs distintos =
-    // señal de que el batch JSON parser sigue drift-eando con cierto prompt).
-    if (
-      previousPassedCount !== null &&
-      passedCount < previousPassedCount &&
-      parseFailureCount > 0 &&
-      !isRegression
-    ) {
-      logger.warn(
-        {
-          event: 'dod.doom_loop.exempt_parse_failures',
-          runId,
-          attempt,
-          passedBefore: previousPassedCount,
-          passedRaw: passedCount,
-          parseFailureCount,
-          effectivePassedCount,
-          rawDelta: passedCount - previousPassedCount,
-          effectiveDelta: effectivePassedCount - previousPassedCount,
-        },
-        `Regresión aparente (raw delta=${passedCount - previousPassedCount}) explicada por ${parseFailureCount} verdict.parse.failed — NO es regresión del agente, es bug del batch verifier. Continuando con attempt ${attempt + 1}.`,
-      );
-    }
-    if (isRegression || isStagnation) {
-      const kind: 'regression' | 'stagnation' = isRegression ? 'regression' : 'stagnation';
-      const delta = effectivePassedCount - (previousPassedCount ?? 0);
-      dodFailureReason = isRegression
-        ? `Doom loop detectado en attempt ${attempt} — REGRESIÓN: passedCount efectivo bajó de ${previousPassedCount} a ${effectivePassedCount} (delta=${delta}, raw=${passedCount}, parse_failures=${parseFailureCount}). El agente rompió criterios que antes pasaban. Escalando a humano sin grace porque la regresión es señal de daño activo.`
-        : `Doom loop detectado en attempt ${attempt} — ESTANCAMIENTO: passedCount efectivo no aumentó (${previousPassedCount} → ${effectivePassedCount}). El agente está atorado en los mismos criterios fallidos. Escalando a humano.`;
+    // Debug: traza del delta de CADA turno verificado. Sin esto, un run que
+    // NO dispara el doom loop no deja registro de cuánto avanzó cada attempt
+    // — es el log que responde "¿por qué no se cortó este run atorado?" y
+    // "¿el retry sirvió de algo?". Nivel debug: ruidoso en prod, oro en una
+    // sesión de diagnóstico (LOG_LEVEL=debug / --verbose).
+    logger.debug(
+      {
+        event: 'dod.turn.delta',
+        runId,
+        attempt,
+        passedCount,
+        previousPassedCount: prevPassedForLog,
+        delta: doomEval.delta,
+        consecutiveBadTurns: doomLoopState.consecutiveBadTurns,
+        doomLoopThreshold: DOOM_LOOP_THRESHOLD,
+      },
+      doomEval.delta === null
+        ? `DoD turn ${attempt}: passed=${passedCount} (baseline, sin turno previo)`
+        : `DoD turn ${attempt}: passed ${prevPassedForLog} → ${passedCount} ` +
+          `(Δ${doomEval.delta >= 0 ? '+' : ''}${doomEval.delta}, ` +
+          `badTurns=${doomLoopState.consecutiveBadTurns}/${DOOM_LOOP_THRESHOLD})`,
+    );
+
+    if (doomEval.doomLooped) {
+      const kindEs =
+        doomEval.kind === 'regression' ? 'REGRESIÓN' : 'ESTANCAMIENTO';
+      doomLooped = true;
+      dodFailureReason =
+        `Doom loop detectado en attempt ${attempt}: 2 turnos seguidos ` +
+        `sin progreso (${kindEs}) — passedCount ${prevPassedForLog} → ` +
+        `${passedCount}. El agente está atorado; se corta el run y ` +
+        `escala a revisión humana.`;
       logger.error(
         {
           event: 'dod.doom_loop',
           runId,
           attempt,
-          kind,
-          passedBefore: previousPassedCount,
-          passedAfter: passedCount,
-          effectivePassedAfter: effectivePassedCount,
-          parseFailureCount,
-          delta,
+          kind: doomEval.kind,
+          previousPassedCount: prevPassedForLog,
+          passedCount,
+          consecutiveBadTurns: doomLoopState.consecutiveBadTurns,
         },
         dodFailureReason,
       );
       break;
     }
-    logger.info(
-      {
-        event: 'dod.attempt.progress',
-        runId,
-        attempt,
-        passedBefore: previousPassedCount,
-        passedAfter: passedCount,
-        delta: previousPassedCount !== null ? passedCount - previousPassedCount : null,
-      },
-      `DoD attempt ${attempt}: passed ${previousPassedCount ?? 0} → ${passedCount}`,
-    );
-    previousPassedCount = passedCount; // baseline para el doom loop check del próximo attempt
 
-    // === Hay budget para retry → build retry-prompt QUIRÚRGICO ===
+    // === DoD-WARN retry: hay criterios fallidos y queda budget ===
     //
-    // Surgical retry (2026-05-17): pasamos AMBOS failed Y passed verdicts +
-    // storyTitle. El nuevo buildRetryPrompt construye un prompt enfocado solo
-    // en lo que falló, listando lo que ya pasa como "preservar". NO reenvía
-    // el `originalPrompt` completo — el agente lee el filesystem (`git log`)
-    // si necesita re-contexto. Esto evita la regresión que causaba doom loop.
-    if (attempt < MAX_DOD_ATTEMPTS) {
+    // El verifier sigue siendo NO BLOQUEANTE: un criterio 'failed' es
+    // "la solución técnica no se cumplió del todo" — deuda visible en
+    // `dodVerification` que la UI pinta como warn. Pero si quedan attempts,
+    // le damos a claude un tiro más para limpiar esos warns ANTES de que
+    // queden fijos: re-spawn con un retry-prompt QUIRÚRGICO enfocado solo
+    // en lo que falló (lista lo que ya pasa como "preservar"). Si es el
+    // último attempt o no hay fallidos, el run completa con los warns que
+    // hayan quedado — sin doom loop, sin skip-regression: solo un cap N.
+    if (hasFailedCriteria(verdicts) && attempt < maxDodAttempts) {
       const failedThisAttempt = extractFailedCriteria(verdicts);
       const passedThisAttempt = extractPassedCriteria(verdicts);
       currentPrompt = buildRetryPrompt({
@@ -1427,7 +1566,7 @@ export async function runStory(
         failedVerdicts: failedThisAttempt,
         passedVerdicts: passedThisAttempt,
         attemptNumber: attempt + 1,
-        maxAttempts: MAX_DOD_ATTEMPTS,
+        maxAttempts: maxDodAttempts,
       });
       logger.info(
         {
@@ -1436,14 +1575,18 @@ export async function runStory(
           nextAttempt: attempt + 1,
           failedCount,
           passedCount: passedThisAttempt.length,
-          surgical: true,
           promptChars: currentPrompt.length,
         },
-        `Surgical retry prompt: ${passedThisAttempt.length} preserved, ${failedCount} to fix`,
+        `DoD con ${failedCount} criterio(s) fallido(s) — retry quirúrgico (attempt ${attempt + 1}/${maxDodAttempts}): ${passedThisAttempt.length} preservados, ${failedCount} a fixear`,
       );
-    } else {
-      dodFailureReason = `DoD verification falló después de ${MAX_DOD_ATTEMPTS} attempts. Criterios fallidos: ${extractFailedCriteria(verdicts).map((v) => v.label).join(', ')}`;
+      continue;
     }
+
+    // Último attempt, o todos los criterios OK: el run procede al push +
+    // complete. Los verdicts 'failed' remanentes son deuda visible (warn),
+    // NO un fallo del run — el verifier permanece no-bloqueante.
+    claudeCompletedOk = true;
+    break;
   }
 
   // === Cleanup tmux/ttyd después del loop ===
@@ -1535,8 +1678,16 @@ export async function runStory(
 
   const durationMs = Date.now() - startedAt;
   const finalOutput = outputBuffer.join('').slice(-MAX_OUTPUT_BYTES);
-  let prNumber: number | undefined;
+  // El worker NUNCA crea PRs ni manda `prNumber` en el payload de /complete:
+  // el backend abre el PR vía Octokit con `headBranch: run.branch` trusted
+  // y persiste el `prNumber` autoritativo desde la respuesta. El campo está
+  // removido del DTO desde el security fix de 2026-05-22 (CWE-639 / CWE-863).
   let prBranchPushed = false;
+  // Q5 (2026-05-21): un fallo del push al remote —o un abort por fuga de
+  // secretos pre-push— es un ERROR del run. Este flag lo propaga al
+  // `reportedExitCode` (74 = EX_IOERR) para que el backend marque la story
+  // 'blocked' en vez de tratarla como completada sin PR.
+  let pushFailed = false;
   let commitSha: string | undefined;
   let errorMessage: string | undefined;
   // Count de archivos modificados en el diff base..HEAD tras push. Se calcula
@@ -1552,7 +1703,7 @@ export async function runStory(
   // ════════════════════════════════════════════════════════════════════════
   // DEBUG: snapshot del estado de decisión DESPUÉS del loop DoD y ANTES del
   // path de push/PR creation. Permite responder "¿por qué la story quedó
-  // atascada?" mirando un solo log line. Si dodPassed=true entramos al if;
+  // atascada?" mirando un solo log line. Si claudeCompletedOk=true entramos al if;
   // si no, vamos al else con dodFailureReason.
   // ════════════════════════════════════════════════════════════════════════
   const passedCriteriaCount = lastVerdicts.filter((v) => v.status === 'passed').length;
@@ -1562,12 +1713,12 @@ export async function runStory(
     {
       event: 'run.outcome.decision',
       runId,
-      dodPassed,
+      claudeCompletedOk,
       cloneSucceeded,
       baseBranch,
       rawExitCode: exitCode,
       totalAttempts,
-      maxAttempts: MAX_DOD_ATTEMPTS,
+      maxAttempts: maxDodAttempts,
       passedCriteriaCount,
       failedCriteriaCount,
       skippedCriteriaCount,
@@ -1581,7 +1732,7 @@ export async function runStory(
       killByBackend,
       killed,
     },
-    `[outcome] dodPassed=${dodPassed} passed=${passedCriteriaCount}/${lastVerdicts.length} attempts=${totalAttempts}/${MAX_DOD_ATTEMPTS} clone=${cloneSucceeded} exitCode=${exitCode}${dodFailureReason ? ` reason="${dodFailureReason.slice(0, 100)}"` : ''}`,
+    `[outcome] claudeCompletedOk=${claudeCompletedOk} passed=${passedCriteriaCount}/${lastVerdicts.length} attempts=${totalAttempts}/${maxDodAttempts} clone=${cloneSucceeded} exitCode=${exitCode}${dodFailureReason ? ` reason="${dodFailureReason.slice(0, 100)}"` : ''}`,
   );
 
   if (spawnError.value) {
@@ -1590,15 +1741,10 @@ export async function runStory(
     errorMessage = `Killed by backend signal (run was already terminal)`;
   } else if (killed) {
     errorMessage = `Killed after ${durationMs}ms (exceeded MAX_RUN_DURATION_MS)`;
-  } else if (dodPassed) {
+  } else if (claudeCompletedOk) {
     logger.info(
-      {
-        event: 'run.dod_passed',
-        runId,
-        attempts: totalAttempts,
-        durationMs,
-      },
-      `DoD verification passed después de ${totalAttempts} attempt(s)`,
+      { event: 'run.claude_ok', runId, attempts: totalAttempts, durationMs },
+      `claude terminó limpio — procediendo al push (el verifier del DoD es no-bloqueante)`,
     );
 
     // ════════════════════════════════════════════════════════════════════
@@ -1610,6 +1756,16 @@ export async function runStory(
     // al recibir prBranchPushed=true, abrirá el PR via Octokit (HITO 5).
     if (cloneSucceeded && baseBranch !== null) {
       try {
+        // Borra el `.env` efímero ANTES de cualquier inspección git: ya
+        // cumplió su función (alimentar a claude + al verifier). Está
+        // gitignoreado vía `.git/info/exclude`, pero borrarlo garantiza
+        // que no entre al commit por ninguna vía. Solo se borra si ESTE
+        // worker lo escribió — si el repo target ya trackeaba un `.env`,
+        // `wroteEphemeralDotenv` es false y no se toca el archivo del repo.
+        if (wroteEphemeralDotenv) {
+          await fs.unlink(join(workdir, '.env')).catch(() => undefined);
+        }
+
         // 1. Verificar si hay archivos modificados sin commit (claude
         //    típicamente NO hace commit por sí mismo; los archivos quedan
         //    como working tree changes). Si los hay, auto-commit.
@@ -1646,10 +1802,57 @@ export async function runStory(
           workdir,
         );
         const aheadCount = log.stdout.trim().split('\n').filter(Boolean).length;
+
+        // Escaneo de seguridad pre-push. La redacción del output NO cubre el
+        // CONTENIDO de los archivos que el agente escribe: si el agente
+        // incrustó el valor literal de un secreto en un archivo commiteado
+        // (en vez de leerlo de `process.env`), ese archivo iría al PR.
+        // Escaneamos el diff `origin/<base>..HEAD` por los valores literales.
+        // Fail-closed: si el diff no se puede leer, NO pusheamos — mejor
+        // bloquear un PR legítimo que filtrar una credencial al remote.
+        let secretLeak: string | null = null;
+        if (aheadCount > 0 && safeSecrets.length > 0) {
+          try {
+            // `--text` fuerza el diff de archivos binarios como texto — así
+            // un secreto incrustado en un blob binario (ej. una DB SQLite)
+            // también se escanea. maxBuffer ampliado a 50MB para no
+            // fallar-cerrado en diffs grandes legítimos.
+            const diff = await git(
+              ['diff', '--text', `origin/${baseBranch}..HEAD`],
+              workdir,
+              50 * 1024 * 1024,
+            );
+            const leakedNames = scanDiffForSecrets(diff.stdout, safeSecrets);
+            if (leakedNames.length > 0) {
+              secretLeak = `un archivo commiteado contiene el valor de: ${leakedNames.join(', ')}`;
+            }
+          } catch (scanErr) {
+            secretLeak = `no se pudo escanear el diff pre-push (${(scanErr as Error).message})`;
+          }
+        }
+
         if (aheadCount === 0) {
           logger.warn(
             { event: 'git.push.skip.empty', runId, branch },
             `No hay commits ahead de ${baseBranch} — claude no produjo cambios. Skip push.`,
+          );
+        } else if (secretLeak) {
+          // Fuga detectada (o diff no verificable) — NO pusheamos. El secreto
+          // no debe llegar al remote. El run termina sin PR y escala a humano
+          // vía `errorMessage`.
+          markCriterion('branch.pushed', 'failed');
+          pushFailed = true;
+          errorMessage = `Pre-push secret scan abort: ${secretLeak}`;
+          logger.error(
+            {
+              event: 'git.push.abort.secret_leak',
+              runId,
+              branch,
+              // Solo el motivo (nombres) — NUNCA el valor del secreto.
+              reason: secretLeak,
+            },
+            `Push abortado por el escaneo de secretos: ${secretLeak}. El branch ` +
+              `NO se pusheó — revisar la historia manualmente.`,
           );
         } else {
           // 3. Captura el SHA del HEAD para reportar al backend
@@ -1718,46 +1921,54 @@ export async function runStory(
           }
         }
       } catch (err) {
-        // Push falló (auth, conflict, network). NO abortamos el run completo;
-        // claude ya terminó limpio, los cambios están en el workdir local.
-        // Reportamos exitCode=0 pero prBranchPushed=false → backend marca
-        // como completed sin mover a in_review. Forensics: log con detalle.
+        // Q5 (2026-05-21): el push al remote falló (auth, conflict, red).
+        // claude terminó limpio pero su trabajo NO llegó al remote — sin
+        // push no hay PR ni merge. Es un ERROR del run: `pushFailed` lo
+        // convierte en exit code 74 → el backend marca la story 'blocked'.
         markCriterion('branch.pushed', 'failed');
+        pushFailed = true;
+        // git imprime la URL del remote (origin = repoUrl, con token) en los
+        // errores de auth del push. Redactar antes de loguear / reportar.
+        // `execFile` puede vaciar la URL en `.message`, `.stderr` o ambos;
+        // concatenamos los dos para que el redactor cubra los dos canales.
+        const rawPushErr = err as Error & { stderr?: string };
+        const pushErrCombined = `${rawPushErr.message ?? ''}${rawPushErr.stderr ? ` :: ${rawPushErr.stderr}` : ''}`.trim();
+        const pushErrMsg = redactRepoUrlCredentials(pushErrCombined, repoUrl);
         logger.error(
           {
             event: 'git.push.fail',
             runId,
-            error: (err as Error).message,
+            error: pushErrMsg,
           },
-          `Push failed — run completed pero sin PR. Cambios solo en workdir local (se borrará en cleanup).`,
+          `Push falló — run marcado como error. Los cambios quedaron solo en el workdir local (se borra en cleanup).`,
         );
-        errorMessage = `Push failed: ${(err as Error).message.slice(0, 500)}`;
+        errorMessage = `Push failed: ${pushErrMsg.slice(0, 500)}`;
       }
-    } else if (repoUrl !== null) {
-      // Clone falló al inicio pero teníamos repoUrl — sandbox fallback ya
-      // se logueó antes. No hay nada que pushear.
-      logger.warn(
-        { event: 'git.push.skip.noclone', runId },
-        `Clone falló previamente — skip push, run termina en sandbox mode`,
-      );
     }
+    // Nota: ya NO existe la rama `else if (repoUrl !== null)` que antes caía
+    // a sandbox mode cuando el clone fallaba con repoUrl válido — desde
+    // 2026-05-21 el fallo de clone aborta el run en línea ~487 con exit 69
+    // y `return`, así que llegar acá con `cloneSucceeded=false &&
+    // repoUrl !== null` es imposible. El único camino al else implícito es
+    // sandbox legítimo (`repoUrl === null`), donde no hay nada que pushear.
   } else {
-    // El loop terminó sin que dodPassed=true. Puede ser:
-    //  - DoD verification falló todas las attempts (dodFailureReason set)
-    //  - Doom loop detectado (dodFailureReason set)
-    //  - claude exit no limpio en algún attempt (exitCode != 0)
-    errorMessage = dodFailureReason ?? `Run finalizó sin pasar DoD (último exitCode=${exitCode})`;
+    // claudeCompletedOk=false ⇒ claude NO terminó limpio. El verifier es
+    // no-bloqueante, así que la única vía a este branch es un fallo DURO
+    // del agente en el ÚLTIMO attempt: crash, exit≠0, sandbox/spawn fail
+    // (los attempts intermedios con fallo duro se reintentaron). Los kills
+    // por timeout/backend ya se ramificaron arriba. `dodFailureReason` lo
+    // setea el `break` del loop con el detalle del crash.
+    errorMessage = dodFailureReason ?? `claude terminó con error (exitCode=${exitCode})`;
     logger.error(
       {
-        event: 'run.dod_failed',
+        event: 'run.failed',
         runId,
         exitCode,
         durationMs,
         attempts: totalAttempts,
         reason: errorMessage,
-        lastFailedCriteria: extractFailedCriteria(lastVerdicts).map((v) => v.label),
       },
-      `Run no pasó DoD: ${errorMessage}`,
+      `Run falló: ${errorMessage}`,
     );
   }
 
@@ -1778,18 +1989,25 @@ export async function runStory(
     //  - 127: spawn falló (binario no encontrado, exec error) — POSIX convention
     //  - 143: backend mató el run administrativamente (128 + SIGTERM=15)
     //  - 124: timeout MAX_RUN_DURATION_MS (timeout(1) convention)
-    //  - 65: DoD verification failure (claude exit limpio pero criterios no cumplen)
-    //        — usamos 65 (BSD EX_DATAERR) para distinguirlo de "agent crash"
-    //  - exitCode real de claude: terminó por su cuenta sin pasar/fallar DoD
+    //  - 74:  push al remote falló o se abortó por fuga de secretos (EX_IOERR)
+    //  - 65:  doom loop — 2 turnos seguidos sin progreso (EX_DATAERR). El run
+    //         se cortó; el backend marca la story 'blocked' y escala a humano.
+    //  - exitCode real de claude: terminó por su cuenta
+    //
+    // NOTA: un criterio del DoD sin cumplir tras agotar los intentos NO es
+    // error — es deuda (warn en `dodVerification`), exit 0. El código 65 es
+    // SOLO para el doom loop (agente atorado), nunca para warns normales.
     const reportedExitCode = spawnError.value
       ? 127
       : killByBackend
         ? 143
         : killed
           ? 124
-          : !dodPassed && exitCode === 0
-            ? 65
-            : Math.max(0, exitCode);
+          : pushFailed
+            ? 74
+            : doomLooped
+              ? 65
+              : Math.max(0, exitCode);
 
     const finalCriteriaProgress = buildCriteriaPayload();
     // Dev-only: en mock mode, le pedimos al backend que marque la story
@@ -1802,28 +2020,21 @@ export async function runStory(
     // ════════════════════════════════════════════════════════════════════
     // DEBUG: predicción del outcome del backend. El backend computa
     // `movedToReview` y `movedToDoneSandbox` con la misma lógica que aquí
-    // documentamos. Si AMBOS son false (después de tomar en cuenta el flow
-    // post-recepción del backend) → story queda atascada (caso bug).
+    // documentamos. Si AMBOS son false → story queda atascada (caso bug).
     //
-    // FIX 2026-05-13: la predicción ANTERIOR siempre dijo "STUCK" cuando
-    // `prNumber=undefined && prBranchPushed=true` (caso típico del worker
-    // honesto: el worker push code pero el backend abre el PR vía Octokit
-    // a posteriori). Esa predicción era pesimista — no consideraba que el
-    // backend va a abrir el PR. Ahora reflejamos eso con un estado
-    // "PENDING_BACKEND_PR_CREATION" que NO es stuck — solo significa que
-    // el outcome final depende de si Octokit/auto-merge tienen éxito.
+    // Desde el security fix de 2026-05-22 el worker NUNCA envía `prNumber`
+    // (campo removido del DTO). El backend abre el PR vía Octokit cuando
+    // recibe `prBranchPushed=true` con `exitCode=0`, así que la predicción
+    // se simplifica: si exitedClean && prBranchPushed, el backend abrirá
+    // PR (estado "PENDING_BACKEND_PR_CREATION", NO stuck).
     // ════════════════════════════════════════════════════════════════════
     const predExitedClean = reportedExitCode === 0;
-    // El backend abrirá el PR si recibe prBranchPushed=true y prNumber=null.
-    // Para la predicción, asumimos que esa apertura va a tener éxito.
-    const predWillBackendOpenPr =
-      predExitedClean && prBranchPushed && prNumber === undefined;
-    const predEffectivePrNumber =
-      prNumber !== undefined || predWillBackendOpenPr ? 'expected' : 'none';
+    const predWillBackendOpenPr = predExitedClean && prBranchPushed;
+    const predEffectivePrNumber = predWillBackendOpenPr ? 'expected' : 'none';
     const predMovedToReview =
       predExitedClean && predEffectivePrNumber === 'expected' && !forceCompletion;
     const predMovedToDoneSandboxSandboxOnly =
-      predExitedClean && !prBranchPushed && prNumber === undefined;
+      predExitedClean && !prBranchPushed;
     const predMovedToDoneViaMockMerge =
       predExitedClean && predEffectivePrNumber === 'expected' && forceCompletion;
     const predMovedToDoneSandbox =
@@ -1845,7 +2056,6 @@ export async function runStory(
         runId,
         payload: {
           exitCode: reportedExitCode,
-          prNumber: prNumber ?? null,
           prBranchPushed,
           commitSha: commitSha?.slice(0, 7) ?? null,
           attempts: totalAttempts,
@@ -1862,7 +2072,7 @@ export async function runStory(
         },
       },
       predStuck
-        ? `[complete.predict] ⚠ STORY PUEDE QUEDAR ATASCADA: exitedClean=true pero prBranchPushed=${prBranchPushed} prNumber=${prNumber ?? 'undefined'} forceCompletion=${forceCompletion}. Revisar push/PR creation upstream.`
+        ? `[complete.predict] ⚠ STORY PUEDE QUEDAR ATASCADA: exitedClean=true pero prBranchPushed=${prBranchPushed} forceCompletion=${forceCompletion}. Revisar push/PR creation upstream.`
         : `[complete.predict] esperado=${predExpected}`,
     );
 
@@ -1891,7 +2101,9 @@ export async function runStory(
 
     await client.post(`/factory/workers/runs/${runId}/complete`, {
       exitCode: reportedExitCode,
-      prNumber,
+      // `prNumber` NO se envía: el campo fue removido del DTO en el security
+      // fix de 2026-05-22 — el backend lo abre vía Octokit con `headBranch`
+      // trusted y persiste el número autoritativo desde la respuesta.
       prBranchPushed,
       commitSha,
       errorMessage,
@@ -1913,19 +2125,18 @@ export async function runStory(
         rawExitCode: exitCode,
         reportedExitCode,
         durationMs,
-        prNumber,
         prBranchPushed,
         commitSha: commitSha?.slice(0, 7),
         killed,
         killByBackend,
         spawnError: !!spawnError.value,
-        dodPassed,
+        claudeCompletedOk,
         totalAttempts,
         passedCriteriaCount,
         failedCriteriaCount,
         forceCompletion,
       },
-      `Run reported complete: dodPassed=${dodPassed} exitCode=${reportedExitCode} pr=${prNumber ?? 'none'} pushed=${prBranchPushed}`,
+      `Run reported complete: claudeCompletedOk=${claudeCompletedOk} exitCode=${reportedExitCode} pushed=${prBranchPushed} (PR opening delegated to backend)`,
     );
   } catch (err) {
     if (err instanceof ApiError && (err.status === 409 || err.status === 410)) {
@@ -1994,7 +2205,8 @@ export async function runStory(
  * Usage capturado del evento `result` final del generator (claude -p con
  * --output-format stream-json). Shape derivado de la doc oficial del Claude
  * Agent SDK (SDKResultMessage). Captura **por attempt** porque el DoD loop
- * puede re-spawnear claude hasta MAX_DOD_ATTEMPTS veces.
+ * puede re-spawnear claude hasta `maxDodAttempts` veces (retry por crash o
+ * por criterios del DoD sin cumplir).
  *
  * Decisión de diseño 2026-05-13: separamos generator usage del verifier usage
  * porque son modelos distintos (Haiku vs Sonnet) con price tables diferentes.
@@ -2303,7 +2515,9 @@ export function formatStreamEvent(line: string): string | null {
         parts.push('\n');
       } else if (c.type === 'tool_use') {
         const name = typeof c.name === 'string' ? c.name : '?';
-        let inputStr = '';
+        // Sin inicializador inútil: el try y el catch lo asignan ambos antes
+        // de cualquier lectura (ESLint no-useless-assignment).
+        let inputStr: string;
         try {
           inputStr = JSON.stringify(c.input ?? {}, null, 0).slice(0, 400);
         } catch {
@@ -2387,18 +2601,4 @@ function appendToBuffer(buffer: string[], chunk: string): void {
     buffer.length = 0;
     buffer.push(joined);
   }
-}
-
-/**
- * Aplica todos los patrones de redacción al chunk. Mejor falsa-positiva
- * (algo legítimo redactado de más) que falsa-negativa (secreto persistido).
- *
- * Exportado para tests aunque por ahora no hay test suite — Sprint 2 MVP.
- */
-export function redactSecrets(text: string): string {
-  let out = text;
-  for (const [pattern, replacement] of REDACTION_PATTERNS) {
-    out = out.replace(pattern, replacement);
-  }
-  return out;
 }

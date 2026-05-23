@@ -109,7 +109,11 @@ export function AgentTokensSection() {
         if (cancelled) return;
         // eslint-disable-next-line @typescript-eslint/no-unused-vars
         const { updatedAt: _ua, updatedBy: _ub, ...editable } = s;
-        setSettings(editable);
+        // Merge sobre los defaults: si una API stale/parcial omite un campo
+        // (ej. `dodMaxAttempts`), cae a su default en vez de quedar undefined.
+        // Así los controles —pills, switches— SIEMPRE reflejan un valor
+        // válido (la pill "1" del DoD queda prendida por defecto).
+        setSettings({ ...DEFAULT_AGENT_TOKEN_SETTINGS, ...editable });
       })
       .catch((e) => {
         if (cancelled) return;
@@ -140,7 +144,9 @@ export function AgentTokensSection() {
       const updated = await updateAgentTokenSettings(settings);
       // eslint-disable-next-line @typescript-eslint/no-unused-vars
       const { updatedAt: _ua, updatedBy: _ub, ...editable } = updated;
-      setSettings(editable);
+      // Merge sobre defaults — ver el fetch inicial: un campo omitido por la
+      // API cae a su default en vez de quedar undefined.
+      setSettings({ ...DEFAULT_AGENT_TOKEN_SETTINGS, ...editable });
       setSavedRecently(true);
     } catch (e) {
       const msg =
@@ -311,6 +317,12 @@ export function AgentTokensSection() {
             }}
             onDodVerifierEffortChange={(v) => {
               setSettings((prev) => ({ ...prev, dodVerifierEffort: v }));
+              setSavedRecently(false);
+            }}
+            // DoD retry loop
+            dodMaxAttempts={settings.dodMaxAttempts}
+            onDodMaxAttemptsChange={(v) => {
+              setSettings((prev) => ({ ...prev, dodMaxAttempts: v }));
               setSavedRecently(false);
             }}
           />

@@ -55,9 +55,16 @@ export function GenerateTokenDialog({
   // y NO incluye `dashboardUrl` en el response, degradamos a `localhost:3001`
   // en vez de generar `--dashboard ` vacío que produce un comando inválido.
   const dashboardUrl = token?.dashboardUrl ?? 'http://localhost:3001';
+  // Un solo comando copy-paste para inicializar el nodo de cómputo: registra
+  // y, si el registro sale OK (&&), arranca el daemon. `start` es long-running
+  // — queda corriendo en primer plano.
   const command = token
-    ? `factory-worker register --dashboard ${dashboardUrl} --token ${token.plaintext}`
+    ? `factory-worker register --dashboard ${dashboardUrl} --token ${token.plaintext} && factory-worker start`
     : '';
+  // Dashboard sobre HTTP (dev local): el worker rechaza dashboards no-HTTPS
+  // salvo que se prefije FACTORY_WORKER_ALLOW_INSECURE=1. Lo mostramos como
+  // disclaimer debajo del comando, NO en el comando mismo.
+  const isHttpDashboard = dashboardUrl.startsWith('http://');
 
   // Genera el token automáticamente al abrir el modal. Solo una vez por
   // apertura — si el user cierra y reabre, se genera otro distinto.
@@ -138,7 +145,7 @@ export function GenerateTokenDialog({
         )}
 
         {token && (
-          <div className="space-y-4 py-2">
+          <div className="space-y-4 py-2 min-w-0">
             {/* Comando completo listo para copiar */}
             <div className="space-y-1.5">
               <label className="text-xs font-medium text-muted-foreground flex items-center gap-1.5">
@@ -163,9 +170,19 @@ export function GenerateTokenDialog({
                 </Button>
               </div>
               <p className="text-[11px] text-muted-foreground/70">
-                Después de ejecutar este comando en la máquina remota, corre{' '}
-                <code className="font-mono text-foreground">factory-worker start</code> para iniciar el daemon de heartbeat.
+                Pégalo en la máquina destino: registra el nodo y arranca el
+                daemon del worker (heartbeat + claim de stories) en un solo
+                paso. El daemon queda corriendo en primer plano — dejá esa
+                terminal abierta.
               </p>
+              {isHttpDashboard && (
+                <p className="text-[11px] text-amber-500/80">
+                  Para probar en desarrollo (dashboard en HTTP local), prefijá
+                  cada comando con{' '}
+                  <code className="font-mono">FACTORY_WORKER_ALLOW_INSECURE=1</code>{' '}
+                  — el worker rechaza dashboards no-HTTPS sin esa variable.
+                </p>
+              )}
             </div>
           </div>
         )}

@@ -70,6 +70,7 @@ import {
   PencilLine,
 } from 'lucide-react';
 import { LinearIcon } from '@/components/icons/LinearIcon';
+import { AnthropicIcon } from '@/components/icons/AnthropicIcon';
 import { TeamSection } from './TeamSection';
 import { RolesPermissionsSection } from './RolesPermissionsSection';
 import { PodsSection } from './PodsSection';
@@ -133,7 +134,7 @@ const SIDEBAR_ITEMS: SidebarItem[] = [
   { id: 'nodes', label: 'Nodos de cómputo', icon: Server, group: 'Infraestructura' },
   { id: 'kill-switch', label: 'Kill Switch del Forge', icon: AlertOctagon, group: 'Infraestructura' },
   { id: 'agent-tokens', label: 'Tokens IA', icon: Brain, group: 'Automatización' },
-  { id: 'anthropic-key', label: 'Anthropic API Key', icon: Brain, group: 'Automatización' },
+  { id: 'anthropic-key', label: 'Anthropic API Key', icon: AnthropicIcon, group: 'Automatización' },
   { id: 'dod', label: 'Definition of Done', icon: ClipboardCheck, group: 'Automatización' },
   { id: 'pods', label: 'Células', icon: Boxes, group: 'Ecosistema' },
   { id: 'team', label: 'Equipo', icon: Users, group: 'Ecosistema' },

@@ -48,11 +48,15 @@ function synthesizeAgentFromRun(run: RunDetailResponse): FactoryAgent {
     worktree: '/forge', // dummy — no se usa en runMode (auto-start está skip)
     tmuxSession: `cenzontle-${run.runId.slice(0, 8)}`,
     startedAt: run.startedAt,
-    duration: 0,
-    tokens: 0,
-    cost: 0,
+    // Métricas reales del run. `duration` en SEGUNDOS (FactoryAgent lo
+    // espera así); `durationMs` es null mientras el run no haya completado.
+    duration: run.durationMs !== null ? Math.round(run.durationMs / 1000) : 0,
+    tokens: run.tokensNew,
+    cost: run.costUsd,
     lastOutput: run.lastOutput ? run.lastOutput.split('\n').slice(-5) : [],
     currentFile: null,
+    // El worker del Forge no reporta líneas/tests granulares — quedan en 0.
+    // En run mode el AgentDetailDrawer no los muestra (usa `runDetail`).
     linesWritten: 0,
     testsRun: 0,
     testsPassed: 0,
@@ -353,13 +357,38 @@ export default function AgentTerminalPage() {
   const runOverride = useMemo(
     () => ({
       ttydUrl: run?.ttydUrl ?? null,
+      // Branch del run — cuando el run ya terminó (ttyd del worker cerrado),
+      // el AgentTerminal embebe un Claude Code nuevo sobre esta branch en
+      // lugar de un spinner infinito. '' mientras `run` aún carga: en esa
+      // ventana el status es Idle, así que el terminal embebido no se monta.
+      branch: run?.branch ?? '',
       dod: dodEvaluated,
       milestones: milestonesEvaluated,
       prNumber: run?.prNumber ?? null,
       loading,
       error,
+      // Datos reales del run para el AgentDetailDrawer. Mientras `run` carga
+      // usamos placeholders neutros — el drawer no se abre en esa ventana.
+      drawer: {
+        branch: run?.branch ?? '',
+        epicId: run?.epicId ?? '',
+        epicTitle: run?.epicTitle ?? '',
+        epicTrackerKey: run?.epicTrackerKey ?? null,
+        storyTitle: run?.storyTitle ?? '',
+        storyPoints: run?.storyPoints ?? 0,
+        storyTrackerKey: run?.storyTrackerKey ?? null,
+        dependsOn: run?.dependsOn ?? [],
+        durationMs: run?.durationMs ?? null,
+        tokensNew: run?.tokensNew ?? 0,
+        costUsd: run?.costUsd ?? 0,
+        filesModified: run?.filesModified ?? null,
+        attempts: run?.attempts ?? 0,
+        // Conteo del DoD evaluado (mismo array que pinta el header).
+        dodPassed: dodEvaluated.filter((c) => c.done).length,
+        dodTotal: dodEvaluated.length,
+      },
     }),
-    [run?.ttydUrl, run?.prNumber, dodEvaluated, milestonesEvaluated, loading, error],
+    [run, dodEvaluated, milestonesEvaluated, loading, error],
   );
 
   return (

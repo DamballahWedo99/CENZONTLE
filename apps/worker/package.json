@@ -12,7 +12,11 @@
     "build": "tsc",
     "dev": "tsx src/cli.ts",
     "type-check": "tsc --noEmit",
-    "lint": "eslint src --ext .ts",
+    "lint": "eslint .",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "test:coverage": "vitest run --coverage",
+    "verify:secrets": "tsx src/verify-secret-read.ts",
     "start": "node dist/cli.js"
   },
   "dependencies": {
@@ -25,7 +29,9 @@
     "@cenzontle/eslint-config": "workspace:*",
     "@cenzontle/ts-config": "workspace:*",
     "@types/node": "^22.10.0",
+    "@vitest/coverage-v8": "^4.1.7",
     "tsx": "^4.19.2",
-    "typescript": "^5.7.2"
+    "typescript": "^5.7.2",
+    "vitest": "^4.1.7"
   }
 }
