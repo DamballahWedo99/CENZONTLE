@@ -22,6 +22,8 @@ import { IsNotEmpty, IsOptional, IsString, Matches, MaxLength } from 'class-vali
 import { writeFileSync, mkdirSync, existsSync, readFileSync } from 'fs';
 import { join, basename, resolve } from 'path';
 import { randomUUID } from 'crypto';
+import { UserRole } from '@cenzontle/shared';
+import { Roles } from '../auth/decorators';
 import { TerminalService } from './terminal.service';
 
 const UPLOAD_DIR = '/tmp/cenzontle-uploads';
@@ -100,6 +102,22 @@ class SendKeysDto {
 // Controller
 // ---------------------------------------------------------------------------
 
+// SEC (CWE-862, Missing Authorization): gate de rol a nivel de CLASE —
+// cubre los 8 endpoints de un solo decorador (el RolesGuard global lee la
+// metadata con getAllAndOverride([handler, class])). Spawnear un proceso
+// `claude` interactivo con acceso al filesystem del host y a las
+// credenciales del repo es una operación de gestión de la flota → solo
+// Alta Gerencia, consistente con el resto del módulo factory (Fleet, Dod,
+// Metrics).
+//
+// NO rompe la visibilidad de runs reales del Forge: en run mode el worker
+// arranca su propio ttyd y el frontend embebe esa URL directa — el
+// AgentTerminal hace `if (isRunMode) return` antes de llamar a /start, así
+// que esos terminales nunca tocan este controller. Lo que sí queda gated:
+// el modo mock/legacy del AgentTerminal y el ClaudeCodeTerminal embebido
+// (la sesión nueva de Claude Code sobre la branch de un run con error).
+// (2026-05-19)
+@Roles(UserRole.AltaGerencia)
 @UsePipes(new ValidationPipe({ whitelist: true, transform: true }))
 @Controller('factory/terminal')
 export class TerminalController {

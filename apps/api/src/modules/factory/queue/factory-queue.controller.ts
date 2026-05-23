@@ -8,6 +8,7 @@ import {
   HttpStatus,
 } from '@nestjs/common';
 import { ApiTags, ApiOperation } from '@nestjs/swagger';
+import { Throttle } from '@nestjs/throttler';
 import { type AuthenticatedUser } from '@cenzontle/shared';
 import { CurrentUser } from '../../auth/decorators';
 import { FactoryQueueService } from './factory-queue.service';
@@ -29,6 +30,12 @@ export class FactoryQueueController {
 
   @Post('enqueue/:epicId')
   @HttpCode(HttpStatus.OK)
+  // Write endpoint que dispara gasto real de tokens al spawnear runs del
+  // worker — cap estricto por usuario (5/min) encima del throttle global
+  // de 60/min, mismo patrón que `retryStory`. El enqueue es una acción
+  // humana deliberada; 5/min es holgado y corta amplificación accidental
+  // (doble click, bots, repintado de UI con auto-retry, etc.).
+  @Throttle({ default: { ttl: 60_000, limit: 5 } })
   @ApiOperation({
     summary:
       'Envía una épica al Forge (la encola). Valida pod intersection, artefactos completos (definición/diagrama/historias) y los 3 VoBos approved.',
@@ -67,5 +74,25 @@ export class FactoryQueueController {
       password: dto.password,
       notes: dto.notes,
     });
+  }
+
+  @Post(':batchId/stories/:storyId/retry')
+  @HttpCode(HttpStatus.OK)
+  // Write endpoint que dispara gasto real de tokens — cap estricto por usuario
+  // (5/min) encima del throttle global de 60/min, siguiendo la convención de
+  // app.module.ts ("writes con un cap más estricto vía @Throttle()"). El retry
+  // es una acción humana deliberada; 5/min es holgado y corta ~12x cualquier
+  // amplificación de gasto. Mismo patrón que el endpoint de login.
+  @Throttle({ default: { ttl: 60_000, limit: 5 } })
+  @ApiOperation({
+    summary:
+      'Reintenta una story con deuda técnica del batch — la resetea a backlog + claimedAt=null para que el worker la re-claim y re-ejecute el flujo completo del Forge (implementación + DoD). Acción humana explícita: consume tokens reales de la API.',
+  })
+  retryStory(
+    @Param('batchId') batchId: string,
+    @Param('storyId') storyId: string,
+    @CurrentUser() user: AuthenticatedUser,
+  ) {
+    return this.queueService.retryStory(batchId, storyId, user);
   }
 }

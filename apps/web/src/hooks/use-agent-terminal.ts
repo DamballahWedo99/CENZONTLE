@@ -29,7 +29,20 @@ export interface UseAgentTerminalReturn {
   sendKeys: (keys: string) => Promise<void>;
 }
 
-export function useAgentTerminal(agentId: string): UseAgentTerminalReturn {
+export function useAgentTerminal(
+  agentId: string,
+  /**
+   * Cuando es false, el hook NO hidrata la sesión al montar (no hace el GET
+   * `/session`). `AgentTerminal` lo usa así para la sesión del workspace de
+   * Claude Code: el `ClaudeCodeTerminal` embebido hace auto-start vía
+   * `startSession` — que espera a que el ttyd esté sirviendo antes de
+   * devolver la URL. Tener además la hidratación crearía un segundo camino
+   * paralelo que puede leer la sesión antes de que su ttyd escuche (→ iframe
+   * con "connection refused"). Default true: el hook legacy de `AgentTerminal`
+   * sí hidrata al montar.
+   */
+  enabled = true,
+): UseAgentTerminalReturn {
   const [ttydUrl, setTtydUrl] = useState<string | null>(null);
   const [sessionActive, setSessionActive] = useState(false);
   const [loading, setLoading] = useState(false);
@@ -37,7 +50,7 @@ export function useAgentTerminal(agentId: string): UseAgentTerminalReturn {
   const [worktreePath, setWorktreePath] = useState<string | null>(null);
 
   useEffect(() => {
-    if (!agentId) return;
+    if (!agentId || !enabled) return;
     let cancelled = false;
 
     (async () => {
@@ -60,7 +73,7 @@ export function useAgentTerminal(agentId: string): UseAgentTerminalReturn {
     })();
 
     return () => { cancelled = true; };
-  }, [agentId]);
+  }, [agentId, enabled]);
 
   useEffect(() => {
     setTtydUrl(null);

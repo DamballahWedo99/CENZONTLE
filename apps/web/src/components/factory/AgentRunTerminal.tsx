@@ -1,6 +1,6 @@
 'use client';
 
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import { Loader2, Circle, X, Info, Terminal as TerminalIcon } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { Button } from '@/components/ui/button';
@@ -136,6 +136,22 @@ export function AgentRunTerminal({ runId, onClose }: Props) {
   const milestones = deriveMilestonesFromRun(run);
   const msDone = milestones.filter((c) => c.done).length;
 
+  // SEC (security-reviewer 2026-05-22, Finding 2): defensa-en-profundidad
+  // contra una ttydUrl maliciosa que haya pasado la validación del backend
+  // (bug futuro, race, valor legacy en DB pre-fix). Solo schemes http/https
+  // pueden cargar en el <iframe src>. Si falla, queda null → fallback.
+  const safeTtydUrl = useMemo(() => {
+    if (!run.ttydUrl) return null;
+    try {
+      const u = new URL(run.ttydUrl);
+      return u.protocol === 'http:' || u.protocol === 'https:'
+        ? run.ttydUrl
+        : null;
+    } catch {
+      return null;
+    }
+  }, [run.ttydUrl]);
+
   return (
     <div className="relative overflow-hidden flex flex-col h-full bg-card">
       {/* Header — replica del AgentTerminal mock */}
@@ -240,11 +256,16 @@ export function AgentRunTerminal({ runId, onClose }: Props) {
       </div>
 
       {/* Terminal */}
-      {run.ttydUrl ? (
+      {safeTtydUrl ? (
         <div className="relative flex-1 min-h-0">
           <iframe
-            src={run.ttydUrl}
+            src={safeTtydUrl}
             className="absolute inset-0 w-full h-full border-0 bg-[#0d1117]"
+            // SEC (Finding 2): sandbox del iframe. `allow-scripts` para
+            // xterm.js; `allow-same-origin` para el WebSocket del ttyd. Sin
+            // `allow-top-navigation` ni `allow-popups` — bloquea phishing
+            // dentro del panel si la URL apuntase a contenido hostil.
+            sandbox="allow-scripts allow-same-origin"
             allow="clipboard-read; clipboard-write"
             title={`Terminal en vivo del run ${run.runId.slice(0, 8)}`}
           />

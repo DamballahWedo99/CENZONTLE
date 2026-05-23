@@ -5,8 +5,11 @@ import { ThrottlerModule } from "@nestjs/throttler";
 import { LoggerModule } from "nestjs-pino";
 import { randomUUID } from "node:crypto";
 import { AuthAwareThrottlerGuard } from "./common/guards/auth-aware-throttler.guard";
+import { ResilientThrottlerStorage } from "./common/throttler/resilient-throttler.storage";
+import { ThrottlerStorageRedisService } from "@nest-lab/throttler-storage-redis";
 import { PrismaModule } from "./modules/prisma/prisma.module";
 import { RedisModule } from "./modules/redis/redis.module";
+import { RedisService } from "./modules/redis/redis.service";
 import { ProyectosModule } from "./modules/proyectos/proyectos.module";
 import { FactoryModule } from "./modules/factory/factory.module";
 import { AuthModule } from "./modules/auth/auth.module";
@@ -118,11 +121,30 @@ import { HealthController } from "./health.controller";
       },
     }),
     // Rate limiting global. El default protege CADA endpoint contra fan-out
-    // de un mismo IP. Endpoints específicos (los 3 SSE generate) sobre-
-    // escriben con un cap más estricto vía @Throttle().
-    ThrottlerModule.forRoot([
-      { name: 'default', ttl: 60_000, limit: 60 }, // 60 req/min global
-    ]),
+    // de un mismo user/IP. Endpoints específicos sobre-escriben con un cap más
+    // estricto vía @Throttle() (login, retry de stories, etc.).
+    //
+    // Storage: Redis (no el default in-memory). Con almacenamiento en memoria
+    // cada réplica de la API lleva su propio contador → los caps se degradan a
+    // "límite × N réplicas" bajo escalado horizontal. El storage en Redis
+    // comparte los contadores entre réplicas, así el cap es global de verdad.
+    // `ResilientThrottlerStorage` lo envuelve con fail-open: si Redis cae, el
+    // throttle se desactiva (request permitido) en vez de tumbar la API —
+    // mismo principio best-effort que RedisService.
+    ThrottlerModule.forRootAsync({
+      // RedisModule es @Global() (RedisService ya resolvería sin esto), pero lo
+      // declaramos explícito: hace la dependencia visible y robusta si algún
+      // día se le saca el @Global().
+      imports: [RedisModule],
+      inject: [RedisService],
+      useFactory: (redis: RedisService) => ({
+        throttlers: [{ name: 'default', ttl: 60_000, limit: 60 }], // 60 req/min
+        storage: new ResilientThrottlerStorage(
+          new ThrottlerStorageRedisService(redis.rawClient),
+          () => redis.isConnected,
+        ),
+      }),
+    }),
     PrismaModule,
     RedisModule,
     VaultModule,

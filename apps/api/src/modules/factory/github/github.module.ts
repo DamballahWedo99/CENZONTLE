@@ -8,8 +8,9 @@ import { CodeRepositoriesModule } from '../../code-repositories/code-repositorie
  * Importa CodeRepositoriesModule para reusar `CodeRepositoryConfigService`
  * que maneja decryption del PAT.
  *
- * Exporta GitHubService para que AgentRunService (Fase 2: crear
- * integration branch al encolar) y reviewer flow (Fase 4) lo consuman.
+ * Exporta GitHubService — el wrapper de Octokit que consumen los flujos
+ * del Forge (crear integration branch, abrir/mergear PRs, preview, branch
+ * strategy). El módulo no expone endpoints HTTP propios.
  */
 @Module({
   imports: [CodeRepositoriesModule],

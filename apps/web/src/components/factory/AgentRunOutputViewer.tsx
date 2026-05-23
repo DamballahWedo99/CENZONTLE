@@ -1,6 +1,6 @@
 'use client';
 
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   Loader2,
   X,
@@ -140,6 +140,23 @@ export function AgentRunOutputViewer({ runId, onClose }: Props) {
         ? 'bg-blue-500 animate-pulse'
         : 'bg-red-500';
 
+  // SEC (security-reviewer 2026-05-22, Finding 2 — defensa-en-profundidad
+  // profiláctica para dead-code path): defensa contra una `ttydUrl` con
+  // scheme no-http(s) que pudiera quedar en DB de algún run viejo previo al
+  // fix server-side. Solo http/https pasan al `<iframe src>`; el sandbox
+  // de abajo es la otra capa.
+  const safeTtydUrl = useMemo(() => {
+    if (!run.ttydUrl) return null;
+    try {
+      const u = new URL(run.ttydUrl);
+      return u.protocol === 'http:' || u.protocol === 'https:'
+        ? run.ttydUrl
+        : null;
+    } catch {
+      return null;
+    }
+  }, [run.ttydUrl]);
+
   return (
     <div className="flex h-screen flex-col bg-background dark">
       {/* Header */}
@@ -215,10 +232,10 @@ export function AgentRunOutputViewer({ runId, onClose }: Props) {
       {/* HITO 1.5: si hay ttydUrl vivo, mostrar iframe del terminal interactivo
        *  en lugar del polling estático. Cuando el run termina, ttydUrl pasa
        *  a null y caemos al viewer estático con lastOutput. */}
-      {isActive && run.ttydUrl ? (
+      {isActive && safeTtydUrl ? (
         <div className="flex-1 bg-black">
           <iframe
-            src={run.ttydUrl}
+            src={safeTtydUrl}
             title={`Terminal en vivo del run ${run.runId.slice(0, 8)}`}
             className="h-full w-full border-0"
             sandbox="allow-scripts allow-same-origin"

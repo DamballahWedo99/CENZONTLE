@@ -9,7 +9,13 @@ import {
   type PreviewStatus,
   type PreviewStatusResponse,
 } from '@/lib/api/factory';
-import { Play, Square, Loader2, ExternalLink, AlertCircle } from 'lucide-react';
+import { Play, Loader2, ExternalLink, AlertCircle } from 'lucide-react';
+import {
+  Tooltip,
+  TooltipContent,
+  TooltipProvider,
+  TooltipTrigger,
+} from '@/components/ui/tooltip';
 
 interface BatchPreviewButtonProps {
   batchId: string;
@@ -106,6 +112,10 @@ export function BatchPreviewButton({ batchId, disabled }: BatchPreviewButtonProp
   const handleStart = useCallback(async () => {
     setLoading(true);
     setError(null);
+    // Optimista: pasamos a 'starting' YA, en el click mismo — el botón muestra
+    // el spinner "Preparando…" de inmediato en vez de girar el ícono de play
+    // durante la ventana de la request al backend.
+    setStatus('starting');
     try {
       const res = await startPreview(batchId);
       setStatus(res.status);
@@ -191,9 +201,10 @@ export function BatchPreviewButton({ batchId, disabled }: BatchPreviewButtonProp
       bg: 'bg-green-500/10 hover:bg-green-500/20',
       text: 'text-green-400 hover:text-green-300',
       border: 'border-green-500/30',
-      title: previewUrl
-        ? `${previewUrl} (click para re-abrir, right-click para detener)`
-        : 'Preview running',
+      // Tooltip enfocado en ACCIONES, no en la URL. La URL es ruido en hover
+      // (el usuario ya la ve cuando se abre la pestaña); lo útil acá es saber
+      // qué hace cada interacción.
+      title: 'Click: abrir · Right-click: detener',
     },
     error: {
       label: 'Preview falló',
@@ -206,25 +217,50 @@ export function BatchPreviewButton({ batchId, disabled }: BatchPreviewButtonProp
   } as const;
 
   const v = variantConfig[status];
-  const isSpinning = status === 'starting' || loading;
+  // Solo el ícono Loader2 del estado 'starting' gira. El Play (stopped) NUNCA
+  // gira — el click pasa optimista a 'starting' antes de cualquier spin.
+  const isSpinning = status === 'starting';
 
   return (
-    <button
-      type="button"
-      onClick={handleClick}
-      onContextMenu={handleContextMenu}
-      disabled={disabled || loading}
-      title={v.title}
-      className={cn(
-        'flex items-center gap-2 rounded-lg border px-3 py-2 text-xs font-medium transition-colors',
-        v.bg,
-        v.text,
-        v.border,
-        (disabled || loading) && 'cursor-not-allowed opacity-50',
-      )}
-    >
-      <v.Icon className={cn('h-3.5 w-3.5', isSpinning && 'animate-spin')} aria-hidden="true" />
-      <span>{v.label}</span>
-    </button>
+    <TooltipProvider delayDuration={200}>
+      {/* `open={false}` durante 'starting' suprime el tooltip mientras se
+          clona/instala — el label "Preparando…" ya transmite el estado, un
+          tooltip encima sería ruido redundante. */}
+      <Tooltip open={status === 'starting' ? false : undefined}>
+        <TooltipTrigger asChild>
+          <button
+            type="button"
+            onClick={handleClick}
+            onContextMenu={handleContextMenu}
+            disabled={disabled || loading}
+            className={cn(
+              'flex items-center gap-2 rounded-lg border px-3 py-2 text-xs font-medium transition-colors',
+              v.bg,
+              v.text,
+              v.border,
+              (disabled || loading) && 'cursor-not-allowed opacity-50',
+            )}
+          >
+            <v.Icon
+              className={cn('h-3.5 w-3.5', isSpinning && 'animate-spin')}
+              aria-hidden="true"
+            />
+            <span>{v.label}</span>
+          </button>
+        </TooltipTrigger>
+        {/* `max-w-sm` (384px) da el ancho justo para que los títulos típicos
+            quepan en UNA sola línea (eliminando el wrap incómodo que dejaba
+            la 1ª línea corta). Los muy largos —URL del preview, error— sí
+            wrapean, balanceados por el `text-balance` del componente.
+            `px-2.5 py-1` aprieta el padding default de shadcn (`px-3 py-1.5`)
+            y `leading-snug` cierra el line-height cuando hay wrap. */}
+        <TooltipContent
+          side="top"
+          className="max-w-sm px-2.5 py-1 leading-snug"
+        >
+          {v.title}
+        </TooltipContent>
+      </Tooltip>
+    </TooltipProvider>
   );
 }

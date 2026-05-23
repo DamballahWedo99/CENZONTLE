@@ -11,10 +11,19 @@ import { WaveDAG } from '@/components/factory/WaveDAG';
 import { AgentCard } from '@/components/factory/AgentCard';
 import { AgentDetailDrawer } from '@/components/factory/AgentDetailDrawer';
 import { StagingGateApprovalDialog } from '@/components/factory/StagingGateApprovalDialog';
+import { RoundCheckbox } from '@/components/ui/round-checkbox';
 import { BatchPreviewButton } from '@/components/factory/BatchPreviewButton';
 import { AgentStatus, GateDecision, PipelineLayer, WaveStatus } from '@cenzontle/shared';
 import type { Epic, Initiative, FactoryAgent, FactoryStory, HumanGate, SprintBatch, Wave } from '@cenzontle/shared';
-import type { BatchDetailResponse } from '@/lib/api/factory';
+import type {
+  BatchDetailResponse,
+  BatchStoryDetail,
+  RunDrawerDetail,
+} from '@/lib/api/factory';
+import { retryStory } from '@/lib/api/factory';
+import { ApiError } from '@/lib/api/client';
+import { toast } from 'sonner';
+import { ConfirmDialog } from '@/components/ui/confirm-dialog';
 import {
   ArrowLeft,
   Bot,
@@ -43,6 +52,13 @@ import {
   Bookmark,
   Target,
   Calendar,
+  AlertTriangle,
+  RotateCw,
+  MinusCircle,
+  SquareTerminal,
+  ListChecks,
+  ChevronDown,
+  ChevronRight,
 } from 'lucide-react';
 
 // ---------------------------------------------------------------------------
@@ -148,18 +164,22 @@ function mapBatchDetailToSprintBatch(data: BatchDetailResponse): SprintBatch {
     agentCount: data.storiesInProgress,
     priority: data.priority,
     startedAt: data.runStartedAt ?? data.enqueuedAt,
-    // Deriva completedAt del máximo timestamp de las stories cuando TODAS están
-    // done. Sin esto, el card "Elapsed" sigue tickeando con Date.now() aunque
-    // el batch haya terminado hace tiempo (bug visible 2026-05-13: batch de 2m
-    // mostraba "1h 31m" creciendo monotónicamente). El backend NO setea este
-    // campo, así que el frontend lo deriva del estado real de stories.
+    // Deriva completedAt — congela el reloj del card "Elapsed" cuando el
+    // Forge terminó. Sin esto, el card sigue tickeando con Date.now() aunque
+    // el batch haya terminado hace horas. El backend NO setea este campo en
+    // BatchDetailResponse, así que el frontend lo deriva.
+    //
+    // El Forge "terminó" cuando todas las stories están en estado terminal —
+    // eso es `awaitingHumanGate`, que INCLUYE las stories `blocked`. Antes la
+    // condición era `storiesDone === storiesCount` (solo done), así que un
+    // batch con una story bloqueada dejaba el reloj corriendo para siempre
+    // (bug 2026-05-20).
     completedAt: (() => {
-      if (data.storiesCount === 0 || data.storiesDone !== data.storiesCount) {
-        return null; // batch aún corriendo
+      if (!data.awaitingHumanGate) {
+        return null; // el Forge aún está procesando stories
       }
-      // Todas las stories están done — tomar el max completedAt como momento
-      // del cierre del batch. Stories sin completedAt se ignoran (caso edge:
-      // story done por DB sin run completado, raro pero defensivo).
+      // Forge terminó — el cierre del batch es el max completedAt de los runs.
+      // Incluye los runs `failed` de stories blocked (que también lo tienen).
       const completedTimestamps = stories
         .map((s) => s.completedAt)
         .filter((t): t is string => t !== null)
@@ -197,11 +217,16 @@ function mapBatchDetailToAgents(data: BatchDetailResponse): FactoryAgent[] {
       // Duration: si el run ya terminó, completedAt - startedAt es fijo. Si
       // sigue corriendo, calculamos contra Date.now() (la card no tiene timer
       // tick propio así que muestra snapshot al render, no live).
-      const startedMs = new Date(run.startedAt).getTime();
+      // startedAt puede ser null durante la ventana claim→running (el tipo
+      // ahora lo refleja honesto). Si lo es, durationSeconds = 0 — el card
+      // mostrará "0s" temporalmente hasta que el worker reporte el inicio
+      // real (≤30s, intervalo del progress endpoint).
+      const startedMs = run.startedAt ? new Date(run.startedAt).getTime() : 0;
       const endedMs = run.completedAt
         ? new Date(run.completedAt).getTime()
         : Date.now();
-      const durationSeconds = Math.max(0, Math.floor((endedMs - startedMs) / 1000));
+      const durationSeconds =
+        startedMs === 0 ? 0 : Math.max(0, Math.floor((endedMs - startedMs) / 1000));
       return {
         id: run.id,
         name: s.title,
@@ -210,7 +235,10 @@ function mapBatchDetailToAgents(data: BatchDetailResponse): FactoryAgent[] {
         status: mapStoryStatusToAgentStatus(s.status, run.status),
         worktree: run.branch,
         tmuxSession: `cenzontle-${run.id.slice(0, 8)}`,
-        startedAt: run.startedAt,
+        // Fallback a string vacío si el backend aún no setea startedAt; el
+        // FactoryAgent type lo declara como string (no nullable). Cuando el
+        // run transicione a running, el próximo poll trae el ISO real.
+        startedAt: run.startedAt ?? '',
         // Métricas reales del backend (antes hardcoded a 0). Default a 0/null
         // para clientes legacy o runs sin datos persistidos (pre-feature).
         duration: durationSeconds,
@@ -520,10 +548,61 @@ function WaveList({ waves, stories, agents }: WaveDisplayProps) {
 // AgentList: agents assigned to this batch
 // ---------------------------------------------------------------------------
 
+/**
+ * Arma un `RunDrawerDetail` (datos reales del run para el AgentDetailDrawer)
+ * desde un `BatchStoryDetail`. Retorna null si la story no tiene run — el
+ * drawer cae a mock mode, que es lo correcto para una story sin ejecutar.
+ */
+function buildRunDrawerDetail(
+  story: BatchStoryDetail,
+  epicId: string,
+  epicTitle: string,
+  allStories: BatchStoryDetail[],
+): RunDrawerDetail | null {
+  const run = story.latestRun;
+  if (!run) return null;
+  const criteria = run.criteria ?? [];
+  // Guard contra timestamps malformados: `new Date('bad').getTime()` → NaN,
+  // que ES `number` y se colaría como durationMs → la UI mostraría "NaN".
+  const completedMs = run.completedAt
+    ? new Date(run.completedAt).getTime()
+    : NaN;
+  const startedMs = run.startedAt ? new Date(run.startedAt).getTime() : NaN;
+  const durationMs =
+    Number.isFinite(completedMs) && Number.isFinite(startedMs)
+      ? completedMs - startedMs
+      : null;
+  return {
+    branch: run.branch,
+    epicId,
+    epicTitle,
+    // El batch detail no expone tracker keys — el drawer los oculta si null.
+    epicTrackerKey: null,
+    storyTitle: story.title,
+    storyPoints: story.storyPoints,
+    storyTrackerKey: null,
+    dependsOn: story.blockedByIds.map((id) => ({
+      key: null,
+      title: allStories.find((s) => s.id === id)?.title ?? id,
+    })),
+    durationMs,
+    tokensNew: run.tokensNew ?? 0,
+    costUsd: run.costUsd ?? 0,
+    filesModified: run.filesModified ?? null,
+    attempts: run.attempts ?? 0,
+    dodPassed: criteria.filter((c) => c.status === 'passed').length,
+    dodTotal: criteria.length,
+  };
+}
+
 interface AgentListProps {
   agents: FactoryAgent[];
   stories: FactoryStory[];
   batch: SprintBatch | null;
+  /** Datos reales del run por storyId — alimentan el AgentDetailDrawer en
+   *  modo run. El padre lo arma desde `realBatchData`; un agente cuya story
+   *  no tiene run no está en el mapa y el drawer cae a mock mode. */
+  runDetailByStory: Map<string, RunDrawerDetail>;
 }
 
 const AGENT_STATUS_STYLES: Record<AgentStatus, { label: string; color: string; bg: string }> = {
@@ -537,7 +616,12 @@ const AGENT_STATUS_STYLES: Record<AgentStatus, { label: string; color: string; b
   [AgentStatus.Error]: { label: 'Error', color: 'text-[#EF4444]', bg: 'bg-[#EF4444]/10' },
 };
 
-function AgentList({ agents, stories, batch }: AgentListProps) {
+function AgentList({
+  agents,
+  stories,
+  batch,
+  runDetailByStory,
+}: AgentListProps) {
   // Agent seleccionado por el botón info ⓘ. Null = drawer cerrado. Se cierra
   // con la X del drawer, click en overlay o Escape (manejado por el componente).
   const [infoAgent, setInfoAgent] = useState<FactoryAgent | null>(null);
@@ -607,6 +691,11 @@ function AgentList({ agents, stories, batch }: AgentListProps) {
           batch={batch}
           open={infoAgent !== null}
           onClose={() => setInfoAgent(null)}
+          runDetail={
+            infoAgent.storyId
+              ? (runDetailByStory.get(infoAgent.storyId) ?? null)
+              : null
+          }
         />
       )}
     </section>
@@ -703,7 +792,11 @@ function MetricsCards({ batch, stories, agents }: MetricsCardsProps) {
     {
       label: 'Elapsed',
       value: formatDuration(elapsedSeconds),
-      sub: batch.status === 'completed' ? 'finished' : 'running',
+      // El subtexto sigue al reloj: si completedAt está set (reloj congelado),
+      // el Forge terminó → "finished"; si no, sigue corriendo. Antes usaba
+      // `batch.status === 'completed'`, que decía "running" para un batch
+      // terminado con stories blocked (bug 2026-05-20).
+      sub: batch.completedAt ? 'finished' : 'running',
       Icon: Timer,
       accent: 'text-amber-400',
       accentBg: 'bg-amber-500/10',
@@ -760,12 +853,594 @@ function formatGateTimestamp(iso: string): string {
   });
 }
 
-function PendingGateCard({ gate, batchBranch, onDecision }: { gate: HumanGate; batchBranch: string; onDecision: (gateId: string, decision: GateDecision, notes: string) => void }) {
+/**
+ * Botón "Reintentar" para una story con deuda técnica. Re-encola la story en
+ * el Forge (POST .../stories/:id/retry → story.status='backlog'): el worker la
+ * re-claim en el próximo poll y re-ejecuta el flujo COMPLETO (re-implementación
+ * + DoD). Como consume tokens reales de la API, la acción se gatea con un
+ * ConfirmDialog explícito — consistente con que el retry es "una acción humana
+ * explícita" (ver completeRun en agent-run.service.ts).
+ *
+ * Estado `queued`: tras un retry exitoso el card sigue mostrando el run viejo
+ * (el filtro de IncompleteStoriesAlert mira latestRun, no story.status) hasta
+ * que el worker produzca un run nuevo. Mientras tanto el botón muestra "En
+ * cola" deshabilitado — feedback honesto de "ya la reintentaste". El callsite
+ * le pasa `key={run.id}`, así que un run nuevo remonta el componente y re-arma
+ * el botón con estado fresco — sin necesidad de un effect que resetee state.
+ */
+function RetryStoryButton({
+  batchId,
+  story,
+  onRetried,
+}: {
+  batchId: string;
+  story: BatchStoryDetail;
+  onRetried?: () => void;
+}) {
+  const [dialogOpen, setDialogOpen] = useState(false);
+  const [queued, setQueued] = useState(false);
+
+  const handleConfirm = async () => {
+    try {
+      const res = await retryStory(batchId, story.id);
+      setQueued(true);
+      toast.success('Story re-encolada en el Forge', {
+        description: `"${res.storyTitle}" volvió a la cola. El worker la re-claimará en el próximo poll y re-ejecutará la implementación + el DoD.`,
+      });
+      onRetried?.();
+    } catch (err) {
+      const msg =
+        err instanceof ApiError
+          ? err.message
+          : 'Error inesperado al reintentar la story.';
+      toast.error('No se pudo reintentar la story', { description: msg });
+      // Re-throw: ConfirmDialog deja el modal abierto on-throw para que el
+      // operador pueda cancelar o reintentar el click.
+      throw err;
+    }
+  };
+
+  return (
+    <>
+      <button
+        type="button"
+        onClick={() => setDialogOpen(true)}
+        disabled={queued}
+        className={cn(
+          'inline-flex items-center gap-1 text-[10px] shrink-0',
+          queued
+            ? 'text-muted-foreground/50 cursor-default'
+            : 'text-amber-400 hover:text-amber-300 hover:underline',
+        )}
+        title={
+          queued
+            ? 'Story re-encolada — esperando a que el worker la re-claim'
+            : `Re-encola "${story.title}" en el Forge — el worker la re-ejecuta desde cero (implementación + DoD). Consume tokens.`
+        }
+      >
+        {queued ? (
+          <>
+            <CheckCircle2 className="h-2.5 w-2.5" aria-hidden="true" />
+            En cola
+          </>
+        ) : (
+          <>
+            <RotateCw className="h-2.5 w-2.5" aria-hidden="true" />
+            Reintentar
+          </>
+        )}
+      </button>
+      <ConfirmDialog
+        open={dialogOpen}
+        onOpenChange={setDialogOpen}
+        title={`Reintentar "${story.title}"`}
+        description="El worker re-claimará esta story y re-ejecutará el flujo completo del Forge: el agente la re-implementa desde la branch base y vuelve a correr el DoD. Consume tokens reales de la API. Si la story ya generó un PR, el re-run produce un run y commits nuevos. Hazlo después de corregir la causa raíz del fallo — por ejemplo, vincular un secreto externo faltante en /factory/settings."
+        confirmText="Reintentar story"
+        onConfirm={handleConfirm}
+      />
+    </>
+  );
+}
+
+/**
+ * Checklist DoD de un run — cada criterio del verifier con su veredicto
+ * (✓ cumplido / − saltado / ✗ no cumplido) + el motivo en los no-pasados.
+ * Data objetiva: viene de los verdicts del verifier, no de un auto-reporte
+ * del agente. Compartida por IncompleteStoriesAlert (fallos duros de
+ * ejecución) y ForgeReviewAlert (warns del DoD en stories completadas).
+ */
+function DodChecklist({
+  criteria,
+}: {
+  criteria: NonNullable<BatchStoryDetail['latestRun']>['criteria'];
+}) {
+  if (!criteria || criteria.length === 0) return null;
+  const passed = criteria.filter((c) => c.status === 'passed').length;
+  return (
+    <div className="mt-1.5">
+      <p className="text-[10px] font-medium text-muted-foreground/80 mb-1">
+        Checklist DoD ·{' '}
+        <span className="tabular-nums">
+          {passed}/{criteria.length}
+        </span>{' '}
+        cumplidos
+      </p>
+      <ul className="space-y-1">
+        {criteria.map((c, idx) => {
+          const statusText =
+            c.status === 'passed'
+              ? 'cumplido'
+              : c.status === 'skipped'
+                ? 'saltado'
+                : 'no cumplido';
+          return (
+            <li
+              // c.id puede colisionar a 'unknown' si un verdict tiene id
+              // malformado — idx como tie-breaker evita el key collision.
+              key={`${c.id}-${idx}`}
+              aria-label={`${c.label}: ${statusText}`}
+              className="flex items-start gap-1.5 text-[10px] leading-snug"
+            >
+              {c.status === 'passed' ? (
+                <CheckCircle2
+                  className="h-3 w-3 text-green-400 mt-0.5 shrink-0"
+                  aria-hidden="true"
+                />
+              ) : c.status === 'skipped' ? (
+                <MinusCircle
+                  className="h-3 w-3 text-muted-foreground/40 mt-0.5 shrink-0"
+                  aria-hidden="true"
+                />
+              ) : (
+                <XCircle
+                  className="h-3 w-3 text-red-400 mt-0.5 shrink-0"
+                  aria-hidden="true"
+                />
+              )}
+              <div className="min-w-0">
+                <span
+                  className={cn(
+                    'font-medium',
+                    c.status === 'passed' && 'text-muted-foreground',
+                    c.status === 'failed' && 'text-foreground',
+                    c.status === 'skipped' && 'text-muted-foreground/60',
+                  )}
+                >
+                  {c.label}
+                </span>
+                {c.status === 'skipped' && (
+                  <span className="text-muted-foreground/40 ml-1">(saltado)</span>
+                )}
+                {c.status !== 'passed' && c.reason && (
+                  <span
+                    className="text-muted-foreground/70 ml-1 break-words"
+                    title={c.reason}
+                  >
+                    — {c.reason}
+                  </span>
+                )}
+              </div>
+            </li>
+          );
+        })}
+      </ul>
+    </div>
+  );
+}
+
+/**
+ * Renderiza la lista de stories cuyo run FALLÓ — Claude crasheó / se quedó
+ * sin tokens, o falló el clone del repo o el push del PR. Esas historias
+ * quedan en estado 'blocked': NO se completaron y NO entran al merge a DEV.
+ * Se monta DENTRO del PendingGateCard del staging gate para que el TechLead,
+ * antes de aprobar, vea qué historias quedaron fuera.
+ *
+ * Importante (2026-05-21): el verificador del DoD es NO BLOQUEANTE. Una
+ * historia con criterios técnicos sin cumplir NO aparece acá — su run
+ * termina 'completed' (warn, no error) y la historia llega a 'done'. Acá
+ * solo caen FALLOS DUROS de ejecución, no deuda técnica.
+ *
+ * Diseño visual:
+ *  - Card amber (warning) — a nivel batch, una historia fallida es un
+ *    "decidir antes de aprobar", no un sistema caído.
+ *  - Por story: título + chip de estado + attempts + checklist DoD del run
+ *    (si alcanzó a correr el verifier) + acciones para reintentar / abrir
+ *    el terminal del run.
+ *  - Si NO hay stories fallidas, el componente devuelve null (sprint limpio
+ *    se ve sin ruido).
+ */
+function IncompleteStoriesAlert({
+  stories,
+  batchId,
+  onStoryRetried,
+}: {
+  stories: BatchStoryDetail[];
+  /** Batch (= enqueuedBatchId del epic) — necesario para el endpoint de retry. */
+  batchId: string;
+  /** Callback tras un retry exitoso — el padre dispara el refetch del batch. */
+  onStoryRetried?: () => void;
+}) {
+  if (stories.length === 0) return null;
+
+  return (
+    <div className="rounded-md border border-amber-500/40 bg-amber-500/10 px-3 py-3 mb-3">
+      <div className="flex items-center gap-2 mb-2">
+        <AlertTriangle className="h-3.5 w-3.5 text-amber-400" aria-hidden="true" />
+        <span className="text-[11px] font-semibold text-amber-300 uppercase tracking-wide">
+          {stories.length} {stories.length === 1 ? 'story' : 'stories'} sin completar
+        </span>
+      </div>
+      <p className="text-xs text-amber-200/80 leading-relaxed mb-3">
+        El run de estas stories <strong>terminó con error</strong> — Claude crasheó o se
+        quedó sin tokens, o falló el clone del repo o el push del PR. <strong>No se
+        completaron y no entran al merge a DEV.</strong> Reintenta cada una tras corregir
+        la causa raíz, o aprueba el batch asumiendo la brecha.
+      </p>
+
+      <ul className="space-y-2.5">
+        {stories.map((story) => {
+          // Defensive: callsite filtra latestRun!=null pero el componente
+          // acepta BatchStoryDetail[] genérico, así que callers futuros o
+          // tests podrían pasar stories sin run. Saltamos en lugar de
+          // crashear con non-null assertion (qa-reviewer 2026-05-19).
+          if (!story.latestRun) return null;
+          const run = story.latestRun;
+          const isRegression = run.doomLoopKind === 'regression';
+          const isStagnation = run.doomLoopKind === 'stagnation';
+
+          return (
+            <li
+              key={story.id}
+              className="rounded border border-amber-500/30 bg-card/50 px-3 py-2"
+            >
+              <div className="flex items-start justify-between gap-2 mb-1.5">
+                <div className="flex-1 min-w-0">
+                  <div className="flex items-center gap-2 flex-wrap">
+                    <span className="text-xs font-medium text-foreground truncate">
+                      {story.title}
+                    </span>
+
+                    {isRegression && (
+                      <span
+                        className="inline-flex items-center gap-1 rounded-full bg-red-500/20 border border-red-500/40 px-2 py-0.5 text-[9px] font-semibold uppercase text-red-300"
+                        title="El agente rompió criterios DoD que antes pasaban — daño activo, abortó sin completar reintentos"
+                      >
+                        Regresión
+                      </span>
+                    )}
+                    {isStagnation && (
+                      <span
+                        className="inline-flex items-center gap-1 rounded-full bg-amber-500/20 border border-amber-500/40 px-2 py-0.5 text-[9px] font-semibold uppercase text-amber-300"
+                        title="El agente quedó atorado en los mismos criterios fallidos sin avanzar entre attempts"
+                      >
+                        Estancamiento
+                      </span>
+                    )}
+                    {!isRegression && !isStagnation && run.status === 'failed' && (
+                      <span className="inline-flex items-center gap-1 rounded-full bg-red-500/15 border border-red-500/30 px-2 py-0.5 text-[9px] font-semibold uppercase text-red-300">
+                        Failed
+                      </span>
+                    )}
+
+                    {typeof run.attempts === 'number' && run.attempts > 0 && (
+                      <span
+                        className="inline-flex items-center gap-1 rounded-full bg-card border border-border px-2 py-0.5 text-[9px] font-medium text-muted-foreground"
+                        title={`El worker ejecutó ${run.attempts} attempt${run.attempts === 1 ? '' : 's'} del DoD enforcement loop antes de abortar`}
+                      >
+                        <RotateCw className="h-2.5 w-2.5" aria-hidden="true" />
+                        {run.attempts} {run.attempts === 1 ? 'attempt' : 'attempts'}
+                      </span>
+                    )}
+                  </div>
+                </div>
+
+                {/* Acciones de la story: abrir Claude Code para trabajar la
+                    deuda + reintentar (re-encola la story en el Forge). */}
+                <div className="flex items-center gap-2 shrink-0">
+                  {/* Abre la página del run en una tab nueva — su área de
+                      terminal embebe un Claude Code NUEVO sobre la branch del
+                      run (el ttyd del worker ya se cerró al terminar). Ahí el
+                      operador trabaja la deuda técnica de esta story. Mismo
+                      patrón window.open que el AgentCard del batch — tab nueva
+                      para que el `window.close()` del terminal funcione. */}
+                  <button
+                    type="button"
+                    onClick={() =>
+                      window.open(
+                        `/factory/agents/${run.id}/terminal`,
+                        '_blank',
+                        'noopener,noreferrer',
+                      )
+                    }
+                    className="inline-flex items-center gap-1 text-[10px] text-cyan-400 hover:text-cyan-300 hover:underline shrink-0"
+                    title={`Abre Claude Code sobre ${run.branch} para trabajar la deuda de esta story`}
+                  >
+                    <SquareTerminal className="h-2.5 w-2.5" aria-hidden="true" />
+                    Abrir Claude Code
+                  </button>
+                  {/* Reintenta la story — re-encola en el Forge tras corregir
+                      la causa raíz del fallo. Confirmación explícita: gasta
+                      tokens. */}
+                  <RetryStoryButton
+                    key={run.id}
+                    batchId={batchId}
+                    story={story}
+                    onRetried={onStoryRetried}
+                  />
+                </div>
+              </div>
+
+              {/* Checklist DoD COMPLETA — todos los criterios con su
+                  veredicto (✓ cumplido / ✗ no cumplido / − saltado). El
+                  TechLead ve qué pasó y qué no, no solo los fallos. La data
+                  viene de los verdicts del verifier (objetiva), no de un
+                  auto-reporte del agente. */}
+              {run.criteria && run.criteria.length > 0 ? (
+                <DodChecklist criteria={run.criteria} />
+              ) : (
+                run.errorMessage && (
+                  <p className="text-[10px] text-muted-foreground/70 leading-snug mt-1 break-words">
+                    {run.errorMessage}
+                  </p>
+                )
+              )}
+            </li>
+          );
+        })}
+      </ul>
+    </div>
+  );
+}
+
+/**
+ * Secciones de la solución técnica (`definicion-tecnica.md`). El verifier
+ * prefija el label de cada verdict `technical-design` con su sección
+ * (`Checklist:`, `Contrato:`, …); agrupamos los criterios sin cumplir por
+ * ese prefijo para que el TechLead vea de qué parte del diseño fue el fallo.
+ */
+const TL_CRITERION_GROUPS: ReadonlyArray<{ prefix: string; name: string }> = [
+  { prefix: 'Checklist:', name: 'Checklist técnico' },
+  { prefix: 'Contrato:', name: 'Contrato' },
+  { prefix: 'Validación:', name: 'Validación' },
+  { prefix: 'Errores:', name: 'Manejo de errores' },
+];
+/** Catch-all para los criterios del DoD sin prefijo de sección técnica. */
+const GENERAL_CRITERION_GROUP = 'Criterios generales del DoD';
+
+interface FailedCriterion {
+  id: string;
+  /** Label sin el prefijo de sección — el wrapper del grupo ya lo nombra. */
+  label: string;
+  /** Lo que el verifier detectó: por qué el criterio no se cumplió. */
+  reason: string;
+}
+interface CriterionGroupData {
+  name: string;
+  items: FailedCriterion[];
+}
+
+/**
+ * Filtra los criterios `failed` y los reparte por su sección de la solución
+ * técnica. Orden fijo (las 4 secciones del TL, luego el general); devuelve
+ * sólo los grupos con al menos un fallo.
+ */
+function groupFailedCriteria(
+  criteria: NonNullable<BatchStoryDetail['latestRun']>['criteria'],
+): CriterionGroupData[] {
+  const failed = (criteria ?? []).filter((c) => c.status === 'failed');
+  const result: CriterionGroupData[] = [
+    ...TL_CRITERION_GROUPS.map((g) => ({
+      name: g.name,
+      items: [] as FailedCriterion[],
+    })),
+    { name: GENERAL_CRITERION_GROUP, items: [] as FailedCriterion[] },
+  ];
+  for (const c of failed) {
+    const def = TL_CRITERION_GROUPS.find((d) => c.label.startsWith(d.prefix));
+    // Strip del prefijo de sección — el wrapper del grupo ya lo nombra. Si el
+    // label era SÓLO el prefijo (vault malformado → descripción vacía), el
+    // strip deja '': caemos al label crudo para no renderar una fila vacía.
+    const stripped = def
+      ? c.label.slice(def.prefix.length).trim()
+      : c.label;
+    const label = stripped || c.label;
+    const target = result.find(
+      (g) => g.name === (def ? def.name : GENERAL_CRITERION_GROUP),
+    );
+    if (target) target.items.push({ id: c.id, label, reason: c.reason });
+  }
+  return result.filter((g) => g.items.length > 0);
+}
+
+/**
+ * Wrapper colapsable de una sección de criterios sin cumplir. El TechLead
+ * despliega/colapsa cada grupo por separado. Default abierto: el objetivo
+ * del panel es que los fallos se vean de inmediato.
+ */
+function CriterionGroup({ group }: { group: CriterionGroupData }) {
+  const [open, setOpen] = useState(true);
+  return (
+    <div className="rounded border border-amber-500/25 bg-amber-500/[0.06]">
+      <button
+        type="button"
+        onClick={() => setOpen((o) => !o)}
+        aria-expanded={open}
+        className="flex w-full items-center gap-1.5 px-2 py-1.5 text-left"
+      >
+        {open ? (
+          <ChevronDown
+            className="h-3 w-3 shrink-0 text-amber-400"
+            aria-hidden="true"
+          />
+        ) : (
+          <ChevronRight
+            className="h-3 w-3 shrink-0 text-amber-400"
+            aria-hidden="true"
+          />
+        )}
+        <span className="text-[10px] font-semibold uppercase tracking-wide text-amber-300">
+          {group.name}
+        </span>
+        <span className="ml-auto inline-flex items-center rounded-full border border-amber-500/40 bg-amber-500/20 px-1.5 py-0.5 text-[9px] font-semibold tabular-nums text-amber-300">
+          {group.items.length}
+        </span>
+      </button>
+      {open && (
+        <ul className="space-y-2 px-2 pb-2">
+          {group.items.map((item, idx) => (
+            <li key={`${item.id}-${idx}`} className="flex items-start gap-1.5">
+              <XCircle
+                className="h-3 w-3 shrink-0 text-red-400 mt-0.5"
+                aria-hidden="true"
+              />
+              <div className="min-w-0">
+                <p className="text-[10px] font-medium leading-snug text-foreground break-words">
+                  {item.label}
+                </p>
+                {item.reason && (
+                  <p className="mt-0.5 text-[10px] leading-snug text-muted-foreground/80 break-words">
+                    <span className="font-medium text-amber-300/90">
+                      Detectado:{' '}
+                    </span>
+                    {item.reason}
+                  </p>
+                )}
+              </div>
+            </li>
+          ))}
+        </ul>
+      )}
+    </div>
+  );
+}
+
+/**
+ * Stories que el Forge COMPLETÓ e integró, pero cuyo verificador técnico
+ * (el "TL review" — el verifier Sonnet sobre `definicion-tecnica.md`) marcó
+ * criterios del DoD que el agente no cumplió por sí mismo.
+ *
+ * 2026-05-21 — el verificador del DoD es NO BLOQUEANTE: un criterio sin
+ * cumplir es un WARN, no un error. La story igual completa, abre PR y entra
+ * al merge consolidado. Este panel lista SOLO los criterios sin cumplir,
+ * agrupados por su sección de la solución técnica en wrappers colapsables,
+ * con el detalle de lo que el verifier detectó. Es informativo: NO bloquea
+ * la aprobación (a diferencia de los fallos duros).
+ */
+function ForgeReviewAlert({ stories }: { stories: BatchStoryDetail[] }) {
+  if (stories.length === 0) return null;
+
+  return (
+    <div className="rounded-md border border-amber-500/40 bg-amber-500/10 px-3 py-3 mb-3">
+      <div className="flex items-center gap-2 mb-2">
+        <ListChecks className="h-3.5 w-3.5 text-amber-400" aria-hidden="true" />
+        <span className="text-[11px] font-semibold text-amber-300 uppercase tracking-wide">
+          Revisión técnica del Forge · {stories.length}{' '}
+          {stories.length === 1 ? 'story con pendientes' : 'stories con pendientes'}
+        </span>
+      </div>
+      <p className="text-xs text-amber-200/80 leading-relaxed mb-3">
+        El Forge <strong>completó e integró</strong> estas stories, pero su
+        verificador técnico marcó criterios del DoD que{' '}
+        <strong>no pudo cumplir por sí mismo</strong>. El merge a DEV no se
+        bloquea — abajo, sólo los criterios sin cumplir, agrupados por su
+        sección de la solución técnica.
+      </p>
+
+      <ul className="space-y-2.5">
+        {stories.map((story) => {
+          // Defensive: el callsite filtra latestRun!=null, pero el componente
+          // acepta BatchStoryDetail[] genérico — saltamos en vez de crashear.
+          if (!story.latestRun) return null;
+          const run = story.latestRun;
+          const groups = groupFailedCriteria(run.criteria);
+          // El filtro `warnStories` garantiza ≥1 criterio failed; si aun así
+          // no quedan grupos (data corrupta), saltamos — sin card vacía.
+          if (groups.length === 0) return null;
+          const failedCount = groups.reduce((n, g) => n + g.items.length, 0);
+
+          return (
+            <li
+              key={story.id}
+              className="rounded border border-amber-500/30 bg-card/50 px-3 py-2"
+            >
+              <div className="flex items-start justify-between gap-2 mb-2">
+                <div className="min-w-0 flex-1">
+                  <p className="text-xs font-medium text-foreground truncate">
+                    {story.title}
+                  </p>
+                  <p className="mt-0.5 text-[10px] text-muted-foreground/70">
+                    {failedCount}{' '}
+                    {failedCount === 1
+                      ? 'criterio sin cumplir'
+                      : 'criterios sin cumplir'}
+                  </p>
+                </div>
+                {/* Abre Claude Code sobre la branch del run para inspeccionar
+                    o completar manualmente lo que el Forge dejó pendiente. */}
+                <button
+                  type="button"
+                  onClick={() =>
+                    window.open(
+                      `/factory/agents/${run.id}/terminal`,
+                      '_blank',
+                      'noopener,noreferrer',
+                    )
+                  }
+                  className="inline-flex items-center gap-1 text-[10px] text-cyan-400 hover:text-cyan-300 hover:underline shrink-0"
+                  title={`Abre Claude Code sobre ${run.branch} para inspeccionar esta story`}
+                >
+                  <SquareTerminal className="h-2.5 w-2.5" aria-hidden="true" />
+                  Abrir Claude Code
+                </button>
+              </div>
+              <div className="space-y-1.5">
+                {groups.map((g) => (
+                  <CriterionGroup key={g.name} group={g} />
+                ))}
+              </div>
+            </li>
+          );
+        })}
+      </ul>
+    </div>
+  );
+}
+
+function PendingGateCard({
+  gate,
+  batchBranch,
+  onDecision,
+  incompleteStories = [],
+  warnStories = [],
+  batchId,
+  onStoryRetried,
+}: {
+  gate: HumanGate;
+  batchBranch: string;
+  onDecision: (gateId: string, decision: GateDecision, notes: string) => void;
+  /** Stories cuyo run terminó en fallo DURO (Claude crasheó / sin tokens, o
+   *  falló el clone del repo o el push del PR). Quedan 'blocked', NO entran
+   *  al merge consolidado a DEV. El TechLead las ve antes de aprobar. */
+  incompleteStories?: BatchStoryDetail[];
+  /** Stories que COMPLETARON y entran al merge, pero el verificador del DoD
+   *  (no bloqueante) marcó criterios técnicos sin cumplir. Informativo. */
+  warnStories?: BatchStoryDetail[];
+  /** Batch — propagado a IncompleteStoriesAlert para el endpoint de retry. */
+  batchId: string;
+  /** Callback tras un retry exitoso de una story con deuda. */
+  onStoryRetried?: () => void;
+}) {
   const [notes, setNotes] = useState('');
   const [isExpanded, setIsExpanded] = useState(true);
   // Staging gate dispara dialog de step-up auth con password — solo TechLead
   // puede aprobar. Release gate (futuro) puede tener su propio flow.
   const [stagingDialogOpen, setStagingDialogOpen] = useState(false);
+  // Confirmación explícita de deuda: cuando el batch lleva stories con deuda
+  // técnica a DEV, el TechLead debe reconocerlo ANTES de poder aprobar. Sin
+  // esto, "Approve & Merge" queda deshabilitado.
+  const [acceptedIncomplete, setAcceptedIncomplete] = useState(false);
+  const hasIncompleteStories = incompleteStories.length > 0;
+  const approveBlocked = hasIncompleteStories && !acceptedIncomplete;
   const cfg = GATE_DECISION_CONFIG[gate.decision];
   const GateIcon = cfg.Icon;
 
@@ -781,29 +1456,70 @@ function PendingGateCard({ gate, batchBranch, onDecision }: { gate: HumanGate; b
         </span>
       </div>
 
-      {/* Consolidated PR info */}
-      <div className="rounded-md border border-border bg-card px-3 py-2.5 mb-3">
+      {/* Stories con fallo duro — Claude crasheó / sin tokens / clone / push.
+          Listadas ANTES del card de decisión para que el TechLead las vea. */}
+      <IncompleteStoriesAlert
+        stories={incompleteStories}
+        batchId={batchId}
+        onStoryRetried={onStoryRetried}
+      />
+
+      {/* Revisión técnica del Forge — stories COMPLETADAS cuyo verificador
+          DoD marcó criterios sin cumplir. Informativo, NO bloquea el gate. */}
+      <ForgeReviewAlert stories={warnStories} />
+
+      {/* Card único de decisión: el PR consolidado, el reconocimiento de
+          deuda (si aplica), las notas y los botones — todo en un solo
+          contenedor para que la acción del gate se lea como una unidad. */}
+      <div className="rounded-lg border border-border bg-card p-4">
+        {/* Consolidated PR */}
         <div className="flex items-center gap-2 mb-1.5">
           <GitBranch className="h-3 w-3 text-muted-foreground" aria-hidden="true" />
-          <span className="text-[11px] font-medium text-muted-foreground">Consolidated PR</span>
+          <span className="text-[11px] font-medium text-muted-foreground">
+            Consolidated PR
+          </span>
         </div>
-        <p className="font-mono text-xs text-foreground mb-2">{batchBranch} → DEV</p>
-        <p className="text-xs text-muted-foreground leading-relaxed">
-          Review the consolidated PR for business intent. This is not about bugs or code quality — agents already handled that. Focus on: business logic correctness, UX alignment, and strategic fit.
-        </p>
-      </div>
-
-      <div className="flex items-center gap-4 text-xs text-muted-foreground/70 mb-3">
-        <span className="flex items-center gap-1">
+        <p className="font-mono text-xs text-foreground">{batchBranch} → DEV</p>
+        <div className="mt-2 flex items-center gap-1 text-xs text-muted-foreground/70">
           <Clock className="h-3 w-3" aria-hidden="true" />
           Requested {formatGateTimestamp(gate.requestedAt)}
-        </span>
-      </div>
+        </div>
 
-      {/* Review form */}
-      <div className="space-y-3 rounded-lg border border-border bg-card p-4">
-        <label className="block">
-          <span className="text-xs font-medium text-muted-foreground mb-1.5 block">Review Notes</span>
+        {/* Divisor: separa el contexto del PR de la zona de decisión sin
+            partirlos en dos cards. */}
+        <div className="my-3 border-t border-border" />
+
+        {/* Confirmación obligatoria de deuda. Solo aparece si el batch lleva
+            stories con fallo duro — el TechLead debe reconocer que esa deuda
+            va a DEV antes de que "Approve & Merge" se habilite. */}
+        {hasIncompleteStories && (
+          <label className="flex items-start gap-2 rounded-md border border-amber-500/40 bg-amber-500/5 px-3 py-2.5 mb-3 cursor-pointer">
+            {/* RoundCheckbox redondo. `[&_svg]:hidden` oculta el checkmark —
+                marcado = círculo azul sólido. El estado se lee por el fill. */}
+            <RoundCheckbox
+              checked={acceptedIncomplete}
+              onCheckedChange={(v) => setAcceptedIncomplete(v === true)}
+              className="mt-0.5 [&_svg]:hidden"
+              aria-label="Acepto mergear a DEV con stories que llevan deuda técnica"
+            />
+            <span className="text-xs text-amber-200/90 leading-relaxed">
+              Acepto mergear a DEV{' '}
+              <strong>
+                {incompleteStories.length}{' '}
+                {incompleteStories.length === 1 ? 'story' : 'stories'} con deuda
+                técnica
+              </strong>
+              . Los criterios DoD pendientes se resolverán en la etapa de
+              staging.
+            </span>
+          </label>
+        )}
+
+        {/* Review Notes */}
+        <label className="block mb-3">
+          <span className="text-xs font-medium text-muted-foreground mb-1.5 block">
+            Review Notes
+          </span>
           <textarea
             value={notes}
             onChange={(e) => setNotes(e.target.value)}
@@ -815,7 +1531,16 @@ function PendingGateCard({ gate, batchBranch, onDecision }: { gate: HumanGate; b
 
         <div className="flex items-center gap-2">
           <button
+            disabled={approveBlocked}
+            title={
+              approveBlocked
+                ? 'Marca la casilla de confirmación para aprobar el merge con deuda técnica'
+                : undefined
+            }
             onClick={() => {
+              // Defensa: el disabled ya previene el click, pero guard explícito
+              // por si el atributo se evade (DevTools, etc.).
+              if (approveBlocked) return;
               // Staging gate: requiere step-up auth con password + role TechLead.
               // Abrimos el dialog en vez de dispatchar directo. El onApproved
               // callback del dialog (más abajo) dispara onDecision para que el
@@ -827,7 +1552,12 @@ function PendingGateCard({ gate, batchBranch, onDecision }: { gate: HumanGate; b
               // Release gate u otros: dispatch directo por ahora (no implementado).
               onDecision(gate.id, GateDecision.Approved, notes);
             }}
-            className="flex-1 inline-flex items-center justify-center gap-2 rounded-lg bg-emerald-500/15 border border-emerald-500/30 px-4 py-2.5 text-sm font-medium text-emerald-400 hover:bg-emerald-500/25 transition-colors"
+            className={cn(
+              'flex-1 inline-flex items-center justify-center gap-2 rounded-lg border px-4 py-2.5 text-sm font-medium transition-colors',
+              approveBlocked
+                ? 'bg-muted border-border text-muted-foreground/50 cursor-not-allowed'
+                : 'bg-emerald-500/15 border-emerald-500/30 text-emerald-400 hover:bg-emerald-500/25',
+            )}
           >
             <CheckCircle className="h-4 w-4" aria-hidden="true" />
             Approve & Merge to DEV
@@ -871,7 +1601,27 @@ function PendingGateCard({ gate, batchBranch, onDecision }: { gate: HumanGate; b
   );
 }
 
-function ApprovalSection({ gates, batchBranch, onDecision }: { gates: HumanGate[]; batchBranch: string; onDecision: (gateId: string, decision: GateDecision, notes: string) => void }) {
+function ApprovalSection({
+  gates,
+  batchBranch,
+  onDecision,
+  incompleteStories = [],
+  warnStories = [],
+  batchId,
+  onStoryRetried,
+}: {
+  gates: HumanGate[];
+  batchBranch: string;
+  onDecision: (gateId: string, decision: GateDecision, notes: string) => void;
+  /** Stories con fallo duro — propagado a PendingGateCard. */
+  incompleteStories?: BatchStoryDetail[];
+  /** Stories completadas con warns del DoD — propagado a PendingGateCard. */
+  warnStories?: BatchStoryDetail[];
+  /** Batch — propagado hasta el botón de retry de cada story con deuda. */
+  batchId: string;
+  /** Callback tras un retry exitoso — dispara el refetch del batch. */
+  onStoryRetried?: () => void;
+}) {
   if (gates.length === 0) return null;
 
   const pendingGates = gates.filter((g) => g.decision === GateDecision.Pending);
@@ -893,7 +1643,16 @@ function ApprovalSection({ gates, batchBranch, onDecision }: { gates: HumanGate[
 
       <div className="space-y-3">
         {pendingGates.map((gate) => (
-          <PendingGateCard key={gate.id} gate={gate} batchBranch={batchBranch} onDecision={onDecision} />
+          <PendingGateCard
+            key={gate.id}
+            gate={gate}
+            batchBranch={batchBranch}
+            onDecision={onDecision}
+            incompleteStories={incompleteStories}
+            warnStories={warnStories}
+            batchId={batchId}
+            onStoryRetried={onStoryRetried}
+          />
         ))}
 
         {resolvedGates.map((gate) => {
@@ -1268,6 +2027,24 @@ export function BatchDetail({ batchId, realBatchData, onRefetchRequested }: Batc
     return state.agents.filter((a) => a.storyId !== null && storyIdSet.has(a.storyId));
   }, [realBatchData, state.agents, batchStories]);
 
+  // RunDrawerDetail por storyId — datos reales del run para el
+  // AgentDetailDrawer que abre AgentList. Vacío en mock mode (sin
+  // realBatchData) → el drawer cae a mock mode, consistente con el batch.
+  const runDetailByStory = useMemo<Map<string, RunDrawerDetail>>(() => {
+    const map = new Map<string, RunDrawerDetail>();
+    if (!realBatchData) return map;
+    for (const s of realBatchData.stories) {
+      const detail = buildRunDrawerDetail(
+        s,
+        realBatchData.epicId,
+        realBatchData.epicTitle,
+        realBatchData.stories,
+      );
+      if (detail) map.set(s.id, detail);
+    }
+    return map;
+  }, [realBatchData]);
+
   // Filter human gates belonging to this batch.
   // Release gate only shows after staging gate is approved (sequential approval flow).
   const batchGates = useMemo<HumanGate[]>(() => {
@@ -1311,51 +2088,56 @@ export function BatchDetail({ batchId, realBatchData, onRefetchRequested }: Batc
     <div className="space-y-6">
       {/* ---- Header ---- */}
       <header className="space-y-3">
-        <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
-          {/* Left: back + title */}
-          <div className="flex items-start gap-3">
-            <Link
-              href="/factory"
-              className="mt-1 flex h-8 w-8 items-center justify-center rounded-lg border border-border bg-card hover:bg-muted transition-colors"
-              aria-label="Back to Factory"
-            >
-              <ArrowLeft className="h-4 w-4 text-muted-foreground" />
-            </Link>
-            <div className="min-w-0">
-              <div className="flex items-center gap-1.5">
-                <h1 className="text-lg font-bold text-foreground truncate">{fullBatch.epicTitle}</h1>
-                <button
-                  onClick={() => setEpicDrawerOpen(true)}
-                  className="shrink-0 text-muted-foreground/40 hover:text-muted-foreground transition-colors"
-                  title="Epic details"
-                >
-                  <Info className="h-4 w-4" />
-                </button>
-              </div>
-              <div className="flex flex-wrap items-center gap-2 mt-1">
-                <span className="font-mono text-xs text-muted-foreground">{fullBatch.tracker.externalKey}</span>
-                <span className="text-border" aria-hidden="true">|</span>
-                <span
-                  className={cn(
-                    'inline-flex items-center rounded-full px-2 py-0.5 text-[10px] font-semibold border',
-                    priorityStyle.bg,
-                    priorityStyle.border,
-                    priorityStyle.text,
-                  )}
-                >
-                  {fullBatch.priority}
-                </span>
+        <div className="flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
+          {/* Izquierda: identidad (back + título) + estado del pipeline.
+              Los pills viven acá —no flotando a la derecha— para que el estado
+              quede junto a la identidad de la épica y llenen el header en vez
+              de dejar un vacío central. */}
+          <div className="flex min-w-0 flex-col gap-3 lg:flex-row lg:items-center">
+            <div className="flex min-w-0 items-center gap-3">
+              <Link
+                href="/factory"
+                className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg border border-border bg-card hover:bg-muted transition-colors"
+                aria-label="Back to Factory"
+              >
+                <ArrowLeft className="h-4 w-4 text-muted-foreground" />
+              </Link>
+              <div className="min-w-0">
+                <div className="flex items-center gap-1.5">
+                  <h1 className="text-lg font-bold text-foreground truncate">{fullBatch.epicTitle}</h1>
+                  <button
+                    onClick={() => setEpicDrawerOpen(true)}
+                    className="shrink-0 text-muted-foreground/40 hover:text-muted-foreground transition-colors"
+                    title="Epic details"
+                  >
+                    <Info className="h-4 w-4" />
+                  </button>
+                </div>
+                <div className="flex flex-wrap items-center gap-2 mt-1">
+                  <span className="font-mono text-xs text-muted-foreground">{fullBatch.tracker.externalKey}</span>
+                  <span className="text-border" aria-hidden="true">|</span>
+                  <span
+                    className={cn(
+                      'inline-flex items-center rounded-full px-2 py-0.5 text-[10px] font-semibold border',
+                      priorityStyle.bg,
+                      priorityStyle.border,
+                      priorityStyle.text,
+                    )}
+                  >
+                    {fullBatch.priority}
+                  </span>
+                </div>
               </div>
             </div>
+            {/* Divisor sutil identidad │ estado — solo cuando el header es fila. */}
+            <div className="hidden h-9 w-px shrink-0 bg-border/70 lg:block" aria-hidden="true" />
+            <PipelinePills currentLayer={fullBatch.currentLayer} />
           </div>
 
-          {/* Right: pipeline pills + preview button + branch badge */}
-          <div className="flex items-center gap-4 shrink-0">
-            <PipelinePills currentLayer={fullBatch.currentLayer} />
-            {/* Botón de preview: a la izquierda del branch indicator.
-                Spawnea local dev server (clone + pnpm dev / npx serve) y
-                abre la URL en una nueva tab. Disabled cuando no hay branch
-                aún (pre-push del Forge). */}
+          {/* Derecha: acciones — botón de preview + indicador de branch.
+              Spawnea local dev server (clone + pnpm dev / npx serve) y abre la
+              URL en otra tab. Disabled cuando no hay branch aún (pre-push). */}
+          <div className="flex shrink-0 items-center gap-2.5">
             <BatchPreviewButton
               batchId={fullBatch.id}
               disabled={!fullBatch.branchUrl}
@@ -1394,7 +2176,47 @@ export function BatchDetail({ batchId, realBatchData, onRefetchRequested }: Batc
       {/* ---- Pipeline ---- */}
 
       {/* ---- Human Gate Approvals ---- */}
-      <ApprovalSection gates={batchGates} batchBranch={fullBatch.branch} onDecision={handleGateDecision} />
+      {/* incompleteStories: filtramos las stories del raw backend data cuyo
+          latestRun terminó en failed o con criterios DoD pendientes. Estas
+          NO van al merge consolidado a DEV — el TechLead las ve dentro del
+          PendingGateCard para tomar decisión informada. */}
+      <ApprovalSection
+        gates={batchGates}
+        batchBranch={fullBatch.branch}
+        onDecision={handleGateDecision}
+        batchId={batchId}
+        onStoryRetried={onRefetchRequested}
+        incompleteStories={
+          realBatchData?.stories.filter((s) => {
+            if (s.latestRun == null) return false;
+            // Excluir 'completed' explícitamente: un run con forceCompletion
+            // puede tener criterios failed pero su PR YA entra al consolidated.
+            // Decir al TechLead "no entra al merge" para un completed sería
+            // engañoso (qa-reviewer 2026-05-19, Finding #6).
+            if (s.latestRun.status === 'completed') return false;
+            return (
+              s.latestRun.status === 'failed' ||
+              (s.latestRun.criteria?.some((c) => c.status === 'failed') ?? false)
+            );
+          }) ?? []
+        }
+        warnStories={
+          // Stories que COMPLETARON y llegaron a 'done' (entran al merge
+          // consolidado) pero cuyo verificador del DoD —no bloqueante— marcó
+          // criterios técnicos sin cumplir. El gate `s.status === 'done'`
+          // descarta el caso raro "run completed pero story atascada" (la
+          // creación del PR falló): esa no integró, no debe decir que sí.
+          // Disjunto de incompleteStories: aquél exige run status != 'completed'.
+          realBatchData?.stories.filter(
+            (s) =>
+              s.latestRun != null &&
+              s.latestRun.status === 'completed' &&
+              s.status === 'done' &&
+              (s.latestRun.criteria?.some((c) => c.status === 'failed') ??
+                false),
+          ) ?? []
+        }
+      />
 
       {/* ---- Wave DAG ---- */}
       <WaveDAG
@@ -1405,7 +2227,12 @@ export function BatchDetail({ batchId, realBatchData, onRefetchRequested }: Batc
       />
 
       {/* ---- Agents ---- */}
-      <AgentList agents={batchAgents} stories={batchStories} batch={fullBatch} />
+      <AgentList
+        agents={batchAgents}
+        stories={batchStories}
+        batch={fullBatch}
+        runDetailByStory={runDetailByStory}
+      />
 
       {/* ---- Epic Info Drawer ---- */}
       <EpicInfoDrawer

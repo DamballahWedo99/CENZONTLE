@@ -5,6 +5,7 @@ import {
   IsArray,
   IsOptional,
   IsString,
+  IsUrl,
   MaxLength,
   ValidateNested,
 } from 'class-validator';
@@ -68,6 +69,19 @@ export class RunProgressDto {
   @IsOptional()
   @IsString()
   @MaxLength(500)
+  // SEC (security-reviewer 2026-05-22, Finding 2 / CWE-601, CWE-1021): el
+  // frontend embebe este valor en `<iframe src>`. Sin restricción de scheme,
+  // un worker comprometido podía reportar `javascript:…` o `data:text/html,…`
+  // y conseguir phishing/clickjacking en el origen del dashboard. @IsUrl con
+  // protocols allowlist bloquea esos schemes; la validación de host (que
+  // sea interno: loopback/RFC 1918/link-local) corre en el service como
+  // segunda barrera — ver `isInternalTtydUrl` en agent-run.service.ts.
+  @IsUrl({
+    protocols: ['http', 'https'],
+    require_protocol: true,
+    require_host: true,
+    require_tld: false, // permite localhost / IPs directas
+  })
   ttydUrl?: string;
 
   @ApiPropertyOptional({

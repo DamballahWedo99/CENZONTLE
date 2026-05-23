@@ -260,7 +260,10 @@ export interface BatchStoryRun {
   prNumber: number | null;
   exitCode: number | null;
   errorMessage: string | null;
-  startedAt: string;
+  /** Null durante la ventana entre claim e inicio del run. Antes el tipo
+   *  decía `string` no-nullable pero el backend SÍ devolvía null en esa
+   *  ventana — el wire-type honesto es nullable (qa-reviewer 2026-05-19). */
+  startedAt: string | null;
   completedAt: string | null;
   /** Cost USD del run individual (generator + verifier). */
   costUsd?: number;
@@ -268,6 +271,20 @@ export interface BatchStoryRun {
   tokensNew?: number;
   /** Archivos modificados en el diff del commit. NULL si sandbox/no-push. */
   filesModified?: number | null;
+  /** Attempts del DoD loop. 1=clean, 2-3=requirió retries. NULL si nunca llegó
+   *  al verifier (claimed→failed por error temprano). */
+  attempts?: number | null;
+  /** Si abortó por doom loop, qué tipo. NULL si no fue doom loop. */
+  doomLoopKind?: 'regression' | 'stagnation' | null;
+  /** Checklist completa del DoD — todos los criterios con su veredicto final
+   *  (passed/failed/skipped), merge-ado across attempts. El merge view la
+   *  renderiza como checklist. Vacío si el run nunca llegó al verifier. */
+  criteria?: Array<{
+    id: string;
+    label: string;
+    status: 'passed' | 'failed' | 'skipped';
+    reason: string;
+  }>;
 }
 
 /**
@@ -326,6 +343,39 @@ export function approveStagingGate(
   return apiFetch<ApproveStagingGateResponse>(
     `/factory/queue/${batchId}/approve-staging`,
     { method: 'POST', body: JSON.stringify(input) },
+  );
+}
+
+// ──────────────────────────────────────────────────────────────────────
+// Retry story — reintenta una story con deuda técnica (reset → backlog)
+// ──────────────────────────────────────────────────────────────────────
+
+export interface RetryStoryResponse {
+  storyId: string;
+  storyTitle: string;
+  /** Estado de la story ANTES del retry (blocked | in_review | failed | ...). */
+  previousStatus: string;
+  /** Estado nuevo — siempre 'backlog' (claimable por el worker). */
+  status: string;
+  /** Cuántos AgentRun activos (claimed/running) se cerraron a failed. */
+  abandonedRunCount: number;
+}
+
+/**
+ * Reintenta una story con deuda técnica desde el merge view. La resetea a
+ * backlog + claimedAt=null: el worker la re-claim en el próximo poll y
+ * re-ejecuta el flujo COMPLETO del Forge (el agente la re-implementa + corre
+ * el DoD). Consume tokens reales — el caller la gatea con un ConfirmDialog.
+ *
+ * Errores tipados:
+ *  - 403: el user no tiene acceso al pod del epic
+ *  - 404: batchId no existe, o la story no pertenece a ese batch
+ *  - 409: la story ya está en 'done' — no hay nada que reintentar
+ */
+export function retryStory(batchId: string, storyId: string) {
+  return apiFetch<RetryStoryResponse>(
+    `/factory/queue/${batchId}/stories/${storyId}/retry`,
+    { method: 'POST' },
   );
 }
 
@@ -433,10 +483,96 @@ export interface RunDetailResponse {
   nodeId: string;
   nodeName: string;
   nodeType: string;
+  /** Duración del run en ms. Null mientras no haya completado. */
+  durationMs: number | null;
+  /** Cost agregado USD — generator + verifier + planner del run. */
+  costUsd: number;
+  /** Tokens "nuevos" del run: input + output + cache_creation (sin cache_read). */
+  tokensNew: number;
+  /** Archivos modificados por el run. Null si el worker no lo reportó. */
+  filesModified: number | null;
+  /** Story points de la historia que el run procesa. */
+  storyPoints: number;
+  /** Tracker key (externalKey) de la story. Null si no tiene tracker. */
+  storyTrackerKey: string | null;
+  /** Tracker key (externalKey) del epic. Null si no tiene tracker. */
+  epicTrackerKey: string | null;
+  /** Historias de las que ésta depende — `{ key, title }` de cada bloqueadora. */
+  dependsOn: { key: string | null; title: string }[];
 }
 
 export function getRunDetail(runId: string) {
   return apiFetch<RunDetailResponse>(`/factory/nodes/runs/${runId}`);
+}
+
+/**
+ * Subconjunto de `RunDetailResponse` que el `AgentDetailDrawer` necesita
+ * para renderizar Identity / Context / Performance en run mode. Derivado
+ * DRY de `RunDetailResponse` — un Pick + el conteo del DoD evaluado en el
+ * frontend (`dodPassed`/`dodTotal` no vienen del backend, los computa
+ * `terminal/page.tsx` desde el catálogo de criterios + los verdicts).
+ *
+ * Vive aquí (no en `AgentDetailDrawer.tsx`) para que `AgentTerminal.tsx`
+ * pueda tiparlo sin importar un tipo desde un componente hijo
+ * (architecture-reviewer 2026-05-20 — dirección de dependencia invertida).
+ */
+export type RunDrawerDetail = Pick<
+  RunDetailResponse,
+  | 'branch'
+  | 'epicId'
+  | 'epicTitle'
+  | 'epicTrackerKey'
+  | 'storyTitle'
+  | 'storyPoints'
+  | 'storyTrackerKey'
+  | 'dependsOn'
+  | 'durationMs'
+  | 'tokensNew'
+  | 'costUsd'
+  | 'filesModified'
+  | 'attempts'
+> & { dodPassed: number; dodTotal: number };
+
+// ──────────────────────────────────────────────────────────────────────
+// Factory Metrics — timeseries 24h para los charts del dashboard /factory
+// ──────────────────────────────────────────────────────────────────────
+
+export interface FactoryMetricsBucket {
+  /** ISO timestamp del inicio del bucket (hora redonda, UTC). */
+  time: string;
+  /** Slots ocupados durante el bucket — runs cuya ventana solapa con la hora.
+   *  Cap a currentCapacityTotal. */
+  capacityUsed: number;
+  /** Tokens "nuevos" (input + output + cache_creation) sumados de los runs
+   *  que reportaron usage en este bucket. */
+  tokensNew: number;
+  /** Tokens cached (cache_read), separados por transparencia. */
+  tokensCached: number;
+}
+
+export interface FactoryMetricsResponse {
+  generatedAt: string;
+  bucketsCount: number;
+  bucketDurationMs: number;
+  /** Array ordenado ASC. buckets[0] = hace 23h, buckets[23] = hora actual. */
+  buckets: FactoryMetricsBucket[];
+  /** Slots ocupados ahora — count de AgentRun en status claimed|running. */
+  currentCapacityUsed: number;
+  /** Capacity total del fleet — sum(ComputeNode.totalSlots WHERE online). */
+  currentCapacityTotal: number;
+  /** Número de ComputeNodes online (no retired, heartbeat fresco). */
+  onlineNodeCount: number;
+}
+
+/**
+ * Timeseries 24h para los charts CapacityChart + TokenBurnChart del dashboard
+ * /factory. Backend agrega desde AgentRun (generator + planner + verifier
+ * usage). Polling sugerido: 30s — el backend escanea ~240 runs en buckets de
+ * 1h, no es barato como /factory/nodes (5s). El polling de 30s + los charts
+ * tienen granularidad horaria hacen que data más fresca no se vea reflejada.
+ */
+export function getFactoryMetrics() {
+  return apiFetch<FactoryMetricsResponse>('/factory/metrics/timeseries');
 }
 
 // ──────────────────────────────────────────────────────────────────────

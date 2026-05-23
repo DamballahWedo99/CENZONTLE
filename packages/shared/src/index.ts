@@ -8,6 +8,7 @@ export * from "./types/integrations";
 export * from "./types/access";
 export * from "./types/external-secrets";
 export * from "./types/agent-token-settings";
+export * from "./types/doom-loop";
 
 // Diagram quality metrics — usado por el frontend `ValidationPanel` para
 // mostrar el score deterministic (0-1) del diagrama actual al usuario.

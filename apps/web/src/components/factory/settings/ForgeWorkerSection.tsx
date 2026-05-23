@@ -1,6 +1,7 @@
 'use client';
 
-import { DollarSign, Zap, Wrench, ShieldCheck } from 'lucide-react';
+import { DollarSign, RotateCw, Zap, Wrench, ShieldCheck } from 'lucide-react';
+import { cn } from '@/lib/utils';
 import {
   FORGE_WORKER_EFFORT_DESCRIPTIONS,
   FORGE_WORKER_EFFORT_LABELS,
@@ -24,6 +25,10 @@ interface ForgeWorkerSectionProps {
   dodVerifierEffort: ForgeWorkerEffortLevel;
   onDodVerifierModelChange: (model: ForgeWorkerModel) => void;
   onDodVerifierEffortChange: (effort: ForgeWorkerEffortLevel) => void;
+
+  // DoD retry loop — tope de intentos del enforcement loop del worker.
+  dodMaxAttempts: number;
+  onDodMaxAttemptsChange: (n: number) => void;
 }
 
 /**
@@ -47,6 +52,8 @@ export function ForgeWorkerSection({
   dodVerifierEffort,
   onDodVerifierModelChange,
   onDodVerifierEffortChange,
+  dodMaxAttempts,
+  onDodMaxAttemptsChange,
 }: ForgeWorkerSectionProps) {
   const currentPricing = FORGE_WORKER_MODEL_PRICING[model];
 
@@ -147,6 +154,59 @@ export function ForgeWorkerSection({
           onEffortChange={onDodVerifierEffortChange}
           ariaLabelPrefix="DoD verifier"
         />
+      </section>
+
+      {/* ═════════════════════════════════════════════════════════════════
+          Sub-sección 3: Reintentos del DoD (enforcement loop del worker)
+          ═════════════════════════════════════════════════════════════════ */}
+      <section className="space-y-3 pt-6 border-t border-border/40">
+        <div className="flex items-center gap-2.5">
+          <div className="shrink-0 rounded-md bg-cyan-500/10 p-1.5">
+            <RotateCw className="h-3.5 w-3.5 text-cyan-600 dark:text-cyan-400" />
+          </div>
+          <div>
+            <h4 className="text-xs font-semibold text-foreground">
+              Reintentos del DoD · Intentos por run
+            </h4>
+            <p className="text-[10px] text-muted-foreground/70">
+              Máximo de intentos del enforcement loop del worker. <strong>1</strong> =
+              una sola pasada, sin reintentos. Súbelo para reintentar ante errores
+              duros o criterios DoD sin cumplir. La protección de <em>doom loop</em>
+              (cortar el run tras 2 turnos seguidos estancado o con regresión) solo
+              opera con <strong>3</strong>: con cap=2 el último attempt finaliza el
+              loop antes de alcanzar el threshold.
+            </p>
+          </div>
+
+          {/* Selector 1/2/3 pegado al borde derecho: `ml-auto` lo empuja al
+              borde, `shrink-0` evita que se comprima si la descripción es larga. */}
+          <div
+            role="radiogroup"
+            aria-label="Máximo de intentos del DoD"
+            className="ml-auto flex shrink-0 items-center gap-1.5 pl-12"
+          >
+            {[1, 2, 3].map((n) => {
+              const selected = dodMaxAttempts === n;
+              return (
+                <button
+                  key={n}
+                  type="button"
+                  role="radio"
+                  aria-checked={selected}
+                  onClick={() => onDodMaxAttemptsChange(n)}
+                  className={cn(
+                    'flex h-9 w-9 items-center justify-center rounded-lg border text-sm font-semibold tabular-nums transition-colors',
+                    selected
+                      ? 'border-cyan-500/50 bg-cyan-500/10 text-cyan-600 dark:text-cyan-400'
+                      : 'border-border bg-muted/30 text-muted-foreground hover:bg-muted hover:text-foreground',
+                  )}
+                >
+                  {n}
+                </button>
+              );
+            })}
+          </div>
+        </div>
       </section>
     </div>
   );

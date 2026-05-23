@@ -572,6 +572,15 @@ model AgentTokenSettings {
   dodVerifierModel  String @default("claude-haiku-4-5-20251001")
   dodVerifierEffort String @default("low")
 
+  // DoD retry loop — máximo de intentos del enforcement loop del worker.
+  // 1 = una sola pasada (default; el verificador es no-bloqueante, los
+  // criterios sin cumplir quedan como warn). >1 activa los reintentos: ante
+  // un error duro (crash / clone / push) el worker re-corre el run, y ante
+  // criterios del DoD sin cumplir re-spawnea claude con un retry-prompt.
+  // Con doom loop: 2 intentos seguidos estancados o con regresión cortan el
+  // run y escalan a humano. Rango 1-3, configurable en el tab "Factory".
+  dodMaxAttempts Int @default(1)
+
   updatedAt DateTime @updatedAt
   updatedBy String?
 

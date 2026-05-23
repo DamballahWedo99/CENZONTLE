@@ -6,10 +6,12 @@ import { Monitor, Cpu, Layers, ChevronRight } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { useFactory } from '@/context/FactoryContext';
 import { useEffectiveResourcePool } from '@/hooks/use-effective-resource-pool';
+import { useFactoryMetrics } from '@/hooks/use-factory-metrics';
 import { AgentCard } from '@/components/factory/AgentCard';
 import { AgentDetailDrawer } from '@/components/factory/AgentDetailDrawer';
 import { AgentStatus } from '@cenzontle/shared';
 import type { FactoryAgent, ComputeNode } from '@cenzontle/shared';
+import type { FactoryMetricsBucket } from '@/lib/api/factory';
 
 // === TYPES ===
 
@@ -107,13 +109,36 @@ function useContainerWidth(ref: React.RefObject<HTMLDivElement | null>) {
   return width;
 }
 
-function CapacityChart({ used, total, nodeCount }: { used: number; total: number; nodeCount: number }) {
+function CapacityChart({
+  used,
+  total,
+  nodeCount,
+  apiBuckets,
+}: {
+  used: number;
+  total: number;
+  nodeCount: number;
+  /** Buckets reales del backend (GET /factory/metrics/timeseries). Cuando es
+   *  null, el chart usa el mock seeded — mantiene UX en dev sin backend o
+   *  durante el primer render antes del fetch. */
+  apiBuckets: FactoryMetricsBucket[] | null;
+}) {
   const containerRef = useRef<HTMLDivElement>(null);
   const svgRef = useRef<SVGSVGElement>(null);
   const width = useContainerWidth(containerRef);
 
-  // useState initializer runs once — avoids hydration mismatch from Math.random()
-  const [history] = useState(() => generateCapacityHistory(used, total));
+  // Cambio de useState a useMemo: cuando los buckets llegan del hook
+  // (después del primer fetch), la serie se recalcula. El mock se mantiene
+  // como fallback determinístico para SSR + dev sin backend.
+  const history = useMemo<CapacitySnapshot[]>(() => {
+    if (apiBuckets && apiBuckets.length > 0) {
+      return apiBuckets.map((b) => ({
+        time: new Date(b.time),
+        used: b.capacityUsed,
+      }));
+    }
+    return generateCapacityHistory(used, total);
+  }, [apiBuckets, used, total]);
 
   const pct = total > 0 ? (used / total) * 100 : 0;
   const textColor = pct < 50 ? 'text-green-400' : pct < 80 ? 'text-amber-400' : 'text-red-400';
@@ -221,14 +246,19 @@ function CapacityChart({ used, total, nodeCount }: { used: number; total: number
       .attr('stroke-width', 1.5);
 
     // --- Current value dot (pulsing via CSS) ---
+    // Defensive: si por alguna razón history viene vacío (apiBuckets [] del
+    // backend antes del fallback al mock), saltamos el dot en lugar de
+    // crashear con undefined.time (qa-reviewer 2026-05-19).
     const last = history[history.length - 1];
-    g.append('circle')
-      .attr('cx', x(last.time))
-      .attr('cy', y(last.used))
-      .attr('r', 4)
-      .attr('fill', dotColor)
-      .attr('stroke', '#0F172A')
-      .attr('stroke-width', 1.5);
+    if (last) {
+      g.append('circle')
+        .attr('cx', x(last.time))
+        .attr('cy', y(last.used))
+        .attr('r', 4)
+        .attr('fill', dotColor)
+        .attr('stroke', '#0F172A')
+        .attr('stroke-width', 1.5);
+    }
 
     // --- X Axis ---
     const xAxis = d3.axisBottom(x)
@@ -331,16 +361,42 @@ function formatTokensShort(v: number): string {
 
 const TOKEN_GRADIENT_ID = 'token-bar-gradient';
 
-function TokenBurnChart({ totalTokens }: { totalTokens: number }) {
+function TokenBurnChart({
+  totalTokens,
+  apiBuckets,
+}: {
+  totalTokens: number;
+  /** Buckets reales del backend. Cuando es null, fallback a mock seeded. */
+  apiBuckets: FactoryMetricsBucket[] | null;
+}) {
   const containerRef = useRef<HTMLDivElement>(null);
   const svgRef = useRef<SVGSVGElement>(null);
   const width = useContainerWidth(containerRef);
 
-  // useState initializer runs once — avoids hydration mismatch from Math.random()
-  const [history] = useState(() => generateTokenHistory(totalTokens));
+  // Igual que en CapacityChart: useMemo en lugar de useState initializer
+  // para reaccionar a la llegada de datos del hook. El total se deriva del
+  // bucket sumado cuando hay datos reales, fallback al scalar del context
+  // (mock) cuando no.
+  const history = useMemo<TokenSnapshot[]>(() => {
+    if (apiBuckets && apiBuckets.length > 0) {
+      return apiBuckets.map((b) => ({
+        time: new Date(b.time),
+        // Para el Token Burn Rate solo contamos tokens "nuevos" (input +
+        // output + cache_creation). Los cached (cache_read) se cobran a 10%
+        // del precio y representan re-lectura del prompt cache — incluirlos
+        // infla la métrica sin reflejar el costo real.
+        tokens: b.tokensNew,
+      }));
+    }
+    return generateTokenHistory(totalTokens);
+  }, [apiBuckets, totalTokens]);
 
-  const currentHourTokens = history[history.length - 1].tokens;
-  const avgTokens = Math.round(history.reduce((s, d) => s + d.tokens, 0) / history.length);
+  // Defensive: history puede ser [] si apiBuckets viene vacío del backend.
+  // Sin guard, `history[length-1].tokens` y la división por length=0 (NaN)
+  // crashean el chart (qa-reviewer 2026-05-19).
+  const currentHourTokens = history.length > 0 ? history[history.length - 1].tokens : 0;
+  const sumTokens = history.reduce((s, d) => s + d.tokens, 0);
+  const avgTokens = history.length > 0 ? Math.round(sumTokens / history.length) : 0;
 
   const height = 140;
   const margin = { top: 12, right: 48, bottom: 24, left: 42 };
@@ -455,7 +511,7 @@ function TokenBurnChart({ totalTokens }: { totalTokens: number }) {
             <span className="inline-block h-[2px] w-3 rounded" style={{ backgroundColor: '#38BDF8', opacity: 0.6 }} />avg
           </span>
           <span className="text-[10px] text-muted-foreground/70">
-            Total: {formatTokensShort(totalTokens)} · 24h
+            Total: {formatTokensShort(apiBuckets ? sumTokens : totalTokens)} · 24h
           </span>
         </div>
       </div>
@@ -656,6 +712,12 @@ export function AgentGrid({ initialAgentId }: AgentGridProps = {}) {
   // dentro de máximo 5s.
   const effectivePool = useEffectiveResourcePool(state.factory.resourcePool);
 
+  // Timeseries 24h para los charts CapacityChart + TokenBurnChart. Polling
+  // 30s (más lento que el pool de 5s — la granularidad horaria del chart no
+  // justifica refresh más frecuente). `null` mientras carga o si el endpoint
+  // falla; los charts caen al mock seeded en ese caso.
+  const metrics = useFactoryMetrics();
+
   // Construye FactoryAgents derivados de los active runs del backend
   // (nodes[*].agents). Cada slot ocupado en un nodo se convierte en un
   // FactoryAgent placeholder con campos default — la story ya tiene
@@ -745,7 +807,7 @@ export function AgentGrid({ initialAgentId }: AgentGridProps = {}) {
 
   const handleSelectAgent = useCallback(
     (agentId: string) => {
-      window.open(`/factory/agents/${agentId}/terminal`, '_blank');
+      window.open(`/factory/agents/${agentId}/terminal`, '_blank', 'noopener,noreferrer');
     },
     [],
   );
@@ -790,10 +852,24 @@ export function AgentGrid({ initialAgentId }: AgentGridProps = {}) {
         </div>
       </div>
 
-      {/* Fleet metrics */}
+      {/* Fleet metrics — el chart usa números autoritativos del endpoint
+          /factory/metrics/timeseries cuando está cargado. Caer al
+          effectivePool solo cuando metrics aún no llegó (primer render),
+          porque effectivePool puede mostrar el mock del FactoryContext
+          (3 slots ocupados ficticios) cuando no hay nodos reales registrados.
+          `??` (no `||`) preserva el `0` legítimo del backend — "no hay runs
+          activos" es información, no ausencia de información. */}
       <div className="grid grid-cols-1 xl:grid-cols-2 gap-4">
-        <CapacityChart used={usedSlots} total={totalSlots} nodeCount={machines.length} />
-        <TokenBurnChart totalTokens={state.factory.totalTokens} />
+        <CapacityChart
+          used={metrics?.currentCapacityUsed ?? usedSlots}
+          total={metrics?.currentCapacityTotal ?? totalSlots}
+          nodeCount={metrics?.onlineNodeCount ?? machines.length}
+          apiBuckets={metrics?.buckets ?? null}
+        />
+        <TokenBurnChart
+          totalTokens={state.factory.totalTokens}
+          apiBuckets={metrics?.buckets ?? null}
+        />
       </div>
 
       {/* Content based on view mode */}
