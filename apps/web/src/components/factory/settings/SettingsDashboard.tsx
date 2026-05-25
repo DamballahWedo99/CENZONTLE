@@ -68,6 +68,7 @@ import {
   AlertTriangle,
   GitPullRequest,
   PencilLine,
+  Palette,
 } from 'lucide-react';
 import { LinearIcon } from '@/components/icons/LinearIcon';
 import { AnthropicIcon } from '@/components/icons/AnthropicIcon';
@@ -79,6 +80,7 @@ import { AgentTokensSection } from './AgentTokensSection';
 import { AnthropicApiKeySection } from './AnthropicApiKeySection';
 import { ForgeKillSwitchSection } from './ForgeKillSwitchSection';
 import { GenerateTokenDialog } from './GenerateTokenDialog';
+import { BrandingSection } from './BrandingSection';
 import {
   getComputeNodes,
   createComputeNode,
@@ -111,7 +113,7 @@ import {
 // Types
 // ---------------------------------------------------------------------------
 
-type SettingsSection = 'branches' | 'linear' | 'vault' | 'codigo' | 'external-secrets' | 'nodes' | 'kill-switch' | 'agents' | 'agent-tokens' | 'anthropic-key' | 'dod' | 'pods' | 'team' | 'roles';
+type SettingsSection = 'branches' | 'linear' | 'vault' | 'codigo' | 'external-secrets' | 'nodes' | 'kill-switch' | 'agents' | 'agent-tokens' | 'anthropic-key' | 'dod' | 'pods' | 'team' | 'roles' | 'branding';
 
 interface SidebarItem {
   id: SettingsSection;
@@ -139,9 +141,13 @@ const SIDEBAR_ITEMS: SidebarItem[] = [
   { id: 'pods', label: 'Células', icon: Boxes, group: 'Ecosistema' },
   { id: 'team', label: 'Equipo', icon: Users, group: 'Ecosistema' },
   { id: 'roles', label: 'Roles y permisos', icon: Shield, group: 'Ecosistema' },
+  // Identidad de marca — customización por organización del logo (sidebar
+  // expandido/colapsado) y favicon de la pestaña. Restringido a Alta
+  // Gerencia (gate por grupo en el sidebar render + MANAGE_BRANDING en API).
+  { id: 'branding', label: 'Marca', icon: Palette, group: 'Identidad' },
 ];
 
-const SIDEBAR_GROUPS = ['Control de código', 'Integraciones', 'Infraestructura', 'Automatización', 'Ecosistema'];
+const SIDEBAR_GROUPS = ['Control de código', 'Integraciones', 'Infraestructura', 'Automatización', 'Ecosistema', 'Identidad'];
 
 // ---------------------------------------------------------------------------
 // Shared helpers
@@ -2903,6 +2909,8 @@ function SectionContent({ section }: { section: SettingsSection }) {
       return <TeamSection />;
     case 'roles':
       return <RolesPermissionsSection />;
+    case 'branding':
+      return <BrandingSection />;
     default:
       return null;
   }
@@ -2970,6 +2978,7 @@ export function SettingsDashboard() {
             const items = SIDEBAR_ITEMS.filter((item) => item.group === group)
               .filter((item) => {
                 if (item.group === 'Ecosistema' && !hasRole(UserRole.AltaGerencia)) return false;
+                if (item.group === 'Identidad' && !hasRole(UserRole.AltaGerencia)) return false;
                 return true;
               });
             if (items.length === 0) return null;

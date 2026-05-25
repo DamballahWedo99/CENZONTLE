@@ -47,6 +47,7 @@ import { useAuth } from "@/hooks/use-auth"
 import { CaretSortIcon } from "@radix-ui/react-icons"
 import { useSidebar } from "@/components/ui/sidebar"
 import { SidebarLogo } from "@/components/sidebar-logo"
+import { useBranding } from "@/context/BrandingContext"
 
 
 import { useAuthContext } from "@/context/AuthContext"
@@ -89,6 +90,7 @@ export function AppSidebar({ ...props }: React.ComponentProps<typeof Sidebar>) {
   const pathname = usePathname()
   const { user, logout } = useAuth()
   const { state, isMobile } = useSidebar()
+  const { branding, assetUrl } = useBranding()
 
 
   const { currentUser } = useAuthContext()
@@ -132,13 +134,15 @@ export function AppSidebar({ ...props }: React.ComponentProps<typeof Sidebar>) {
         {state === "collapsed" ? (
           <SidebarLogo />
         ) : (
-          <div className="flex items-center justify-center px-3">
+          <div className="flex items-center justify-center px-3" data-testid="sidebar-logo-expanded">
             <Image
-              src="/Logo.svg"
-              alt="CENZONTLE"
+              key={assetUrl('logo')}
+              src={assetUrl('logo')}
+              alt={branding.companyName}
               width={153}
               height={25}
-              className="object-contain dark:invert"
+              unoptimized
+              className="object-contain max-h-7 w-auto dark:invert"
             />
           </div>
         )}

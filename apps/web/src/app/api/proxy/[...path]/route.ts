@@ -107,6 +107,17 @@ async function proxyRequest(
   const contentType = request.headers.get('content-type');
   if (contentType) headers['Content-Type'] = contentType;
 
+  // Forward Origin/Referer para que módulos del backend que implementan
+  // defense-in-depth CSRF (e.g. branding-settings) puedan validar contra
+  // su allowlist. Sin esto, el backend ve `undefined` en ambos y debe
+  // fail-open al asumir que es un client API legítimo. CON esto, un PATCH
+  // legítimo del browser lleva el Origin del frontend; un atacante cross-
+  // origin lleva su propio Origin → el backend lo rechaza.
+  const origin = request.headers.get('origin');
+  if (origin) headers['Origin'] = origin;
+  const referer = request.headers.get('referer');
+  if (referer) headers['Referer'] = referer;
+
   try {
     // Forward raw body (funciona para JSON y multipart)
     const hasBody = !['GET', 'HEAD'].includes(request.method);

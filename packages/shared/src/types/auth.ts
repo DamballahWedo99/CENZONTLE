@@ -77,6 +77,11 @@ export enum Permission {
   // de MANAGE_INTEGRATIONS porque operaciones cripto (encrypt/rotate/delete)
   // son más sensibles y queremos poder otorgar/revocar independiente.
   MANAGE_EXTERNAL_SECRETS = 'manage:external_secrets',
+  // Branding de la organización (logo, favicon, nombre). Restringido a Alta
+  // Gerencia porque cambia la identidad visual que ven TODOS los usuarios —
+  // un cambio accidental tendría blast radius global. El endpoint GET es
+  // público (sin permiso); solo PATCH/POST/DELETE requieren este permiso.
+  MANAGE_BRANDING = 'manage:branding',
 
   // View
   VIEW_ALL = 'view:all',
@@ -106,6 +111,7 @@ export const PERMISSION_LABELS: Record<Permission, string> = {
   [Permission.MANAGE_DIAGRAM_THEME]: 'Gestionar tema de diagramas',
   [Permission.MANAGE_AGENT_TOKENS]: 'Gestionar tokens de agentes IA',
   [Permission.MANAGE_EXTERNAL_SECRETS]: 'Gestionar secretos externos',
+  [Permission.MANAGE_BRANDING]: 'Gestionar identidad de marca',
   [Permission.VIEW_ALL]: 'Ver Todo',
 };
 
@@ -137,7 +143,7 @@ export const PERMISSION_CATEGORIES: PermissionCategory[] = [
   },
   {
     label: 'Gestión',
-    permissions: [Permission.MANAGE_DOCUMENTS, Permission.MANAGE_DEPENDENCIES, Permission.MANAGE_USERS, Permission.MANAGE_INTEGRATIONS, Permission.MANAGE_DIAGRAM_THEME, Permission.MANAGE_AGENT_TOKENS, Permission.MANAGE_EXTERNAL_SECRETS],
+    permissions: [Permission.MANAGE_DOCUMENTS, Permission.MANAGE_DEPENDENCIES, Permission.MANAGE_USERS, Permission.MANAGE_INTEGRATIONS, Permission.MANAGE_DIAGRAM_THEME, Permission.MANAGE_AGENT_TOKENS, Permission.MANAGE_EXTERNAL_SECRETS, Permission.MANAGE_BRANDING],
   },
   {
     label: 'Acceso',
@@ -160,6 +166,7 @@ export const DEFAULT_ROLE_PERMISSIONS: Record<UserRole, Permission[]> = {
     Permission.MANAGE_USERS, Permission.MANAGE_INTEGRATIONS, Permission.MANAGE_DIAGRAM_THEME,
     Permission.MANAGE_AGENT_TOKENS,
     Permission.MANAGE_EXTERNAL_SECRETS,
+    Permission.MANAGE_BRANDING,
     Permission.VIEW_ALL,
   ],
   [UserRole.ProductOwner]: [
@@ -202,6 +209,7 @@ export const ROLE_PERMISSIONS: Record<UserRole, Permission[]> = {
     Permission.MANAGE_USERS, Permission.MANAGE_INTEGRATIONS, Permission.MANAGE_DIAGRAM_THEME,
     Permission.MANAGE_AGENT_TOKENS,
     Permission.MANAGE_EXTERNAL_SECRETS,
+    Permission.MANAGE_BRANDING,
     Permission.VIEW_ALL,
   ],
   [UserRole.ProductOwner]: [

@@ -1,4 +1,10 @@
+import type { Metadata } from 'next';
 import { StoryFullPage } from '@/components/proyectos/historias/StoryFullPage';
+
+// Title estático — el template del layout raíz añade el companyName.
+export const metadata: Metadata = {
+  title: 'Historia',
+};
 
 export default async function StoryPageRoute({ params }: { params: Promise<{ id: string }> }) {
   const { id } = await params;

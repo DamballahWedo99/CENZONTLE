@@ -1,8 +1,9 @@
 import type { Metadata } from 'next';
 import { ChangelogPage } from '@/components/proyectos/ChangelogPage';
 
+// Sufijo solo — el template del layout raíz aplica el companyName dinámico.
 export const metadata: Metadata = {
-  title: 'Changelog | CENZONTLE',
+  title: 'Changelog',
   description: 'Historial de cambios en épicas e historias de usuario',
 };
 
