@@ -18,6 +18,7 @@ import {
   type RunDetailResponse,
 } from '@/lib/api/factory';
 import { listDodCriteria, type DodCriterion } from '@/lib/api/dod';
+import { useDocumentTitle } from '@/hooks/use-document-title';
 
 const POLL_INTERVAL_MS = 5_000;
 
@@ -239,6 +240,11 @@ export default function AgentTerminalPage() {
   const params = useParams();
   const agentId = params.id as string;
   const { state } = useFactory();
+  // Title con el ID truncado del run — permite al operador identificar la
+  // pestaña sin abrirla cuando hay varios terminales abiertos. El storyTitle
+  // real podría inyectarse después que el run cargue (via state), pero hoy
+  // el ID es suficiente para distinguir.
+  useDocumentTitle(`Terminal · ${agentId.slice(0, 8)}`);
 
   const mockAgent = useMemo(
     () => state.agents.find((a) => a.id === agentId) ?? null,

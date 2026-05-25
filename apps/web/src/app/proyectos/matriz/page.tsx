@@ -1,8 +1,9 @@
 import type { Metadata } from 'next';
 import { MatrizPage } from '@/components/proyectos/MatrizPage';
 
+// Sufijo solo — el template del layout raíz aplica el companyName dinámico.
 export const metadata: Metadata = {
-  title: 'Matriz de Seguimiento | CENZONTLE',
+  title: 'Matriz de Seguimiento',
   description: 'Matriz de seguimiento de épicas por Célula',
 };
 

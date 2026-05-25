@@ -6,11 +6,15 @@ import { ApiError } from '@/lib/api/client';
 import { getBatchDetail, type BatchDetailResponse } from '@/lib/api/factory';
 import { ArrowLeft, PackageOpen, Loader2 } from 'lucide-react';
 import Link from 'next/link';
+import { useDocumentTitle } from '@/hooks/use-document-title';
 
 const POLL_INTERVAL_MS = 5_000;
 
 export default function BatchDetailPage({ params }: { params: Promise<{ id: string }> }) {
   const { id } = use(params);
+  // Title con el ID del batch en el sufijo — útil cuando el operador tiene
+  // varias pestañas abiertas de distintos batches: ahora distingue por title.
+  useDocumentTitle(`Batch ${id.slice(0, 8)}`);
   const [batch, setBatch] = useState<BatchDetailResponse | null>(null);
   const [loading, setLoading] = useState(true);
   const [notFound, setNotFound] = useState(false);

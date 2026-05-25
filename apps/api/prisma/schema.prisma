@@ -587,6 +587,44 @@ model AgentTokenSettings {
   @@map("agent_token_settings")
 }
 
+/// Configuración singleton de identidad de marca (branding) de la organización.
+///
+/// Permite a cada cliente customizar el logo (sidebar expandido), imagotipo
+/// (sidebar colapsado) y favicon de la pestaña del navegador. Cuando un
+/// storageKey es null, el frontend cae al asset estático default de
+/// CENZONTLE en `/public` (Logo.svg / Imagotipo.svg).
+///
+/// IMPORTANTE: la BD persiste SOLO la storage key opaca del archivo en
+/// disco. Las URLs públicas (`logoUrl`, etc.) que ve el cliente se
+/// construyen en runtime en `toPublic()` del service — combinando un path
+/// configurable y el `updatedAt` como cache buster. Esto evita que un
+/// cambio en el routing del frontend rompa registros históricos en BD.
+///
+/// El endpoint GET es PÚBLICO (sin auth) porque el layout raíz consume el
+/// favicon en SSR antes de Auth0. PATCH/POST/DELETE requieren MANAGE_BRANDING.
+model BrandingSettings {
+  id String @id @default("singleton")
+
+  /// Nombre legible de la organización. Se inyecta en <title> de la página
+  /// y en aria-label del logo. Default "CENZONTLE" mantiene la identidad
+  /// original cuando no se ha customizado nada todavía.
+  companyName String @default("CENZONTLE")
+
+  /// Storage key opaca dentro del bucket S3 (S3_BUCKET) con prefix
+  /// `branding/`. null ⇒ no hay asset custom, frontend usa el fallback
+  /// estático. El URL público se construye dinámicamente en el service
+  /// desde esta key — la BD nunca persiste la URL literal para evitar
+  /// acoplamiento con el routing del frontend o el bucket específico.
+  logoStorageKey          String?
+  logoCollapsedStorageKey String?
+  faviconStorageKey       String?
+
+  updatedAt DateTime @updatedAt
+  updatedBy String?
+
+  @@map("branding_settings")
+}
+
 /// Nodo de cómputo registrado en la flota del Forge. Cada nodo es una
 /// máquina externa (MacBook local, Mac Mini de oficina, futuras VMs) que
 /// corre el binario `factory-worker` y se autoregistra al dashboard usando

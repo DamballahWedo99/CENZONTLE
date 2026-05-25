@@ -9,6 +9,7 @@ import { ResilientThrottlerStorage } from "./common/throttler/resilient-throttle
 import { ThrottlerStorageRedisService } from "@nest-lab/throttler-storage-redis";
 import { PrismaModule } from "./modules/prisma/prisma.module";
 import { RedisModule } from "./modules/redis/redis.module";
+import { S3StorageModule } from "./common/storage/s3-storage.module";
 import { RedisService } from "./modules/redis/redis.service";
 import { ProyectosModule } from "./modules/proyectos/proyectos.module";
 import { FactoryModule } from "./modules/factory/factory.module";
@@ -18,6 +19,7 @@ import { VaultModule } from "./modules/vault/vault.module";
 import { CodeRepositoriesModule } from "./modules/code-repositories/code-repositories.module";
 import { DiagramThemeSettingsModule } from "./modules/diagram-theme-settings/diagram-theme-settings.module";
 import { AgentTokenSettingsModule } from "./modules/agent-token-settings/agent-token-settings.module";
+import { BrandingSettingsModule } from "./modules/branding-settings/branding-settings.module";
 import { ExternalSecretsModule } from "./modules/external-secrets/external-secrets.module";
 import { IntegrationsModule } from "./modules/integrations/integrations.module";
 import { AgentRunRegistryModule } from "./common/services/agent-run-registry.module";
@@ -147,6 +149,7 @@ import { HealthController } from "./health.controller";
     }),
     PrismaModule,
     RedisModule,
+    S3StorageModule,
     VaultModule,
     CodeRepositoriesModule,
     AgentRunRegistryModule,
@@ -156,6 +159,7 @@ import { HealthController } from "./health.controller";
     DocumentsModule,
     DiagramThemeSettingsModule,
     AgentTokenSettingsModule,
+    BrandingSettingsModule,
     ExternalSecretsModule,
     IntegrationsModule,
   ],
