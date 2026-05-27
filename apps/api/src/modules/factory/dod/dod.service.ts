@@ -22,13 +22,14 @@ export interface DodCriterionPublic {
  * valores acá ganan sobre lo que esté en DB para los criterios con `kind`.
  *
  * Orden canónico:
- *  0. code-written          (status quo)
- *  1. acceptance-criteria   (NUEVO — el más citado por las fuentes)
- *  2. tests-passing         (REFINADO — quita threshold arbitrario 90%)
- *  3. no-errors             (status quo)
- *  4. security-scan         (REACTIVADO — must-have para AI agents)
- *  5. pr-created            (status quo)
- *  6. docs-updated          (status quo)
+ *  0. code-written            (status quo)
+ *  1. acceptance-criteria     (NUEVO — el más citado por las fuentes)
+ *  2. tests-passing           (REFINADO — quita threshold arbitrario 90%)
+ *  3. no-errors               (status quo)
+ *  4. security-scan           (REACTIVADO — must-have para AI agents)
+ *  5. design-coverage-check   (NUEVO — Layer 1 sobre componentManifest del diseño)
+ *  6. pr-created              (status quo)
+ *  7. docs-updated            (status quo)
  *
  * Si en el futuro se cambia un criterio estándar (text o description),
  * actualizar acá Y crear migration de backfill para los installs existentes.
@@ -73,6 +74,12 @@ const DEFAULT_DOD_CRITERIA: ReadonlyArray<{
     text: 'Sin vulnerabilidades críticas de seguridad',
     description:
       'Tu código no debe introducir vulnerabilidades de severidad crítica/alta detectables por herramientas estándar (npm audit, dependabot, semgrep). En particular: cero command injection, cero SQL injection, cero secretos hardcoded, cero XSS en componentes que renderean input del usuario. Validá inputs en los boundaries del sistema (endpoints, queries DB, exec de comandos shell).',
+  },
+  {
+    kind: 'design-coverage-check',
+    text: 'Cobertura de componentes del diseño UX/UI',
+    description:
+      'Si la épica tiene diseños UX/UI con un manifest de componentes (sections / react-components extraídos del bundle por `design-bundle.service`), cada componente del manifest DEBE tener una implementación correspondiente en el código del workdir bajo `src/`. El check del worker (Layer 1, no bloqueante) hace grep recursivo del nombre del componente sobre los archivos `.ts/.tsx/.js/.jsx` buscando patrones `function NAME(`, `const NAME =`, `class NAME `, `<NAME ...>`. Si la épica es backend-only o no trae manifest, el check se salta. Si encuentra componentes sin implementación, queda como warn visible en la UI — el operador decide si re-encolar la historia.',
   },
   {
     kind: 'pr-created',
@@ -186,7 +193,8 @@ export class DodService {
   /**
    * Restaura los criterios estándar al estado canónico definido en
    * `DEFAULT_DOD_CRITERIA`. Para cada uno (`code-written`, `acceptance-criteria`,
-   * `tests-passing`, `no-errors`, `security-scan`, `pr-created`, `docs-updated`):
+   * `tests-passing`, `no-errors`, `security-scan`, `design-coverage-check`,
+   * `pr-created`, `docs-updated`):
    *  - Si existe en DB (con cualquier text/description), lo PISA con los
    *    valores canónicos.
    *  - Si NO existe (operador lo borró), lo INSERTA de nuevo.

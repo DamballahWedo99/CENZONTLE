@@ -3,6 +3,7 @@ import {
   Injectable,
 } from '@nestjs/common';
 import {
+  AGENT_TOKEN_BOUNDS,
   type AgentEffortLevel,
   type AgentTokenSettings as AgentTokenSettingsPublic,
   DEFAULT_AGENT_TOKEN_SETTINGS,
@@ -156,12 +157,22 @@ export class AgentTokenSettingsService {
    * que `agent-run.service.ts:claimStory` lo incluya en la response al worker.
    * El worker pasa estos valores al CLI `claude` via `--model` y `--effort`.
    */
-  async getForgeWorker(): Promise<{ model: ForgeWorkerModel; effort: ForgeWorkerEffortLevel }> {
+  async getForgeWorker(): Promise<{
+    model: ForgeWorkerModel;
+    effort: ForgeWorkerEffortLevel;
+    maxRunDurationMs: number;
+  }> {
     // No log aquí — el worker emite `Spawning claude with model=... source=backend`
     // con el valor autoritativo aplicado. El log del lado backend es redundante
     // (cleanup 2026-05-19).
     const s = await this.get();
-    return { model: s.forgeWorkerModel, effort: s.forgeWorkerEffort };
+    return {
+      model: s.forgeWorkerModel,
+      effort: s.forgeWorkerEffort,
+      // Reemplaza el MAX_RUN_DURATION_MS hardcoded del worker (runner.ts:145).
+      // Si el worker recibe valor 0/null, cae al default 30 min en su lado.
+      maxRunDurationMs: s.forgeWorkerMaxRunDurationMs,
+    };
   }
 
   // ─────────────────────────────────────────────────────────────────────
@@ -184,6 +195,7 @@ export class AgentTokenSettingsService {
     diagramThinkingEnabled: boolean;
     forgeWorkerModel: string;
     forgeWorkerEffort: string;
+    forgeWorkerMaxRunDurationMs: number;
     dodVerifierModel: string;
     dodVerifierEffort: string;
     dodMaxAttempts: number;
@@ -227,6 +239,19 @@ export class AgentTokenSettingsService {
       diagramThinkingEnabled: row.diagramThinkingEnabled,
       forgeWorkerModel: forgeModel(row.forgeWorkerModel),
       forgeWorkerEffort: forgeEffort(row.forgeWorkerEffort),
+      // Clamp defensivo del max-run-duration al rango configurado en
+      // AGENT_TOKEN_BOUNDS (5 min .. 2 h). Si la BD tuviera basura legacy
+      // (e.g. 0 por una migración rota o un downgrade), default al
+      // valor de DEFAULT_AGENT_TOKEN_SETTINGS (30 min).
+      forgeWorkerMaxRunDurationMs: Math.min(
+        AGENT_TOKEN_BOUNDS.forgeWorkerMaxRunDurationMs.max,
+        Math.max(
+          AGENT_TOKEN_BOUNDS.forgeWorkerMaxRunDurationMs.min,
+          row.forgeWorkerMaxRunDurationMs > 0
+            ? row.forgeWorkerMaxRunDurationMs
+            : DEFAULT_AGENT_TOKEN_SETTINGS.forgeWorkerMaxRunDurationMs,
+        ),
+      ),
       // DoD verifier — mismo cast defensivo, defaults distintos (haiku+low
       // porque el verifier hace checks atómicos baratos).
       dodVerifierModel: forgeModel(row.dodVerifierModel),

@@ -98,6 +98,15 @@ export class UpdateAgentTokenSettingsDto {
   @IsOptional() @IsIn(FORGE_WORKER_EFFORT_LEVELS as unknown as string[])
   forgeWorkerEffort?: ForgeWorkerEffortLevel;
 
+  @ApiPropertyOptional({
+    minimum: 300_000,
+    maximum: 7_200_000,
+    description:
+      'Max wall-clock duration (ms) que el worker espera al CLI del Forge antes de matar el proceso. Default 1800000 (30 min). Stories con muchos componentes UI o suites de tests grandes pueden necesitar 3600000-5400000 (60-90 min). Min 300000 (5 min). Max 7200000 (2h) — más allá usualmente significa que la story es demasiado grande y deberia dividirse en chunks más chicos antes de subir el timeout.',
+  })
+  @IsOptional() @IsInt() @Min(300_000) @Max(7_200_000)
+  forgeWorkerMaxRunDurationMs?: number;
+
   // ════════════════════════════════════════════════════════════════════
   // DoD Verifier (reviewer agent — Claude Code CLI con --output-format json)
   // ════════════════════════════════════════════════════════════════════

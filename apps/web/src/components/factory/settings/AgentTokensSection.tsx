@@ -325,6 +325,12 @@ export function AgentTokensSection() {
               setSettings((prev) => ({ ...prev, dodMaxAttempts: v }));
               setSavedRecently(false);
             }}
+            // Max run duration del worker (timeout wall-clock)
+            forgeWorkerMaxRunDurationMs={settings.forgeWorkerMaxRunDurationMs}
+            onForgeWorkerMaxRunDurationMsChange={(v) => {
+              setSettings((prev) => ({ ...prev, forgeWorkerMaxRunDurationMs: v }));
+              setSavedRecently(false);
+            }}
           />
         </TabsContent>
       </Tabs>

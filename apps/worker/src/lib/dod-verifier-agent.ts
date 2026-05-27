@@ -631,6 +631,26 @@ export async function runVerifierAgent(input: {
     let stdoutBytes = 0;
     let timedOut = false;
 
+    // === FORENSIC AUDIT (DoD verifier single) ===
+    const verifierUseUserSession = process.env.FACTORY_WORKER_USE_USER_SESSION === '1';
+    const verifierOauthToken = process.env.CLAUDE_CODE_OAUTH_TOKEN;
+    const verifierApiKeyInSecrets = input.externalSecrets.some((s) => s.name === 'ANTHROPIC_API_KEY');
+    logger.warn(
+      {
+        event: 'verifier.spawn.credential_audit',
+        verifier: 'single',
+        useUserSession: verifierUseUserSession,
+        hasOauthToken: !!verifierOauthToken,
+        oauthTokenPrefix: verifierOauthToken?.slice(0, 13) ?? null,
+        apiKeyInOrgSecrets: verifierApiKeyInSecrets,
+        apiKeyInParentEnv: !!process.env.ANTHROPIC_API_KEY,
+        expectedAuthSource: verifierUseUserSession
+          ? (verifierOauthToken ? 'oauth_token' : 'NONE_will_fail')
+          : 'api_key',
+      },
+      `[verifier_audit:single] useUserSession=${verifierUseUserSession} authSource=${verifierUseUserSession ? (verifierOauthToken ? 'oauth' : 'NONE') : 'api_key'}`,
+    );
+
     const child = spawn(sandboxed.bin, sandboxed.args, {
       cwd: input.workdir,
       env: {
@@ -641,7 +661,14 @@ export async function runVerifierAgent(input: {
         PATH: process.env.PATH ?? '',
         USER: process.env.USER ?? '',
         LANG: process.env.LANG ?? 'en_US.UTF-8',
-        ANTHROPIC_API_KEY: input.anthropicApiKey,
+        // FACTORY_WORKER_USE_USER_SESSION=1 → usar CLAUDE_CODE_OAUTH_TOKEN
+        // (generado con `claude setup-token`). Doc oficial:
+        // https://code.claude.com/docs/en/authentication.md
+        ...(verifierUseUserSession
+          ? (verifierOauthToken
+              ? { CLAUDE_CODE_OAUTH_TOKEN: verifierOauthToken }
+              : {})
+          : { ANTHROPIC_API_KEY: input.anthropicApiKey }),
       },
       stdio: ['ignore', 'pipe', 'pipe'],
     });
@@ -1300,6 +1327,27 @@ export async function runVerifierAgentBatch(input: {
     let stdoutBytes = 0;
     let timedOut = false;
 
+    // === FORENSIC AUDIT (DoD verifier batch) ===
+    const batchUseUserSession = process.env.FACTORY_WORKER_USE_USER_SESSION === '1';
+    const batchOauthToken = process.env.CLAUDE_CODE_OAUTH_TOKEN;
+    const batchApiKeyInSecrets = input.externalSecrets.some((s) => s.name === 'ANTHROPIC_API_KEY');
+    logger.warn(
+      {
+        event: 'verifier.spawn.credential_audit',
+        verifier: 'batch',
+        useUserSession: batchUseUserSession,
+        hasOauthToken: !!batchOauthToken,
+        oauthTokenPrefix: batchOauthToken?.slice(0, 13) ?? null,
+        apiKeyInOrgSecrets: batchApiKeyInSecrets,
+        apiKeyInParentEnv: !!process.env.ANTHROPIC_API_KEY,
+        criteriaCount: input.criteria.length,
+        expectedAuthSource: batchUseUserSession
+          ? (batchOauthToken ? 'oauth_token' : 'NONE_will_fail')
+          : 'api_key',
+      },
+      `[verifier_audit:batch] useUserSession=${batchUseUserSession} authSource=${batchUseUserSession ? (batchOauthToken ? 'oauth' : 'NONE') : 'api_key'}`,
+    );
+
     const child = spawn(sandboxed.bin, sandboxed.args, {
       cwd: input.workdir,
       env: {
@@ -1310,7 +1358,14 @@ export async function runVerifierAgentBatch(input: {
         PATH: process.env.PATH ?? '',
         USER: process.env.USER ?? '',
         LANG: process.env.LANG ?? 'en_US.UTF-8',
-        ANTHROPIC_API_KEY: input.anthropicApiKey,
+        // FACTORY_WORKER_USE_USER_SESSION=1 → usar CLAUDE_CODE_OAUTH_TOKEN
+        // (generado con `claude setup-token`). Doc oficial:
+        // https://code.claude.com/docs/en/authentication.md
+        ...(batchUseUserSession
+          ? (batchOauthToken
+              ? { CLAUDE_CODE_OAUTH_TOKEN: batchOauthToken }
+              : {})
+          : { ANTHROPIC_API_KEY: input.anthropicApiKey }),
       },
       stdio: ['ignore', 'pipe', 'pipe'],
     });

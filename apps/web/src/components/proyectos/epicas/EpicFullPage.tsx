@@ -55,6 +55,7 @@ import { SectionTiptapEditor } from '../historias/editor/SectionTiptapEditor';
 import { ReadOnlyMarkdown } from '@/components/shared/tiptap/ReadOnlyMarkdown';
 import { IntegrationSettingsDialog } from '../settings/IntegrationSettingsDialog';
 import { EpicEnqueueDialog } from './EpicEnqueueDialog';
+import { CoverageGate, ForceEnqueueDialog } from './CoverageGate';
 import { EpicStoryList } from './EpicStoryList';
 import { StoryAgentPromptBar } from './StoryAgentPromptBar';
 import { StoryProposalList } from './StoryProposalList';
@@ -94,6 +95,7 @@ import {
   Palette,
   ExternalLink,
   Loader2,
+  AlertTriangle,
 } from 'lucide-react';
 import { LinearIcon } from '@/components/icons/LinearIcon';
 import { Tooltip, TooltipTrigger, TooltipContent, TooltipProvider } from '@/components/ui/tooltip';
@@ -478,6 +480,13 @@ function EpicFullPageInner({ epicId }: { epicId: string }) {
   };
   const [showIntegrationDialog, setShowIntegrationDialog] = useState(false);
   const [showEnqueueDialog, setShowEnqueueDialog] = useState(false);
+  // Coverage gate state — defaultea a `true` (no bloquear) hasta que el
+  // CoverageGate confirme que hay uncovered components. Sin la default a
+  // true, una épica sin bundle quedaría con el botón deshabilitado durante
+  // el primer render mientras el hook resuelve.
+  const [coverageCanEnqueue, setCoverageCanEnqueue] = useState(true);
+  const [coverageUncovered, setCoverageUncovered] = useState<string[]>([]);
+  const [showForceEnqueueDialog, setShowForceEnqueueDialog] = useState(false);
   const [editTitle, setEditTitle] = useState('');
   /** Markdown único de la épica — reemplaza description + 11 sub-campos del shape v1. */
   const [editMarkdown, setEditMarkdown] = useState('');
@@ -956,6 +965,13 @@ function EpicFullPageInner({ epicId }: { epicId: string }) {
         // backend.
         sourceClientId: proposal.clientId,
         blockedBy: proposal.blockedBy,
+        // BUG FIX 2026-05-26: el PO agent emite `componentsCovered` en la
+        // proposal pero el frontend lo descartaba acá — sin este campo el
+        // INSERT recibía undefined y persistía como `[]` en BD, dejando el
+        // coverage gate en 0/N pese a que el PO hubiera cubierto todo.
+        // El campo es opcional en `CreateStoryInput` — si la proposal no lo
+        // trae (épica sin manifest), pasamos `undefined` y backend default a `[]`.
+        componentsCovered: (proposal as { componentsCovered?: string[] }).componentsCovered,
       });
 
       const nowIso = new Date().toISOString();
@@ -1426,15 +1442,77 @@ function EpicFullPageInner({ epicId }: { epicId: string }) {
                         <p className="text-xs font-semibold text-green-700 dark:text-green-400">Épica Lista</p>
                         <p className="text-[11px] text-green-600/80 dark:text-green-400/60">Protocolo completo y aprobado por PO, TL y QA</p>
                       </div>
-                      <Button
-                        size="sm"
-                        onClick={() => setShowEnqueueDialog(true)}
-                        className="gap-1.5 bg-green-600 hover:bg-green-700 text-white shrink-0"
-                      >
-                        <Upload className="h-3.5 w-3.5" />
-                        Subir tarjetas
-                      </Button>
+                      <div className="flex items-center gap-2 shrink-0">
+                        {coverageCanEnqueue ? (
+                          <Button
+                            size="sm"
+                            onClick={() => setShowEnqueueDialog(true)}
+                            className="gap-1.5 bg-green-600 hover:bg-green-700 text-white"
+                          >
+                            <Upload className="h-3.5 w-3.5" />
+                            Subir tarjetas
+                          </Button>
+                        ) : (
+                          <>
+                            <Tooltip>
+                              <TooltipTrigger asChild>
+                                {/* Wrapper span necesario: tooltip no se dispara
+                                    sobre botones disabled (Radix limitation) */}
+                                <span className="inline-flex">
+                                  <Button
+                                    size="sm"
+                                    disabled
+                                    className="gap-1.5 bg-green-600 text-white pointer-events-none"
+                                    aria-disabled="true"
+                                  >
+                                    <Upload className="h-3.5 w-3.5" />
+                                    Subir tarjetas
+                                  </Button>
+                                </span>
+                              </TooltipTrigger>
+                              <TooltipContent className="max-w-xs">
+                                <p className="text-xs font-medium mb-1">
+                                  Cobertura incompleta
+                                </p>
+                                <p className="text-[11px] leading-relaxed">
+                                  Faltan stories para:{' '}
+                                  <span className="font-mono">
+                                    {coverageUncovered.join(', ')}
+                                  </span>
+                                </p>
+                              </TooltipContent>
+                            </Tooltip>
+                            <Button
+                              size="sm"
+                              variant="outline"
+                              onClick={() => setShowForceEnqueueDialog(true)}
+                              className="gap-1.5 border-amber-500 text-amber-700 hover:bg-amber-50 dark:text-amber-400 dark:hover:bg-amber-950/40"
+                            >
+                              <AlertTriangle className="h-3.5 w-3.5" />
+                              Forzar envío
+                            </Button>
+                          </>
+                        )}
+                      </div>
                     </div>
+                  )}
+                  {/* Coverage gate UI — debajo del botón "Subir tarjetas".
+                      Solo se renderiza si la épica tiene designs; el
+                      componente decide internamente si mostrar nada
+                      (legacy/error) o el bloque completo. */}
+                  {epic && (
+                    <CoverageGate
+                      epicId={epic.id}
+                      epicHasDesigns={(epic.designs?.length ?? 0) > 0}
+                      onCanEnqueueChange={setCoverageCanEnqueue}
+                      onStateChange={(s) => {
+                        if (s.kind === 'ready') {
+                          setCoverageUncovered(s.data.summary.uncoveredComponents);
+                        } else {
+                          setCoverageUncovered([]);
+                        }
+                      }}
+                    />
                   )}
                   {epic && (
                     <EpicEnqueueDialog
@@ -1462,6 +1540,26 @@ function EpicFullPageInner({ epicId }: { epicId: string }) {
                             },
                           },
                         });
+                      }}
+                    />
+                  )}
+                  {epic && (
+                    <ForceEnqueueDialog
+                      open={showForceEnqueueDialog}
+                      onOpenChange={setShowForceEnqueueDialog}
+                      uncoveredComponents={coverageUncovered}
+                      onConfirm={async (justification) => {
+                        // Tras confirmar el "Forzar envío", abrimos el
+                        // dialog normal de envío. La justificación se
+                        // anexa al toast del enqueue para que QA pueda
+                        // reproducir el contexto del bypass. Un PR
+                        // posterior la persistirá en el ChangelogEntry
+                        // como newValue del enqueue forzado.
+                        toast.warning('Envío forzado al Forge', {
+                          description: `Justificación: ${justification}`,
+                        });
+                        setShowForceEnqueueDialog(false);
+                        setShowEnqueueDialog(true);
                       }}
                     />
                   )}

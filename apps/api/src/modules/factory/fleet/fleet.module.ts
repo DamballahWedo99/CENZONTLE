@@ -2,13 +2,12 @@ import { Module } from '@nestjs/common';
 import { ScheduleModule } from '@nestjs/schedule';
 import { FleetController } from './fleet.controller';
 import { WorkerApiController } from './worker-api.controller';
-import { OrgAnthropicConfigController } from './org-anthropic-config.controller';
 import { FleetService } from './fleet.service';
 import { FleetSweeperService } from './fleet-sweeper.service';
 import { WorkerTokenService } from './worker-token.service';
 import { WorkerAuthGuard } from './worker-auth.guard';
 import { AgentRunService } from './agent-run.service';
-import { OrgAnthropicConfigService } from './org-anthropic-config.service';
+import { OrgAnthropicConfigModule } from '../../org-anthropic-config/org-anthropic-config.module';
 import { ForgePromptBuilderService } from './forge-prompt-builder.service';
 import { ConflictResolverService } from './conflict-resolver.service';
 import { ForgePlannerService } from './forge-planner.service';
@@ -49,16 +48,16 @@ import { ExternalSecretsModule } from '../../external-secrets/external-secrets.m
     DodModule,
     FactoryAuthzModule,
     ExternalSecretsModule,
+    OrgAnthropicConfigModule,
     ScheduleModule.forRoot(),
   ],
-  controllers: [FleetController, WorkerApiController, OrgAnthropicConfigController],
+  controllers: [FleetController, WorkerApiController],
   providers: [
     FleetService,
     FleetSweeperService,
     WorkerTokenService,
     WorkerAuthGuard,
     AgentRunService,
-    OrgAnthropicConfigService,
     ForgePromptBuilderService,
     ConflictResolverService,
     ForgePlannerService,
@@ -67,7 +66,10 @@ import { ExternalSecretsModule } from '../../external-secrets/external-secrets.m
     FleetService,
     WorkerTokenService,
     AgentRunService,
-    OrgAnthropicConfigService,
+    // Re-export del módulo (no del service directo) — patrón NestJS correcto
+    // para re-exportar providers de módulos importados. Consumers que importen
+    // FleetModule reciben OrgAnthropicConfigService transitivamente.
+    OrgAnthropicConfigModule,
     ForgePromptBuilderService,
     ConflictResolverService,
     ForgePlannerService,

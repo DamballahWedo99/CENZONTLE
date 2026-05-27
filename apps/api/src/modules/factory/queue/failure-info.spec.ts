@@ -201,8 +201,12 @@ describe('extractFailureInfo', () => {
     expect(extractFailureInfo(dod, null).criteria[0].reason).toBe('stderr dump');
   });
 
-  it('trunca el reason a 200 chars con elipsis', () => {
-    const longReason = 'x'.repeat(500);
+  it('trunca el reason a 500 chars con elipsis', () => {
+    // El cap es 500 (no 200 como decía el test viejo) — alineado con
+    // REASON_MAX_CHARS de failure-info.ts. Subió de 200→500 cuando el DTO
+    // permite reasons de hasta 2000 chars (Layer 3 verifier emite reasons
+    // detallados que el operador necesita ver en el panel de revisión).
+    const longReason = 'x'.repeat(800);
     const dod = [
       {
         attempt: 1,
@@ -212,7 +216,7 @@ describe('extractFailureInfo', () => {
       },
     ];
     const reason = extractFailureInfo(dod, null).criteria[0].reason;
-    expect(reason).toHaveLength(201); // 200 + '…'
+    expect(reason).toHaveLength(501); // 500 + '…'
     expect(reason.endsWith('…')).toBe(true);
   });
 

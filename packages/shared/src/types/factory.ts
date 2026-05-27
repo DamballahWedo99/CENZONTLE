@@ -639,6 +639,13 @@ export interface ClaimedStory {
    *  high | xhigh | max. Para Sonnet/Opus, high+ activa extended thinking
    *  automático. Worker prioriza esto sobre `process.env.CLAUDE_EFFORT`. */
   forgeWorkerEffort: string;
+  /** Max wall-clock duration (ms) que el worker espera al CLI antes de
+   *  matar el proceso. Reemplaza el MAX_RUN_DURATION_MS hardcoded del worker
+   *  (runner.ts:145). Configurado desde `/factory/settings → tab Factory`,
+   *  default backend 1_800_000 (30 min), rango 300_000-7_200_000 (5 min-2h).
+   *  OPCIONAL: un worker nuevo con claim de backend viejo lo recibe
+   *  undefined y degrada al default local 30 min. */
+  forgeWorkerMaxRunDurationMs?: number;
   /** Modelo del DoD Verifier (reviewer agent CLI). Configurado desde la
    *  misma tab Factory de settings. Worker lo usa con prioridad sobre
    *  `process.env.DOD_VERIFIER_MODEL`. */
@@ -691,6 +698,21 @@ export interface ClaimedStory {
    *  Array vacío si la story no tiene markdown técnico o el parser no
    *  encontró ninguna sección — el verifier degrada a "no aplica". */
   technicalRequirements?: TechnicalRequirement[];
+  /** Manifests de componentes extraídos del bundle de diseño UX/UI de la
+   *  épica (uno por diseño). El worker los usa para el Layer 1 check
+   *  `design-coverage-check`: para cada componente del manifest hace grep
+   *  recursivo en `${workdir}/src` y reporta los faltantes como warn (NO
+   *  bloqueante, consistente con `security-scan` y `docs-updated`).
+   *
+   *  Stream A (`design-bundle.service` + `story-generation.service`) emite
+   *  los manifests al armar el claim. OPCIONAL en el contrato porque:
+   *   - durante deploys parciales, un worker nuevo puede recibir un claim
+   *     de un backend viejo que aún no extrae manifests — degrada a skip.
+   *   - épicas backend-only (sin UI / `designSkipped=true`) NO traen
+   *     manifests — degrada a skip.
+   *
+   *  Array vacío y `undefined` se tratan igual por el worker. */
+  componentManifests?: ComponentManifest[];
 }
 
 /**
@@ -707,6 +729,55 @@ export interface QaTestCase {
    *  markdown (e.g. "input vacío debe retornar 400"). Es el `label` que
    *  ve el verifier y la UI. */
   description: string;
+}
+
+/**
+ * Componente individual extraído del bundle de diseño UX/UI de una épica.
+ * Cada componente representa una sección o react-component que debe estar
+ * implementado en el código del workdir tras el run del coder. Lo usa el
+ * Layer 1 check `design-coverage-check` del worker para verificar que el
+ * agente no se haya saltado ningún componente del manifest del diseño.
+ *
+ * El extractor canónico vive en el backend (Stream A: epics/design-bundle
+ * service) y emite estos shapes como parte del bundle de cada diseño.
+ * `startLine`/`endLine` son metadata del extractor — el worker NO los usa
+ * para el check, solo `name` (para el grep) y `kind` (para tracing en logs).
+ */
+export interface DesignManifestComponent {
+  /** Nombre del componente — debe ser un identificador exportable válido
+   *  (PascalCase típicamente). Usado por el worker como anchor de grep
+   *  para verificar que el coder lo implementó. */
+  name: string;
+  /** Tipo del componente: `section` (bloque dentro de un parent file) o
+   *  `react-component` (componente exportado/declarado). El worker hace el
+   *  mismo grep para ambos — la distinción es solo para forensics. */
+  kind: 'section' | 'react-component';
+  /** Línea inicial del componente en el `primaryFilePath` original. */
+  startLine: number;
+  /** Línea final del componente en el `primaryFilePath` original. */
+  endLine: number;
+  /** Path al archivo donde se extrajo el componente (relativo al vault). */
+  filePath: string;
+}
+
+/**
+ * Manifest de componentes asociado a un diseño UX/UI de la épica. Lo emite
+ * el extractor del backend (Stream A: `design-bundle.service`) al parsear
+ * el bundle del diseño. Llega al worker como parte de `ClaimedStory` para
+ * que el Layer 1 check `design-coverage-check` valide que cada componente
+ * está implementado en el código del workdir tras el run del coder.
+ */
+export interface ComponentManifest {
+  /** Lista de componentes que el diseño espera del coder. Vacío si el
+   *  extractor no encontró nada parseable — el worker degrada a skip. */
+  components: DesignManifestComponent[];
+  /** Path al archivo principal del bundle (HTML/JSX/TSX) — usado por
+   *  forensics. El check NO depende de este archivo: hace grep recursivo
+   *  por nombre de componente. */
+  primaryFilePath: string;
+  /** Timestamp ISO de cuando el extractor emitió el manifest. Solo trazado
+   *  — el worker no toma decisiones basadas en este valor. */
+  extractedAt: string;
 }
 
 /**

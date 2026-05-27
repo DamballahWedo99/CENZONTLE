@@ -163,7 +163,7 @@ describe('Prompt cache anti-thrashing fix — source-level regression', () => {
       it('usa messages.create() (no stream) — single-turn agent', () => {
         // Validación cruzada: el layout pass agent es el ÚNICO que usa create()
         // en este archivo. Confirma que el fix no lo migró accidentalmente.
-        expect(DIAGRAM_SERVICE).toMatch(/this\.client\.messages\.create\(/);
+        expect(DIAGRAM_SERVICE).toMatch(/client\.messages\.create\(/);
       });
     });
 
@@ -215,7 +215,7 @@ describe('Prompt cache anti-thrashing fix — source-level regression', () => {
     });
 
     it('usa messages.stream() (no create) — multi-turn agent loop', () => {
-      expect(EPIC_SERVICE).toMatch(/this\.client\.messages\.stream\(/);
+      expect(EPIC_SERVICE).toMatch(/client\.messages\.stream\(/);
     });
   });
 
@@ -455,7 +455,7 @@ describe('Prompt cache anti-thrashing fix — source-level regression', () => {
       expect(DIAGRAM_SERVICE).not.toMatch(/type:\s*'advisor_20260301'/);
       expect(DIAGRAM_SERVICE).not.toMatch(/'anthropic-beta':\s*'[^']*advisor-tool-2026-03-01/);
       // Tampoco debe usar el namespace beta (sin advisor no hace falta).
-      expect(DIAGRAM_SERVICE).not.toMatch(/this\.client\.beta\.messages\.stream\(/);
+      expect(DIAGRAM_SERVICE).not.toMatch(/client\.beta\.messages\.stream\(/);
     });
 
     it('los 3 servicios pasan defaultHeaders al constructor de Anthropic', () => {
@@ -570,7 +570,7 @@ describe('Prompt cache anti-thrashing fix — source-level regression', () => {
     it('story-generation usa client.beta.messages.stream() (NO el namespace standard)', () => {
       // Sin el namespace beta, el header `advisor-tool-2026-03-01` se ignora
       // y el advisor nunca se invoca aunque esté declarado en `tools`.
-      expect(STORY_SERVICE).toMatch(/this\.client\.beta\.messages\.stream\(/);
+      expect(STORY_SERVICE).toMatch(/client\.beta\.messages\.stream\(/);
     });
 
     it('story-generation pasa betas con extended-cache-ttl + advisor-tool en cada llamada beta', () => {

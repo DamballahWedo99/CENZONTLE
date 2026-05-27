@@ -2,12 +2,12 @@ import {
   BadRequestException,
   Injectable,
 } from '@nestjs/common';
-import { ConfigService } from '@nestjs/config';
 import { Prisma } from '@prisma/client';
 import Anthropic from '@anthropic-ai/sdk';
 import { anthropicFetch } from '../../../../lib/anthropic-fetch';
 import { Subject } from 'rxjs';
 import { PrismaService } from '../../../prisma/prisma.service';
+import { OrgAnthropicConfigService } from '../../../org-anthropic-config/org-anthropic-config.service';
 import { InitiativeDocumentsTool } from '../../../factory/agent-tools/initiative-documents.tool';
 import { CodeGlobTool } from '../../../factory/agent-tools/code-glob.tool';
 import { CodeGrepTool } from '../../../factory/agent-tools/code-grep.tool';
@@ -255,16 +255,31 @@ type EpicContext = {
    */
   markdown: string;
   initiative: { id: string; name: string; description: string };
+  /**
+   * Component manifests extraídos del bundle de Claude Design (2026-05-25).
+   * Lista de componentes top-level del HTML del referencia que el diagrama
+   * DEBE incluir como nodos. Si la épica no tiene bundle, este array está
+   * vacío y el agente sigue su lógica histórica.
+   */
+  componentManifests?: Array<{
+    components: Array<{
+      name: string;
+      kind: 'section' | 'react-component';
+      startLine: number;
+      endLine: number;
+      filePath: string;
+    }>;
+    primaryFilePath: string;
+  }>;
 };
 
 @Injectable()
 export class DiagramGenerationService {
-  private readonly client: Anthropic;
   private readonly tools: AgentTool[];
 
   constructor(
-    private readonly config: ConfigService,
     private readonly prisma: PrismaService,
+    private readonly orgAnthropic: OrgAnthropicConfigService,
     private readonly initDocsTool: InitiativeDocumentsTool,
     private readonly codeGlob: CodeGlobTool,
     private readonly codeGrep: CodeGrepTool,
@@ -279,34 +294,34 @@ export class DiagramGenerationService {
     private readonly tokenSettings: AgentTokenSettingsService,
     @InjectPinoLogger(DiagramGenerationService.name) private readonly logger: PinoLogger,
   ) {
-    const apiKey = this.config.get<string>('ANTHROPIC_API_KEY');
-    if (!apiKey) {
-      this.logger.warn('ANTHROPIC_API_KEY not configured — diagram generation will fail at runtime');
-    }
-    // `timeout: 30 * 60 * 1000` (30 min): override del default del SDK.
-    // El `timeout` cubre la lógica del request — el `terminated` que
-    // veíamos venía de la capa undici subyacente (`bodyTimeout` default
-    // ~5 min). Pasamos `fetch: anthropicFetch` para que el SDK use un
-    // dispatcher con `bodyTimeout: 0`. Ver
-    // `apps/api/src/lib/anthropic-fetch.ts`.
-    // `defaultHeaders.anthropic-beta: extended-cache-ttl-2025-04-11`:
-    // habilita TTL de 1 hora en cache_control. Crítico aquí porque iters
-    // de diagram pueden tomar 5-6 min cada una (output de 20K+ tokens con
-    // thinking extendido), excediendo el TTL default de 5min y forzando
-    // cache_create mid-iter. Ver doc completa en story-generation.
-    this.client = new Anthropic({
-      apiKey: apiKey || undefined,
+    // La API key se resuelve en runtime (por run) desde OrgAnthropicConfigService,
+    // que la lee de la tabla cifrada OrgAnthropicConfig. Esto permite que una
+    // rotación en /factory/settings se aplique INMEDIATAMENTE al siguiente run
+    // sin necesidad de reiniciar el servidor.
+    this.tools = [initDocsTool, codeGlob, codeGrep, codeRead, vaultGlob, vaultGrep, vaultRead];
+  }
+
+  /**
+   * Construye un cliente Anthropic con la API key resuelta desde
+   * OrgAnthropicConfigService. Throws con mensaje claro si la key no está
+   * configurada — el caller debe capturar y emitir SSE error al usuario.
+   *
+   * `timeout: 30 * 60 * 1000` (30 min): override del default del SDK.
+   * `fetch: anthropicFetch`: dispatcher con `bodyTimeout: 0` para tolerar
+   * silencios largos durante extended thinking.
+   * `extended-cache-ttl-2025-04-11`: TTL 1h en cache_control — crítico para
+   * iters de diagram que pueden tomar 5-6 min con thinking extendido.
+   */
+  private async buildClient(): Promise<Anthropic> {
+    const apiKey = await this.orgAnthropic.getApiKeyPlaintext();
+    return new Anthropic({
+      apiKey,
       timeout: 30 * 60 * 1000,
       fetch: anthropicFetch,
       defaultHeaders: {
-        // `extended-cache-ttl-2025-04-11`: TTL 1h en cache_control (vs 5min
-        // default). Crítico para iters de diagram que pueden tomar 5-6 min
-        // cada una con thinking extendido. Ver doc completa en
-        // story-generation.service.ts.
         'anthropic-beta': 'extended-cache-ttl-2025-04-11',
       },
     });
-    this.tools = [initDocsTool, codeGlob, codeGrep, codeRead, vaultGlob, vaultGrep, vaultRead];
   }
 
   /**
@@ -617,16 +632,54 @@ export class DiagramGenerationService {
         subject.complete();
         return;
       }
-      this.logger.error({ err }, `Agent error: ${err.message}`);
+
+      // BUG FIX 2026-05-26: el SDK de Anthropic NO siempre throw Error
+      // standard — a veces son objetos plain con shape `{status, error:
+      // {type, message}}`. El `err.message` queda undefined y el log
+      // anterior decía "Agent error: undefined" sin contexto. Acá
+      // extraemos TODOS los campos diagnósticos posibles para que el
+      // operador vea status code, type de error, y body completo.
+      const errObj = err as {
+        name?: string;
+        message?: string;
+        status?: number;
+        stack?: string;
+        error?: { type?: string; message?: string };
+        headers?: Record<string, string>;
+        request_id?: string;
+      };
+      const status = errObj?.status;
+      const sdkErrorType = errObj?.error?.type ?? null;
+      const sdkErrorMessage = errObj?.error?.message ?? null;
+      const requestId = errObj?.request_id ?? null;
+      const safeMessage = errObj?.message ?? sdkErrorMessage ?? '(no message)';
+      this.logger.error(
+        {
+          event: 'generate.agent_error',
+          epicId,
+          type,
+          userId: user.sub,
+          errName: errObj?.name ?? null,
+          errMessage: safeMessage,
+          httpStatus: status ?? null,
+          sdkErrorType,           // 'authentication_error' | 'rate_limit_error' | 'overloaded_error' | ...
+          sdkErrorMessage,
+          anthropicRequestId: requestId,
+          stack: errObj?.stack ?? null,
+        },
+        `🚨 [generate.agent_error] epic=${epicId} type=${type} status=${status ?? 'n/a'} sdkType=${sdkErrorType ?? 'n/a'} msg="${safeMessage}" requestId=${requestId ?? 'n/a'}`,
+      );
+
       // Surface specific auth failures so the operator knows the problem is
       // the Anthropic API key, not the agent logic.
-      const status = (err as { status?: number })?.status;
       const message = status === 401
-        ? 'Credenciales de Anthropic inválidas o expiradas. Verifica ANTHROPIC_API_KEY en la configuración del servidor.'
+        ? 'Credenciales de Anthropic inválidas o expiradas. Verifica la API key en /factory/settings.'
         : status === 429
         ? 'Límite de uso de Anthropic alcanzado (rate limit o sin créditos). Reintenta en unos minutos.'
         : status === 529
         ? 'API de Anthropic sobrecargada temporalmente. Reintenta.'
+        : status && status >= 500
+        ? `Error ${status} de la API de Anthropic. Reintenta o revisa el log del backend.`
         : 'Error interno al generar el diagrama. Intenta de nuevo.';
       subject.next({ data: { type: 'error', message, timestamp: new Date().toISOString() } });
       subject.complete();
@@ -673,7 +726,7 @@ export class DiagramGenerationService {
       // texto localizado sin branching por tipo de operación.
       const status = (err as { status?: number })?.status;
       const message = status === 401
-        ? 'Credenciales de Anthropic inválidas o expiradas. Verifica ANTHROPIC_API_KEY en la configuración del servidor.'
+        ? 'Credenciales de Anthropic inválidas o expiradas. Verifica la API key en /factory/settings.'
         : status === 429
         ? 'Límite de uso de Anthropic alcanzado (rate limit o sin créditos). Reintenta en unos minutos.'
         : status === 529
@@ -697,6 +750,31 @@ export class DiagramGenerationService {
     const runStartTime = Date.now();
     subject.next({ data: { type: 'run_started', timestamp: new Date().toISOString() } });
 
+    // Resolver API key desde OrgAnthropicConfigService (cifrada en BD,
+    // configurable desde /factory/settings). Failure modes:
+    //  - NotFoundException (404) → key no configurada (UX: pedir al admin)
+    //  - InternalServerError → ciphertext corrupto o VAULT_ENCRYPTION_KEY rotada
+    let client: Anthropic;
+    try {
+      client = await this.buildClient();
+    } catch (err: any) {
+      const isNotConfigured = err?.status === 404 || err?.name === 'NotFoundException';
+      const message = isNotConfigured
+        ? 'Anthropic API key no configurada. Configúrala en /factory/settings antes de generar diagramas.'
+        : 'Error al acceder a la API key de Anthropic. Contacta al administrador del sistema.';
+      this.logger.warn({ err: err?.message, isNotConfigured }, `[DiagramAgent] ${message}`);
+      subject.next({
+        data: {
+          type: 'error',
+          message,
+          timestamp: new Date().toISOString(),
+        },
+      });
+      subject.next({ data: { type: 'run_finished', timestamp: new Date().toISOString(), totalDurationMs: Date.now() - runStartTime } });
+      subject.complete();
+      return;
+    }
+
     subject.next({ data: { type: 'step_start', step: 'loading_context', label: 'Cargando contexto de la épica', timestamp: new Date().toISOString() } });
 
     const epic = await this.prisma.epic.findUnique({
@@ -711,6 +789,46 @@ export class DiagramGenerationService {
       return;
     }
 
+    // BUG FIX 2026-05-25: cargar componentManifests del bundle de Claude
+    // Design para que el agente del diagrama tenga la lista exhaustiva de
+    // componentes a modelar. Sin esto, el diagrama omite secciones del
+    // referencia (Ticker, Destinations, Strip footer, Tweaks panel, etc.)
+    // y solo modela los componentes "evidentes" del markdown del PO.
+    const designs = (epic.designs ?? []) as unknown as Array<{
+      componentManifest?: unknown;
+    }>;
+    const componentManifests = designs
+      .map((d) => d.componentManifest)
+      .filter(
+        (m): m is { components: unknown[]; primaryFilePath: string } =>
+          m !== null &&
+          typeof m === 'object' &&
+          Array.isArray((m as { components?: unknown }).components) &&
+          typeof (m as { primaryFilePath?: unknown }).primaryFilePath === 'string',
+      )
+      .map((m) => ({
+        components: (m.components as unknown[])
+          .filter(
+            (c): c is { name: string; kind: string; startLine: number; endLine: number; filePath: string } =>
+              typeof c === 'object' &&
+              c !== null &&
+              typeof (c as { name?: unknown }).name === 'string' &&
+              (((c as { kind?: unknown }).kind === 'section') ||
+                ((c as { kind?: unknown }).kind === 'react-component')) &&
+              typeof (c as { startLine?: unknown }).startLine === 'number' &&
+              typeof (c as { endLine?: unknown }).endLine === 'number' &&
+              typeof (c as { filePath?: unknown }).filePath === 'string',
+          )
+          .map((c) => ({
+            name: c.name,
+            kind: c.kind as 'section' | 'react-component',
+            startLine: c.startLine,
+            endLine: c.endLine,
+            filePath: c.filePath,
+          })),
+        primaryFilePath: m.primaryFilePath,
+      }));
+
     const epicContext: EpicContext = {
       id: epic.id,
       title: epic.title,
@@ -720,6 +838,7 @@ export class DiagramGenerationService {
         name: epic.initiative.name,
         description: epic.initiative.description,
       },
+      componentManifests: componentManifests.length > 0 ? componentManifests : undefined,
     };
 
     // Pre-check: distingue `created` vs `updated` en el changelog emitido
@@ -876,7 +995,7 @@ export class DiagramGenerationService {
       // `messages.stream()` (vs create) porque Anthropic exige stream cuando
       // el tiempo estimado puede superar 10min — caso común con max_tokens
       // grande + thinking adaptive. `finalMessage()` es drop-in.
-      const stream = this.client.messages.stream(
+      const stream = client.messages.stream(
         {
           model: MODEL,
           // max_tokens INCLUYE thinking_budget + output.
@@ -1529,6 +1648,28 @@ export class DiagramGenerationService {
     const runStartTime = Date.now();
     subject.next({ data: { type: 'run_started', timestamp: new Date().toISOString() } });
 
+    // Resolver API key (mismas failure modes que runAgent — ver comentario allí).
+    let client: Anthropic;
+    try {
+      client = await this.buildClient();
+    } catch (err: any) {
+      const isNotConfigured = err?.status === 404 || err?.name === 'NotFoundException';
+      const message = isNotConfigured
+        ? 'Anthropic API key no configurada. Configúrala en /factory/settings antes de generar el documento de flujo.'
+        : 'Error al acceder a la API key de Anthropic. Contacta al administrador del sistema.';
+      this.logger.warn({ err: err?.message, isNotConfigured }, `[IntegrationDocAgent] ${message}`);
+      subject.next({
+        data: {
+          type: 'error',
+          message,
+          timestamp: new Date().toISOString(),
+        },
+      });
+      subject.next({ data: { type: 'run_finished', timestamp: new Date().toISOString(), totalDurationMs: Date.now() - runStartTime } });
+      subject.complete();
+      return;
+    }
+
     subject.next({
       data: {
         type: 'step_start',
@@ -1587,6 +1728,46 @@ export class DiagramGenerationService {
       return;
     }
 
+    // BUG FIX 2026-05-25: cargar componentManifests del bundle de Claude
+    // Design para que el agente del diagrama tenga la lista exhaustiva de
+    // componentes a modelar. Sin esto, el diagrama omite secciones del
+    // referencia (Ticker, Destinations, Strip footer, Tweaks panel, etc.)
+    // y solo modela los componentes "evidentes" del markdown del PO.
+    const designs = (epic.designs ?? []) as unknown as Array<{
+      componentManifest?: unknown;
+    }>;
+    const componentManifests = designs
+      .map((d) => d.componentManifest)
+      .filter(
+        (m): m is { components: unknown[]; primaryFilePath: string } =>
+          m !== null &&
+          typeof m === 'object' &&
+          Array.isArray((m as { components?: unknown }).components) &&
+          typeof (m as { primaryFilePath?: unknown }).primaryFilePath === 'string',
+      )
+      .map((m) => ({
+        components: (m.components as unknown[])
+          .filter(
+            (c): c is { name: string; kind: string; startLine: number; endLine: number; filePath: string } =>
+              typeof c === 'object' &&
+              c !== null &&
+              typeof (c as { name?: unknown }).name === 'string' &&
+              (((c as { kind?: unknown }).kind === 'section') ||
+                ((c as { kind?: unknown }).kind === 'react-component')) &&
+              typeof (c as { startLine?: unknown }).startLine === 'number' &&
+              typeof (c as { endLine?: unknown }).endLine === 'number' &&
+              typeof (c as { filePath?: unknown }).filePath === 'string',
+          )
+          .map((c) => ({
+            name: c.name,
+            kind: c.kind as 'section' | 'react-component',
+            startLine: c.startLine,
+            endLine: c.endLine,
+            filePath: c.filePath,
+          })),
+        primaryFilePath: m.primaryFilePath,
+      }));
+
     const epicContext: EpicContext = {
       id: epic.id,
       title: epic.title,
@@ -1596,6 +1777,7 @@ export class DiagramGenerationService {
         name: epic.initiative.name,
         description: epic.initiative.description,
       },
+      componentManifests: componentManifests.length > 0 ? componentManifests : undefined,
     };
 
     const enabledRepos = await this.codeRepoClones.getEnabled().catch(() => []);
@@ -1729,7 +1911,7 @@ export class DiagramGenerationService {
       // `messages.stream()` (vs create) porque Anthropic exige stream para
       // runs > 10min — caso común con max_tokens grande + thinking adaptive.
       // `finalMessage()` es drop-in con la response de create.
-      const stream = this.client.messages.stream(
+      const stream = client.messages.stream(
         {
           model: MODEL,
           max_tokens: diagramMaxTokens,
@@ -3759,6 +3941,57 @@ ${epic.markdown || '(épica sin markdown — usa la información del initiative)
 ${epic.initiative.description}
 </initiative>`);
 
+    // BUG FIX 2026-05-25: si la épica tiene componentManifests del bundle
+    // de Claude Design, inyectarlos como BLOQUE OBLIGATORIO de cobertura.
+    if (epic.componentManifests && epic.componentManifests.length > 0) {
+      const allComponents = epic.componentManifests.flatMap((m) =>
+        m.components.map((c) => ({ ...c, primaryFilePath: m.primaryFilePath })),
+      );
+      const componentsTable = allComponents
+        .map(
+          (c, i) =>
+            `  ${i + 1}. ${c.name} (${c.kind}) — líneas ${c.startLine}-${c.endLine} de ${c.primaryFilePath}`,
+        )
+        .join('\n');
+      parts.push(`<design_component_coverage>
+═══════════════════════════════════════════════════════════════════════
+🎨 BUNDLE DE DISEÑO DETECTADO — COBERTURA OBLIGATORIA EN EL DIAGRAMA
+═══════════════════════════════════════════════════════════════════════
+
+Esta épica tiene un bundle de Claude Design subido. El sistema extrajo
+automáticamente los siguientes componentes que DEBEN aparecer como nodos
+en el diagrama (uno por componente, o agrupados si son sub-componentes
+de un mismo flow):
+
+${componentsTable}
+
+REGLAS DUROS para generación del diagrama:
+
+1. **CADA componente del manifest DEBE estar representado como un nodo
+   en el diagrama** (o como sub-flujo dentro de un nodo padre claramente
+   etiquetado). NO omitas componentes — el referencia visual tiene esa
+   densidad y el diagrama debe reflejarla.
+
+2. **Antes de generar nodos**, lee el HTML del referencia con \`vault_read\`
+   (path: \`${epic.componentManifests[0].primaryFilePath}\`) para entender
+   cada componente. NO inventes la semántica — extráela del HTML real.
+
+3. Para cada componente del manifest, identifica:
+   - Su tipo arquitectural (frontend/backend/data/external/etc.)
+   - Sus interacciones con otros componentes
+   - Su rol en el flujo del usuario
+
+4. NO inventes componentes que NO están en el manifest. Si crees que falta
+   algo, modélalo solo si es estrictamente necesario para el flujo
+   (ej: un Backend API mock que el SearchBox consume).
+
+5. Densidad esperada: con ${allComponents.length} componentes en el manifest,
+   el diagrama final debería tener AL MENOS ${allComponents.length} nodos
+   (más auxiliares si aplica: gateways, datasets, decisiones).
+═══════════════════════════════════════════════════════════════════════
+</design_component_coverage>`);
+    }
+
     if (enabledRepos.length > 0) {
       parts.push(`<available_code_repositories>
 Estos repositorios de código están conectados y listos para exploración con code_glob/code_grep/code_read.
@@ -3914,6 +4147,20 @@ ${safePrompt}
       return diagram;
     }
 
+    // Resolver API key desde OrgAnthropicConfigService. Si no está configurada,
+    // degradar graciosamente devolviendo el diagrama original — el layout pass
+    // es una mejora opcional, no debería bloquear el flow primario.
+    let client: Anthropic;
+    try {
+      client = await this.buildClient();
+    } catch (err: any) {
+      this.logger.warn(
+        { err: err?.message, epicId: epicContext.id },
+        `[layout_pass] skipped — Anthropic API key no configurada`,
+      );
+      return diagram;
+    }
+
     const startTime = Date.now();
     this.logger.info(
       `[layout_pass] agente 2 iniciado epic=${epicContext.id} nodes=${diagram.nodes.length} edges=${diagram.edges.length}`,
@@ -3959,7 +4206,7 @@ ${safePrompt}
           return diagram;
         }
 
-        const response = await this.client.messages.create(
+        const response = await client.messages.create(
           {
             model: MODEL,
             max_tokens: LAYOUT_PASS_MAX_TOKENS,

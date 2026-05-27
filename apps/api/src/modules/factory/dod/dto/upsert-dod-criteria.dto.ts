@@ -21,7 +21,7 @@ export class DodCriterionInputDto {
   @ApiProperty({
     description:
       'Identificador estable para mapping determinístico de evaluación. ' +
-      'Solo aplica a criterios estándar (code-written, tests-passing, pr-created, no-errors, docs-updated, security-scan, perf-budget, accessibility). ' +
+      'Solo aplica a criterios estándar (code-written, tests-passing, pr-created, no-errors, docs-updated, security-scan, design-coverage-check, perf-budget, accessibility). ' +
       'Custom criteria deben tener kind=null.',
     nullable: true,
     required: false,

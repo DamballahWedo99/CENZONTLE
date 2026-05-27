@@ -28,7 +28,11 @@ import {
  *    100 es 6x el upper-bound observado, suficiente para edge cases sin
  *    permitir abuse)
  *  - MaxLength en strings: alineados con el shape esperado del worker
- *    (criterionId/label ≤ 200, command ≤ 500, output ≤ 4000, reason ≤ 2000)
+ *    (criterionId ≤ 2000, label ≤ 500, command ≤ 500, output ≤ 4000,
+ *    reason ≤ 2000). El cap de criterionId se amplió de 200 → 2000 tras
+ *    el incidente del 2026-05-25 (run 162dc9f9): el verifier Layer 3 emite
+ *    criterionIds que son DESCRIPCIONES completas del criterio, no slugs
+ *    cortos. 2000 chars cubre cualquier descripción razonable.
  *  - attempt 1..10, exitCode -1..255 (POSIX range con sentinel -1)
  */
 
@@ -70,9 +74,9 @@ class CriterionUsageDto {
 }
 
 export class CriterionVerdictDto {
-  @ApiProperty({ description: 'Identificador del criterio', maxLength: 200 })
+  @ApiProperty({ description: 'Identificador del criterio', maxLength: 2000 })
   @IsString()
-  @MaxLength(200)
+  @MaxLength(2000)
   criterionId!: string;
 
   @ApiProperty({ description: 'Label legible para UI', maxLength: 500 })

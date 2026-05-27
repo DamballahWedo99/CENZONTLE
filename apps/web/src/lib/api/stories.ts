@@ -81,6 +81,14 @@ export interface CreateStoryInput {
   sourceClientId?: string;
   /** DAG de orden entre historias del MISMO batch (emitido por el TL). */
   blockedBy?: StoryOrderDependencyInput[];
+  /**
+   * Componentes del componentManifest del design bundle que esta historia
+   * cubre. Emitido por el PO agent. Lo lee el coverage gate de la épica
+   * (GET /epics/:id/coverage-check) para verificar que cada componente del
+   * manifest esté cubierto por al menos una story antes de permitir enqueue
+   * al Forge. Vacío para historias backend-only o épicas sin bundle.
+   */
+  componentsCovered?: string[];
 }
 
 export function getStories(params?: { epicId?: string; podId?: string; status?: string }) {
