@@ -969,6 +969,14 @@ export interface UserStory {
   sprintId: string | null;
   tracker?: TrackerReference;
   labels: string[];
+  /**
+   * Componentes del componentManifest del design bundle que esta historia
+   * cubre. Emitido por el PO agent durante la generación. El coverage gate
+   * de la épica (GET /epics/:id/coverage-check) verifica que cada componente
+   * del manifest aparezca en `componentsCovered` de al menos una story.
+   * Vacío para historias backend-only o épicas sin bundle.
+   */
+  componentsCovered?: string[];
   // Structured sections
   po: StoryPOFields;
   technical: StoryTechnicalFields;
@@ -980,6 +988,12 @@ export interface UserStory {
 /**
  * Output del Agente PO (Product Owner). Contiene los meta-datos de la historia
  * y la seccion de negocio. Se pasa literalmente al Agente Tech Lead como input.
+ *
+ * `componentsCovered` (2026-05-25): lista opcional de nombres del componentManifest
+ * del diseño UX/UI que esta story cubre. Solo se popula cuando la épica tiene
+ * un bundle de diseño con manifest extraído. El sistema downstream usa este
+ * campo para validar coverage (cada componente del manifest debe aparecer en
+ * ≥1 story). En stories backend-only o épicas sin diseño, queda vacío.
  */
 export interface StoryOutline {
   title: string;
@@ -988,6 +1002,7 @@ export interface StoryOutline {
   podId: string;
   labels: string[];
   po: StoryPOFields;
+  componentsCovered?: string[];
 }
 
 /**

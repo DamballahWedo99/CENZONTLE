@@ -1,8 +1,9 @@
 'use client';
 
-import { DollarSign, RotateCw, Zap, Wrench, ShieldCheck } from 'lucide-react';
+import { DollarSign, RotateCw, Zap, Wrench, ShieldCheck, Clock } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import {
+  AGENT_TOKEN_BOUNDS,
   FORGE_WORKER_EFFORT_DESCRIPTIONS,
   FORGE_WORKER_EFFORT_LABELS,
   FORGE_WORKER_EFFORT_LEVELS,
@@ -29,6 +30,12 @@ interface ForgeWorkerSectionProps {
   // DoD retry loop — tope de intentos del enforcement loop del worker.
   dodMaxAttempts: number;
   onDodMaxAttemptsChange: (n: number) => void;
+
+  // Max wall-clock duration del run del worker (ms). Reemplaza la constante
+  // MAX_RUN_DURATION_MS hardcoded del runner.ts. Stories con muchos
+  // componentes UI o tests pesados pueden necesitar 60-90 min (default 30).
+  forgeWorkerMaxRunDurationMs: number;
+  onForgeWorkerMaxRunDurationMsChange: (ms: number) => void;
 }
 
 /**
@@ -54,8 +61,14 @@ export function ForgeWorkerSection({
   onDodVerifierEffortChange,
   dodMaxAttempts,
   onDodMaxAttemptsChange,
+  forgeWorkerMaxRunDurationMs,
+  onForgeWorkerMaxRunDurationMsChange,
 }: ForgeWorkerSectionProps) {
   const currentPricing = FORGE_WORKER_MODEL_PRICING[model];
+  const maxRunDurationMin = Math.round(forgeWorkerMaxRunDurationMs / 60_000);
+  const maxRunDurationBounds = AGENT_TOKEN_BOUNDS.forgeWorkerMaxRunDurationMs;
+  const minMin = maxRunDurationBounds.min / 60_000;
+  const maxMin = maxRunDurationBounds.max / 60_000;
 
   return (
     <div className="space-y-8">
@@ -206,6 +219,97 @@ export function ForgeWorkerSection({
               );
             })}
           </div>
+        </div>
+      </section>
+
+      {/* ═════════════════════════════════════════════════════════════════
+          Sub-sección 4: Max run duration del worker (timeout wall-clock)
+          ═════════════════════════════════════════════════════════════════ */}
+      <section className="space-y-3 pt-6 border-t border-border/40">
+        <div className="flex items-start gap-2.5">
+          <div className="shrink-0 rounded-md bg-cyan-500/10 p-1.5">
+            <Clock className="h-3.5 w-3.5 text-cyan-600 dark:text-cyan-400" />
+          </div>
+          <div className="flex-1 min-w-0">
+            <h4 className="text-xs font-semibold text-foreground">
+              Tiempo máximo de ejecución · Worker timeout
+            </h4>
+            <p className="text-[10px] text-muted-foreground/70">
+              Wall-clock máximo que el worker espera al CLI del Forge antes de matar el
+              proceso. Default <strong>30 min</strong>. Stories con muchos componentes UI o
+              suites de tests grandes (visual regression, e2e) pueden necesitar{' '}
+              <strong>60-90 min</strong>. Si el worker mata un run justo antes del commit,
+              subir este valor. Rango permitido: <strong>{minMin}-{maxMin} min</strong>.
+            </p>
+          </div>
+        </div>
+
+        {/* Input numérico de minutos + presets rápidos */}
+        <div className="rounded-xl border border-border/60 bg-muted/20 p-3 space-y-3">
+          <div className="flex items-center gap-3">
+            <label
+              htmlFor="forge-max-run-duration"
+              className="text-xs font-medium text-muted-foreground shrink-0"
+            >
+              Minutos:
+            </label>
+            <input
+              id="forge-max-run-duration"
+              type="number"
+              min={minMin}
+              max={maxMin}
+              step={5}
+              value={maxRunDurationMin}
+              onChange={(e) => {
+                const min = Number(e.target.value);
+                if (!Number.isFinite(min) || min <= 0) return;
+                const clampedMin = Math.min(maxMin, Math.max(minMin, min));
+                onForgeWorkerMaxRunDurationMsChange(clampedMin * 60_000);
+              }}
+              className="h-9 w-24 rounded-lg border border-border bg-background px-3 text-sm font-semibold tabular-nums text-foreground focus:border-cyan-500/50 focus:outline-none focus:ring-2 focus:ring-cyan-500/20"
+              aria-label="Tiempo máximo de ejecución en minutos"
+            />
+            <span className="text-[10px] text-muted-foreground/60">
+              ({forgeWorkerMaxRunDurationMs.toLocaleString()} ms)
+            </span>
+
+            {/* Presets rápidos: 30 / 60 / 90 / 120 min */}
+            <div
+              role="radiogroup"
+              aria-label="Presets de tiempo máximo"
+              className="ml-auto flex shrink-0 items-center gap-1.5"
+            >
+              {[30, 60, 90, 120].map((preset) => {
+                const selected = maxRunDurationMin === preset;
+                return (
+                  <button
+                    key={preset}
+                    type="button"
+                    role="radio"
+                    aria-checked={selected}
+                    onClick={() => onForgeWorkerMaxRunDurationMsChange(preset * 60_000)}
+                    className={cn(
+                      'flex h-9 min-w-[3rem] items-center justify-center rounded-lg border px-2 text-xs font-semibold tabular-nums transition-colors',
+                      selected
+                        ? 'border-cyan-500/50 bg-cyan-500/10 text-cyan-600 dark:text-cyan-400'
+                        : 'border-border bg-muted/30 text-muted-foreground hover:bg-muted hover:text-foreground',
+                    )}
+                  >
+                    {preset}m
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+
+          {/* Warning si el valor está fuera de rango razonable */}
+          {maxRunDurationMin >= 90 && (
+            <p className="text-[10px] text-amber-600/80 dark:text-amber-400/70 leading-relaxed">
+              ⚠️ Stories que necesitan &gt;90 min suelen ser demasiado grandes — considerar
+              dividirlas en chunks más chicos antes de subir el timeout. Más tiempo = más
+              costo si el modelo entra en doom loop.
+            </p>
+          )}
         </div>
       </section>
     </div>

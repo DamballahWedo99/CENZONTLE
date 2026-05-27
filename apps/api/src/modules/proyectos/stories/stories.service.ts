@@ -382,6 +382,26 @@ export class StoriesService {
 
     // 2. Crear fila en PG. Si falla, rollback completo del vault.
     try {
+      // === FORENSIC LOG (pre-INSERT): qué componentsCovered llegó del cliente ===
+      // Si esto es 0 mientras el manifest tiene componentes, significa que el
+      // frontend NO envió el campo en el POST body — gap entre proposal_ready
+      // SSE y apiCreateStory. Si esto es > 0 pero post-INSERT log dice [], el
+      // problema es Prisma o el schema.
+      this.logger.info(
+        {
+          event: 'story.create.dto_received',
+          storyId: id,
+          title: dto.title?.slice(0, 50),
+          dtoHasField: 'componentsCovered' in (dto as object),
+          dtoCount: dto.componentsCovered?.length ?? 0,
+          dtoComponents: dto.componentsCovered ?? [],
+        },
+        `[story.create.dto] id=${id.slice(0, 8)} title="${dto.title?.slice(0, 40)}" ` +
+          `dtoHas=${'componentsCovered' in (dto as object)} ` +
+          `dtoCount=${dto.componentsCovered?.length ?? 0} ` +
+          `components=[${(dto.componentsCovered ?? []).join(',') || 'EMPTY'}]`,
+      );
+
       const result = await this.prisma.story.create({
         data: {
           id,
@@ -392,10 +412,31 @@ export class StoriesService {
           podId: dto.podId,
           sprintId: dto.sprintId,
           labels: dto.labels ?? [],
+          // BUG FIX 2026-05-26: el PO agent emitía componentsCovered pero el
+          // INSERT NO lo incluía — el campo se perdía silenciosamente y el
+          // coverage gate siempre mostraba 0/N. Acompaña migration
+          // 20260526110000_add_components_covered_to_stories que agrega la
+          // columna a la tabla. Default `[]` para stories sin manifest.
+          componentsCovered: dto.componentsCovered ?? [],
           vaultPath: indexPath,
           sourceClientId: dto.sourceClientId ?? null,
         },
       });
+
+      // === FORENSIC LOG (post-INSERT): qué quedó persistido en BD ===
+      // Si dtoCount > 0 pero esto dice [], algo entre dto y Prisma falló
+      // (schema desactualizado, Prisma client cacheado, etc.).
+      this.logger.info(
+        {
+          event: 'story.create.persisted',
+          storyId: result.id,
+          componentsCoveredPersistedCount: result.componentsCovered?.length ?? 0,
+          componentsCoveredPersisted: result.componentsCovered ?? [],
+        },
+        `[story.create.persisted] id=${result.id.slice(0, 8)} ` +
+          `persistedCount=${result.componentsCovered?.length ?? 0} ` +
+          `persisted=[${(result.componentsCovered ?? []).join(',') || 'EMPTY'}]`,
+      );
 
       // 3. Persistir edges de `blockedBy` al modelo `StoryDependency`. Solo
       // crear rows para las bloqueantes que YA existen en DB (búsqueda por

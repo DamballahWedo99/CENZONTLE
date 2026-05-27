@@ -310,9 +310,20 @@ export class DiagramGenerationController {
     @Res() res: Response,
     @CurrentUser() user: AuthenticatedUser,
   ) {
-    await this.assertUserCanAccessEpic(user, epicId);
-    const type = query.type ?? 'business';
+    // Log de entrada ANTES de cualquier check que pueda throw (assertAccess,
+    // service validations). Si un guard rechazó arriba (Permissions/Throttle/
+    // ParseUUIDPipe), nunca llegamos acá — pero si llegamos, queremos rastro.
+    // Sin este log, una request abortada por validación queda invisible para
+    // el operador que solo ve "polleo de /session" sin entender por qué no
+    // empezó la generación.
     const safePromptForLog = query.prompt ? sanitizeForLog(query.prompt) : '';
+    const type = query.type ?? 'business';
+    this.logger.info(
+      { event: 'generate.attempt', epicId, type, userId: user.sub, hasPrompt: !!query.prompt },
+      `[generate.attempt] epic=${epicId} type=${type} userId=${user.sub} hasPrompt=${!!query.prompt}`,
+    );
+
+    await this.assertUserCanAccessEpic(user, epicId);
     this.logger.info({ epicId, type, safePromptForLog }, `[generate] epic=${epicId} type=${type} prompt="${safePromptForLog}"`);
 
     const runKey = this.runKey(epicId, type);
@@ -386,6 +397,28 @@ export class DiagramGenerationController {
         const data = event.data as DiagramGenerationEvent;
         safeWrite(`data: ${JSON.stringify(event.data)}\n\n`);
         collectedEvents.push(data);
+
+        // BUG FIX 2026-05-26: el service emite errores como
+        // `subject.next({type:'error'}) + subject.complete()` en vez de
+        // `subject.error(...)`. Eso hacía que el handler `error:` del
+        // controller NUNCA se invocara, perdiendo el log de error pese a
+        // que la generación falló. Detectamos el caso aquí y emitimos
+        // log explícito con el mensaje que vio el cliente — así el
+        // operador tiene rastro de la falla en los logs del backend.
+        if ((data as { type?: string })?.type === 'error') {
+          this.logger.error(
+            {
+              event: 'generate.inline_error',
+              epicId,
+              type,
+              userId: user.sub,
+              clientMessage: (data as { message?: string })?.message ?? null,
+              emitCountSoFar: emitCount,
+              durationMs: Date.now() - subscribeStart,
+            },
+            `🚨 [generate.inline_error] epic=${epicId} type=${type} clientMsg="${(data as { message?: string })?.message ?? 'unknown'}" — el agente emitió un evento type=error inline. Buscar el "Agent error" log arriba para el stack/status code del SDK.`,
+          );
+        }
 
         // Identidad por AbortController — si fue cancelado vía DELETE,
         // saltamos writeSession para no recrear cache que cancelActiveRun

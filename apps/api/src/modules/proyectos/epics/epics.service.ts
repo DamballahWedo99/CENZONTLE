@@ -1522,6 +1522,270 @@ export class EpicsService {
   }
 
   /**
+   * Coverage check del bundle de diseño contra las historias de la épica.
+   *
+   * Stream A persiste:
+   *   - `epic.designs[].componentManifest`: lista determinística de
+   *     componentes top-level (secciones HTML + funciones React) extraída
+   *     del primary HTML del bundle al subirlo.
+   *   - `story.componentsCovered: string[]`: nombres del manifest que
+   *     cubre cada historia (poblado por el agente PO).
+   *
+   * Este endpoint cruza ambas fuentes para responder: "¿está cada
+   * componente del bundle cubierto por al menos una historia?". El
+   * frontend usa la respuesta para bloquear el botón "Enviar al Forge"
+   * cuando faltan stories — antes esta lógica era confiar 100% en el
+   * agente PO, y el manifest fue la última red de seguridad pre-deploy.
+   *
+   * Degrada graciosamente en 3 escenarios:
+   *   1. Épica sin bundle → `hasDesignBundle: false`, no bloquea.
+   *   2. Bundle legacy sin manifest (upload pre-Stream-A) →
+   *      `manifestExists: false`, no bloquea, sugiere re-upload.
+   *   3. Stories sin `componentsCovered` (porque Stream A no ha
+   *      regenerado o porque la story es manual) → cuentan como
+   *      `componentsCovered = []` (silent).
+   *
+   * Si la épica tiene múltiples bundles, usamos el PRIMERO con manifest
+   * (asumimos que es el primary; la UI solo permite uno activo). Si
+   * ninguno tiene manifest, se trata como caso legacy.
+   */
+  async getCoverageCheck(epicId: string): Promise<{
+    hasDesignBundle: boolean;
+    manifestExists: boolean;
+    components: Array<{
+      name: string;
+      kind: 'section' | 'react-component';
+      coverage: {
+        covered: boolean;
+        coveredByStories: Array<{ storyId: string; storyTitle: string }>;
+      };
+    }>;
+    summary: {
+      totalComponents: number;
+      coveredComponents: number;
+      uncoveredComponents: string[];
+      coveragePercent: number;
+    };
+    canEnqueue: boolean;
+  }> {
+    const epic = await this.prisma.epic.findUnique({
+      where: { id: epicId },
+      select: {
+        id: true,
+        designs: true,
+        stories: { select: { id: true, title: true } },
+      },
+    });
+    if (!epic) throw new NotFoundException('Épica no encontrada');
+
+    const emptyResult = {
+      components: [],
+      summary: {
+        totalComponents: 0,
+        coveredComponents: 0,
+        uncoveredComponents: [],
+        coveragePercent: 100,
+      },
+    };
+
+    // 1. No bundle → coverage gate no aplica.
+    const designs = Array.isArray(epic.designs)
+      ? (epic.designs as unknown as Array<{
+          id: string;
+          name?: string;
+          componentManifest?: {
+            components?: Array<{
+              name?: unknown;
+              kind?: unknown;
+              startLine?: unknown;
+              endLine?: unknown;
+              filePath?: unknown;
+            }>;
+            primaryFilePath?: string;
+            extractedAt?: string;
+          } | null;
+        }>)
+      : [];
+    if (designs.length === 0) {
+      return {
+        hasDesignBundle: false,
+        manifestExists: false,
+        ...emptyResult,
+        canEnqueue: true,
+      };
+    }
+
+    // 2. Pick el primer bundle con manifest válido. Sin manifest → legacy.
+    const bundleWithManifest = designs.find(
+      (d) =>
+        d.componentManifest != null &&
+        Array.isArray(d.componentManifest.components) &&
+        d.componentManifest.components.length > 0,
+    );
+    if (!bundleWithManifest || !bundleWithManifest.componentManifest) {
+      return {
+        hasDesignBundle: true,
+        manifestExists: false,
+        ...emptyResult,
+        canEnqueue: true,
+      };
+    }
+
+    const rawComponents = bundleWithManifest.componentManifest.components ?? [];
+
+    // 3. Cargar componentsCovered de cada story. Stream A persiste el
+    //    array directamente en la tabla `stories` o en un campo JSONB —
+    //    para desacoplar, leemos defensively con cast a `unknown` y
+    //    validamos con Array.isArray. Stories sin el campo aún caen a [].
+    //
+    //    NOTA: usamos $queryRaw aquí para no acoplar este endpoint al
+    //    timing del PR de Stream A que añade la columna al schema Prisma.
+    //    `to_jsonb` garantiza que el cast a JSON array funciona ya sea
+    //    que la columna sea text[] o jsonb. Si la columna no existe, la
+    //    query falla y caemos al catch → tratamos todas las stories como
+    //    sin coverage (peor-caso seguro).
+    let storyCoverage: Array<{ id: string; title: string; componentsCovered: string[] }> = [];
+    try {
+      const rows = await this.prisma.$queryRaw<
+        Array<{ id: string; title: string; components_covered: unknown }>
+      >(
+        Prisma.sql`
+          SELECT id, title, to_jsonb("componentsCovered") AS components_covered
+          FROM stories
+          WHERE "epicId" = ${epicId}
+        `,
+      );
+      storyCoverage = rows.map((r) => {
+        const cc = r.components_covered;
+        const arr: string[] = Array.isArray(cc)
+          ? cc.filter((x): x is string => typeof x === 'string')
+          : [];
+        return { id: r.id, title: r.title, componentsCovered: arr };
+      });
+    } catch (err) {
+      this.logger.warn(
+        `[getCoverageCheck] componentsCovered no disponible (Stream A pending?): ${(err as Error)?.message ?? err}. Usando coverage vacío.`,
+      );
+      storyCoverage = epic.stories.map((s) => ({
+        id: s.id,
+        title: s.title,
+        componentsCovered: [],
+      }));
+    }
+
+    // 4. Iterar el manifest y cruzar con storyCoverage.
+    const components = rawComponents
+      .filter((c) => typeof c?.name === 'string' && (c.kind === 'section' || c.kind === 'react-component'))
+      .map((c) => {
+        const name = c.name as string;
+        const kind = c.kind as 'section' | 'react-component';
+        const coveredByStories = storyCoverage
+          .filter((s) => s.componentsCovered.includes(name))
+          .map((s) => ({ storyId: s.id, storyTitle: s.title }));
+        return {
+          name,
+          kind,
+          coverage: {
+            covered: coveredByStories.length > 0,
+            coveredByStories,
+          },
+        };
+      });
+
+    const totalComponents = components.length;
+    const coveredComponents = components.filter((c) => c.coverage.covered).length;
+    const uncoveredComponents = components
+      .filter((c) => !c.coverage.covered)
+      .map((c) => c.name);
+    const coveragePercent =
+      totalComponents === 0
+        ? 100
+        : Math.round((coveredComponents / totalComponents) * 100);
+
+    // === FORENSIC LOG: por qué quedaron componentes sin cobertura ===
+    // Cuando el UI muestra "0/N cubiertos" después de generar historias,
+    // necesitamos saber si: (a) las stories no emitieron `componentsCovered`,
+    // (b) emitieron pero con nombres distintos (case mismatch, typo),
+    // (c) la columna en BD está vacía. Este log emite todos los datos crudos
+    // para diagnosticar sin acceso a la BD.
+    if (totalComponents > 0 && coveredComponents < totalComponents) {
+      // Calcular todos los nombres que aparecen en componentsCovered de cualquier story.
+      const allReportedByStories = new Set<string>();
+      const storiesWithEmptyCoverage: string[] = [];
+      const storiesWithCoverage: Array<{ id: string; title: string; covered: string[] }> = [];
+      for (const s of storyCoverage) {
+        if (s.componentsCovered.length === 0) {
+          storiesWithEmptyCoverage.push(`${s.id.slice(0, 8)}:${s.title.slice(0, 40)}`);
+        } else {
+          storiesWithCoverage.push({ id: s.id, title: s.title, covered: s.componentsCovered });
+          for (const c of s.componentsCovered) allReportedByStories.add(c);
+        }
+      }
+      const manifestNames = components.map((c) => c.name);
+      // Nombres en stories que NO matchean ningún componente del manifest.
+      const reportedButNotInManifest = Array.from(allReportedByStories).filter(
+        (n) => !manifestNames.includes(n),
+      );
+      // Posibles mismatches case-insensitive (típicamente PascalCase vs camelCase).
+      const possibleCaseMismatches: Array<{ reported: string; manifestMatch: string }> = [];
+      for (const reported of reportedButNotInManifest) {
+        const ciMatch = manifestNames.find(
+          (m) => m.toLowerCase() === reported.toLowerCase() && m !== reported,
+        );
+        if (ciMatch) {
+          possibleCaseMismatches.push({ reported, manifestMatch: ciMatch });
+        }
+      }
+      this.logger.warn(
+        {
+          event: 'coverage.gap_analysis',
+          epicId,
+          totalComponents,
+          coveredComponents,
+          uncoveredComponents,
+          totalStories: storyCoverage.length,
+          storiesWithCoverageCount: storiesWithCoverage.length,
+          storiesWithEmptyCoverageCount: storiesWithEmptyCoverage.length,
+          storiesWithEmptyCoverage: storiesWithEmptyCoverage.slice(0, 10),
+          allReportedByStories: Array.from(allReportedByStories),
+          reportedButNotInManifest,
+          possibleCaseMismatches,
+          manifestNames,
+        },
+        `[coverage.gap] epic=${epicId} ${coveredComponents}/${totalComponents} cubiertos. ` +
+          `${storiesWithEmptyCoverage.length}/${storyCoverage.length} stories SIN componentsCovered. ` +
+          `${reportedButNotInManifest.length} nombres reportados NO matchean manifest. ` +
+          `${possibleCaseMismatches.length} posibles mismatches por case.`,
+      );
+
+      // Si hay case mismatches, log más loud
+      if (possibleCaseMismatches.length > 0) {
+        this.logger.error(
+          { event: 'coverage.case_mismatch', epicId, mismatches: possibleCaseMismatches },
+          `🚨 [coverage.case_mismatch] epic=${epicId} — las stories reportan nombres que matchean el manifest IGNORANDO case. ` +
+            `Ejemplos: ${possibleCaseMismatches
+              .slice(0, 3)
+              .map((m) => `"${m.reported}" → manifest tiene "${m.manifestMatch}"`)
+              .join(', ')}. El matching del coverage es case-sensitive — esto es bug del PO al normalizar nombres.`,
+        );
+      }
+    }
+
+    return {
+      hasDesignBundle: true,
+      manifestExists: true,
+      components,
+      summary: {
+        totalComponents,
+        coveredComponents,
+        uncoveredComponents,
+        coveragePercent,
+      },
+      canEnqueue: uncoveredComponents.length === 0,
+    };
+  }
+
+  /**
    * Lista el DAG de orden entre historias del epic. Retorna cada historia
    * que tiene al menos una dep entrante (está bloqueada por algo) junto con
    * los edges de sus bloqueantes. Las historias sin deps se omiten — el
@@ -1874,6 +2138,12 @@ export class EpicsService {
     const handoff = this.designBundle.buildSyntheticHandoff(extracted, bundleVaultPath);
 
     // 5) Persistir el EpicDesign al array JSONB.
+    // BUG FIX 2026-05-25: `componentManifest` ANTES no se persistía aunque
+    // el extractor lo generara. El handoff sí lo recibía como texto pero el
+    // field estructurado (que el getCoverageCheck + DiagramGen + PO/QA
+    // necesitan leer para forzar cobertura) quedaba null en BD. Resultado:
+    // bundles "modernos" se reportaban como "legacy sin manifest" en la UI.
+    // El fix es propagar `extracted.componentManifest` al objeto persistido.
     const nowIso = new Date().toISOString();
     const newDesign = {
       id: designId,
@@ -1882,6 +2152,7 @@ export class EpicsService {
       handoff,
       bundleKey: extracted.bundleKey,
       bundleVaultPath,
+      componentManifest: extracted.componentManifest ?? null,
       createdAt: nowIso,
       updatedAt: nowIso,
       createdBy: params.user.sub,

@@ -1,6 +1,6 @@
 import { execFile, spawn, type ChildProcess } from 'child_process';
 import { promises as fs } from 'fs';
-import { tmpdir } from 'os';
+import { homedir, tmpdir } from 'os';
 import { join } from 'path';
 import { promisify } from 'util';
 import type { ClaimedStory, CriterionEvent } from '@cenzontle/shared';
@@ -27,6 +27,7 @@ import {
   buildSecretEnv,
   serializeDotenv,
   makeRedactor,
+  redactSecrets,
   scanDiffForSecrets,
 } from './secrets.js';
 import {
@@ -137,11 +138,339 @@ export function redactRepoUrlCredentials(
 }
 
 /**
- * Threshold ms — kill el proceso `claude` si excede esta duración. Sprint
- * 3 podemos hacer configurable por nodo. 30min es generoso para historias
- * arquitecturales pero corta cost runaway.
+ * Threshold ms — kill el proceso `claude` si excede esta duración.
+ *
+ * DEFAULT 30 min, pero el valor AUTORITATIVO viene del backend en el
+ * claim payload (`ClaimedStory.forgeWorkerMaxRunDurationMs`), configurable
+ * desde `/factory/settings → tab Factory`. Esta constante se usa SOLO como
+ * red de seguridad cuando:
+ *   - El backend es viejo y NO incluye el campo (claim legacy).
+ *   - El valor del backend es 0/NaN/negativo (defensa contra basura).
+ *
+ * Rango válido cuando viene del backend: 300_000 (5 min) .. 7_200_000 (2h).
+ * Stories con muchos componentes UI o tests pesados típicamente necesitan
+ * 3_600_000-5_400_000 (60-90 min) — el viejo default de 30 min mataba runs
+ * justo antes del commit (observado run cb180125, 11 componentes pixel-perfect).
  */
-const MAX_RUN_DURATION_MS = 30 * 60 * 1000;
+export const MAX_RUN_DURATION_MS_DEFAULT = 30 * 60 * 1000;
+export const MAX_RUN_DURATION_MS_MIN = 300_000; // 5 min — clamp inferior
+export const MAX_RUN_DURATION_MS_MAX = 7_200_000; // 2 h — clamp superior
+
+/**
+ * Resuelve el max run duration efectivo del worker para un run dado.
+ *
+ * Algoritmo:
+ *   1. Si el backend NO envió el campo (legacy claim, deploy parcial) o
+ *      envió un valor inválido (NaN, ≤0, negativo) → DEFAULT 30 min.
+ *   2. Si envió un valor válido pero fuera del rango [MIN, MAX] → CLAMP
+ *      al borde más cercano. `clamped: true` para que el caller pueda log.
+ *   3. Si envió un valor dentro del rango → pasa tal cual con `clamped: false`.
+ *
+ * `source` distingue "backend" (el operador configuró) vs "default" (no
+ * configurado o fallback) para observabilidad. Sin esto, no podríamos
+ * saber en producción si un timeout efectivo viene de un default
+ * accidental vs de una decisión del operador.
+ *
+ * Función pura exportada para testing — la lógica vive acá y `runStory`
+ * solo la llama. Ver runner.timeout-resolver.spec.ts.
+ */
+export function resolveMaxRunDurationMs(
+  backendValue: number | undefined,
+): { value: number; source: 'backend' | 'default'; clamped: boolean } {
+  if (typeof backendValue !== 'number' || !Number.isFinite(backendValue) || backendValue <= 0) {
+    return { value: MAX_RUN_DURATION_MS_DEFAULT, source: 'default', clamped: false };
+  }
+  const clamped = Math.min(MAX_RUN_DURATION_MS_MAX, Math.max(MAX_RUN_DURATION_MS_MIN, backendValue));
+  return {
+    value: clamped,
+    source: 'backend',
+    clamped: clamped !== backendValue,
+  };
+}
+
+/**
+ * Observabilidad de "agente colgado". Si los running tokens (in/out) NO se
+ * mueven entre N iteraciones consecutivas del progress timer (cada 30s), el
+ * agente probablemente está atorado en una tool call que no retorna —
+ * típicamente `vitest`/`jest` sin `--run`, `next dev`, etc. Loggeamos warn
+ * cuando se cumple el threshold y escalamos a ERROR tras un segundo umbral.
+ *
+ * No matamos automáticamente — un operator puede querer revisar antes de
+ * intervenir. El log estructurado da contexto suficiente (last tool, pid,
+ * cpu/mem) para decidir kill manual.
+ */
+const STUCK_DETECT_TOKEN_FREEZE_TICKS = 3; // 3 ticks × 30s = 90s
+const STUCK_LIKELY_HANG_TICKS = 10; // 10 ticks × 30s = 5min
+
+/**
+ * Threshold ms — una bash task en background que excede esta duración se
+ * marca como `long_running`. 60s es razonable: builds/installs típicos
+ * caben; un `vitest` en watch mode lo excede ampliamente.
+ */
+const BASH_LONG_RUNNING_THRESHOLD_MS = 60_000;
+
+/**
+ * Patrones heurísticos de comandos en watch mode que NUNCA salen.
+ * Cada entry es {regex, label} — match positivo en el comando de un Bash
+ * tool call activa el log `bash.task.likely_watch_mode`.
+ *
+ * Mantener conservador — un falso positivo confunde, pero los siguientes
+ * son comandos que en headless mode JAMÁS terminan por sí solos:
+ *   - vitest sin --run (default es watch mode)
+ *   - jest --watch / --watchAll
+ *   - nodemon
+ *   - next dev (sin build & start)
+ *   - npm/pnpm/yarn run dev
+ *   - tsc --watch
+ */
+const WATCH_MODE_PATTERNS: ReadonlyArray<{ regex: RegExp; label: string }> = [
+  { regex: /\bvitest\b(?!.*--run\b)/, label: 'vitest sin --run (default watch)' },
+  { regex: /\bjest\b.*--watch(All)?\b/, label: 'jest --watch' },
+  { regex: /\bnodemon\b/, label: 'nodemon' },
+  { regex: /\bnext\s+dev\b/, label: 'next dev' },
+  { regex: /\b(npm|pnpm|yarn)\s+run\s+dev\b/, label: 'package script dev' },
+  { regex: /\btsc\b.*--watch\b/, label: 'tsc --watch' },
+];
+
+/**
+ * Directorio donde se persisten los `/complete` payloads que NO se pudieron
+ * reportar al backend tras agotar los retries del ApiClient. Cada archivo es
+ * `{runId}.json` con `{ runId, payload, savedAt, attemptsExhausted }`.
+ *
+ * Vive bajo `~/.factory-worker/pending-completes/` — colocalizado con el
+ * config del worker. Permisos 0700 al directorio + 0600 a los archivos: el
+ * payload puede contener `errorMessage` con stderr crudo (post-redacción)
+ * y nombres de archivos del repo.
+ *
+ * Boot recovery: en `start.ts` el daemon lee el dir al arrancar, intenta
+ * re-reportar cada archivo y, en éxito, lo borra. Si falla, se conserva
+ * para el próximo restart.
+ */
+const PENDING_COMPLETES_DIR = join(homedir(), '.factory-worker', 'pending-completes');
+
+/**
+ * Snapshot del estado de runningTokens para detección de freeze. Tracking
+ * minimal: solo necesitamos saber si in/out cambiaron y desde cuándo el
+ * último cambio. `lastToolCall` lo capturamos del último `tool_use` del
+ * stream-json del agente — proporciona forensics si el agente se cuelga
+ * (ej: "stuck after Bash: vitest").
+ */
+interface StuckDetectState {
+  lastInputTokens: number;
+  lastOutputTokens: number;
+  noChangeTicks: number;
+  lastToolCall: { name: string; inputPreview: string } | null;
+}
+
+/**
+ * Una bash task en background que el agente lanzó. Se trackea por
+ * heurística (input de tool_use con `run_in_background: true`) para detectar
+ * runs largos y comandos en watch mode. La key del Map es un hash sintético
+ * del comando + startedAt — el agente no expone un task ID estable.
+ */
+interface BashTaskInfo {
+  command: string;
+  startedAt: number;
+  /** Indica si ya emitimos el WARN long_running para evitar spam de logs. */
+  longRunningLogged: boolean;
+  /** Match de WATCH_MODE_PATTERNS ya logueado para evitar spam. */
+  watchModeLogged: boolean;
+}
+
+/**
+ * Inspecciona stats de un proceso vía `ps` (CPU% y RSS en KB). Pure best-effort:
+ * si `ps` falla por cualquier razón, retorna `null` — no debe fallar el flujo.
+ *
+ * Cross-platform (darwin/linux): el formato de columnas es estable. En BSD/macOS
+ * usamos `-o pid,%cpu,rss,comm`; en Linux GNU el mismo formato funciona.
+ */
+async function getProcessStats(
+  pid: number,
+): Promise<{ cpuPercent: number; rssKb: number; comm: string } | null> {
+  try {
+    const { stdout } = await execFileAsync(
+      'ps',
+      ['-p', String(pid), '-o', 'pid=,%cpu=,rss=,comm='],
+      { timeout: 2000 },
+    );
+    const line = stdout.trim();
+    if (!line) return null;
+    // Columnas separadas por whitespace. `comm` (último campo) puede tener
+    // espacios — los toleramos uniendo el resto.
+    const parts = line.split(/\s+/).filter(Boolean);
+    if (parts.length < 4) return null;
+    const cpuPercent = parseFloat(parts[1]) || 0;
+    const rssKb = parseInt(parts[2], 10) || 0;
+    const comm = parts.slice(3).join(' ');
+    return { cpuPercent, rssKb, comm };
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Persiste un `/complete` payload no reportable a `~/.factory-worker/pending-completes/{runId}.json`.
+ * Mkdir-recursive con `mode: 0o700` y archivo con `mode: 0o600` — el payload
+ * puede contener stderr (post-redacción) y paths del repo: protegerlo del
+ * resto del sistema es defensa en profundidad.
+ *
+ * `recoveryBlockedByDto`: cuando el backend rechazó el complete con 400 por
+ * validación de DTO (incidente real del 2026-05-25: criterionId > 200 chars),
+ * persistimos igual el payload para que el operador pueda recuperarlo a mano
+ * — PERO marcamos el archivo para que `recoverOnePendingComplete` NO lo
+ * reintente al próximo boot (el DTO seguiría rechazando hasta que el bug se
+ * arregle y el worker se redespliegue).
+ *
+ * No-throws: si el write falla, loguea WARN y sigue (el sweeper backend marca
+ * abandoned si nada llega). Cualquier excepción acá sería peor que el silencio.
+ */
+async function writePendingComplete(
+  runId: string,
+  payload: Record<string, unknown>,
+  attemptsExhausted: number,
+  recoveryBlockedByDto = false,
+  backendErrorBody: unknown = null,
+): Promise<string | null> {
+  try {
+    await fs.mkdir(PENDING_COMPLETES_DIR, { recursive: true, mode: 0o700 });
+    const filePath = join(PENDING_COMPLETES_DIR, `${runId}.json`);
+    const body = JSON.stringify(
+      {
+        runId,
+        payload,
+        savedAt: new Date().toISOString(),
+        attemptsExhausted,
+        recovery_blocked_by_dto: recoveryBlockedByDto,
+        backendErrorBody: recoveryBlockedByDto ? backendErrorBody : undefined,
+      },
+      null,
+      2,
+    );
+    await fs.writeFile(filePath, body, { encoding: 'utf-8', mode: 0o600 });
+    return filePath;
+  } catch (err) {
+    logger.warn(
+      {
+        event: 'complete.pending.write_fail',
+        runId,
+        error: (err as Error).message,
+      },
+      'No se pudo persistir el /complete pendiente — boot recovery no podrá reintentarlo',
+    );
+    return null;
+  }
+}
+
+/**
+ * Path del directorio de pending completes (helper para que start.ts pueda
+ * importarlo sin duplicar el literal). Boot recovery vive en start.ts.
+ */
+export function getPendingCompletesDir(): string {
+  return PENDING_COMPLETES_DIR;
+}
+
+/**
+ * Re-reporta un único pending complete al backend. Usado por boot recovery
+ * en start.ts. Si éxito → borra el archivo. Si fail con 409/410 (run ya
+ * terminal en backend) → borra el archivo (no hay nada que recuperar). Si
+ * fail con otro motivo → conserva el archivo y loguea para próximo retry.
+ *
+ * Retorna `true` si el archivo fue borrado (éxito o terminal), `false` si
+ * debe conservarse.
+ */
+export async function recoverOnePendingComplete(
+  client: ApiClient,
+  filePath: string,
+): Promise<boolean> {
+  let parsed: {
+    runId?: string;
+    payload?: Record<string, unknown>;
+    savedAt?: string;
+    recovery_blocked_by_dto?: boolean;
+    backendErrorBody?: unknown;
+  };
+  try {
+    const raw = await fs.readFile(filePath, 'utf-8');
+    parsed = JSON.parse(raw);
+  } catch (err) {
+    logger.warn(
+      {
+        event: 'complete.recovery.read_fail',
+        filePath,
+        error: (err as Error).message,
+      },
+      `No se pudo leer el pending complete — borrando archivo corrupto`,
+    );
+    // Archivo corrupto: borrarlo (re-leerlo cada boot sería infinito spam).
+    await fs.unlink(filePath).catch(() => undefined);
+    return true;
+  }
+  const runId = parsed.runId;
+  if (!runId || !parsed.payload) {
+    logger.warn(
+      { event: 'complete.recovery.malformed', filePath },
+      'Pending complete sin runId/payload — borrando',
+    );
+    await fs.unlink(filePath).catch(() => undefined);
+    return true;
+  }
+  // Archivos marcados `recovery_blocked_by_dto` se persistieron porque el
+  // backend rechazó el complete con 400 (DTO validation). Reintentar daría
+  // el mismo 400 — solo loguear WARN y CONSERVAR el archivo para que el
+  // operador lo revise (probablemente edite el JSON o levante un fix del
+  // DTO y luego renombre el archivo para forzar reintento manual).
+  if (parsed.recovery_blocked_by_dto === true) {
+    logger.warn(
+      {
+        event: 'complete.recovery.blocked_by_dto',
+        runId,
+        filePath,
+        savedAt: parsed.savedAt,
+        backendErrorBody: parsed.backendErrorBody,
+      },
+      `[recovery] /complete diferido marcado recovery_blocked_by_dto=true — NO se reintenta automáticamente (el backend lo seguiría rechazando con 400). Revisar manualmente: ${filePath}`,
+    );
+    // Retornamos `false` para que el caller lo cuente como "still pending"
+    // sin borrarlo. Sigue ocupando un slot en el directorio hasta que el
+    // operador intervenga.
+    return false;
+  }
+  try {
+    await client.post(`/factory/workers/runs/${runId}/complete`, parsed.payload);
+    logger.info(
+      { event: 'complete.recovery.ok', runId, savedAt: parsed.savedAt },
+      `[recovery] /complete diferido reportado exitosamente al backend`,
+    );
+    await fs.unlink(filePath).catch(() => undefined);
+    return true;
+  } catch (err) {
+    // 409/410 = run ya terminal en el backend (el sweeper lo marcó abandoned
+    // o un re-claim recompletó). No hay nada que recuperar — borramos.
+    if (err instanceof ApiError && (err.status === 409 || err.status === 410)) {
+      logger.info(
+        {
+          event: 'complete.recovery.already_terminal',
+          runId,
+          status: err.status,
+        },
+        `[recovery] /complete diferido: backend ya tenía el run en terminal — descartando`,
+      );
+      await fs.unlink(filePath).catch(() => undefined);
+      return true;
+    }
+    logger.warn(
+      {
+        event: 'complete.recovery.fail',
+        runId,
+        filePath,
+        error: (err as Error).message,
+        status: err instanceof ApiError ? err.status : null,
+      },
+      `[recovery] /complete diferido falló — se reintentará en el próximo boot`,
+    );
+    return false;
+  }
+}
 
 /**
  * Frecuencia de progress POST mientras claude corre. 30s = balance entre
@@ -183,6 +512,50 @@ export async function runStory(
 ): Promise<void> {
   const { runId, storyId, storyTitle, storyMarkdown, branch, prompt, repoUrl, baseBranch, anthropicApiKey, forgeWorkerModel, forgeWorkerEffort } = claimed;
 
+  // === Resolver el max run duration desde el backend con clamps ===
+  // Lógica delegada a `resolveMaxRunDurationMs` (función pura, testeable
+  // independientemente — ver runner.timeout-resolver.test.ts).
+  const backendMaxRunDuration = claimed.forgeWorkerMaxRunDurationMs;
+  const { value: maxRunDurationMs, source: maxRunDurationSource, clamped: maxRunDurationClamped } =
+    resolveMaxRunDurationMs(backendMaxRunDuration);
+
+  // Log DEDICADO y PROMINENTE del timeout efectivo. Aparece al INICIO del run,
+  // ANTES de cualquier otro log de spawn/clone/etc., para que el operador
+  // pueda ver de inmediato qué timeout va a aplicar sin scrollear. Incluye
+  // valor en ms + minutos legibles + fuente (backend vs default).
+  logger.info(
+    {
+      event: 'run.max_duration',
+      runId,
+      storyId,
+      maxRunDurationMs,
+      maxRunDurationMin: Math.round(maxRunDurationMs / 60_000),
+      source: maxRunDurationSource,
+      backendValue: backendMaxRunDuration ?? null,
+      clamped: maxRunDurationClamped,
+    },
+    `⏱️  [run.max_duration] timeout=${Math.round(maxRunDurationMs / 60_000)}min ` +
+      `(${maxRunDurationMs}ms) source=${maxRunDurationSource}` +
+      (maxRunDurationClamped ? ` ⚠️  clamped from backendValue=${backendMaxRunDuration}ms` : '') +
+      (maxRunDurationSource === 'default'
+        ? ' ⚠️  backend NO envió valor — usando default 30 min (verificar AgentTokenSettings)'
+        : ''),
+  );
+
+  if (maxRunDurationClamped) {
+    logger.warn(
+      {
+        event: 'run.max_duration.clamped',
+        runId,
+        backendValue: backendMaxRunDuration,
+        clampedValue: maxRunDurationMs,
+        min: MAX_RUN_DURATION_MS_MIN,
+        max: MAX_RUN_DURATION_MS_MAX,
+      },
+      `[run.max_duration.clamped] backend=${backendMaxRunDuration}ms clamped to ${maxRunDurationMs}ms`,
+    );
+  }
+
   logger.info(
     {
       event: 'run.start',
@@ -194,8 +567,10 @@ export async function runStory(
       hasRepoUrl: !!repoUrl,
       mode: repoUrl ? 'git' : 'sandbox',
       promptLength: prompt?.length ?? 0,
+      maxRunDurationMs,
+      maxRunDurationSource,
     },
-    `Starting run for story "${storyTitle}" (mode=${repoUrl ? 'git' : 'sandbox'})`,
+    `Starting run for story "${storyTitle}" (mode=${repoUrl ? 'git' : 'sandbox'}, maxDuration=${(maxRunDurationMs / 60_000).toFixed(0)}min)`,
   );
 
   // ════════════════════════════════════════════════════════════════════════
@@ -858,6 +1233,24 @@ export async function runStory(
   // reemplaza por el autoritativo del SDK en el perAttempt array.
   let runningTokens: GeneratorRunningTokens | null = null;
 
+  // Estado para detección de agente "colgado". Comparado con runningTokens
+  // en cada tick del progress timer (30s). Si in/out no cambiaron en
+  // STUCK_DETECT_TOKEN_FREEZE_TICKS ticks consecutivos → WARN; si excede
+  // STUCK_LIKELY_HANG_TICKS → ERROR. lastToolCall lo refresca el handler
+  // de stdout cuando ve un `tool_use` en el stream-json.
+  const stuckState: StuckDetectState = {
+    lastInputTokens: 0,
+    lastOutputTokens: 0,
+    noChangeTicks: 0,
+    lastToolCall: null,
+  };
+
+  // Tracking de bash tasks en background (P4). Key = hash sintético del
+  // comando + startedAt. El stream-json del agente no expone un task ID
+  // estable, así que usamos un counter monotónico.
+  const bashTasks = new Map<number, BashTaskInfo>();
+  let bashTaskCounter = 0;
+
   for (let attempt = 1; attempt <= maxDodAttempts; attempt++) {
     totalAttempts = attempt;
 
@@ -890,6 +1283,14 @@ export async function runStory(
       // la UI mostraría "Claude terminó" mientras el retry vuelve a correr.
       markCriterion('claude.spawned', 'in_progress');
       markCriterion('claude.exited', 'in_progress');
+      // Reset del estado de stuck detection y bash tasks — un attempt previo
+      // pudo dejar el contador alto o tasks "stuck" que ya no aplican al spawn
+      // nuevo. Sin esto, el primer tick del attempt 2 dispararía un WARN falso.
+      stuckState.lastInputTokens = 0;
+      stuckState.lastOutputTokens = 0;
+      stuckState.noChangeTicks = 0;
+      stuckState.lastToolCall = null;
+      bashTasks.clear();
     }
 
     // === Wrap claude args con sandbox para este attempt ===
@@ -935,6 +1336,96 @@ export async function runStory(
     }
 
     // === Spawn claude ===
+    // FACTORY_WORKER_USE_USER_SESSION=1 — modo dev: NO pasar API key.
+    // Pasamos `CLAUDE_CODE_OAUTH_TOKEN` en su lugar (token long-lived
+    // generado con `claude setup-token`). Esta es la API OFICIAL de
+    // Anthropic para automation con suscripción Pro/Max — documentada en
+    // https://code.claude.com/docs/en/authentication.md.
+    //
+    // Por qué un token explícito y no la sesión local: el subprocess
+    // hereda env limpio (sin shell session), entonces no puede leer
+    // automáticamente el Keychain (~/.claude/.credentials.json). El token
+    // explícito es la forma soportada de pasar la sesión OAuth al subprocess.
+    //
+    // Setup (una vez por dev machine):
+    //   claude setup-token   # genera token long-lived
+    //   export CLAUDE_CODE_OAUTH_TOKEN=<output>   # en tu shell
+    //
+    // Trade-off vs API key:
+    //   - Cuota se descuenta del plan Pro/Max (no API credits)
+    //   - Rate limit de 5h se comparte con uso interactivo del developer
+    //   - Desde Jun 15, 2026: nueva cuota "Agent SDK credit" separada
+    const useUserSession = process.env.FACTORY_WORKER_USE_USER_SESSION === '1';
+    const oauthToken = process.env.CLAUDE_CODE_OAUTH_TOKEN;
+    if (useUserSession && !oauthToken) {
+      logger.error(
+        { event: 'run.spawn.user_session.no_token', runId, attempt },
+        '❌ FACTORY_WORKER_USE_USER_SESSION=1 pero CLAUDE_CODE_OAUTH_TOKEN no está set. ' +
+          'Genera el token con `claude setup-token` y exportalo en tu shell antes de arrancar el worker. ' +
+          'Sin el token, el CLI no puede autenticarse desde el subprocess y aborta silenciosamente.',
+      );
+    }
+
+    // === FORENSIC AUDIT: credenciales que llegan al CLI ===
+    // Esta auditoría existe porque hay un escenario observado donde el CLI
+    // cobra a la API pese al flag activo. Los logs aquí permiten distinguir
+    // entre causas: token malformado, key fantasma del Keychain, conflicto
+    // de env vars, etc. NUNCA logueamos el valor real — solo metadata.
+    const tokenPrefix = oauthToken ? oauthToken.slice(0, 13) : null; // sk-ant-oat01 = 12 chars + '-'
+    const tokenIsValidShape = tokenPrefix === 'sk-ant-oat01-';
+    const apiKeyInSecrets = safeSecrets.some((s) => s.name === 'ANTHROPIC_API_KEY');
+    const apiKeyInParentEnv = !!process.env.ANTHROPIC_API_KEY;
+    const childEnvKeys = [
+      ...safeSecrets.map((s) => s.name),
+      'HOME', 'PATH', 'USER', 'LANG',
+      ...(useUserSession
+        ? (oauthToken ? ['CLAUDE_CODE_OAUTH_TOKEN'] : [])
+        : ['ANTHROPIC_API_KEY']),
+    ];
+    logger.warn(
+      {
+        event: 'run.spawn.credential_audit',
+        runId,
+        attempt,
+        useUserSession,
+        hasOauthToken: !!oauthToken,
+        oauthTokenLength: oauthToken?.length ?? 0,
+        oauthTokenPrefix: tokenPrefix,
+        oauthTokenShapeValid: tokenIsValidShape,
+        apiKeyFromBackendLength: anthropicApiKey?.length ?? 0,
+        apiKeyInOrgSecrets: apiKeyInSecrets,
+        apiKeyInParentEnv,
+        childEnvKeys,
+        expectedAuthSource: useUserSession
+          ? (oauthToken ? 'oauth_token' : 'NONE_will_fail')
+          : 'api_key',
+      },
+      `[credential_audit] useUserSession=${useUserSession} authSource=${useUserSession ? (oauthToken ? 'oauth' : 'NONE') : 'api_key'} ` +
+        `tokenShape=${tokenIsValidShape ? 'ok' : 'INVALID'} apiKeyLeak=${apiKeyInSecrets || apiKeyInParentEnv ? 'WARN' : 'clean'}`,
+    );
+    if (useUserSession && oauthToken && !tokenIsValidShape) {
+      logger.error(
+        {
+          event: 'run.spawn.oauth_token.invalid_shape',
+          runId,
+          attempt,
+          tokenPrefix,
+          expectedPrefix: 'sk-ant-oat01-',
+        },
+        '❌ CLAUDE_CODE_OAUTH_TOKEN no tiene el formato esperado (sk-ant-oat01-...). ' +
+          'El CLI puede silenciosamente caer a otra credencial (Keychain). ' +
+          'Regenerá con `claude setup-token` y exportá el valor exacto que imprime.',
+      );
+    }
+    if (useUserSession && apiKeyInSecrets) {
+      logger.error(
+        { event: 'run.spawn.api_key_leak.org_secrets', runId, attempt },
+        '🚨 ANTHROPIC_API_KEY está en los secretos externos del org. ' +
+          'buildSecretEnv la va a inyectar al child ANTES que el OAuth token, ' +
+          'lo que anula el flag. Borrá la entrada del org en la UI.',
+      );
+    }
+
     let child: ChildProcess;
     try {
       child = spawn(sandboxed.bin, sandboxed.args, {
@@ -950,10 +1441,24 @@ export async function runStory(
           PATH: process.env.PATH ?? '',
           USER: process.env.USER ?? '',
           LANG: process.env.LANG ?? 'en_US.UTF-8',
-          ANTHROPIC_API_KEY: anthropicApiKey,
+          // Si useUserSession está activo, pasamos el OAuth token (no API key).
+          // El CLI usa CLAUDE_CODE_OAUTH_TOKEN para autenticar via OAuth
+          // contra el plan Pro/Max del developer. Si NO está activo (default
+          // = producción), pasamos la API key normalmente.
+          ...(useUserSession
+            ? (oauthToken ? { CLAUDE_CODE_OAUTH_TOKEN: oauthToken } : {})
+            : { ANTHROPIC_API_KEY: anthropicApiKey }),
         },
         stdio: ['ignore', 'pipe', 'pipe'],
       });
+      if (useUserSession) {
+        logger.warn(
+          { event: 'run.spawn.user_session', runId, attempt, pid: child.pid, hasToken: !!oauthToken },
+          oauthToken
+            ? '⚠️  Spawned with CLAUDE_CODE_OAUTH_TOKEN — using Pro/Max quota. Dev only — NOT for production.'
+            : '⚠️  Spawned WITHOUT API key AND WITHOUT OAuth token — CLI will likely fail. Run `claude setup-token` first.',
+        );
+      }
     } catch (err) {
       const e = err as Error;
       logger.error(
@@ -980,6 +1485,12 @@ export async function runStory(
       },
       `claude spawned (attempt ${attempt}, sandbox=${sandboxed.mode}, pid=${child.pid})`,
     );
+
+    // Safety net armado SOLO cuando el CLI emite un `result` terminal
+    // (subtype: success/error). Si tras 30s de ese punto el exit aún no
+    // llegó, mandamos SIGKILL — el CLI ya hizo su trabajo, no hay razón
+    // para que siga vivo. Ver el bloque `child.stdin.close` abajo.
+    let postTerminalKillTimer: NodeJS.Timeout | null = null;
 
     // === Hook stdout/stderr al log file (mismo log compartido entre attempts) ===
     child.on('error', (err) => {
@@ -1054,6 +1565,65 @@ export async function runStory(
           runningTokens.estimatedCostUsd = estimateHaikuCost(runningTokens);
         }
 
+        // Captura tool_use del agente para tracking de forensics (stuck) y
+        // bash tasks en background (long-running / watch-mode detection).
+        // Se evalúa por línea ANTES de parseResultUsage para que el ÚLTIMO
+        // tool_call quede registrado aunque el attempt esté por cerrar.
+        const toolUse = parseToolUse(line);
+        if (toolUse) {
+          stuckState.lastToolCall = {
+            name: toolUse.toolName,
+            inputPreview: toolUse.inputPreview,
+          };
+          // P4 — bash task tracking (solo para Bash con run_in_background=true).
+          // El stream-json no nos da un task ID estable, así que generamos uno
+          // sintético (counter monotónico) y trackeamos por command + startedAt.
+          if (
+            toolUse.bashCommand !== null &&
+            toolUse.runInBackground
+          ) {
+            const taskId = ++bashTaskCounter;
+            bashTasks.set(taskId, {
+              command: toolUse.bashCommand,
+              startedAt: Date.now(),
+              longRunningLogged: false,
+              watchModeLogged: false,
+            });
+            const watchHit = WATCH_MODE_PATTERNS.find((p) =>
+              p.regex.test(toolUse.bashCommand!),
+            );
+            logger.info(
+              {
+                event: 'bash.task.spawned',
+                runId,
+                attempt,
+                taskId,
+                command: redactSecrets(toolUse.bashCommand.slice(0, 500)),
+                watchModeMatch: watchHit?.label ?? null,
+              },
+              `Bash task ${taskId} spawned in background: ${toolUse.bashCommand.slice(0, 80)}`,
+            );
+            // Si el comando es claramente watch-mode, escalamos el WARN ya —
+            // sin esperar a que pasen 60s. La heurística es conservadora,
+            // los patterns están muy acotados (vitest sin --run, etc).
+            if (watchHit) {
+              const task = bashTasks.get(taskId);
+              if (task) task.watchModeLogged = true;
+              logger.warn(
+                {
+                  event: 'bash.task.likely_watch_mode',
+                  runId,
+                  attempt,
+                  taskId,
+                  command: redactSecrets(toolUse.bashCommand.slice(0, 500)),
+                  watchModePattern: watchHit.label,
+                },
+                `Bash task ${taskId} parece estar en watch mode (${watchHit.label}) — el agente puede colgarse esperando que termine. Considerar kill manual si los tokens se congelan.`,
+              );
+            }
+          }
+        }
+
         // Captura el evento `result` con cost/usage ANTES del formatting.
         // Solo viene UNO por spawn de claude (al cierre del run), pero el
         // DoD loop puede re-spawnear; cada attempt mete su entry al array.
@@ -1076,12 +1646,120 @@ export async function runStory(
               durationMs: usage.durationMs,
               numTurns: usage.numTurns,
               subtype: usage.subtype,
+              serviceTier: usage.serviceTier,
             },
             `[generator.cost] attempt=${usage.attempt} cost=$${usage.totalCostUsd.toFixed(4)} ` +
+              `tier=${usage.serviceTier ?? 'unknown'} ` +
               `tokens(in/out/cw/cr)=${usage.inputTokens}/${usage.outputTokens}/` +
               `${usage.cacheCreationInputTokens}/${usage.cacheReadInputTokens} ` +
               `turns=${usage.numTurns} duration=${(usage.durationMs / 1000).toFixed(1)}s`,
           );
+
+          // === FORENSIC ASSERT: si el flag está activo pero el tier es
+          // "standard", el OAuth falló silenciosamente y el CLI cayó a una
+          // API key fantasma. Loggeamos LOUD con contexto suficiente para
+          // diagnosticar la fuente (Keychain / helper / env leak).
+          if (useUserSession && usage.serviceTier === 'standard' && usage.totalCostUsd > 0) {
+            logger.error(
+              {
+                event: 'run.spawn.oauth_bypass_detected',
+                runId,
+                attempt: usage.attempt,
+                serviceTier: usage.serviceTier,
+                totalCostUsd: usage.totalCostUsd,
+                oauthTokenPresent: !!oauthToken,
+                oauthTokenShapeValid: tokenIsValidShape,
+                apiKeyInOrgSecrets: apiKeyInSecrets,
+                apiKeyInParentEnv,
+                possibleSources: [
+                  apiKeyInSecrets && 'org_secrets',
+                  apiKeyInParentEnv && 'parent_env_inherit',
+                  !tokenIsValidShape && 'oauth_token_invalid_shape',
+                  'macos_keychain_residual',
+                  'claude_settings_api_key_helper',
+                ].filter(Boolean),
+              },
+              `🚨 [oauth_bypass] flag=USER_SESSION pero el CLI usó tier="standard" y cobró $${usage.totalCostUsd.toFixed(4)} — ` +
+                'el OAuth fue ignorado. Revisar Keychain (security find-generic-password -s "Claude Code-credentials"), ' +
+                'apiKeyHelper en ~/.claude/settings.json, o secretos del org con nombre ANTHROPIC_API_KEY.',
+            );
+          } else if (useUserSession && usage.serviceTier && usage.serviceTier !== 'standard') {
+            logger.info(
+              {
+                event: 'run.spawn.oauth_confirmed',
+                runId,
+                attempt: usage.attempt,
+                serviceTier: usage.serviceTier,
+                totalCostUsd: usage.totalCostUsd,
+              },
+              `✅ [oauth_confirmed] flag activo y tier="${usage.serviceTier}" — el OAuth está funcionando, sin cobro API.`,
+            );
+          }
+
+          // BUG FIX 2026-05-25 (incident: stream-json never closes stdin):
+          // El CLI Claude Code emite `result` event con subtype="success" cuando
+          // termina su trabajo, PERO mantiene stdin abierto esperando potencial
+          // input para un siguiente turno (modo interactive stream-json). El
+          // proceso NO termina por sí solo — el worker queda esperando
+          // `child.on('exit')` que nunca llega.
+          //
+          // Síntoma observado: 6+ min de silencio post-`generator.usage`,
+          // resuelto solo al recibir SIGINT del operador (que mata al child).
+          //
+          // Fix: cerrar explícitamente stdin del child cuando recibimos un
+          // result terminal. Esto le indica al CLI "no hay más input, termina".
+          // El CLI cierra sus streams, emite 'exit', el worker resuelve y
+          // avanza al DoD verify.
+          if (
+            usage.subtype === 'success' ||
+            usage.subtype === 'error_during_execution' ||
+            usage.subtype === 'error_max_turns'
+          ) {
+            logger.info(
+              {
+                event: 'child.stdin.close',
+                runId,
+                attempt: usage.attempt,
+                subtype: usage.subtype,
+                reason: 'agent emitted terminal result — closing stdin so CLI exits',
+              },
+              `[child.stdin.close] subtype=${usage.subtype} — signaling CLI to exit by closing stdin`,
+            );
+            try {
+              child.stdin?.end();
+            } catch (err) {
+              logger.warn(
+                { event: 'child.stdin.close.fail', runId, error: (err as Error).message },
+                'Failed to close child stdin (non-fatal — exit safety net still active)',
+              );
+            }
+            // Safety net: si tras 30s del result terminal el CLI sigue vivo
+            // (zombie/deadlock en kernel), mandamos SIGKILL. El trabajo ya
+            // terminó — no hay razón para seguir esperando. Solo se arma una
+            // vez; reintentos en el mismo attempt sobre-escriben el handle.
+            if (postTerminalKillTimer) clearTimeout(postTerminalKillTimer);
+            postTerminalKillTimer = setTimeout(() => {
+              if (!child.killed) {
+                logger.warn(
+                  {
+                    event: 'child.post_terminal.kill',
+                    runId,
+                    attempt: usage.attempt,
+                    pid: child.pid,
+                  },
+                  'CLI didn\'t exit 30s after terminal result — sending SIGKILL',
+                );
+                try {
+                  child.kill('SIGKILL');
+                } catch (err) {
+                  logger.warn(
+                    { event: 'child.post_terminal.kill.fail', runId, error: (err as Error).message },
+                    'SIGKILL failed (non-fatal)',
+                  );
+                }
+              }
+            }, 30_000);
+          }
           // Real-time cost: post el summary parcial a /progress INMEDIATAMENTE
           // (no esperar al /complete final). El UI pollea cada N segundos y
           // ve el cost subir attempt-por-attempt. Fire-and-forget — si falla
@@ -1154,11 +1832,11 @@ export async function runStory(
     const timeoutHandle = setTimeout(() => {
       killed = true;
       logger.error(
-        { event: 'run.timeout', runId, attempt, durationMs: MAX_RUN_DURATION_MS },
+        { event: 'run.timeout', runId, attempt, durationMs: maxRunDurationMs },
         'Killing claude after max duration',
       );
       killClaude();
-    }, MAX_RUN_DURATION_MS);
+    }, maxRunDurationMs);
 
     const refreshOutputFromFile = async () => {
       try {
@@ -1176,6 +1854,140 @@ export async function runStory(
     const progressTimer = setInterval(() => {
       if (killed) return;
       void (async () => {
+        // P3 — detección de agente colgado. Comparamos runningTokens contra el
+        // snapshot anterior. Si NO cambiaron → incrementa contador; si cambiaron
+        // → resetea. Loggeamos WARN al cruzar STUCK_DETECT_TOKEN_FREEZE_TICKS y
+        // ERROR al cruzar STUCK_LIKELY_HANG_TICKS. No matamos automáticamente —
+        // operator decide. El log incluye lastToolCall + cpu/mem del proceso
+        // para diagnosticar sin ssh al worker.
+        if (runningTokens && child.pid !== undefined) {
+          const curIn = runningTokens.inputTokens;
+          const curOut = runningTokens.outputTokens;
+          const tokensFrozen =
+            curIn === stuckState.lastInputTokens &&
+            curOut === stuckState.lastOutputTokens;
+          if (tokensFrozen) {
+            stuckState.noChangeTicks += 1;
+          } else {
+            stuckState.noChangeTicks = 0;
+            stuckState.lastInputTokens = curIn;
+            stuckState.lastOutputTokens = curOut;
+          }
+
+          // Threshold WARN — primera vez que cruzamos. Reportamos UNA vez por
+          // ventana de freeze; si los tokens se mueven y vuelven a congelarse,
+          // el contador empieza de cero y volverá a disparar.
+          if (stuckState.noChangeTicks === STUCK_DETECT_TOKEN_FREEZE_TICKS) {
+            const stats = await getProcessStats(child.pid);
+            const frozenSeconds =
+              STUCK_DETECT_TOKEN_FREEZE_TICKS * (PROGRESS_INTERVAL_MS / 1000);
+            logger.warn(
+              {
+                event: 'agent.stuck.detect',
+                runId,
+                attempt,
+                pid: child.pid,
+                frozenSeconds,
+                runningTokens: {
+                  in: curIn,
+                  out: curOut,
+                },
+                lastToolCall: stuckState.lastToolCall
+                  ? {
+                      name: stuckState.lastToolCall.name,
+                      inputPreview: redactSecrets(
+                        stuckState.lastToolCall.inputPreview,
+                      ),
+                    }
+                  : null,
+                cpuPercent: stats?.cpuPercent ?? null,
+                rssKb: stats?.rssKb ?? null,
+                comm: stats?.comm ?? null,
+              },
+              `WARN: agent stuck — no token activity for ${frozenSeconds}s. lastTool=${stuckState.lastToolCall?.name ?? 'unknown'} pid=${child.pid} cpu=${stats?.cpuPercent ?? '?'}%`,
+            );
+          }
+
+          // Threshold ERROR — likely hang. Loggea con recomendación de kill.
+          if (stuckState.noChangeTicks === STUCK_LIKELY_HANG_TICKS) {
+            const stats = await getProcessStats(child.pid);
+            const frozenSeconds =
+              STUCK_LIKELY_HANG_TICKS * (PROGRESS_INTERVAL_MS / 1000);
+            logger.error(
+              {
+                event: 'agent.stuck.likely_hang',
+                runId,
+                attempt,
+                pid: child.pid,
+                frozenSeconds,
+                runningTokens: {
+                  in: curIn,
+                  out: curOut,
+                },
+                lastToolCall: stuckState.lastToolCall
+                  ? {
+                      name: stuckState.lastToolCall.name,
+                      inputPreview: redactSecrets(
+                        stuckState.lastToolCall.inputPreview,
+                      ),
+                    }
+                  : null,
+                cpuPercent: stats?.cpuPercent ?? null,
+                rssKb: stats?.rssKb ?? null,
+                comm: stats?.comm ?? null,
+                recommendation: 'manual_kill',
+              },
+              `ERROR: agent.stuck.likely_hang — ${frozenSeconds}s sin actividad de tokens, último tool=${stuckState.lastToolCall?.name ?? 'unknown'}. Considerar kill manual: kill ${child.pid}`,
+            );
+          }
+        }
+
+        // P4 — bash tasks long-running detection. Recorremos las tareas activas
+        // y, si alguna superó BASH_LONG_RUNNING_THRESHOLD_MS sin haber sido
+        // marcada, loguamos WARN. El re-match de watch-mode patterns acá cubre
+        // el caso donde una task NO matcheó al inicio (heurística estricta)
+        // pero superó el threshold de cualquier modo.
+        for (const [taskId, task] of bashTasks) {
+          const elapsedMs = Date.now() - task.startedAt;
+          if (
+            elapsedMs >= BASH_LONG_RUNNING_THRESHOLD_MS &&
+            !task.longRunningLogged
+          ) {
+            task.longRunningLogged = true;
+            const watchHit = WATCH_MODE_PATTERNS.find((p) =>
+              p.regex.test(task.command),
+            );
+            logger.warn(
+              {
+                event: 'bash.task.long_running',
+                runId,
+                attempt,
+                taskId,
+                elapsedMs,
+                command: redactSecrets(task.command.slice(0, 500)),
+                watchModeMatch: watchHit?.label ?? null,
+              },
+              `Bash task ${taskId} long_running (${(elapsedMs / 1000).toFixed(0)}s): ${task.command.slice(0, 80)}`,
+            );
+            // Si el comando coincide con un pattern watch-mode y no se había
+            // logueado todavía, escalamos ahora.
+            if (watchHit && !task.watchModeLogged) {
+              task.watchModeLogged = true;
+              logger.warn(
+                {
+                  event: 'bash.task.likely_watch_mode',
+                  runId,
+                  attempt,
+                  taskId,
+                  command: redactSecrets(task.command.slice(0, 500)),
+                  watchModePattern: watchHit.label,
+                },
+                `WARN: command likely in watch mode — will never exit. Consider killing. (${watchHit.label})`,
+              );
+            }
+          }
+        }
+
         await refreshOutputFromFile();
         const lastOutput = outputBuffer.join('').slice(-MAX_OUTPUT_BYTES);
         const criteriaProgress = buildCriteriaPayload();
@@ -1238,15 +2050,31 @@ export async function runStory(
       })();
     }, PROGRESS_INTERVAL_MS);
 
-    // === Wait close ===
+    // === Wait exit ===
     // Capturamos también `signal` (qa-validation 2026-05-11) — SIGKILL/SIGTERM
     // revelan kills externos vs. exits "naturales" del proceso. Antes solo
     // teníamos code y crashes silenciosos no daban pistas.
+    //
+    // BUG FIX 2026-05-25: usar 'exit' en lugar de 'close'. El evento 'close' se
+    // emite cuando TODOS los streams stdio del child cierran — si algún
+    // listener retiene referencia al pipe (caso observado con stuck detect +
+    // bash tracking + tmux+ttyd attachados al log), 'close' nunca dispara y el
+    // worker queda en deadlock indefinido post-agente.
+    // 'exit' se emite cuando el process termina independiente del estado de
+    // los streams. Es el patrón idiomático para "el subprocess murió".
+    //
+    // Esperamos exit sin timeout aquí. Defensa en profundidad:
+    //   1. `postTerminalKillTimer` arma SIGKILL si subtype:success llegó pero
+    //      el CLI no cerró en 30s (definido en el handler de stdout arriba).
+    //   2. `timeoutHandle` (MAX_RUN_DURATION_MS) mata el run entero si nunca
+    //      llega ni subtype:success ni exit — defensa última contra hangs.
+    // Anti-patrón previo: un setTimeout(30s) acá arrancaba al spawn y mataba
+    // runs legítimos que tomaban > 30s en producir output. Removido 2026-05-26.
     const { exitCode: rawExitCode, signal: claudeSignal } = await new Promise<{
       exitCode: number;
       signal: NodeJS.Signals | null;
     }>((resolve) => {
-      child.on('close', (code, sig) => {
+      child.on('exit', (code, sig) => {
         resolve({ exitCode: code ?? -1, signal: sig });
       });
     });
@@ -1255,6 +2083,7 @@ export async function runStory(
     clearTimeout(timeoutHandle);
     clearInterval(progressTimer);
     if (sigkillFallbackHandle) clearTimeout(sigkillFallbackHandle);
+    if (postTerminalKillTimer) clearTimeout(postTerminalKillTimer);
 
     // Detectamos un fallo DURO de claude (crash, exit≠0, timeout-kill,
     // spawn-fail) para decidir abajo si reintentamos o cerramos. Lo
@@ -1333,7 +2162,7 @@ export async function runStory(
         (killByBackend
           ? 'Killed by backend signal'
           : killed
-            ? `Killed after ${MAX_RUN_DURATION_MS}ms`
+            ? `Killed after ${maxRunDurationMs}ms`
             : `claude attempt ${attempt} exited with code ${exitCode}${claudeSignal ? ` (signal=${claudeSignal})` : ''}`);
       break;
     }
@@ -1386,6 +2215,12 @@ export async function runStory(
         // legacy o desync de versiones), el verifier cae a env vars.
         dodVerifierModel: claimed.dodVerifierModel,
         dodVerifierEffort: claimed.dodVerifierEffort,
+        // Manifests de componentes UX/UI del bundle de diseño de la épica
+        // (Stream A). Los usa el Layer 1 check `design-coverage-check` para
+        // verificar que el coder no se haya saltado ningún componente. Si
+        // el claim viene de un backend desactualizado o la épica es
+        // backend-only, el check degrada a `skipped`.
+        componentManifests: claimed.componentManifests,
       },
       async (partialVerdicts) => {
         // Sync storyCriteria con verdicts emitidos. Para los tres tipos de
@@ -1740,7 +2575,7 @@ export async function runStory(
   } else if (killByBackend) {
     errorMessage = `Killed by backend signal (run was already terminal)`;
   } else if (killed) {
-    errorMessage = `Killed after ${durationMs}ms (exceeded MAX_RUN_DURATION_MS)`;
+    errorMessage = `Killed after ${durationMs}ms (exceeded forgeWorkerMaxRunDurationMs=${maxRunDurationMs}ms)`;
   } else if (claudeCompletedOk) {
     logger.info(
       { event: 'run.claude_ok', runId, attempts: totalAttempts, durationMs },
@@ -1815,13 +2650,37 @@ export async function runStory(
           try {
             // `--text` fuerza el diff de archivos binarios como texto — así
             // un secreto incrustado en un blob binario (ej. una DB SQLite)
-            // también se escanea. maxBuffer ampliado a 50MB para no
-            // fallar-cerrado en diffs grandes legítimos.
+            // también se escanea. maxBuffer ampliado a 500MB tras el
+            // incidente real del 2026-05-25 (run 162dc9f9 abortado por
+            // `stdout maxBuffer length exceeded` con un diff legítimo que
+            // excedía los 50MB previos). 500MB es el techo razonable para
+            // diffs patológicos pero recuperables; arriba de eso un humano
+            // debe revisar (probable bug del agente — node_modules,
+            // builds, etc.). Sigue siendo fail-closed por encima del cap.
             const diff = await git(
               ['diff', '--text', `origin/${baseBranch}..HEAD`],
               workdir,
-              50 * 1024 * 1024,
+              500 * 1024 * 1024,
             );
+            const diffBytes = Buffer.byteLength(diff.stdout, 'utf-8');
+            // Visibilidad operativa: un diff > 100MB es señal fuerte de que
+            // el agente está generando output anormal (commit accidental
+            // de node_modules, dist/, etc.). NO bloqueamos — solo emitimos
+            // WARN para que el operador investigue por qué creció tanto.
+            if (diffBytes > 100 * 1024 * 1024) {
+              logger.warn(
+                {
+                  event: 'git.diff.scan.large_diff',
+                  runId,
+                  branch,
+                  baseBranch,
+                  diffBytes,
+                  diffMegabytes: Math.round((diffBytes / (1024 * 1024)) * 10) / 10,
+                  aheadCount,
+                },
+                `git.diff.scan.large_diff: el diff pre-push supera 100MB (${Math.round((diffBytes / (1024 * 1024)) * 10) / 10}MB) — probable bug del agente (¿commiteo node_modules/dist/build?). Revisar el contenido del PR antes de mergear.`,
+              );
+            }
             const leakedNames = scanDiffForSecrets(diff.stdout, safeSecrets);
             if (leakedNames.length > 0) {
               secretLeak = `un archivo commiteado contiene el valor de: ${leakedNames.join(', ')}`;
@@ -1862,18 +2721,170 @@ export async function runStory(
           // 4. Push de la story branch al remote. -u set upstream para que
           //    futuros pulls/pushes desde este workdir (si lo preserváramos
           //    para debug) funcionen sin args.
+          //
+          // P1 — observabilidad detallada del flujo de push. Estructura:
+          //  - git.push.start: contexto pre-comando (branch, base, aheadCount, sha).
+          //  - git.push.attempt: timing start del comando git push concreto.
+          //  - git.push.ok: timing end, stdout/stderr summary del comando.
+          //  - git.push.fail: en el catch (más abajo), con stderr + exitCode.
+          //  - git.push.verify: post-push `git ls-remote` para CONFIRMAR que el
+          //    branch existe en el remote. Si falla, `pushFailed=true` y el
+          //    branch NO se reporta como pushed.
           markCriterion('branch.pushed', 'in_progress');
           logger.info(
-            { event: 'git.push.start', runId, branch, aheadCount, commitSha: commitSha.slice(0, 7) },
-            `git push origin ${branch} (${aheadCount} commits)`,
+            {
+              event: 'git.push.start',
+              runId,
+              branch,
+              baseBranch,
+              remote: 'origin',
+              commitSha,
+              commitShaShort: commitSha.slice(0, 7),
+              aheadCount,
+            },
+            `git push origin ${branch} (${aheadCount} commits, sha=${commitSha.slice(0, 7)})`,
           );
-          await git(['push', '-u', 'origin', branch], workdir);
-          prBranchPushed = true;
-          markCriterion('branch.pushed', 'completed');
+
+          const pushStartedAt = Date.now();
           logger.info(
-            { event: 'git.push.ok', runId, branch, commitSha: commitSha.slice(0, 7) },
-            `Push exitoso — backend abrirá PR via Octokit`,
+            {
+              event: 'git.push.attempt',
+              runId,
+              branch,
+              remote: 'origin',
+              startedAt: new Date(pushStartedAt).toISOString(),
+            },
+            `Ejecutando: git push -u origin ${branch}`,
           );
+          const pushResult = await git(['push', '-u', 'origin', branch], workdir);
+          const pushDurationMs = Date.now() - pushStartedAt;
+          // Stdout/stderr del push pueden contener URLs con token embebido si
+          // git las imprime — pasamos por `redactRepoUrlCredentials` defensivo.
+          const pushStdoutRedacted = redactRepoUrlCredentials(
+            pushResult.stdout ?? '',
+            repoUrl,
+          );
+          const pushStderrRedacted = redactRepoUrlCredentials(
+            pushResult.stderr ?? '',
+            repoUrl,
+          );
+          // Heurística de bytes uploaded: git push imprime " ... KiB | ... KiB/s"
+          // en stderr cuando hay transferencia. Capturamos la primera ocurrencia
+          // como evidencia de upload — si NO aparece, puede ser un push de un
+          // branch vacío o pre-existente y reportamos null (no error).
+          const bytesMatch = pushStderrRedacted.match(/(\d+(?:\.\d+)?)\s*(KiB|MiB|GiB|bytes)/);
+          const bytesUploaded = bytesMatch ? `${bytesMatch[1]} ${bytesMatch[2]}` : null;
+          logger.info(
+            {
+              event: 'git.push.ok',
+              runId,
+              branch,
+              commitSha,
+              commitShaShort: commitSha.slice(0, 7),
+              durationMs: pushDurationMs,
+              bytesUploaded,
+              commitsPushed: aheadCount,
+              // stdout suele ser vacío en pushes exitosos; stderr es donde git
+              // pone "Writing objects: ...", el `remote: ` y el "main -> main".
+              stdoutPreview: pushStdoutRedacted.slice(0, 500),
+              stderrPreview: pushStderrRedacted.slice(0, 1000),
+            },
+            `Push exitoso (${pushDurationMs}ms, ${bytesUploaded ?? 'tamaño desconocido'}) — verificando contra el remote`,
+          );
+
+          // INVARIANTE NUEVA — confirmar que el branch EXISTE en el remote tras
+          // el push. Sin esto, un `git push` con éxito aparente pero que NO
+          // llegó a propagar (fast-forward sin escritura efectiva al remote
+          // por un bug del servidor, push hook silencioso, etc.) marcaría el
+          // run como completo y borraríamos el workdir — el bug del incidente
+          // real del 2026-05-25. `git ls-remote origin {branch}` retorna 0
+          // líneas si el branch NO existe; verificamos que aparezca y que el
+          // SHA coincida con el commitSha local.
+          let verifyOk = false;
+          let verifyRemoteSha: string | null = null;
+          try {
+            const lsRemote = await git(
+              ['ls-remote', '--exit-code', '--heads', 'origin', branch],
+              workdir,
+            );
+            // Output: "SHA<TAB>refs/heads/BRANCH". Si --exit-code y el branch
+            // no existe, git retorna 2 → throw → catch abajo. Si existe,
+            // tenemos al menos una línea con el SHA del HEAD remoto.
+            const remoteLine = lsRemote.stdout.trim().split('\n').find(Boolean);
+            if (remoteLine) {
+              verifyRemoteSha = remoteLine.split(/\s+/)[0] ?? null;
+            }
+            if (verifyRemoteSha && verifyRemoteSha === commitSha) {
+              verifyOk = true;
+              logger.info(
+                {
+                  event: 'git.push.verify.ok',
+                  runId,
+                  branch,
+                  remoteSha: verifyRemoteSha,
+                  remoteShaShort: verifyRemoteSha.slice(0, 7),
+                  localShaShort: commitSha.slice(0, 7),
+                },
+                `Push verificado: branch ${branch} existe en origin con sha=${verifyRemoteSha.slice(0, 7)}`,
+              );
+            } else {
+              // Branch EXISTE pero el SHA NO coincide — push no propagó el
+              // commit nuevo (force-push del lado remoto?, hook?). Severidad
+              // ERROR.
+              logger.error(
+                {
+                  event: 'git.push.verify.mismatch',
+                  runId,
+                  branch,
+                  localCommitSha: commitSha,
+                  remoteSha: verifyRemoteSha,
+                  remoteShaShort: verifyRemoteSha?.slice(0, 7) ?? null,
+                  localShaShort: commitSha.slice(0, 7),
+                },
+                `git.push.verify.mismatch: el remote tiene sha=${verifyRemoteSha?.slice(0, 7) ?? 'desconocido'} pero el local commiteó ${commitSha.slice(0, 7)} — el push no propagó el commit esperado`,
+              );
+            }
+          } catch (verifyErr) {
+            const rawVerifyErr = verifyErr as Error & { stderr?: string };
+            const verifyErrCombined = `${rawVerifyErr.message ?? ''}${rawVerifyErr.stderr ? ` :: ${rawVerifyErr.stderr}` : ''}`.trim();
+            const verifyErrMsg = redactRepoUrlCredentials(
+              verifyErrCombined,
+              repoUrl,
+            );
+            logger.error(
+              {
+                event: 'git.push.verify.fail',
+                runId,
+                branch,
+                error: verifyErrMsg,
+              },
+              `git.push.verify.fail: ls-remote no encontró ${branch} en origin (push silenciosamente perdido). El run se marcará como push-failed.`,
+            );
+          }
+
+          // Aplica la invariante: si la verificación falló, NO marques el
+          // branch como pushed. Esto fuerza el run a exit code 74 (EX_IOERR)
+          // → el backend marca la story 'blocked' para revisión humana y
+          // el workdir se preservará (P5 abajo) para recuperación.
+          if (!verifyOk) {
+            pushFailed = true;
+            markCriterion('branch.pushed', 'failed');
+            errorMessage =
+              errorMessage ??
+              `Push verification failed: branch ${branch} no encontrado en remote o sha mismatch. Local sha=${commitSha.slice(0, 7)}, remote sha=${verifyRemoteSha?.slice(0, 7) ?? 'ausente'}`;
+          } else {
+            prBranchPushed = true;
+            markCriterion('branch.pushed', 'completed');
+            logger.info(
+              {
+                event: 'git.push.ok.confirmed',
+                runId,
+                branch,
+                commitShaShort: commitSha.slice(0, 7),
+              },
+              `Push confirmado — backend abrirá PR via Octokit`,
+            );
+          }
 
           // 5. Count de archivos modificados en el diff base..HEAD. Visible
           //    en el AgentCard como "X files". Comparamos contra origin/<base>
@@ -1931,16 +2942,35 @@ export async function runStory(
         // errores de auth del push. Redactar antes de loguear / reportar.
         // `execFile` puede vaciar la URL en `.message`, `.stderr` o ambos;
         // concatenamos los dos para que el redactor cubra los dos canales.
-        const rawPushErr = err as Error & { stderr?: string };
+        // Aplicamos AMBOS redactores: `redactRepoUrlCredentials` cubre el
+        // formato URL exacto del clone; `redactSecrets` cubre patrones por
+        // prefijo (sk-ant-, ghp_, etc.) por si stderr trae otros tokens.
+        const rawPushErr = err as Error & {
+          stderr?: string;
+          code?: number;
+          signal?: NodeJS.Signals;
+        };
         const pushErrCombined = `${rawPushErr.message ?? ''}${rawPushErr.stderr ? ` :: ${rawPushErr.stderr}` : ''}`.trim();
-        const pushErrMsg = redactRepoUrlCredentials(pushErrCombined, repoUrl);
+        const pushErrMsg = redactSecrets(
+          redactRepoUrlCredentials(pushErrCombined, repoUrl),
+        );
+        const pushStderrFull = redactSecrets(
+          redactRepoUrlCredentials(rawPushErr.stderr ?? '', repoUrl),
+        );
         logger.error(
           {
             event: 'git.push.fail',
             runId,
-            error: pushErrMsg,
+            branch,
+            attempt: 1, // git push no retry-internal — un único attempt acá
+            exitCode: rawPushErr.code ?? null,
+            signal: rawPushErr.signal ?? null,
+            error: pushErrMsg.slice(0, 2000),
+            // stderr completo (post-redacción) — útil para forensics. Cap a
+            // 4000 chars para evitar logs gigantes.
+            stderr: pushStderrFull.slice(0, 4000),
           },
-          `Push falló — run marcado como error. Los cambios quedaron solo en el workdir local (se borra en cleanup).`,
+          `Push falló — run marcado como error. Los cambios quedaron solo en el workdir local (P5 lo preserva si pushFailed=true).`,
         );
         errorMessage = `Push failed: ${pushErrMsg.slice(0, 500)}`;
       }
@@ -1974,6 +3004,10 @@ export async function runStory(
 
   // Reporta complete al backend. Si esto falla, el sweeper marcará abandoned
   // después de 10min — graceful degradation.
+  // Variables del payload se declaran FUERA del try porque el catch necesita
+  // accederlas para persistir el `pending-complete` a disco (P2 — recovery).
+  let reportedExitCode = 0;
+  let completePayload: Record<string, unknown> = {};
   try {
     // Reportar exitCode semánticamente correcto (qa-reviewer F-A):
     //  - 127: spawn falló (binario no encontrado, exec error) — POSIX convention
@@ -1997,7 +3031,7 @@ export async function runStory(
     // NOTA: un criterio del DoD sin cumplir tras agotar los intentos NO es
     // error — es deuda (warn en `dodVerification`), exit 0. El código 65 es
     // SOLO para el doom loop (agente atorado), nunca para warns normales.
-    const reportedExitCode = spawnError.value
+    reportedExitCode = spawnError.value
       ? 127
       : killByBackend
         ? 143
@@ -2099,7 +3133,11 @@ export async function runStory(
       );
     }
 
-    await client.post(`/factory/workers/runs/${runId}/complete`, {
+    // P2 — observabilidad del /complete. El payload final que vamos a postear,
+    // construido una sola vez para permitir el fallback de "pending complete"
+    // si todos los retries del ApiClient fallan. Asignamos a la `let` outer
+    // para que el catch tenga acceso al payload completo.
+    completePayload = {
       exitCode: reportedExitCode,
       // `prNumber` NO se envía: el campo fue removido del DTO en el security
       // fix de 2026-05-22 — el backend lo abre vía Octokit con `headBranch`
@@ -2117,7 +3155,41 @@ export async function runStory(
       filesModified,
       filesModifiedPaths,
       ...(forceCompletion ? { forceCompletion: true } : {}),
-    });
+    };
+
+    logger.info(
+      {
+        event: 'complete.report.start',
+        runId,
+        summary: {
+          exitCode: reportedExitCode,
+          prBranchPushed,
+          commitShaShort: commitSha?.slice(0, 7) ?? null,
+          attempts: totalAttempts,
+          hasDodVerification: verificationLog.length > 0,
+          pushFailed,
+          forceCompletion,
+        },
+      },
+      `[complete.report.start] reportando /complete al backend (exitCode=${reportedExitCode} pushed=${prBranchPushed} attempts=${totalAttempts})`,
+    );
+
+    // El ApiClient ya hace retry exponencial (3 intentos sobre 5xx + network).
+    // Loguamos `complete.report.attempt` UNA vez con el comienzo del request:
+    // el ApiClient internamente emite `api.retry` por cada retry adicional, así
+    // que el operador ve el flow completo en los logs sin duplicación.
+    const completeStartedAt = Date.now();
+    logger.info(
+      {
+        event: 'complete.report.attempt',
+        runId,
+        endpoint: `/factory/workers/runs/${runId}/complete`,
+        startedAt: new Date(completeStartedAt).toISOString(),
+      },
+      `POST /complete iniciado (el ApiClient hará hasta 3 retries en network/5xx)`,
+    );
+
+    await client.post(`/factory/workers/runs/${runId}/complete`, completePayload);
     logger.info(
       {
         event: 'run.complete',
@@ -2125,6 +3197,7 @@ export async function runStory(
         rawExitCode: exitCode,
         reportedExitCode,
         durationMs,
+        complete_request_ms: Date.now() - completeStartedAt,
         prBranchPushed,
         commitSha: commitSha?.slice(0, 7),
         killed,
@@ -2150,38 +3223,136 @@ export async function runStory(
       // response para diagnóstico exacto del campo que falló (e.g.
       // MaxLength violation, enum mismatch, missing required field).
       // Sin esto el 400 es opaco y debugging tiene que ser por adivinación.
+      //
+      // Tras el incidente del 2026-05-25 (run 162dc9f9 perdido por
+      // criterionId > 200 chars): PERSISTIMOS el payload a disco con flag
+      // `recovery_blocked_by_dto=true`. Reintentar daría el mismo 400, así
+      // que `recoverOnePendingComplete` NO lo reintenta automáticamente —
+      // queda esperando intervención humana (arreglar el DTO, redeployar
+      // backend, luego renombrar el archivo o limpiar la marca para que
+      // el próximo boot lo reintente). Sin esto el código del run se pierde.
       logger.error(
         {
-          event: 'run.complete.bad_request',
+          event: 'complete.report.fail.dto_validation',
           runId,
           status: 400,
           backendErrorBody: err.body,
         },
-        `Backend rejected /complete with 400 — see backendErrorBody for the specific field that failed validation. Sweeper will mark abandoned.`,
+        `Backend rejected /complete with 400 (DTO validation) — see backendErrorBody. Escribiendo pending-complete con recovery_blocked_by_dto=true; revisar el DTO y limpiar la marca manualmente para reintentar.`,
       );
+      const pendingPath = await writePendingComplete(
+        runId,
+        completePayload,
+        3,
+        true,
+        err.body,
+      );
+      if (pendingPath) {
+        logger.warn(
+          {
+            event: 'complete.report.fail.dto_validation.queued',
+            runId,
+            pendingPath,
+            exitCode: reportedExitCode,
+            prBranchPushed,
+          },
+          `[recovery] /complete diferido a ${pendingPath} con recovery_blocked_by_dto=true — NO se reintenta automáticamente`,
+        );
+      }
     } else {
+      // P2 — diferenciar fallo de red (recuperable, vale persistir para boot
+      // recovery) vs fallo persistente (5xx tras los retries del ApiClient, o
+      // un crash inesperado). En ambos casos persistimos el payload — la
+      // distinción de severidad ayuda al operador pero la acción es la misma:
+      // dejar el archivo para el próximo boot.
+      const apiErr = err instanceof ApiError ? err : null;
+      const isNetworkError = apiErr?.status === 0;
+      const eventName = isNetworkError
+        ? 'complete.report.fail.network'
+        : 'complete.report.fail.persistent';
       logger.error(
         {
-          event: 'run.complete.fail',
+          event: eventName,
           runId,
           error: (err as Error).message,
-          status: err instanceof ApiError ? err.status : null,
-          backendErrorBody: err instanceof ApiError ? err.body : null,
+          status: apiErr ? apiErr.status : null,
+          backendErrorBody: apiErr ? apiErr.body : null,
+          // ApiClient ya agotó sus 3 retries internos antes de throwear.
+          attemptsCount: 3,
         },
-        'Failed to report complete — sweeper will mark abandoned',
+        isNetworkError
+          ? `Failed to report complete (network error after 3 retries) — escribiendo pending-complete para boot recovery`
+          : `Failed to report complete (persistent error) — escribiendo pending-complete; si es un bug del backend, el próximo boot reintenta`,
       );
+
+      // Persistimos el payload a disco para boot-time recovery. Si el write
+      // mismo falla, el sweeper backend marcará abandoned tras 10min — fail
+      // open al peor caso conocido.
+      const pendingPath = await writePendingComplete(runId, completePayload, 3);
+      if (pendingPath) {
+        logger.info(
+          {
+            event: 'complete.report.fail.persistent.queued',
+            runId,
+            pendingPath,
+            exitCode: reportedExitCode,
+            prBranchPushed,
+          },
+          `[recovery] /complete diferido a ${pendingPath} — boot recovery del worker lo retomará`,
+        );
+      }
     }
   }
 
-  // Cleanup: borra el workdir temporal. Sprint 3 podemos preservar para
-  // debugging, controlado por flag.
-  try {
-    await fs.rm(workdir, { recursive: true, force: true });
-  } catch (err) {
+  // Cleanup: borra el workdir temporal. P5 — guard defensivo POSITIVO:
+  // SOLO borramos el workdir si CONFIRMAMOS que el branch llegó al remote
+  // (`prBranchPushed === true`, que solo se setea tras `git.push.verify.ok`).
+  // Cualquier otro path preserva el workdir para recovery manual. El
+  // operador entra al directorio, inspecciona el estado de git, y
+  // manualmente pushea o copia el código. Sin esto, un fallo silencioso
+  // de push perdería todo el trabajo del agente al borrar /tmp/factory-run-{uuid}/.
+  //
+  // Los 3 paths de no-push que esta guard cubre — TODOS terminan con
+  // `prBranchPushed=false` y `pushFailed=true` salvo el sandbox legítimo:
+  //   (1) push fail (try/catch del git push): `pushFailed=true`, `prBranchPushed=false`
+  //   (2) secret leak abort:                  `pushFailed=true`, `prBranchPushed=false`
+  //   (3) push verify mismatch (ls-remote):   `pushFailed=true`, `prBranchPushed=false`
+  // Plus:
+  //   (4) aheadCount === 0 (agente no commiteó nada): `pushFailed=false`,
+  //       `prBranchPushed=false` — preservamos por defensa (puede haber
+  //       cambios uncommitted que el operador quiera revisar).
+  //
+  // En sandbox mode (repoUrl === null) NO hay nada que preservar y siempre
+  // borramos. En git mode con push confirmado, happy-path inalterado.
+  const shouldPreserveWorkdir =
+    repoUrl !== null && cloneSucceeded && prBranchPushed !== true;
+  if (shouldPreserveWorkdir) {
     logger.warn(
-      { event: 'workdir.cleanup.fail', runId, error: (err as Error).message },
-      'Workdir cleanup failed (non-fatal)',
+      {
+        event: 'cleanup.workdir.skip.unverified_push',
+        runId,
+        workdir,
+        branch,
+        pushFailed,
+        prBranchPushed,
+        cloneSucceeded,
+        commitSha: commitSha ?? null,
+      },
+      `workdir preserved for recovery: ${workdir} (pushFailed=${pushFailed}, prBranchPushed=${prBranchPushed}). Inspeccionar manualmente: cd ${workdir} && git log -1 && git push origin ${branch}`,
     );
+  } else {
+    try {
+      await fs.rm(workdir, { recursive: true, force: true });
+      logger.info(
+        { event: 'cleanup.workdir.ok', runId, workdir },
+        `workdir limpiado: ${workdir}`,
+      );
+    } catch (err) {
+      logger.warn(
+        { event: 'workdir.cleanup.fail', runId, error: (err as Error).message },
+        'Workdir cleanup failed (non-fatal)',
+      );
+    }
   }
 }
 
@@ -2225,6 +3396,13 @@ export interface GeneratorAttemptUsage {
   numTurns: number;
   isError: boolean;
   subtype: string;
+  // service_tier reportado por el CLI. Valores observados:
+  //   "standard"     → autenticación vía API key (cobra créditos)
+  //   "priority"     → autenticación vía OAuth subscription (Pro/Max — no cobra)
+  //   null/undefined → response truncada o stream incompleto
+  // Esta es la sonda forense más confiable para detectar si el OAuth ganó
+  // o si el CLI cayó silenciosamente a una API key fantasma (Keychain/helper).
+  serviceTier: string | null;
 }
 
 /**
@@ -2322,6 +3500,7 @@ function buildLiveGeneratorSummary(
           numTurns: 0,
           isError: false,
           subtype: 'in_progress',
+          serviceTier: null, // no disponible hasta el `result`
         },
       ]
     : [];
@@ -2374,6 +3553,7 @@ function parseResultUsage(line: string, attempt: number): GeneratorAttemptUsage 
     numTurns: typeof e.num_turns === 'number' ? e.num_turns : 0,
     isError: typeof e.is_error === 'boolean' ? e.is_error : false,
     subtype: typeof e.subtype === 'string' ? e.subtype : 'unknown',
+    serviceTier: typeof usage.service_tier === 'string' ? usage.service_tier : null,
   };
 }
 
@@ -2436,6 +3616,72 @@ function estimateHaikuCost(tokens: {
  * tener running total, el caller acumula SUMANDO los usages de todos los
  * assistant events que llegan durante un attempt.
  */
+/**
+ * Parsea una línea del stream-json. Si la línea es un `assistant` event que
+ * contiene un `tool_use` (el agente invocó una tool), retorna información
+ * estructurada: nombre de la tool y, en el caso especial de la Bash tool,
+ * el comando + `run_in_background` flag (que el agente puede setear para
+ * lanzar procesos en background).
+ *
+ * Usado por la detección de stuck/watch-mode: el `lastToolCall` del agente
+ * da forensics si los tokens se congelan ("el agente lleva 90s sin actividad,
+ * último tool fue Bash: vitest" → claro).
+ *
+ * Retorna `null` si la línea no es un assistant con tool_use, o si el shape
+ * es inesperado. Tolerante a campos faltantes — esto es defensivo.
+ */
+export function parseToolUse(line: string): {
+  toolName: string;
+  inputPreview: string;
+  bashCommand: string | null;
+  runInBackground: boolean;
+} | null {
+  if (!line.trim()) return null;
+  let evt: unknown;
+  try {
+    evt = JSON.parse(line);
+  } catch {
+    return null;
+  }
+  if (typeof evt !== 'object' || evt === null) return null;
+  const e = evt as Record<string, unknown>;
+  if (e.type !== 'assistant') return null;
+  const msg = e.message as Record<string, unknown> | undefined;
+  if (!msg || typeof msg !== 'object') return null;
+  const content = msg.content;
+  if (!Array.isArray(content)) return null;
+  // Tomamos el PRIMER tool_use del array (un mensaje puede tener varios; el
+  // primero suele ser el comando "activo" para la heurística).
+  for (const block of content) {
+    if (
+      typeof block !== 'object' ||
+      block === null ||
+      (block as Record<string, unknown>).type !== 'tool_use'
+    ) {
+      continue;
+    }
+    const b = block as Record<string, unknown>;
+    const toolName = typeof b.name === 'string' ? b.name : '?';
+    const input = (b.input ?? {}) as Record<string, unknown>;
+    let inputPreview: string;
+    try {
+      inputPreview = JSON.stringify(input).slice(0, 200);
+    } catch {
+      inputPreview = '[unserializable]';
+    }
+    // Caso especial Bash: campos `command` + `run_in_background` definidos en
+    // la API del Claude Agent SDK. Si la tool no es Bash, no aplica.
+    const bashCommand =
+      toolName === 'Bash' && typeof input.command === 'string'
+        ? input.command
+        : null;
+    const runInBackground =
+      toolName === 'Bash' && input.run_in_background === true;
+    return { toolName, inputPreview, bashCommand, runInBackground };
+  }
+  return null;
+}
+
 function parseAssistantUsage(line: string): {
   inputTokens: number;
   outputTokens: number;

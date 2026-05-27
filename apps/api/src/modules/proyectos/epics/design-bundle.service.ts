@@ -109,6 +109,10 @@ const BUNDLE_STORAGE_ROOT =
  *   descomprimimos al vault. Se mencionan en el handoff sintético para que
  *   el agente sepa que existen.
  * - `bundleKey`: clave para recuperar el ZIP completo desde storage.
+ * - `componentManifest`: lista de componentes top-level extraídos del primary
+ *   HTML (secciones HTML + funciones React top-level). null si el primary file
+ *   no es HTML o no se pudo parsear. Se persiste en `epic.designs[].componentManifest`
+ *   para coverage validation downstream (PO + QA agents).
  */
 export interface ExtractedBundle {
   bundleSlug: string;
@@ -117,6 +121,43 @@ export interface ExtractedBundle {
   textFiles: Array<{ relativePath: string; content: string }>;
   binaryEntries: string[];
   bundleKey: string;
+  componentManifest: ComponentManifest | null;
+}
+
+/**
+ * Manifest de componentes top-level extraídos del primary HTML del bundle.
+ * Se genera deterministamente al hacer upload, antes de persistir al vault,
+ * y se inyecta al prompt del PO agent (cobertura obligatoria) y al QA agent
+ * (criterios visuales automáticos).
+ *
+ * Shape diseñado para:
+ *  - **Cobertura exhaustiva**: el PO ve los N componentes detectados y debe
+ *    cubrirlos con stories. Sin manifest, el PO podía omitir componentes
+ *    pequeños/secundarios (Ticker, Strip footer, etc.).
+ *  - **Trazabilidad por líneas**: cada componente lleva `startLine`-`endLine`
+ *    para que Claude Code haga `vault_read` de los rangos exactos al
+ *    implementar, en vez de leer el HTML completo (costo + ruido).
+ *  - **Compat legacy**: bundles upload-eados ANTES de este cambio tienen
+ *    `componentManifest: null` en el JSONB. El sistema downstream debe
+ *    degradar graciosamente cuando el manifest está ausente.
+ */
+export interface ComponentManifest {
+  components: Array<{
+    /** Nombre del componente: tag/clase HTML o nombre de función React. */
+    name: string;
+    /** Origen: `section` (HTML element top-level) o `react-component` (function React). */
+    kind: 'section' | 'react-component';
+    /** Línea donde empieza la definición (1-indexed). */
+    startLine: number;
+    /** Línea donde termina la definición (1-indexed, inclusive). */
+    endLine: number;
+    /** Path relativo dentro del bundle del archivo donde vive (siempre el primary file). */
+    filePath: string;
+  }>;
+  /** Path relativo del archivo HTML del que se extrajeron los componentes. */
+  primaryFilePath: string;
+  /** Timestamp ISO de cuando se hizo la extracción (para invalidación si re-uploads). */
+  extractedAt: string;
 }
 
 @Injectable()
@@ -256,6 +297,13 @@ export class DesignBundleService {
       );
     }
 
+    // Extrae el componentManifest del primary HTML si existe + es .html.
+    // Falla silenciosa: si no se puede parsear, queda null y el downstream
+    // (PO/QA prompt) opera en modo legacy sin coverage check.
+    const componentManifest = primaryDesignPath
+      ? this.extractComponentManifest(textFiles, primaryDesignPath)
+      : null;
+
     return {
       bundleSlug: wrapperSlug,
       primaryDesignPath: primaryDesignPath ?? '',
@@ -263,6 +311,7 @@ export class DesignBundleService {
       textFiles,
       binaryEntries,
       bundleKey,
+      componentManifest,
     };
   }
 
@@ -332,9 +381,22 @@ export class DesignBundleService {
     // el bundleKey apunta al archivo intacto.
     const bundleKey = await this.persistBundle(htmlBuffer, originalFilename, slug);
 
+    // Extraer componentManifest del HTML standalone. Parsea sobre el contenido
+    // RAW (sin banner) — el banner es solo un comentario inyectado al inicio
+    // que no debe afectar el conteo de líneas que damos al agente. El parser
+    // recibe `rawContent` y devuelve líneas indexadas desde 1 sobre rawContent;
+    // como ese es el contenido que el agente verá tras hacer `vault_read` (más
+    // las pocas líneas del banner al inicio), aceptamos un offset menor — el
+    // costo de leer banner + N líneas vs leer líneas exactas es despreciable.
+    const componentManifest = this.extractComponentManifest(
+      [{ relativePath: htmlRelativePath, content: rawContent }],
+      htmlRelativePath,
+    );
+
     this.logger.info(
       `[design-bundle] Extracted standalone HTML: slug=${slug} rawSize=${htmlBuffer.length}b ` +
-        `withBanner=${content.length}b filename="${originalFilename}"`,
+        `withBanner=${content.length}b filename="${originalFilename}" ` +
+        `componentManifest=${componentManifest ? `${componentManifest.components.length} comps` : 'null'}`,
     );
 
     return {
@@ -344,12 +406,17 @@ export class DesignBundleService {
       textFiles: [{ relativePath: htmlRelativePath, content }],
       binaryEntries: [],
       bundleKey,
+      componentManifest,
     };
   }
 
   /**
-   * Construye el handoff sintético compacto que el agente PO/TL/QA verá en
-   * su contexto. ~10 líneas con la info útil — sin el boilerplate del README.
+   * Construye el handoff sintético que el agente PO/TL/QA verá en su contexto.
+   * Versión 2 (2026-05-25): el handoff pasó de PASIVO ("puedes leer si toca UI")
+   * a IMPERATIVO ("OBLIGATORIO: vault_read del primary file COMPLETO antes de
+   * cualquier código UI, replica TODOS los componentes del manifest"). Razón:
+   * con el handoff pasivo, el agente coder generaba implementaciones simplificadas
+   * (hero + un texto) en vez de replicar los 7-10 componentes del referencia.
    *
    * `bundleVaultPath` es el path absoluto del bundle dentro del vault (ej.
    * `iniciativas/x/epics/y/disenos/checkout-abc/`) — el caller lo conoce
@@ -398,13 +465,355 @@ export class DesignBundleService {
       );
     }
 
+    // ── Handoff IMPERATIVO (V2 — 2026-05-25) ─────────────────────────────
+    // Cambio crítico: pasamos de lenguaje pasivo ("puedes leer si toca UI")
+    // a OBLIGATORIO ("ANTES de escribir UI, vault_read del primary file
+    // COMPLETO"). Esto cierra el gap observado donde Claude Code generaba
+    // implementaciones simplificadas omitiendo componentes del referencia.
     lines.push('');
-    lines.push(
-      'Para implementar: cuando una historia toque UI relevante, Claude Code debe leer ' +
-      `\`${bundleVaultPath}README.md\` y seguir sus instrucciones (abrir el primary design + sus imports).`,
-    );
+    if (extracted.primaryDesignPath) {
+      const primaryFullPath = `${bundleVaultPath}${extracted.primaryDesignPath}`;
+      lines.push('⚠️ OBLIGATORIO: ANTES de escribir cualquier código UI, hacer `vault_read` del');
+      lines.push(`archivo primary \`${primaryFullPath}\` COMPLETO. Replica TODOS los componentes`);
+      lines.push('visibles (ver componentManifest abajo). PROHIBIDO simplificar componentes u omitir');
+      lines.push('secciones. Si el referencia tiene 7 componentes top-level, tu output DEBE tener los 7.');
+      lines.push('Si tienes dudas sobre detalles visuales, copia el referencia LITERALMENTE — NUNCA');
+      lines.push('reduzcas la densidad visual del diseño de Claude Design.');
+
+      // Inyectamos el componentManifest como bullet list si existe. Sin manifest
+      // (bundles ZIP sin primary HTML parseable, o bundles legacy), el handoff
+      // omite la sección — el agente todavía recibe la instrucción de replicar
+      // pero sin la lista exhaustiva (modo degradado).
+      if (extracted.componentManifest && extracted.componentManifest.components.length > 0) {
+        lines.push('');
+        lines.push('Component manifest (lista exhaustiva de componentes a implementar):');
+        for (const comp of extracted.componentManifest.components) {
+          lines.push(`- ${comp.name} (líneas ${comp.startLine}-${comp.endLine})`);
+        }
+        lines.push('');
+        lines.push('Para CADA componente del manifest, ejecuta este proceso:');
+        lines.push(`1. vault_read del rango de líneas startLine-endLine en \`${primaryFullPath}\``);
+        lines.push('2. Replica la estructura HTML/JSX completa');
+        lines.push('3. Replica TODOS los estilos CSS (no abreviar, no omitir)');
+        lines.push('4. Replica el comportamiento JS (hover, focus, anim)');
+        lines.push('5. Verifica el output renderizado mentalmente vs el referencia ANTES de cerrar el archivo');
+      } else {
+        // Manifest ausente — fallback: el agente todavía debe replicar pero
+        // sin la lista exhaustiva. Indicamos que descubra los componentes
+        // leyendo el archivo entero.
+        lines.push('');
+        lines.push(
+          'No se pudo extraer un componentManifest automático para este bundle ' +
+            '(archivo primary no es HTML o no tiene secciones/funciones React detectables). ' +
+            'Descubre los componentes leyendo el primary file completo y aplica el mismo principio: ' +
+            'replica todo lo que veas, sin simplificar.',
+        );
+      }
+    } else {
+      // Sin primary design — fallback al lenguaje pasivo original.
+      lines.push(
+        'Cuando una historia toque UI relevante, Claude Code debe explorar el bundle bajo ' +
+          `\`${bundleVaultPath}\` con \`vault_glob\` para localizar los archivos de diseño y leerlos completos.`,
+      );
+    }
 
     return lines.join('\n');
+  }
+
+  /**
+   * Extrae componentes top-level de un archivo HTML primary. Identifica:
+   *
+   *  1. **Top-level HTML structural elements**: `<section>`, `<header>`,
+   *     `<footer>`, `<nav>`, `<aside>` con identificador (class principal o id).
+   *     Solo "top-level" en el sentido de no estar anidado dentro de OTRO
+   *     elemento estructural — aceptamos que estén dentro del `<body>` directo
+   *     o un wrapper genérico (`<div>`).
+   *
+   *  2. **React top-level functions**: Funciones React dentro de
+   *     `<script type="text/babel">` o `<script type="module">` cuyo nombre
+   *     empiece con mayúscula (convención React) — detectadas con regex
+   *     `function ([A-Z][a-zA-Z]+)\s*\(`. Cubre el patrón típico de mockups
+   *     Claude Design donde la UI vive como funciones React en un único
+   *     `<script>` inline.
+   *
+   * Para cada componente captura `startLine`/`endLine` (1-indexed). Para
+   * funciones React usa brace-matching simple para identificar el cierre.
+   * Para secciones HTML usa el tag de cierre correspondiente.
+   *
+   * Diseño: usa regex sobre el texto crudo, NO un parser DOM real. Razón:
+   * (a) los HTMLs de Claude Design suelen ser válidos pero con sintaxis JSX
+   * dentro de `<script>` que rompe parsers HTML estrictos; (b) sin nueva
+   * dependencia (cheerio/jsdom) — mantenemos el peso del módulo.
+   *
+   * Retorna null si:
+   *  - El primary file no es .html
+   *  - El primary file no existe en textFiles (caso defensivo)
+   *  - No se detectó NINGÚN componente (HTML malformado o no estándar)
+   *
+   * El caller decide si null degrada graciosamente (handoff sin manifest) o
+   * propaga el caso (los tests sí esperan que aerovia.html extraiga >=7 comps).
+   */
+  private extractComponentManifest(
+    textFiles: Array<{ relativePath: string; content: string }>,
+    primaryFilePath: string,
+  ): ComponentManifest | null {
+    // Solo extraemos de archivos HTML — los .md/.css/.js no aplican.
+    if (!primaryFilePath.toLowerCase().endsWith('.html') && !primaryFilePath.toLowerCase().endsWith('.htm')) {
+      return null;
+    }
+    const file = textFiles.find((f) => f.relativePath === primaryFilePath);
+    if (!file) return null;
+
+    const components: ComponentManifest['components'] = [];
+
+    // ── 1) React top-level functions ────────────────────────────────────
+    // Patrón: `function ComponentName(props) { ... }` o
+    //         `function ComponentName() { ... }` dentro de `<script type="text/babel">`.
+    // Buscamos todas las apariciones y para cada match calculamos endLine
+    // con brace matching desde la primera `{` hasta su `}` balanceado.
+    const reactFunctions = this.extractReactComponents(file.content, primaryFilePath);
+    components.push(...reactFunctions);
+
+    // ── 2) Top-level HTML structural elements ───────────────────────────
+    // Solo si NO encontramos funciones React — los bundles de Claude Design
+    // tipicamente usan UNA de las dos formas (HTML estático con secciones o
+    // React inline). Si ya hay funciones React, no duplicamos con secciones
+    // (la lógica downstream las trataría como "extras" y el agente podría
+    // confundirse con dupes Hero-section vs Hero-component).
+    // Esta heurística reduce ruido sin sacrificar coverage en el caso común
+    // (mockups Claude Design).
+    if (reactFunctions.length === 0) {
+      const sections = this.extractHtmlSections(file.content, primaryFilePath);
+      components.push(...sections);
+    }
+
+    if (components.length === 0) {
+      return null;
+    }
+
+    // Orden deterministico por startLine — fácil de razonar para humanos +
+    // estable para tests.
+    components.sort((a, b) => a.startLine - b.startLine);
+
+    return {
+      components,
+      primaryFilePath,
+      extractedAt: new Date().toISOString(),
+    };
+  }
+
+  /**
+   * Detecta funciones React top-level (`function ComponentName(...)`) dentro
+   * de bloques `<script type="text/babel">` o `<script type="module">` o
+   * `<script>` plain. Cada función se reporta como un componente.
+   *
+   * Brace matching ingenuo: cuenta `{` y `}` desde la firma de la función,
+   * ignorando strings (best-effort — no parser JS completo). En el 99% de
+   * mockups de Claude Design esto basta porque los strings con `{` desbalanceadas
+   * son raros.
+   */
+  private extractReactComponents(
+    content: string,
+    filePath: string,
+  ): ComponentManifest['components'] {
+    const components: ComponentManifest['components'] = [];
+
+    // Regex sobre todo el content — solo aceptamos funciones PascalCase
+    // (convención React, evita falsos positivos con funciones helper en
+    // camelCase como `formatDate`).
+    // \b para boundary — evita matches como `myfunctionMyComp`.
+    // (?:async\s+)? acepta `async function ComponentName(...)` también.
+    const funcRegex = /\b(?:async\s+)?function\s+([A-Z][a-zA-Z0-9]+)\s*\(/g;
+    let match: RegExpExecArray | null;
+    while ((match = funcRegex.exec(content)) !== null) {
+      const name = match[1];
+      const matchStart = match.index;
+      // Calcula startLine (1-indexed) contando \n hasta matchStart.
+      const startLine = this.lineNumberAt(content, matchStart);
+
+      // Avanza hasta el `{` que abre el cuerpo de la función.
+      let i = match.index + match[0].length;
+      // Skip params (anidados con `(` `)`).
+      let parenDepth = 1; // ya consumimos el `(`
+      while (i < content.length && parenDepth > 0) {
+        const ch = content[i];
+        if (ch === '(') parenDepth++;
+        else if (ch === ')') parenDepth--;
+        i++;
+      }
+      // Skip whitespace.
+      while (i < content.length && /\s/.test(content[i])) i++;
+      // Si no hay `{`, no es una función body — saltamos (probablemente
+      // una declaración tipo `function X() : ReturnType { ... }` en TS,
+      // pero como aceptamos el body con braces, eventualmente lo encontramos).
+      if (content[i] !== '{') continue;
+
+      // Brace matching ignorando strings simples ('...', "...", `...`)
+      // y comentarios (// ..., /* ... */). Best-effort.
+      const bodyStart = i;
+      let depth = 0;
+      let inSingleQuote = false;
+      let inDoubleQuote = false;
+      let inBacktick = false;
+      let inLineComment = false;
+      let inBlockComment = false;
+      let endIdx = -1;
+      while (i < content.length) {
+        const ch = content[i];
+        const next = content[i + 1];
+        if (inLineComment) {
+          if (ch === '\n') inLineComment = false;
+        } else if (inBlockComment) {
+          if (ch === '*' && next === '/') {
+            inBlockComment = false;
+            i++;
+          }
+        } else if (inSingleQuote) {
+          if (ch === '\\') i++;
+          else if (ch === "'") inSingleQuote = false;
+        } else if (inDoubleQuote) {
+          if (ch === '\\') i++;
+          else if (ch === '"') inDoubleQuote = false;
+        } else if (inBacktick) {
+          // template literal — no maneja `${...}` anidado balanceado, pero
+          // suficiente para mockups simples.
+          if (ch === '\\') i++;
+          else if (ch === '`') inBacktick = false;
+        } else if (ch === '/' && next === '/') {
+          inLineComment = true;
+          i++;
+        } else if (ch === '/' && next === '*') {
+          inBlockComment = true;
+          i++;
+        } else if (ch === "'") inSingleQuote = true;
+        else if (ch === '"') inDoubleQuote = true;
+        else if (ch === '`') inBacktick = true;
+        else if (ch === '{') depth++;
+        else if (ch === '}') {
+          depth--;
+          if (depth === 0) {
+            endIdx = i;
+            break;
+          }
+        }
+        i++;
+      }
+      void bodyStart; // tracked solo para debugging futuro
+      if (endIdx === -1) {
+        // Sin cierre balanceado — el archivo está malformado o nuestro parser
+        // no resolvió un edge case. Skip esta función para no emitir un range
+        // hasta el final del archivo (ruido).
+        continue;
+      }
+      const endLine = this.lineNumberAt(content, endIdx);
+
+      components.push({
+        name,
+        kind: 'react-component',
+        startLine,
+        endLine,
+        filePath,
+      });
+    }
+
+    return components;
+  }
+
+  /**
+   * Detecta secciones HTML top-level: `<section>`, `<header>`, `<footer>`,
+   * `<nav>`, `<aside>`. Solo cuenta las que tienen un identificador (`id` o
+   * `class`) — sin identificador no hay nombre útil para el manifest.
+   *
+   * "Top-level" significa: aparece en el HTML pero NO está anidada dentro
+   * de OTRA sección. Implementación simple: stack de tags abiertos; si una
+   * sección candidata aparece mientras hay otra abierta en el stack, la
+   * tratamos como nested (no se reporta).
+   *
+   * El nombre del componente sale del `class` (primer token) o del `id` si
+   * no hay class.
+   */
+  private extractHtmlSections(
+    content: string,
+    filePath: string,
+  ): ComponentManifest['components'] {
+    const components: ComponentManifest['components'] = [];
+    const TARGET_TAGS = new Set(['section', 'header', 'footer', 'nav', 'aside']);
+    // Regex para tags de apertura y cierre. Group 1 = '/' (si cierra) o vacío.
+    // Group 2 = tag name. Group 3 = atributos (puede ser vacío).
+    const tagRegex = /<(\/?)([a-zA-Z][a-zA-Z0-9]*)(\s[^>]*)?>/g;
+    let match: RegExpExecArray | null;
+    // Stack de elementos estructurales abiertos {tag, startIdx, name}.
+    const openStack: Array<{ tag: string; startIdx: number; name: string | null }> = [];
+    while ((match = tagRegex.exec(content)) !== null) {
+      const closing = match[1] === '/';
+      const tag = match[2].toLowerCase();
+      const attrs = match[3] ?? '';
+      if (!TARGET_TAGS.has(tag)) continue;
+
+      if (closing) {
+        // Pop el último que coincida en stack.
+        for (let s = openStack.length - 1; s >= 0; s--) {
+          if (openStack[s].tag === tag) {
+            const opened = openStack.splice(s, 1)[0];
+            // Solo reportamos si era top-level (no había otro structural
+            // abierto antes en el stack al momento de su apertura).
+            // Como removimos en orden FIFO, lo determinamos por: openStack
+            // tras el splice tiene length === s, y al apertura el stack
+            // antes tenía length === s. Si s === 0, era top-level.
+            if (s === 0 && opened.name) {
+              const endIdx = match.index + match[0].length - 1;
+              components.push({
+                name: opened.name,
+                kind: 'section',
+                startLine: this.lineNumberAt(content, opened.startIdx),
+                endLine: this.lineNumberAt(content, endIdx),
+                filePath,
+              });
+            }
+            break;
+          }
+        }
+      } else {
+        // Tag de apertura — push al stack con nombre extraído.
+        const name = this.extractElementName(attrs);
+        openStack.push({ tag, startIdx: match.index, name });
+      }
+    }
+
+    return components;
+  }
+
+  /**
+   * Extrae el nombre identificador de un atributo string del tag.
+   * Prioridad: `class` (primer token) → `id` → null.
+   * `<section class="hero-main hero">` → `hero-main`.
+   * `<section id="ticker">` → `ticker`.
+   * `<section>` (sin atrs) → null.
+   */
+  private extractElementName(attrs: string): string | null {
+    const classMatch = attrs.match(/\bclass\s*=\s*["']([^"']+)["']/i);
+    if (classMatch && classMatch[1].trim()) {
+      const firstToken = classMatch[1].trim().split(/\s+/)[0];
+      if (firstToken) return firstToken;
+    }
+    const idMatch = attrs.match(/\bid\s*=\s*["']([^"']+)["']/i);
+    if (idMatch && idMatch[1].trim()) {
+      return idMatch[1].trim();
+    }
+    return null;
+  }
+
+  /**
+   * Calcula el número de línea (1-indexed) en `content` para el offset `idx`.
+   * Implementación O(n) — para mockups < 1MB es trivial.
+   */
+  private lineNumberAt(content: string, idx: number): number {
+    // 1 + número de '\n' antes de idx.
+    let line = 1;
+    for (let i = 0; i < idx && i < content.length; i++) {
+      if (content[i] === '\n') line++;
+    }
+    return line;
   }
 
   /**

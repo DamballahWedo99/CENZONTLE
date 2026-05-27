@@ -24,6 +24,14 @@ function makeMockPrisma(initialRow?: Partial<Record<string, unknown>>) {
     diagramEffort: 'high',
     diagramMaxTokens: 64000,
     diagramThinkingEnabled: true,
+    // Forge Worker (coder agent CLI) — defaults alineados con schema.
+    forgeWorkerModel: 'claude-sonnet-4-6',
+    forgeWorkerEffort: 'high',
+    forgeWorkerMaxRunDurationMs: 1_800_000, // 30 min (default schema)
+    // DoD Verifier (reviewer agent CLI) — defaults.
+    dodVerifierModel: 'claude-haiku-4-5-20251001',
+    dodVerifierEffort: 'low',
+    dodMaxAttempts: 1,
     updatedAt: new Date('2026-04-28T00:00:00Z'),
     updatedBy: null,
     ...initialRow,
@@ -152,6 +160,118 @@ describe('AgentTokenSettingsService', () => {
       const service = new AgentTokenSettingsService(prisma, createMockPinoLogger());
 
       expect(await service.getDiagram()).toEqual({ effort: 'high', maxTokens: 64000, enabled: true });
+    });
+  });
+
+  // ═════════════════════════════════════════════════════════════════════
+  // forgeWorkerMaxRunDurationMs — wall-clock timeout del worker
+  // ═════════════════════════════════════════════════════════════════════
+  //
+  // Cubre los 4 invariantes críticos del campo:
+  //   1. Default 30 min (1_800_000) cuando no se patchea
+  //   2. update() aplica el valor sin distorsionar
+  //   3. toPublic() clampea valores fuera del rango [300_000, 7_200_000]
+  //   4. toPublic() restaura default si row tiene 0/negativo (defensa
+  //      contra basura legacy en BD post-migration o downgrade roto)
+  //   5. getForgeWorker() incluye maxRunDurationMs en el objeto retornado
+  // ═════════════════════════════════════════════════════════════════════
+  describe('forgeWorkerMaxRunDurationMs (worker timeout)', () => {
+    it('default es 1_800_000 (30 min) cuando no se patchea', async () => {
+      const prisma = makeMockPrisma();
+      const service = new AgentTokenSettingsService(prisma, createMockPinoLogger());
+
+      const settings = await service.get();
+      expect(settings.forgeWorkerMaxRunDurationMs).toBe(1_800_000);
+    });
+
+    it('update() aplica un valor válido dentro del rango', async () => {
+      const prisma = makeMockPrisma();
+      const service = new AgentTokenSettingsService(prisma, createMockPinoLogger());
+
+      const updated = await service.update(
+        { forgeWorkerMaxRunDurationMs: 3_600_000 }, // 60 min
+        'user-123',
+      );
+      expect(updated.forgeWorkerMaxRunDurationMs).toBe(3_600_000);
+    });
+
+    it('toPublic clampea valores debajo del MIN (300_000 / 5 min)', async () => {
+      // Defense in depth: si la BD tiene basura (e.g. 60000 = 1 min, valor
+      // pre-migration sin DEFAULT, o downgrade roto que dejó valor inválido),
+      // el mapper sube al MIN del bounds. NO permite valores menores a 5 min.
+      const prisma = makeMockPrisma({ forgeWorkerMaxRunDurationMs: 60_000 }); // 1 min
+      const service = new AgentTokenSettingsService(prisma, createMockPinoLogger());
+
+      const settings = await service.get();
+      expect(settings.forgeWorkerMaxRunDurationMs).toBe(300_000);
+    });
+
+    it('toPublic clampea valores arriba del MAX (7_200_000 / 2 h)', async () => {
+      // Si la BD tiene un valor absurdo (10h), el mapper baja al MAX. Esto
+      // protege contra runaway costs si alguien mete por SQL un valor enorme.
+      const prisma = makeMockPrisma({ forgeWorkerMaxRunDurationMs: 36_000_000 }); // 10 h
+      const service = new AgentTokenSettingsService(prisma, createMockPinoLogger());
+
+      const settings = await service.get();
+      expect(settings.forgeWorkerMaxRunDurationMs).toBe(7_200_000);
+    });
+
+    it('toPublic restaura default (1_800_000) si row tiene 0', async () => {
+      // Si la columna existe pero tiene 0 (valor falsy), el código asume
+      // "valor inválido / no inicializado" y restaura al default del schema.
+      const prisma = makeMockPrisma({ forgeWorkerMaxRunDurationMs: 0 });
+      const service = new AgentTokenSettingsService(prisma, createMockPinoLogger());
+
+      const settings = await service.get();
+      expect(settings.forgeWorkerMaxRunDurationMs).toBe(1_800_000);
+    });
+
+    it('toPublic restaura default si row tiene valor negativo', async () => {
+      // Negativo es claramente basura (probablemente cast erróneo de UI o
+      // SQL injection roto). El mapper lo descarta y aplica el default.
+      const prisma = makeMockPrisma({ forgeWorkerMaxRunDurationMs: -500 });
+      const service = new AgentTokenSettingsService(prisma, createMockPinoLogger());
+
+      const settings = await service.get();
+      expect(settings.forgeWorkerMaxRunDurationMs).toBe(1_800_000);
+    });
+
+    it('getForgeWorker() incluye maxRunDurationMs alineado con el row', async () => {
+      const prisma = makeMockPrisma({ forgeWorkerMaxRunDurationMs: 5_400_000 }); // 90 min
+      const service = new AgentTokenSettingsService(prisma, createMockPinoLogger());
+
+      const cfg = await service.getForgeWorker();
+      expect(cfg).toEqual({
+        model: 'claude-sonnet-4-6',
+        effort: 'high',
+        maxRunDurationMs: 5_400_000,
+      });
+    });
+
+    it('getForgeWorker() retorna el valor CLAMPEADO cuando la BD tiene basura', async () => {
+      // E2E del clamp: si la BD tiene 100ms (basura), el cliente (worker)
+      // recibe MIN (300_000), NO el valor crudo. Defense in depth garantiza
+      // que el worker NUNCA reciba un timeout absurdo.
+      const prisma = makeMockPrisma({ forgeWorkerMaxRunDurationMs: 100 });
+      const service = new AgentTokenSettingsService(prisma, createMockPinoLogger());
+
+      const cfg = await service.getForgeWorker();
+      expect(cfg.maxRunDurationMs).toBe(300_000);
+    });
+
+    it('update + getForgeWorker round-trip preserva el valor', async () => {
+      // Confirma que la cache invalidation tras update funciona también
+      // para este campo (no quedó cacheado el valor viejo).
+      const prisma = makeMockPrisma();
+      const service = new AgentTokenSettingsService(prisma, createMockPinoLogger());
+
+      const before = await service.getForgeWorker();
+      expect(before.maxRunDurationMs).toBe(1_800_000);
+
+      await service.update({ forgeWorkerMaxRunDurationMs: 3_600_000 }, 'user-123');
+
+      const after = await service.getForgeWorker();
+      expect(after.maxRunDurationMs).toBe(3_600_000);
     });
   });
 });

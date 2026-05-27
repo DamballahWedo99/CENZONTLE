@@ -64,6 +64,12 @@ function buildService(): StoryGenerationService {
   // como objetos vacíos para satisfacer la firma del constructor sin importar
   // las clases reales.
   const empty = {} as AnyObj;
+  // orgAnthropic se inyecta tras refactor 2026-05-25 (key cifrada en BD).
+  // El método bajo test no llama a buildClient(), pero el constructor exige
+  // la dependencia.
+  const orgAnthropicStub = {
+    getApiKeyPlaintext: jest.fn().mockResolvedValue('sk-test'),
+  } as AnyObj;
   // tokenSettings sí se invoca desde runPOAgent/runTLAgent/runQAAgent — mock
   // real con los métodos tipados que el service usa.
   const tokenSettingsStub = {
@@ -71,10 +77,20 @@ function buildService(): StoryGenerationService {
     getStoryTl: jest.fn().mockResolvedValue({ thinking: 12000, maxTokens: 44000 }),
     getStoryQa: jest.fn().mockResolvedValue({ thinking: 12000, maxTokens: 44000 }),
   } as AnyObj;
+  // Mock minimal del logger pino — el constructor lo invoca al evaluar
+  // STORY_AGENT_CONCURRENCY. Sin esto: TypeError reading 'info'/'warn'.
+  const loggerStub = {
+    info: jest.fn(),
+    warn: jest.fn(),
+    error: jest.fn(),
+    debug: jest.fn(),
+  } as AnyObj;
   return new (StoryGenerationService as any)(
     configStub,
+    orgAnthropicStub,
     empty, empty, empty, empty, empty, empty, empty, empty, empty, empty, empty,
     tokenSettingsStub,
+    loggerStub,
   );
 }
 
@@ -357,7 +373,10 @@ describe('Integración — handoff llega al request HTTP de Anthropic', () => {
         }),
       };
     };
-    (service as any).client = {
+    // Tras refactor 2026-05-25, el client Anthropic se construye dentro de
+    // `runAgentLoop` con `await this.buildClient()` (en vez de ser un field
+    // de instancia). Mockear `buildClient` para que retorne el mock cliente.
+    const mockClient = {
       messages: {
         stream: streamHandler,
       },
@@ -367,6 +386,7 @@ describe('Integración — handoff llega al request HTTP de Anthropic', () => {
         },
       },
     };
+    (service as any).buildClient = jest.fn().mockResolvedValue(mockClient);
 
     // Mock de prisma para getInitiativeDocumentsMeta.
     (service as any).prisma = {

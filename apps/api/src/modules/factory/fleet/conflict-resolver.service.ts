@@ -5,7 +5,7 @@ import { mkdtemp, rm, readFile, writeFile } from 'fs/promises';
 import { tmpdir } from 'os';
 import * as path from 'path';
 import Anthropic from '@anthropic-ai/sdk';
-import { OrgAnthropicConfigService } from './org-anthropic-config.service';
+import { OrgAnthropicConfigService } from '../../org-anthropic-config/org-anthropic-config.service';
 
 /**
  * Auto-resolver de merge conflicts entre stories paralelas de la misma wave.

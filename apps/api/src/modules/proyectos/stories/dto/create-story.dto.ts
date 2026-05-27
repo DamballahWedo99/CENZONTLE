@@ -117,6 +117,22 @@ export class CreateStoryDto {
   @IsArray()
   labels?: string[];
 
+  /**
+   * Componentes del componentManifest del design bundle que esta historia
+   * cubre. Emitido por el PO agent durante la generación. El coverage gate
+   * (GET /epics/:id/coverage-check) verifica que cada componente del manifest
+   * aparezca en `componentsCovered` de al menos una story de la épica.
+   * Vacío para historias backend-only o stories de épicas sin bundle.
+   */
+  @ApiPropertyOptional({
+    type: [String],
+    description: 'Componentes del componentManifest del design bundle que esta historia cubre',
+  })
+  @IsOptional()
+  @IsArray()
+  @IsString({ each: true })
+  componentsCovered?: string[];
+
   // Narrative content (will be stored in vault as markdown)
   @ApiPropertyOptional()
   @IsOptional()

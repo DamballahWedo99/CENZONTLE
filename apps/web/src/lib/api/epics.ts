@@ -123,6 +123,54 @@ export function getStoryDependencies(epicId: string) {
 }
 
 /**
+ * Shape de la respuesta del coverage check del bundle de diseño contra las
+ * historias. El backend cruza `epic.designs[].componentManifest` contra
+ * `story.componentsCovered: string[]`.
+ *
+ * Tres escenarios "no aplica":
+ *  - `hasDesignBundle: false`: épica sin bundle (legacy o nunca tuvo).
+ *  - `hasDesignBundle: true && manifestExists: false`: bundle subido ANTES
+ *    de que el extractor de manifest existiera. El frontend muestra un
+ *    mensaje sugiriendo re-upload, pero NO bloquea el envío.
+ *
+ * Cuando ambos son true, `canEnqueue` refleja si TODO componente del
+ * manifest está cubierto. Si false, el frontend deshabilita el botón
+ * "Enviar al Forge" y permite un "forzar envío" con justificación.
+ */
+export interface CoverageCheckResponse {
+  hasDesignBundle: boolean;
+  manifestExists: boolean;
+  components: Array<{
+    name: string;
+    kind: 'section' | 'react-component';
+    coverage: {
+      covered: boolean;
+      coveredByStories: Array<{ storyId: string; storyTitle: string }>;
+    };
+  }>;
+  summary: {
+    totalComponents: number;
+    coveredComponents: number;
+    uncoveredComponents: string[];
+    coveragePercent: number;
+  };
+  canEnqueue: boolean;
+}
+
+/**
+ * Coverage check del bundle de diseño contra las historias de la épica.
+ * Devuelve qué componentes del manifest están cubiertos por al menos una
+ * story. El caller debe degradar graciosamente si el endpoint falla
+ * (Stream A puede no haberlo desplegado aún): NO mostrar el bloque de
+ * cobertura y permitir el flujo normal de envío.
+ */
+export function getEpicCoverageCheck(epicId: string) {
+  return apiFetch<CoverageCheckResponse>(
+    `/proyectos/epicas/${epicId}/coverage-check`,
+  );
+}
+
+/**
  * Borra un diseño de la épica. El backend hace cleanup completo:
  *  - Bundle: borra todos los archivos del vault bajo `disenos/<slug>/`
  *    + el ZIP de respaldo en disco.

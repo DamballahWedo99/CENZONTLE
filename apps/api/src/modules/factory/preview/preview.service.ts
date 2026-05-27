@@ -78,12 +78,25 @@ export class PreviewService {
   private readonly previews = new Map<string, PreviewInstance>();
 
   /**
-   * Port allocation: range [9000, 9099]. Cada preview reserva 1 port.
+   * Port allocation: range [9200, 9299]. Cada preview reserva 1 port.
    * Si se agotan, start tira BadRequestException. En la práctica con cap
    * de 10 nunca se agota.
+   *
+   * BUG FIX 2026-05-25: el rango anterior [9000, 9099] colisionaba con
+   * MinIO (puertos 9000=API, 9001=Console). El preview hacía bind a 9001
+   * pero MinIO ya escuchaba ahí — el navegador veía el login de MinIO en
+   * vez del dev server del proyecto generado.
+   *
+   * El nuevo rango [9200, 9299] evita conflictos con servicios estándar:
+   *   - 3000-3099: Next.js, dev servers comunes
+   *   - 5432, 6379: Postgres, Redis
+   *   - 8000-8080: HTTP servers genéricos
+   *   - 9000-9001: MinIO (object storage)
+   *   - 9100-9199: usado por Prometheus exporters en algunos setups
+   *   - 9200-9299: ← elegido (Elasticsearch usa 9200-9300 pero es opt-in)
    */
-  private readonly PORT_MIN = 9000;
-  private readonly PORT_MAX = 9099;
+  private readonly PORT_MIN = 9200;
+  private readonly PORT_MAX = 9299;
 
   /**
    * Timeout máximo para que el dev server bindee al puerto tras spawn.

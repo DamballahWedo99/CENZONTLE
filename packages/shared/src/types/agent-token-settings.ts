@@ -131,6 +131,14 @@ export interface AgentTokenSettings {
   forgeWorkerModel: ForgeWorkerModel;
   forgeWorkerEffort: ForgeWorkerEffortLevel;
 
+  /**
+   * Max wall-clock duration (ms) que el worker espera al CLI antes de
+   * matar el proceso. Default 1800000 (30 min). Stories grandes con
+   * muchos componentes UI o suites de tests pueden necesitar 3600000-
+   * 5400000 (60-90 min). Min 300000 (5 min), max 7200000 (2h).
+   */
+  forgeWorkerMaxRunDurationMs: number;
+
   // DoD Verifier — reviewer agent (Claude Code CLI, --output-format json)
   // Reusa el mismo set de modelos + effort levels que el Forge Worker
   // porque ambos invocan el CLI con los mismos parámetros válidos.
@@ -164,6 +172,7 @@ export const DEFAULT_AGENT_TOKEN_SETTINGS: Omit<AgentTokenSettings, 'updatedAt' 
   diagramThinkingEnabled: true,
   forgeWorkerModel: 'claude-sonnet-4-6',
   forgeWorkerEffort: 'high',
+  forgeWorkerMaxRunDurationMs: 1_800_000, // 30 min — default conservador
   dodVerifierModel: 'claude-haiku-4-5-20251001',
   dodVerifierEffort: 'low',
   dodMaxAttempts: 1,
@@ -172,6 +181,10 @@ export const DEFAULT_AGENT_TOKEN_SETTINGS: Omit<AgentTokenSettings, 'updatedAt' 
 /** Bounds usados tanto en server (validation) como en client (input min/max). */
 export const AGENT_TOKEN_BOUNDS = {
   maxTokens: { min: 4096, max: 64_000 },
+  forgeWorkerMaxRunDurationMs: {
+    min: 300_000, // 5 min — runs más cortos suelen indicar config rota
+    max: 7_200_000, // 2 h — más allá indica que la story es demasiado grande
+  },
 } as const;
 
 /** Identificador discriminator para iterar agentes en UI. */

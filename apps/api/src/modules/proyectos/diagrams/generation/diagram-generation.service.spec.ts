@@ -38,24 +38,30 @@ import { createMockPinoLogger } from '../../../../common/testing/mock-pino-logge
 // ---------------------------------------------------------------------------
 
 function createService(): DiagramGenerationService {
-  const configStub = { get: jest.fn().mockReturnValue(undefined) } as any;
   const emptyStub = {} as any;
+  // Stub mínimo para OrgAnthropicConfigService — los validators bajo test no
+  // invocan buildClient(), pero si un test futuro lo hace, el mock devuelve
+  // una key válida en formato sk-test para que falle por otra razón (request
+  // real a Anthropic) y no por mock undefined.
+  const orgAnthropicStub = {
+    getApiKeyPlaintext: jest.fn().mockResolvedValue('sk-test'),
+  } as any;
 
   return new DiagramGenerationService(
-    configStub, // ConfigService
-    emptyStub,  // PrismaService
-    emptyStub,  // InitiativeDocumentsTool
-    emptyStub,  // CodeGlobTool
-    emptyStub,  // CodeGrepTool
-    emptyStub,  // CodeReadTool
-    emptyStub,  // VaultGlobTool
-    emptyStub,  // VaultGrepTool
-    emptyStub,  // VaultReadTool
-    emptyStub,  // CodeRepoCloneService
-    emptyStub,  // DiagramCacheService
-    emptyStub,  // ChangelogService
-    emptyStub,  // VaultService
-    emptyStub,  // AgentTokenSettingsService
+    emptyStub,         // PrismaService
+    orgAnthropicStub,  // OrgAnthropicConfigService
+    emptyStub,         // InitiativeDocumentsTool
+    emptyStub,         // CodeGlobTool
+    emptyStub,         // CodeGrepTool
+    emptyStub,         // CodeReadTool
+    emptyStub,         // VaultGlobTool
+    emptyStub,         // VaultGrepTool
+    emptyStub,         // VaultReadTool
+    emptyStub,         // CodeRepoCloneService
+    emptyStub,         // DiagramCacheService
+    emptyStub,         // ChangelogService
+    emptyStub,         // VaultService
+    emptyStub,         // AgentTokenSettingsService
     createMockPinoLogger(),
   );
 }

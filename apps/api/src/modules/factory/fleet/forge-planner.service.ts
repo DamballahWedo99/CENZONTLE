@@ -1,7 +1,7 @@
 import { Injectable } from '@nestjs/common';
 import { InjectPinoLogger, PinoLogger } from 'nestjs-pino';
 import Anthropic from '@anthropic-ai/sdk';
-import { OrgAnthropicConfigService } from './org-anthropic-config.service';
+import { OrgAnthropicConfigService } from '../../org-anthropic-config/org-anthropic-config.service';
 import { anthropicFetch } from '../../../lib/anthropic-fetch';
 
 /**

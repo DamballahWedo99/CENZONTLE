@@ -200,6 +200,14 @@ model Story {
   labels         String[]    @default([])
   tracker        Json?
 
+  // Componentes del componentManifest del design bundle que esta historia
+  // cubre. Emitido por el PO agent durante la generación cuando la épica
+  // tiene un bundle con manifest. El coverage gate (GET /epics/:id/coverage-check)
+  // verifica que cada componente del manifest aparezca en `componentsCovered`
+  // de al menos UNA story de la épica antes de permitir enqueue al Forge.
+  // Vacío para historias backend-only o stories de épicas sin bundle.
+  componentsCovered String[]  @default([])
+
   // Path to the markdown file in the vault (GitHub repo)
   vaultPath      String?
 
@@ -562,6 +570,19 @@ model AgentTokenSettings {
   //   Para Haiku, todos los valores != 'low' son no-op (Haiku no soporta).
   forgeWorkerModel  String @default("claude-sonnet-4-6")
   forgeWorkerEffort String @default("high")
+
+  // Max wall-clock duration que el worker espera al CLI antes de matarlo.
+  // Default: 1800000ms (30 min). Reemplaza la constante hardcoded
+  // MAX_RUN_DURATION_MS de runner.ts:145. Configurable desde
+  // /factory/settings → tab "Factory". Stories con muchos componentes UI o
+  // suites de tests grandes pueden necesitar 60-90 min — el default 30 min
+  // se quedaba corto y mataba runs JUSTO antes del commit (observado en
+  // run cb180125 — 11 componentes pixel-perfect, killed at 30min sin push).
+  //
+  // Min 5 min (300_000) — runs más cortos suelen indicar config rota.
+  // Max 7200000ms (120 min / 2h) — más allá usualmente significa que la
+  // story es demasiado grande y deberia dividirse, NO subir el timeout.
+  forgeWorkerMaxRunDurationMs Int @default(1800000)
 
   // DoD Verifier — reviewer agent (Claude Code CLI con --output-format json).
   // Configurable desde la misma tab "Factory". Reemplaza env vars

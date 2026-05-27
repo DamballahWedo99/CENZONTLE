@@ -1,7 +1,14 @@
+import { promises as fs } from 'fs';
+import { join } from 'path';
 import { ApiClient, ApiError } from '../lib/api-client.js';
 import { loadConfig } from '../lib/config.js';
 import { logger } from '../lib/logger.js';
-import { runStory, type ClaimedStory } from '../lib/runner.js';
+import {
+  runStory,
+  getPendingCompletesDir,
+  recoverOnePendingComplete,
+  type ClaimedStory,
+} from '../lib/runner.js';
 
 const HEARTBEAT_INTERVAL_MS = 30_000;
 const POLL_CLAIM_INTERVAL_MS = 5_000;
@@ -106,6 +113,18 @@ export async function startCommand(opts: { slotsOverride?: number } = {}): Promi
   // Primer heartbeat inmediato — confirma que la conexión funciona Y trae
   // el `totalSlots` del dashboard antes de que el poll loop empiece.
   await heartbeatAndSync();
+
+  // Boot recovery — re-reportar `/complete` payloads que quedaron pendientes
+  // en disco por fallos previos del backend (network down, restart en pleno
+  // post). El daemon recién verificó conectividad arriba, así que es el
+  // momento correcto para intentar drenar el backlog antes de empezar a
+  // clamar nuevas stories. Fire-and-forget: si falla, no impide arranque.
+  void recoverPendingCompletes(client).catch((err) => {
+    logger.warn(
+      { event: 'complete.recovery.boot_fail', error: (err as Error).message },
+      'Boot recovery del pending-completes falló — se reintentará en el próximo restart',
+    );
+  });
 
   const heartbeatHandle = setInterval(() => {
     if (shuttingDown) return;
@@ -341,4 +360,85 @@ async function sendHeartbeat(
     );
     return null;
   }
+}
+
+/**
+ * Boot recovery del directorio `~/.factory-worker/pending-completes/`.
+ *
+ * Cuando un run termina pero el `/complete` al backend falla persistentemente
+ * (network outage, backend down durante el restart de dev), el worker persiste
+ * el payload a disco en `{runId}.json`. Al arrancar el daemon de nuevo,
+ * intentamos drenar ese directorio: para cada archivo, re-postear al backend.
+ * En éxito → borrar el archivo; en 409/410 (run ya terminal) → borrar también
+ * (no hay nada que recuperar); en otro error → conservar para el próximo boot.
+ *
+ * No fatal: errores individuales se loguean pero no detienen el arranque del
+ * worker. El loop secuencial (no paralelo) es intencional — preserva el
+ * orden de finalización y evita stampede sobre un backend que justo arrancó.
+ */
+async function recoverPendingCompletes(client: ApiClient): Promise<void> {
+  const dir = getPendingCompletesDir();
+  let files: string[];
+  try {
+    files = await fs.readdir(dir);
+  } catch (err) {
+    // ENOENT esperado en el primer arranque — no es error.
+    if ((err as NodeJS.ErrnoException).code === 'ENOENT') {
+      logger.debug(
+        { event: 'complete.recovery.skip', reason: 'no_dir' },
+        'No pending-completes dir — boot recovery skip',
+      );
+      return;
+    }
+    logger.warn(
+      {
+        event: 'complete.recovery.boot_fail',
+        error: (err as Error).message,
+      },
+      'No se pudo leer el directorio de pending-completes',
+    );
+    return;
+  }
+  const jsonFiles = files.filter((f) => f.endsWith('.json'));
+  if (jsonFiles.length === 0) {
+    logger.debug(
+      { event: 'complete.recovery.skip', reason: 'empty' },
+      'No hay pending-completes para recuperar',
+    );
+    return;
+  }
+  logger.info(
+    { event: 'complete.recovery.start', count: jsonFiles.length, dir },
+    `[recovery] Re-reportando ${jsonFiles.length} pending-complete(s) al backend...`,
+  );
+  let recovered = 0;
+  let pending = 0;
+  for (const file of jsonFiles) {
+    const filePath = join(dir, file);
+    try {
+      const ok = await recoverOnePendingComplete(client, filePath);
+      if (ok) recovered += 1;
+      else pending += 1;
+    } catch (err) {
+      // recoverOnePendingComplete no debe throwear, pero defensa en profundidad
+      pending += 1;
+      logger.warn(
+        {
+          event: 'complete.recovery.unexpected_error',
+          filePath,
+          error: (err as Error).message,
+        },
+        'Error inesperado en recoverOnePendingComplete',
+      );
+    }
+  }
+  logger.info(
+    {
+      event: 'complete.recovery.done',
+      total: jsonFiles.length,
+      recovered,
+      stillPending: pending,
+    },
+    `[recovery] Resumen: ${recovered}/${jsonFiles.length} reportados, ${pending} aún pendientes`,
+  );
 }

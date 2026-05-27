@@ -13,7 +13,7 @@ import {
   type ExternalSecretForWorker,
 } from '@cenzontle/shared';
 import { PrismaService } from '../../prisma/prisma.service';
-import { OrgAnthropicConfigService } from './org-anthropic-config.service';
+import { OrgAnthropicConfigService } from '../../org-anthropic-config/org-anthropic-config.service';
 import { ForgePromptBuilderService } from './forge-prompt-builder.service';
 import { GitHubService } from '../github/github.service';
 import { DodService } from '../dod/dod.service';
@@ -178,6 +178,12 @@ interface MaterializedClaim {
    *  vars del worker (que quedan como fallback legacy). */
   forgeWorkerModel: string;
   forgeWorkerEffort: string;
+  /** Max wall-clock duration (ms) que el worker espera al CLI antes de matar
+   *  el proceso. Default backend 1_800_000 (30 min). Configurable desde
+   *  /factory/settings → tab Factory. Reemplaza el MAX_RUN_DURATION_MS
+   *  hardcoded del runner.ts. Si llega null/0/undefined, el worker cae al
+   *  default local 30 min como red de seguridad. */
+  forgeWorkerMaxRunDurationMs: number;
   /** Modelo + effort del DoD Verifier (reviewer agent CLI). Mismo patrón. */
   dodVerifierModel: string;
   dodVerifierEffort: string;
@@ -1251,6 +1257,71 @@ export class AgentRunService {
       );
     }
 
+    // ════════════════════════════════════════════════════════════════════
+    // Load componentManifests del bundle de diseño (post-tx, fail-soft)
+    // ════════════════════════════════════════════════════════════════════
+    //
+    // El DesignBundleService extrae automáticamente el manifest de
+    // componentes del HTML del bundle (TopBar, Hero, Ticker, etc.) y lo
+    // guarda en `epic.designs[].componentManifest`. El worker lo necesita
+    // para:
+    //   1. Worker recibe en claim payload como `componentManifests`
+    //   2. Verifier de Layer 1 (`design-coverage-check`) usa el manifest
+    //      para validar que cada componente fue implementado.
+    //
+    // Fail-soft: si no hay designs, o no tienen manifest (legacy), o
+    // alguno tiene shape inválido, retornamos `[]` y el check del worker
+    // hace `skipped`. NO bloqueamos el claim por esto.
+    let componentManifests: ClaimedStory['componentManifests'] = undefined;
+    try {
+      const epicWithDesigns = await this.prisma.epic.findUnique({
+        where: { id: materialized.epicId },
+        select: { designs: true },
+      });
+      const designs = (epicWithDesigns?.designs ?? []) as unknown as Array<{
+        componentManifest?: unknown;
+      }>;
+      const manifests = designs
+        .map((d) => d.componentManifest)
+        .filter(
+          (m): m is { components: unknown[]; primaryFilePath: string; extractedAt: string } =>
+            m !== null &&
+            typeof m === 'object' &&
+            Array.isArray((m as { components?: unknown }).components) &&
+            typeof (m as { primaryFilePath?: unknown }).primaryFilePath === 'string',
+        )
+        .map((m) => ({
+          components: (m.components as unknown[])
+            .filter(
+              (c): c is { name: string; kind: string; startLine: number; endLine: number; filePath: string } =>
+                typeof c === 'object' &&
+                c !== null &&
+                typeof (c as { name?: unknown }).name === 'string' &&
+                (((c as { kind?: unknown }).kind === 'section') ||
+                  ((c as { kind?: unknown }).kind === 'react-component')) &&
+                typeof (c as { startLine?: unknown }).startLine === 'number' &&
+                typeof (c as { endLine?: unknown }).endLine === 'number' &&
+                typeof (c as { filePath?: unknown }).filePath === 'string',
+            )
+            .map((c) => ({
+              name: c.name,
+              kind: c.kind as 'section' | 'react-component',
+              startLine: c.startLine,
+              endLine: c.endLine,
+              filePath: c.filePath,
+            })),
+          primaryFilePath: m.primaryFilePath,
+          extractedAt: m.extractedAt,
+        }));
+      componentManifests = manifests.length > 0 ? manifests : undefined;
+    } catch (err) {
+      // Fail-soft: log pero no bloquear. El check downstream queda skipped.
+      this.logger.warn(
+        { event: 'claim.componentManifest.load_failed', runId: materialized.runId, err: (err as Error).message },
+        '[claim] Failed to load componentManifests — design-coverage-check will skip',
+      );
+    }
+
     return {
       runId: materialized.runId,
       storyId: materialized.storyId,
@@ -1265,6 +1336,7 @@ export class AgentRunService {
       externalSecrets: materialized.externalSecrets,
       forgeWorkerModel: materialized.forgeWorkerModel,
       forgeWorkerEffort: materialized.forgeWorkerEffort,
+      forgeWorkerMaxRunDurationMs: materialized.forgeWorkerMaxRunDurationMs,
       dodVerifierModel: materialized.dodVerifierModel,
       dodVerifierEffort: materialized.dodVerifierEffort,
       dodMaxAttempts: materialized.dodMaxAttempts,
@@ -1272,6 +1344,7 @@ export class AgentRunService {
       acceptanceCriteria,
       qaTestCases,
       technicalRequirements,
+      componentManifests,
     };
   }
 
@@ -1564,6 +1637,7 @@ export class AgentRunService {
       dodCriteria,
       forgeWorkerModel: forgeWorkerConfig.model,
       forgeWorkerEffort: forgeWorkerConfig.effort,
+      forgeWorkerMaxRunDurationMs: forgeWorkerConfig.maxRunDurationMs,
       dodVerifierModel: dodVerifierConfig.model,
       dodVerifierEffort: dodVerifierConfig.effort,
       dodMaxAttempts: dodVerifierConfig.maxAttempts,

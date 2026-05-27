@@ -64,6 +64,15 @@ export class EpicsController {
     return this.epicsService.listStoryDependencies(id);
   }
 
+  @Get(':id/coverage-check')
+  @ApiOperation({
+    summary:
+      'Coverage check del bundle de diseño contra las historias. Devuelve qué componentes del manifest están cubiertos por al menos una story (via story.componentsCovered) y un flag `canEnqueue`. Degrada para épicas sin bundle o con bundle legacy (sin manifest): no bloquea.',
+  })
+  getCoverageCheck(@Param('id') id: string) {
+    return this.epicsService.getCoverageCheck(id);
+  }
+
   @Post()
   @Permissions(Permission.CREATE_EPIC)
   @ApiOperation({ summary: 'Crear una épica' })

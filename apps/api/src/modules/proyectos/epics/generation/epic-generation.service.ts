@@ -1,10 +1,10 @@
 import {
   Injectable,
 } from '@nestjs/common';
-import { ConfigService } from '@nestjs/config';
 import Anthropic from '@anthropic-ai/sdk';
 import { anthropicFetch } from '../../../../lib/anthropic-fetch';
 import { PrismaService } from '../../../prisma/prisma.service';
+import { OrgAnthropicConfigService } from '../../../org-anthropic-config/org-anthropic-config.service';
 import { PodsService } from '../../pods/pods.service';
 // Tools vestigiales removidas (archivos existen pero no se registran):
 // - CodeExplorerTool (reemplazada por code_*)
@@ -69,12 +69,11 @@ function cap(s: string, n = MAX_FIELD_LEN): string {
 
 @Injectable()
 export class EpicGenerationService {
-  private readonly client: Anthropic;
   private readonly tools: AgentTool[];
 
   constructor(
-    private readonly config: ConfigService,
     private readonly prisma: PrismaService,
+    private readonly orgAnthropic: OrgAnthropicConfigService,
     private readonly pods: PodsService,
     private readonly initDocsTool: InitiativeDocumentsTool,
     private readonly codeGlob: CodeGlobTool,
@@ -87,19 +86,12 @@ export class EpicGenerationService {
     private readonly tokenSettings: AgentTokenSettingsService,
     @InjectPinoLogger(EpicGenerationService.name) private readonly logger: PinoLogger,
   ) {
-    const apiKey = this.config.get<string>('ANTHROPIC_API_KEY');
-    if (!apiKey) {
-      this.logger.warn('ANTHROPIC_API_KEY not configured — epic generation will fail at runtime');
-    }
-    // `timeout: 30 * 60 * 1000` (30 min): override del default del SDK.
-    // Para resolver el `terminated` que viene de la capa undici durante
-    // silencios largos entre chunks, usamos `fetch: anthropicFetch` que
-    // configura un dispatcher con `bodyTimeout: 0`. Ver
-    // `apps/api/src/lib/anthropic-fetch.ts`.
-    // `defaultHeaders.anthropic-beta: extended-cache-ttl-2025-04-11`:
-    // habilita TTL de 1 hora en cache_control. Para runs largos (>5min) el
-    // TTL default de 5min expira mid-run, forzando cache_create múltiples
-    // veces por el mismo contenido. Ver doc completa en story-generation.
+    // La API key se resuelve en runtime (por run) desde OrgAnthropicConfigService,
+    // que la lee de la tabla cifrada OrgAnthropicConfig. Esto permite que una
+    // rotación en /factory/settings se aplique INMEDIATAMENTE al siguiente run
+    // sin necesidad de reiniciar el servidor — antes la key se leía una sola
+    // vez del .env en el constructor, lo que la hacía estática durante el
+    // lifecycle del proceso.
     //
     // NOTA HISTÓRICA (2026-05-04): se intentó habilitar el advisor tool
     // (Opus consultor) en este agente, pero el smoke test mostró que Sonnet
@@ -108,15 +100,31 @@ export class EpicGenerationService {
     // consulta. El setup quedaba como overhead inútil. Removido y se queda
     // pendiente decidir si Fase 2 aplica para otros agentes con más
     // ambigüedad inherente (e.g., TL en story-generation).
-    this.client = new Anthropic({
-      apiKey: apiKey || undefined,
+    this.tools = [initDocsTool, codeGlob, codeGrep, codeRead, vaultGlob, vaultGrep, vaultRead];
+  }
+
+  /**
+   * Construye un cliente Anthropic con la API key resuelta desde
+   * OrgAnthropicConfigService. Throws con mensaje claro si la key no está
+   * configurada en /factory/settings — el caller debe capturar y propagar
+   * al usuario via SSE.
+   *
+   * `timeout: 30 * 60 * 1000` (30 min): override del default del SDK.
+   * `fetch: anthropicFetch`: usa un dispatcher de undici con `bodyTimeout: 0`
+   * para tolerar silencios largos entre chunks (resuelve `terminated`).
+   * `extended-cache-ttl-2025-04-11`: TTL de 1h en cache_control (vs 5min
+   * default) para runs largos que excederían el TTL corto.
+   */
+  private async buildClient(): Promise<Anthropic> {
+    const apiKey = await this.orgAnthropic.getApiKeyPlaintext();
+    return new Anthropic({
+      apiKey,
       timeout: 30 * 60 * 1000,
       fetch: anthropicFetch,
       defaultHeaders: {
         'anthropic-beta': 'extended-cache-ttl-2025-04-11',
       },
     });
-    this.tools = [initDocsTool, codeGlob, codeGrep, codeRead, vaultGlob, vaultGrep, vaultRead];
   }
 
   /**
@@ -156,6 +164,32 @@ export class EpicGenerationService {
     // --- Run lifecycle ---
     const runStartTime = Date.now();
     subject.next({ data: { type: 'run_started', timestamp: new Date().toISOString() } });
+
+    // Resolver API key desde OrgAnthropicConfigService (key cifrada en BD,
+    // configurable desde /factory/settings sin redeploy). Failure modes:
+    //  - NotFoundException (404) → key no configurada (UX: pedir al admin)
+    //  - InternalServerError (decrypt fallido) → ciphertext corrupto o
+    //    VAULT_ENCRYPTION_KEY rotada sin re-encriptar (UX: contactar admin)
+    let client: Anthropic;
+    try {
+      client = await this.buildClient();
+    } catch (err: any) {
+      const isNotConfigured = err?.status === 404 || err?.name === 'NotFoundException';
+      const message = isNotConfigured
+        ? 'Anthropic API key no configurada. Configúrala en /factory/settings antes de generar épicas.'
+        : 'Error al acceder a la API key de Anthropic. Contacta al administrador del sistema.';
+      this.logger.warn({ err: err?.message, isNotConfigured }, `[EpicGen] ${message}`);
+      subject.next({
+        data: {
+          type: 'error',
+          message,
+          timestamp: new Date().toISOString(),
+        },
+      });
+      subject.next({ data: { type: 'run_finished', timestamp: new Date().toISOString(), totalDurationMs: Date.now() - runStartTime } });
+      subject.complete();
+      return;
+    }
 
     // --- Phase tracking ---
     let currentPhase: string = 'researching';
@@ -382,7 +416,7 @@ REGLAS DUROS:
       // exceder 10min. Con `max_tokens` que escala hasta 64K, esa estimación
       // se gatilla. `stream()` agrupa los chunks internamente y
       // `finalMessage()` espera al `message_stop`, drop-in con `create()`.
-      const stream = this.client.messages.stream(
+      const stream = client.messages.stream(
         {
           model: MODEL,
           max_tokens: maxTokens,

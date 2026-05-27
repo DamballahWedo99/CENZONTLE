@@ -2,7 +2,11 @@ import { execFile } from 'child_process';
 import { promises as fs } from 'fs';
 import { join } from 'path';
 import { promisify } from 'util';
-import type { CriterionVerdict, ExternalSecretForWorker } from '@cenzontle/shared';
+import type {
+  ComponentManifest,
+  CriterionVerdict,
+  ExternalSecretForWorker,
+} from '@cenzontle/shared';
 import { logger } from './logger.js';
 import {
   runVerifierAgent,
@@ -10,6 +14,7 @@ import {
   type BatchCriterionInput,
   type VerifierAgentVerdict,
 } from './dod-verifier-agent.js';
+import { runDesignCoverageCheck } from './design-coverage-check.js';
 
 /**
  * Batch mode toggle. ON por default tras OPTIMIZATION #1 (Anthropic harness
@@ -457,6 +462,19 @@ export async function verifyDoDCriteria(
      * NO vuelve a sanear — solo redacta el output e inyecta el env.
      */
     externalSecrets: ExternalSecretForWorker[];
+    /**
+     * Manifests de componentes UX/UI extraídos del bundle de diseño de la
+     * épica (lo emite Stream A: `design-bundle.service` y se forwardea en
+     * `ClaimedStory.componentManifests`). Lo usa el Layer 1 check
+     * `design-coverage-check` para verificar que cada componente del
+     * manifest tiene una implementación en `${workdir}/src` tras el run
+     * del coder.
+     *
+     * `undefined` (o array vacío) → el check skipea sin fail. Aplica a:
+     *   - épicas backend-only (sin diseño UI).
+     *   - claims de un backend desactualizado que aún no extrae manifests.
+     */
+    componentManifests?: ComponentManifest[];
   },
   /**
    * Callback opcional para UX progressive (2026-05-11). El verifier lo
@@ -533,6 +551,67 @@ export async function verifyDoDCriteria(
         output: null,
         status: 'skipped',
         reason: 'Verificado por el worker después del DoD loop (push + Octokit).',
+      });
+      await fireProgress();
+      continue;
+    }
+
+    // ────────────────────────────────────────────────────────────────────
+    // design-coverage-check (Layer 1 NON-subprocess)
+    // ────────────────────────────────────────────────────────────────────
+    //
+    // Verifica que cada componente del/los `componentManifests` del claim
+    // está implementado en `${workdir}/src`. NO está en VERIFIERS porque
+    // no es un subprocess único: necesita iterar componentes, grepearlos
+    // uno por uno y emitir log estructurado por cada uno.
+    //
+    // Política WARN (consistente con `security-scan` y `docs-updated`):
+    //   - Sin componentManifests → skipped.
+    //   - Todos los componentes encontrados → passed.
+    //   - 1+ faltante → failed (warn no bloqueante: el runner no usa
+    //     `hasFailedCriteria` para abortar el push, solo para WARN logs).
+    if (c.kind === 'design-coverage-check') {
+      const coverage = await runDesignCoverageCheck(
+        workdir,
+        agentContext.componentManifests,
+      );
+      // Output: lista resumida de matched paths cuando passed, lista de
+      // faltantes cuando failed. Truncado a MAX_OUTPUT_BYTES para no inflar
+      // el prompt de retry ni el DTO del backend.
+      const outputLines: string[] = [];
+      for (const pc of coverage.perComponent) {
+        if (pc.found) {
+          outputLines.push(
+            `  ✓ ${pc.component.name} (${pc.component.kind}) → ${pc.matchedPaths.slice(0, 3).join(', ')}`,
+          );
+        } else {
+          outputLines.push(
+            `  ✗ ${pc.component.name} (${pc.component.kind}) → NOT FOUND (manifest origen: ${pc.component.filePath})`,
+          );
+        }
+      }
+      const output = outputLines.length > 0
+        ? `Cobertura del manifest de diseño:\n${outputLines.join('\n')}`
+        : null;
+      logger.info(
+        {
+          event: 'dod.verify.layer1',
+          kind: c.kind,
+          status: coverage.status,
+          componentCount: coverage.perComponent.length,
+          missingCount: coverage.perComponent.filter((v) => !v.found).length,
+        },
+        `DoD Layer 1 [${c.kind}] → ${coverage.status}`,
+      );
+      verdicts.push({
+        criterionId: c.kind,
+        label: c.text,
+        kind: c.kind,
+        command: null, // No es un subprocess — el comando "compuesto" se loggea per-componente.
+        exitCode: null,
+        output: output ? tailBytes(output, MAX_OUTPUT_BYTES) : null,
+        status: coverage.status,
+        reason: coverage.reason,
       });
       await fireProgress();
       continue;
@@ -966,7 +1045,8 @@ function emitVerifierSummary(
   const skipped = verdicts.filter((v) => v.status === 'skipped').length;
 
   // Breakdown por kind (acceptance-criteria, tests-passing, technical-design,
-  // code-written, no-errors, security-scan, docs-updated, pr-created).
+  // code-written, no-errors, security-scan, design-coverage-check,
+  // docs-updated, pr-created).
   const byKind: Record<string, { total: number; passed: number; failed: number }> = {};
   for (const v of verdicts) {
     const kind = v.kind ?? 'custom';
