@@ -12,7 +12,11 @@ import { PrismaService } from '../../prisma/prisma.service';
 import { VaultService } from '../../vault/vault.service';
 import { VaultFolderService } from '../../vault/vault-folder.service';
 import { IntegrationsService } from '../../integrations/integrations.service';
-import { assertUserCanAccessStoryByEpic } from '../epics/epic-access.util';
+import {
+  assertUserCanAccessStoryByEpic,
+  assertUserCanAccessEpicPods,
+  assertUserCanAssignPods,
+} from '../epics/epic-access.util';
 
 const PENDING_TRACKER_SENTINEL = '__pending__';
 import { CreateStoryDto, RelatedDocumentDto, DiscoveredDependencyDto } from './dto/create-story.dto';
@@ -317,7 +321,7 @@ export class StoriesService {
     return story;
   }
 
-  async create(dto: CreateStoryDto) {
+  async create(dto: CreateStoryDto, user: AuthenticatedUser) {
     const docsCount = dto.relatedDocuments?.length ?? 0;
     const depsCount = dto.discoveredDependencies?.length ?? 0;
     this.logger.info(
@@ -325,12 +329,26 @@ export class StoriesService {
     );
 
     // Resolver parent chain: necesitamos initiative + epic para construir el
-    // path anidado `iniciativas/.../epics/.../historias/<story>/`.
+    // path anidado `iniciativas/.../epics/.../historias/<story>/`. Incluimos los
+    // pods de la épica para el check de authz de abajo.
     const epic = await this.prisma.epic.findUnique({
       where: { id: dto.epicId },
-      include: { initiative: { select: { id: true, name: true } } },
+      include: {
+        initiative: { select: { id: true, name: true } },
+        pods: { select: { podId: true } },
+      },
     });
     if (!epic) throw new NotFoundException('Épica padre no encontrada');
+
+    // Resource-scoped authz (CWE-639/BOLA, cerrado 2026-05-28). Sin esto, un rol
+    // con CREATE_STORY del pod A podía crear historias bajo la épica de otro pod
+    // y/o asignarles un podId ajeno. Dos checks (NO usamos assertUserCanAccess
+    // StoryByEpic acá: incluye el storyPodId en el set permitido, lo que dejaría
+    // al atacante "colar" su propio podId para pasar el check de una épica ajena):
+    //  1. El caller debe poder acceder a la ÉPICA padre (compartir un pod con ella).
+    //  2. El `podId` asignado debe ser uno al que el caller pertenece.
+    assertUserCanAccessEpicPods(user, epic.pods.map((p) => p.podId));
+    assertUserCanAssignPods(user, dto.podId ? [dto.podId] : []);
 
     const id = randomUUID();
     const iniRef: InitiativeRef = { id: epic.initiative.id, name: epic.initiative.name };
@@ -504,6 +522,23 @@ export class StoriesService {
       epicPodIds: existing.epic?.pods?.map((p) => p.podId) ?? [],
       storyPodId: existing.podId ?? null,
     });
+
+    // El check de arriba valida la historia ACTUAL (¿puede tocarla?), pero NO
+    // los DESTINOS de un reassignment. Sin esto, un atacante con EDIT_STORY que
+    // comparte pod podía re-parentar la historia a una épica AJENA o reasignar
+    // su podId a un pod ajeno (CWE-639 vía reassignment, security-reviewer HIGH
+    // 2026-05-28). Validamos cada destino entrante:
+    if (dto.podId !== undefined) {
+      assertUserCanAssignPods(user, dto.podId ? [dto.podId] : []);
+    }
+    if (dto.epicId !== undefined && dto.epicId !== existing.epicId) {
+      const targetEpic = await this.prisma.epic.findUnique({
+        where: { id: dto.epicId },
+        select: { pods: { select: { podId: true } } },
+      });
+      if (!targetEpic) throw new NotFoundException('Épica destino no encontrada');
+      assertUserCanAccessEpicPods(user, targetEpic.pods.map((p) => p.podId));
+    }
 
     // Excluir campos que no son columnas escalares de `story`: los 3 de
     // contenido (po/technical/qa van al vault), `relatedDocuments` y
@@ -970,52 +1005,6 @@ export class StoriesService {
       this.logger.error(
         `[rollback] Failed to delete ${failed.length}/${paths.length} orphan files. Manual cleanup needed: ${failed.join(', ')}`,
       );
-    }
-  }
-
-  private async deleteFolder(folderPath: string, storyId: string, storyTitle: string): Promise<void> {
-    try {
-      // listTree retorna estructura recursiva. Aplanamos todos los paths de archivo.
-      const tree = await this.vault.listTree(folderPath).catch(() => []);
-      const allFiles: string[] = [];
-      const walk = (nodes: any[]) => {
-        for (const node of nodes) {
-          if (node.type === 'file' && typeof node.path === 'string') {
-            allFiles.push(node.path);
-          } else if (node.children) {
-            walk(node.children);
-          }
-        }
-      };
-      walk(tree);
-
-      if (allFiles.length === 0) {
-        // Fallback: intenta borrar al menos los paths conocidos.
-        const known = [
-          `${folderPath}/index.md`,
-          `${folderPath}/definicion-negocio.md`,
-          `${folderPath}/definicion-tecnica.md`,
-          `${folderPath}/testing-strategy.md`,
-        ];
-        for (const p of known) {
-          await this.vault.deleteNote(p, `feat(story): delete "${storyTitle}" [${storyId}]`).catch(() => {});
-        }
-        return;
-      }
-
-      // Primer archivo con commit de "feat(story): delete", el resto con mensaje de cleanup.
-      let first = true;
-      for (const file of allFiles) {
-        const msg = first
-          ? `feat(story): delete "${storyTitle}" [${storyId}]`
-          : `chore(story): cleanup ${this.basename(file)} [${storyId}]`;
-        await this.vault.deleteNote(file, msg).catch((err) =>
-          this.logger.warn({ file, message: err?.message }, `[deleteFolder] Failed to delete ${file}: ${err?.message}`),
-        );
-        first = false;
-      }
-    } catch (err: any) {
-      this.logger.warn({ folderPath, message: err?.message }, `[deleteFolder] Error listing/deleting folder ${folderPath}: ${err?.message}`);
     }
   }
 
@@ -1646,12 +1635,6 @@ export class StoriesService {
   // ─────────────────────────────────────────────────────────────────────
   //   Path helpers
   // ─────────────────────────────────────────────────────────────────────
-
-  private buildFolderSlug(title: string, id: string): string {
-    const slug = this.slugify(title) || 'historia';
-    const shortId = id.slice(-6);
-    return `${slug}-${shortId}`;
-  }
 
   private slugify(text: string): string {
     return text

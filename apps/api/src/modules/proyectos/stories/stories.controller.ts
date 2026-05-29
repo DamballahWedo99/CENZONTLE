@@ -44,8 +44,8 @@ export class StoriesController {
   @Post()
   @Permissions(Permission.CREATE_STORY)
   @ApiOperation({ summary: 'Crear una historia de usuario' })
-  create(@Body() dto: CreateStoryDto) {
-    return this.storiesService.create(dto);
+  create(@Body() dto: CreateStoryDto, @CurrentUser() user: AuthenticatedUser) {
+    return this.storiesService.create(dto, user);
   }
 
   @Patch(':id')

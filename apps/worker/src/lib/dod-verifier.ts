@@ -1,16 +1,19 @@
 import { execFile } from 'child_process';
 import { promises as fs } from 'fs';
+import { tmpdir } from 'os';
 import { join } from 'path';
 import { promisify } from 'util';
 import type {
   ComponentManifest,
   CriterionVerdict,
+  DodCanonicalKind,
   ExternalSecretForWorker,
 } from '@cenzontle/shared';
 import { logger } from './logger.js';
 import {
-  runVerifierAgent,
-  runVerifierAgentBatch,
+  runVerifierAgentWithRetry,
+  runVerifierAgentBatchWithRetry,
+  runCodeSecurityReview,
   type BatchCriterionInput,
   type VerifierAgentVerdict,
 } from './dod-verifier-agent.js';
@@ -66,6 +69,16 @@ const VERIFIER_TIMEOUT_MS = 5 * 60 * 1000; // 5 min por command — cubre tests 
 const MAX_OUTPUT_BYTES = 2000; // Output truncado para no inflar prompts/DB
 
 /**
+ * Prefijo del `reason` cuando un verdict `skipped` viene de un FALLO DE INFRA
+ * del verifier (no de un skip legítimo "no aplica"). `emitVerifierSummary` lo
+ * usa para contar `verifierErrors` por separado. CRÍTICO: este mismo prefijo se
+ * usa al CONSTRUIR el reason en callVerifierAgent[Batch] — si divergen, el
+ * conteo queda en 0 silenciosamente (qa/arch review 2026-05-28). Una sola
+ * constante ata construcción y detección.
+ */
+const VERIFIER_INFRA_ERROR_PREFIX = 'Verifier agent error (';
+
+/**
  * Un comando individual ejecutado por el verifier. `binary` + `args` van
  * directos a `execFile` (sin shell), preservando la defensa shell-escape
  * multi-capa.
@@ -76,18 +89,43 @@ interface VerifierCommand {
 }
 
 /**
- * Configuración del verifier para un kind canónico. `precheck` valida
- * prerrequisitos del environment (ej. existe package.json + script "test").
- * Si el precheck retorna `{ skip }`, el criterio se skip con esa razón.
- * Si retorna `{ commands }`, ejecuta los comandos SECUENCIALMENTE con
- * short-circuit en el primer fail (semántica AND).
- *
- * Multi-command permite que `no-errors` corra `lint` Y `type-check` sin
- * recurrir a shell wrappers — un lint exitoso ya NO oculta type errors.
+ * Contexto que recibe un verifier custom (`customVerify`). Le damos todo lo
+ * que un check determinístico no-command puede necesitar: el workdir, la
+ * identidad del criterio (kind/label) para construir el verdict, el base
+ * branch para diffs contra origin/<base>, y los secrets del org para el env.
  */
-interface VerifierSpec {
-  precheck: (workdir: string) => Promise<{ commands: VerifierCommand[] } | { skip: string }>;
+interface CustomVerifyContext {
+  workdir: string;
+  kind: string;
+  label: string;
+  baseBranch: string | null;
+  secrets: ExternalSecretForWorker[];
+  /**
+   * API key del org para spawns de claude desde un custom verifier (ej.
+   * `code-security`, que spawnea el review headless). Los verifiers que no
+   * spawnean claude (ej. `security-scan`) lo ignoran.
+   */
+  anthropicApiKey: string;
 }
+
+/**
+ * Configuración del verifier para un kind canónico. Es una unión discriminada:
+ *
+ *  - **command-based** (`precheck`): el caso común. `precheck` valida
+ *    prerrequisitos del environment (ej. existe package.json + script "test").
+ *    Si retorna `{ skip }`, el criterio se skip con esa razón. Si retorna
+ *    `{ commands }`, ejecuta los comandos SECUENCIALMENTE con short-circuit en
+ *    el primer fail (semántica AND). Multi-command permite que `no-errors`
+ *    corra `lint` Y `type-check` sin shell wrappers.
+ *
+ *  - **custom** (`customVerify`): para checks que NO se expresan como un
+ *    subprocess con exit-code (ej. `security-scan` diferencial, que parsea
+ *    JSON de dos `npm audit` y hace set-diff). `customVerify` posee el cómputo
+ *    completo del verdict y devuelve un `CriterionVerdict` directo.
+ */
+type VerifierSpec =
+  | { precheck: (workdir: string) => Promise<{ commands: VerifierCommand[] } | { skip: string }> }
+  | { customVerify: (ctx: CustomVerifyContext) => Promise<CriterionVerdict> };
 
 /**
  * Detecta si el workdir tiene un package.json + un script específico.
@@ -123,7 +161,469 @@ async function detectPackageManager(workdir: string): Promise<'pnpm' | 'npm' | '
   return 'npm';
 }
 
-const VERIFIERS: Record<string, VerifierSpec> = {
+// ═══════════════════════════════════════════════════════════════════════════
+// SECURITY-SCAN DIFERENCIAL — npm audit base vs HEAD, falla solo en las NUEVAS
+// ═══════════════════════════════════════════════════════════════════════════
+//
+// `npm audit --audit-level=high` plano falla por CUALQUIER advisory high/critical
+// del árbol de deps — incluidas las PREEXISTENTES que el agente no introdujo.
+// Es un falso negativo: penaliza al agente por vulns que ya estaban en la base.
+// Este differential audita la base (origin/<base>) y el HEAD, y falla SOLO por
+// advisories que aparecen en HEAD y NO en la base.
+
+interface NpmAuditVia {
+  source?: number;
+  name?: string;
+  title?: string;
+  url?: string;
+  severity?: string;
+}
+interface NpmAuditVuln {
+  name?: string;
+  severity?: string;
+  via?: Array<NpmAuditVia | string>;
+}
+interface NpmAuditJson {
+  vulnerabilities?: Record<string, NpmAuditVuln>;
+}
+
+type AdvisoryInfo = { severity: string; title: string; module: string };
+
+/**
+ * Extrae el set de advisories high+critical de un reporte `npm audit --json`,
+ * keyed por un identificador ESTABLE entre runs: el `source` numérico del
+ * advisory de npm (invariante por GHSA), o la URL como fallback. Solo cuenta
+ * entradas `via` que son OBJETOS — un `via` string es una referencia transitiva
+ * a otro paquete vulnerable, no un advisory primario (lo contaríamos doble).
+ */
+function extractHighCriticalAdvisories(audit: NpmAuditJson): Map<string, AdvisoryInfo> {
+  const out = new Map<string, AdvisoryInfo>();
+  for (const [pkgName, vuln] of Object.entries(audit.vulnerabilities ?? {})) {
+    for (const via of vuln.via ?? []) {
+      if (typeof via === 'string') continue;
+      const sev = (via.severity ?? '').toLowerCase();
+      if (sev !== 'high' && sev !== 'critical') continue;
+      const key =
+        via.source != null
+          ? `src:${via.source}`
+          : via.url
+            ? `url:${via.url}`
+            : `pkg:${pkgName}:${via.title ?? ''}`;
+      out.set(key, { severity: sev, title: via.title ?? '(sin título)', module: via.name ?? pkgName });
+    }
+  }
+  return out;
+}
+
+/**
+ * Corre `npm audit --json` en `cwd` y devuelve el JSON parseado, o null si no
+ * se pudo obtener un reporte parseable (npm ausente, sin lockfile, sin red al
+ * advisory API, output corrupto). `npm audit` sale con exit code 1 cuando
+ * ENCUENTRA vulns pero igual emite el JSON en stdout — por eso parseamos
+ * `err.stdout` en el catch, no solo el happy path.
+ */
+async function runNpmAuditJson(
+  cwd: string,
+  secrets: ExternalSecretForWorker[],
+): Promise<NpmAuditJson | null> {
+  const tryParse = (s: string | undefined): NpmAuditJson | null => {
+    if (!s) return null;
+    try {
+      return JSON.parse(s) as NpmAuditJson;
+    } catch {
+      return null;
+    }
+  };
+  const opts = {
+    cwd,
+    env: {
+      ...buildSecretEnv(secrets),
+      HOME: process.env.HOME ?? '',
+      PATH: process.env.PATH ?? '',
+      USER: process.env.USER ?? '',
+      LANG: process.env.LANG ?? 'en_US.UTF-8',
+      CI: '1',
+    },
+    timeout: VERIFIER_TIMEOUT_MS,
+    maxBuffer: 10 * 1024 * 1024,
+  };
+  try {
+    const { stdout } = await execFileAsync('npm', ['audit', '--json'], opts);
+    return tryParse(stdout);
+  } catch (err) {
+    // exit code 1 (vulns encontradas) → JSON en err.stdout. ENOENT/timeout → null.
+    const e = err as { stdout?: string };
+    return tryParse(e.stdout);
+  }
+}
+
+/**
+ * `git show <ref>` read-only contra el workdir. Devuelve el contenido del
+ * archivo en ese ref, o null si no existe (ej. la base no tenía lockfile).
+ * NO toca el working tree del agente.
+ */
+async function gitShow(workdir: string, ref: string): Promise<string | null> {
+  try {
+    const { stdout } = await execFileAsync('git', ['show', ref], {
+      cwd: workdir,
+      maxBuffer: 10 * 1024 * 1024,
+    });
+    return stdout;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Security-scan diferencial. Compara los advisories high/critical de la base
+ * (origin/<base>) contra el HEAD del workdir y falla SOLO por los nuevos.
+ *
+ * Estados:
+ *  - skip: sin package-lock.json, sin base branch, o audit no parseable (infra).
+ *    Skip escala a Layer 3 — nunca cuenta como fallo del agente.
+ *  - passed: 0 advisories nuevos (las preexistentes de la base se ignoran).
+ *  - failed: ≥1 advisory high/critical introducido por este branch.
+ */
+async function runSecurityScanDifferential(ctx: CustomVerifyContext): Promise<CriterionVerdict> {
+  const baseVerdict = {
+    criterionId: ctx.kind,
+    label: ctx.label,
+    kind: ctx.kind,
+    command: `npm audit --json (diferencial origin/${ctx.baseBranch ?? '?'} vs HEAD)`,
+    exitCode: null as number | null,
+  };
+
+  // Observabilidad: una sola forma de evento (`dod.security_scan.differential`)
+  // emitida antes de cada return. WARN para failed/infra-skip (accionable),
+  // INFO para passed/skip-normal. En prod permite alertar sobre vulns nuevas y
+  // sobre degradación de infra (audit no parseable); en debug confirma que el
+  // diferencial corrió y con qué conteos (head/base/new/preexisting).
+  const emitLog = (outcome: string, fields: Record<string, unknown> = {}) => {
+    const payload = { event: 'dod.security_scan.differential', outcome, baseBranch: ctx.baseBranch, ...fields };
+    if (outcome === 'failed' || outcome.startsWith('skip.infra')) {
+      logger.warn(payload, `[security-scan.diff] ${outcome}`);
+    } else {
+      logger.info(payload, `[security-scan.diff] ${outcome}`);
+    }
+  };
+
+  // Precheck: npm necesita package-lock.json. Sin lockfile (pnpm/yarn, o repo
+  // sin deps), skip → escalará a Layer 3.
+  try {
+    await fs.access(join(ctx.workdir, 'package-lock.json'));
+  } catch {
+    emitLog('skip.no_lockfile');
+    return {
+      ...baseVerdict,
+      command: null,
+      output: null,
+      status: 'skipped',
+      reason: 'El repo no tiene package-lock.json (npm). Security scan diferencial no aplica.',
+    };
+  }
+
+  // 1. Audit del HEAD (workdir tras el commit del agente).
+  const headAudit = await runNpmAuditJson(ctx.workdir, ctx.secrets);
+  if (!headAudit) {
+    emitLog('skip.infra.head_audit_unparseable');
+    return {
+      ...baseVerdict,
+      output: null,
+      status: 'skipped',
+      reason:
+        'No se pudo obtener `npm audit --json` del HEAD (npm ausente, sin red al advisory API, o output no parseable). No contado como fallo.',
+    };
+  }
+  const headAdv = extractHighCriticalAdvisories(headAudit);
+
+  // 2. Sin base branch no hay con qué diferenciar → skip. Fallar por absolutos
+  //    reintroduciría el falso negativo que este differential existe para evitar.
+  if (!ctx.baseBranch) {
+    emitLog('skip.no_base_branch', { headCount: headAdv.size });
+    return {
+      ...baseVerdict,
+      output: null,
+      status: 'skipped',
+      reason: 'No hay base branch para diferenciar advisories. Security scan diferencial omitido.',
+    };
+  }
+
+  // 3. Audit de la base: materializamos package.json + package-lock.json de
+  //    origin/<base> en un tempdir y corremos npm audit ahí (trabaja sobre el
+  //    lockfile, no necesita node_modules). git show es read-only — no tocamos
+  //    el working tree del agente.
+  let baseAdv = new Map<string, AdvisoryInfo>();
+  let baseAuditFailed = false;
+  const tmp = await fs.mkdtemp(join(tmpdir(), 'cenzontle-audit-base-'));
+  try {
+    const basePkg = await gitShow(ctx.workdir, `origin/${ctx.baseBranch}:package.json`);
+    const baseLock = await gitShow(ctx.workdir, `origin/${ctx.baseBranch}:package-lock.json`);
+    if (basePkg !== null && baseLock !== null) {
+      await fs.writeFile(join(tmp, 'package.json'), basePkg);
+      await fs.writeFile(join(tmp, 'package-lock.json'), baseLock);
+      const baseAudit = await runNpmAuditJson(tmp, ctx.secrets);
+      if (baseAudit) {
+        baseAdv = extractHighCriticalAdvisories(baseAudit);
+      } else {
+        baseAuditFailed = true;
+      }
+    }
+    // else: la base no tenía package.json/lock (este branch los introdujo).
+    // baseAdv queda vacío → TODOS los advisories del HEAD cuentan como nuevos,
+    // que es correcto: si el branch agregó las deps, sus vulns son suyas.
+  } finally {
+    await fs.rm(tmp, { recursive: true, force: true }).catch(() => {});
+  }
+
+  // Si el audit de la base FALLÓ (red/parse) — distinto de "base sin deps" —
+  // no podemos diferenciar con confianza. Skip en vez de reportar falsos nuevos.
+  if (baseAuditFailed) {
+    emitLog('skip.infra.base_audit_unparseable', { headCount: headAdv.size });
+    return {
+      ...baseVerdict,
+      output: null,
+      status: 'skipped',
+      reason: `No se pudo auditar la base (origin/${ctx.baseBranch}) para diferenciar. Security scan diferencial omitido (no contado como fallo).`,
+    };
+  }
+
+  // 4. Diferencial: advisories en HEAD que NO están en la base.
+  const newAdv = [...headAdv.entries()].filter(([k]) => !baseAdv.has(k));
+  const preexisting = headAdv.size - newAdv.length;
+
+  if (newAdv.length === 0) {
+    emitLog('passed', { headCount: headAdv.size, baseCount: baseAdv.size, newCount: 0, preexisting });
+    return {
+      ...baseVerdict,
+      output:
+        headAdv.size > 0
+          ? `${preexisting} advisory(s) high/critical preexistente(s) en la base — ignorados. 0 nuevos introducidos por este branch.`
+          : '0 advisories high/critical.',
+      status: 'passed',
+      reason:
+        headAdv.size > 0
+          ? `Sin nuevas vulnerabilidades. ${preexisting} preexistente(s) ignorada(s) (ya estaban en origin/${ctx.baseBranch}).`
+          : 'npm audit limpio (0 high/critical).',
+    };
+  }
+
+  emitLog('failed', {
+    headCount: headAdv.size,
+    baseCount: baseAdv.size,
+    newCount: newAdv.length,
+    preexisting,
+    newModules: newAdv.map(([, v]) => v.module).slice(0, 20),
+  });
+
+  const lines = newAdv
+    .map(([, v]) => `  - [${v.severity.toUpperCase()}] ${v.module}: ${v.title}`)
+    .join('\n');
+  return {
+    ...baseVerdict,
+    output: tailBytes(
+      `NUEVAS vulnerabilidades introducidas por este branch (${newAdv.length}):\n${lines}` +
+        (preexisting > 0 ? `\n\n(${preexisting} preexistente(s) de la base, ignorada(s))` : ''),
+      MAX_OUTPUT_BYTES,
+    ),
+    status: 'failed',
+    reason: `${newAdv.length} nueva(s) vulnerabilidad(es) high/critical introducida(s) por este branch (npm audit diferencial vs origin/${ctx.baseBranch}). Las preexistentes (${preexisting}) no cuentan.`,
+  };
+}
+
+/**
+ * Adaptador del `code-security` review (plan #4): traduce el
+ * `CodeSecurityReviewResult` del agente headless al `CriterionVerdict` del
+ * pipeline. Requiere base branch (sin él no hay diff que revisar → skip).
+ *
+ * Mapeo: failed (≥1 HIGH) bloquea; passed (0 HIGH) puede traer MEDIUMs que se
+ * reportan en el output pero no fallan; skipped (review no pudo correr) no
+ * cuenta como fallo (medidor≠medido). El markdown del review va al `output`
+ * truncado para revisión humana en la UI.
+ */
+async function runCodeSecurityReviewVerdict(ctx: CustomVerifyContext): Promise<CriterionVerdict> {
+  const baseVerdict = {
+    criterionId: ctx.kind,
+    label: ctx.label,
+    kind: ctx.kind,
+    command: null,
+    exitCode: null,
+  };
+
+  if (!ctx.baseBranch) {
+    return {
+      ...baseVerdict,
+      output: null,
+      status: 'skipped',
+      reason: 'No hay base branch para revisar (origin/<base>..HEAD). Code-security review omitido.',
+    };
+  }
+
+  const result = await runCodeSecurityReview({
+    workdir: ctx.workdir,
+    baseBranch: ctx.baseBranch,
+    anthropicApiKey: ctx.anthropicApiKey,
+    externalSecrets: ctx.secrets,
+  });
+
+  // El markdown del review (con findings + recomendaciones) va al output,
+  // truncado. Si está vacío, caemos al summary.
+  const output =
+    result.markdown.trim().length > 0
+      ? tailBytes(result.markdown.trim(), MAX_OUTPUT_BYTES)
+      : result.summary || null;
+
+  if (result.status === 'skipped') {
+    return {
+      ...baseVerdict,
+      output,
+      status: 'skipped',
+      reason: `Code-security review no pudo correr (${result.verifierError ?? 'desconocido'}) — no contado como fallo: ${result.summary}`,
+    };
+  }
+
+  if (result.status === 'failed') {
+    return {
+      ...baseVerdict,
+      output,
+      status: 'failed',
+      reason: `${result.highCount} vulnerabilidad(es) HIGH de seguridad introducida(s) por este branch (code-security review /security-review). ${result.mediumCount} MEDIUM. ${result.summary}`,
+    };
+  }
+
+  // passed
+  return {
+    ...baseVerdict,
+    output,
+    status: 'passed',
+    reason:
+      result.mediumCount > 0
+        ? `Sin vulnerabilidades HIGH. ${result.mediumCount} MEDIUM reportada(s) (no bloqueante). ${result.summary}`
+        : `Sin vulnerabilidades HIGH/MEDIUM de seguridad. ${result.summary}`,
+  };
+}
+
+/**
+ * docs-updated DETERMINÍSTICO (reemplaza el juez Haiku semántico, que era flaky:
+ * coder y verifier — ambos Haiku — juzgaban distinto el mismo caso ambiguo
+ * "¿este cambio necesita docs?", 2026-05-28). Regla determinística PROPORCIONAL:
+ * si el diff (origin/<base>..HEAD) tocó archivos de CÓDIGO de aplicación, exige
+ * que también haya tocado un archivo de DOCS (README/CHANGELOG/AGENTS/CLAUDE,
+ * `docs/**`, cualquier `*.md`, o un ADR en `docs/adr/`). Cambios solo-config o
+ * solo-docs pasan sin requisito.
+ *
+ * Principio de harness: un gate de DoD debe ser PREDECIBLE — el agente aprende
+ * "tocá un doc cuando cambies código" y pasa de forma fiable. La CALIDAD de la
+ * doc la guía el prompt del coder (README proporcional + ADR para decisiones
+ * significativas); este gate solo verifica PRESENCIA. Separa "el agente produce
+ * (semántico, inteligente)" de "el gate verifica (determinístico)". Acepta
+ * cualquier artefacto de doc → habilita el esquema escalonado (línea en README
+ * para lo trivial, ADR nuevo para lo grande) sin imponer estructura rígida.
+ */
+async function runDocsUpdatedCheck(ctx: CustomVerifyContext): Promise<CriterionVerdict> {
+  const baseVerdict = {
+    criterionId: ctx.kind,
+    label: ctx.label,
+    kind: ctx.kind,
+    command: `git diff --name-only origin/${ctx.baseBranch ?? '?'}..HEAD (docs gate determinístico)`,
+    exitCode: null as number | null,
+  };
+  const emitLog = (outcome: string, fields: Record<string, unknown> = {}) => {
+    const payload = { event: 'dod.docs_updated.check', outcome, baseBranch: ctx.baseBranch, ...fields };
+    if (outcome === 'failed') logger.warn(payload, `[docs-updated] ${outcome}`);
+    else logger.info(payload, `[docs-updated] ${outcome}`);
+  };
+
+  if (!ctx.baseBranch) {
+    emitLog('skip.no_base_branch');
+    return {
+      ...baseVerdict,
+      command: null,
+      output: null,
+      status: 'skipped',
+      reason: 'No hay base branch para diferenciar el diff. docs-updated omitido.',
+    };
+  }
+
+  let changed: string[];
+  try {
+    // Tres puntos (qa-reviewer 2026-05-28): `A...B` difea desde el ANCESTRO
+    // COMÚN, así reporta solo lo que ESTA branch introdujo. Con dos puntos, si
+    // origin/<base> avanzó (otra historia mergeó) mientras corría, archivos de
+    // esa otra historia aparecerían en el diff y falsearían el conteo.
+    const { stdout } = await execFileAsync(
+      'git',
+      ['diff', '--name-only', `origin/${ctx.baseBranch}...HEAD`],
+      { cwd: ctx.workdir, maxBuffer: 10 * 1024 * 1024 },
+    );
+    changed = stdout.split('\n').map((s) => s.trim()).filter(Boolean);
+  } catch (err) {
+    emitLog('skip.infra.diff_failed', { err: (err as Error).message.slice(0, 120) });
+    return {
+      ...baseVerdict,
+      output: null,
+      status: 'skipped',
+      reason: `No se pudo obtener el diff vs origin/${ctx.baseBranch} — docs-updated omitido (no contado como fallo).`,
+    };
+  }
+
+  // OJO (qa-reviewer 2026-05-28): el 4to clause restringe la EXTENSIÓN a docs
+  // (.md/.mdx/.txt/.rst o sin extensión). Sin esa restricción, un archivo de
+  // CÓDIGO como `src/claude.ts` o `lib/changelog.ts` matchearía por basename →
+  // se contaría como doc (falso negativo: código sin docs pasaría). Los .md ya
+  // los cubre el 1er clause; el 4to es solo para README/CHANGELOG sin ext o .txt.
+  const isDoc = (f: string): boolean =>
+    /\.mdx?$/i.test(f) ||
+    f.startsWith('docs/') ||
+    f.includes('/docs/') ||
+    /(^|\/)(README|CHANGELOG|CONTRIBUTING|AGENTS|CLAUDE)(\.(md|mdx|txt|rst))?$/i.test(f);
+  // Código de APLICACIÓN (no docs). Config/lockfiles (package.json, *.lock) NO
+  // cuentan como código → un bump de deps no exige docs.
+  const CODE_EXT =
+    /\.(tsx?|jsx?|mjs|cjs|cts|mts|vue|svelte|astro|py|go|rs|rb|php|java|kt|swift|c|cc|cpp|h|hpp|cs|css|scss|sass|less|html?)$/i;
+  const isCode = (f: string): boolean => CODE_EXT.test(f) && !isDoc(f);
+
+  const codeChanged = changed.filter(isCode);
+  const docChanged = changed.filter(isDoc);
+
+  if (codeChanged.length === 0) {
+    emitLog('passed.no_code', { changedCount: changed.length });
+    return {
+      ...baseVerdict,
+      output: null,
+      status: 'passed',
+      reason: 'El cambio no toca código de aplicación (solo config/otros) — no requiere actualización de docs.',
+    };
+  }
+  if (docChanged.length > 0) {
+    emitLog('passed', { codeChanged: codeChanged.length, docChanged: docChanged.length });
+    return {
+      ...baseVerdict,
+      output: `Docs actualizados: ${docChanged.slice(0, 10).join(', ')}`,
+      status: 'passed',
+      reason: `Tocaste ${codeChanged.length} archivo(s) de código y ${docChanged.length} de docs — OK.`,
+    };
+  }
+  emitLog('failed', { codeChanged: codeChanged.length, docChanged: 0, sampleCode: codeChanged.slice(0, 8) });
+  return {
+    ...baseVerdict,
+    output: tailBytes(
+      `Código cambiado SIN docs (${codeChanged.length} archivo(s)):\n${codeChanged.slice(0, 15).map((f) => `  - ${f}`).join('\n')}`,
+      MAX_OUTPUT_BYTES,
+    ),
+    status: 'failed',
+    reason:
+      `Cambiaste ${codeChanged.length} archivo(s) de código pero NO actualizaste ninguna doc. ` +
+      `Actualizá el README (qué hace / cómo correr / estructura). Para una decisión arquitectónica significativa, agregá un ADR en docs/adr/NNNN-titulo.md.`,
+  };
+}
+
+// `Partial<Record<DodCanonicalKind, ...>>` (no `Record<string, ...>`): las keys
+// deben ser kinds canónicos de `@cenzontle/shared` — un typo o un kind que el
+// backend renombró sin actualizar acá es un ERROR de compilación, no un drift
+// silencioso a Layer 3 (architecture-reviewer 2026-05-28). `Partial` porque no
+// todos los kinds tienen spec Layer 1 (acceptance-criteria, technical-design,
+// pr-created se manejan aparte/semánticos).
+const VERIFIERS: Partial<Record<DodCanonicalKind, VerifierSpec>> = {
   /**
    * code-written: el agente debe haber producido cambios. Verificación
    * más simple posible — `git status --porcelain` debe traer al menos
@@ -196,19 +696,34 @@ const VERIFIERS: Record<string, VerifierSpec> = {
   },
 
   /**
-   * security-scan: `npm audit --audit-level=high` reporta solo críticas y
-   * altas. Exit code != 0 si encuentra. Solo aplica a repos Node con
-   * package.json — sin él, skip.
+   * security-scan: DIFERENCIAL. Audita origin/<base> vs HEAD con `npm audit
+   * --json` y falla SOLO por advisories high/critical que este branch
+   * introdujo — las preexistentes de la base no penalizan al agente. Ver
+   * `runSecurityScanDifferential`. Skip si no hay package-lock.json, base
+   * branch, o red al advisory API (no cuenta como fallo).
    */
   'security-scan': {
-    precheck: async (workdir) => {
-      try {
-        await fs.access(join(workdir, 'package.json'));
-      } catch {
-        return { skip: 'El repo no tiene package.json. Security scan vía npm audit no aplica.' };
-      }
-      return { commands: [{ binary: 'npm', args: ['audit', '--audit-level=high'] }] };
-    },
+    customVerify: (ctx) => runSecurityScanDifferential(ctx),
+  },
+
+  /**
+   * code-security: revisión de seguridad profunda con el prompt pixel-perfect
+   * de `/security-review` (Sonnet headless contra origin/<base>..HEAD). Falla
+   * solo por findings HIGH (directamente explotables); MEDIUM se reportan pero
+   * no bloquean. Skip si no hay base branch o el review no pudo correr
+   * (timeout/spawn/parse). Ver `runCodeSecurityReviewVerdict`.
+   */
+  'code-security': {
+    customVerify: (ctx) => runCodeSecurityReviewVerdict(ctx),
+  },
+
+  /**
+   * docs-updated: DETERMINÍSTICO (ya no juez Haiku semántico — ver
+   * `runDocsUpdatedCheck`). Si el diff tocó código de app, exige que también
+   * tocó un doc (README/docs/**​/*.md/ADR). Predecible, nunca flaky.
+   */
+  'docs-updated': {
+    customVerify: (ctx) => runDocsUpdatedCheck(ctx),
   },
 
   // pr-created: NO se verifica acá — lo hace el worker después de la
@@ -246,7 +761,15 @@ async function runVerifier(
   label: string,
   spec: VerifierSpec,
   secrets: ExternalSecretForWorker[],
+  baseBranch: string | null,
+  anthropicApiKey: string,
 ): Promise<CriterionVerdict> {
+  // Verifier custom (ej. security-scan diferencial, code-security review):
+  // posee su propio cómputo de verdict — no pasa por el pipeline command-based.
+  if ('customVerify' in spec) {
+    return spec.customVerify({ workdir, kind, label, baseBranch, secrets, anthropicApiKey });
+  }
+
   const config = await spec.precheck(workdir);
   if ('skip' in config) {
     return {
@@ -441,6 +964,13 @@ export async function verifyDoDCriteria(
       description: string;
     }>;
     branch: string;
+    /**
+     * Base branch del repo (origin/<base>) contra el que el security-scan
+     * diferencial compara advisories. `null` si el run no tiene repo remoto
+     * (local-only) — ahí el differential skipea. Lo provee el runner desde
+     * el claim (`ClaimedStory.baseBranch`).
+     */
+    baseBranch: string | null;
     anthropicApiKey: string;
     /**
      * Modelo + effort del verifier (configurados en /factory/settings →
@@ -744,7 +1274,10 @@ export async function verifyDoDCriteria(
       continue;
     }
 
-    const spec = c.kind !== null ? VERIFIERS[c.kind] : undefined;
+    // `c.kind` es un string runtime (viene del claim/DB). El cast a
+    // DodCanonicalKind es seguro: si NO es canónico, el lookup en el Partial
+    // devuelve undefined → cae al path "sin spec" (Layer 3), igual que antes.
+    const spec = c.kind !== null ? VERIFIERS[c.kind as DodCanonicalKind] : undefined;
 
     if (spec) {
       // Layer 1: Deterministic check. Corre subprocess.
@@ -754,6 +1287,8 @@ export async function verifyDoDCriteria(
         c.text,
         spec,
         agentContext.externalSecrets,
+        agentContext.baseBranch,
+        agentContext.anthropicApiKey,
       );
       logger.info(
         {
@@ -766,9 +1301,13 @@ export async function verifyDoDCriteria(
         `DoD Layer 1 [${c.kind}] → ${verdict.status}`,
       );
 
-      // Si Layer 1 hizo skip por falta de tooling → fallback a Layer 3.
-      // El agente verifier hereda el criterio y decide independiente.
-      if (verdict.status === 'skipped') {
+      // Si un check command-based hizo skip por falta de tooling → fallback a
+      // Layer 3 (el agente verifier hereda el criterio y decide independiente).
+      // PERO un verifier `customVerify` (security-scan, code-security) que skipea
+      // ya decidió "no puedo medir esto con confianza" — escalar a un agente
+      // genérico menos equipado contradice esa decisión. Su skip es autoritativo
+      // (no bloqueante) y NO escala.
+      if (verdict.status === 'skipped' && !('customVerify' in spec)) {
         logger.info(
           { event: 'dod.verify.layer3.fallback', kind: c.kind, reason: verdict.reason },
           `Layer 1 skipped → escalating to Layer 3 verifier agent`,
@@ -776,7 +1315,7 @@ export async function verifyDoDCriteria(
         const upgraded = await callVerifierAgent(workdir, c, agentContext);
         verdicts.push(upgraded);
       } else {
-        // passed o failed de Layer 1 son autoritative.
+        // passed/failed de Layer 1, o skip autoritativo de un customVerify.
         verdicts.push(verdict);
       }
     } else {
@@ -1043,6 +1582,16 @@ function emitVerifierSummary(
   const passed = verdicts.filter((v) => v.status === 'passed').length;
   const failed = verdicts.filter((v) => v.status === 'failed').length;
   const skipped = verdicts.filter((v) => v.status === 'skipped').length;
+  // `verifierErrors`: subconjunto de `skipped` que NO es un skip legítimo
+  // ("no aplica al entorno") sino un fallo del MEDIDOR (timeout/spawn/parse/
+  // batch.missing_verdict del verifier agent). Los distinguimos por el prefijo
+  // determinista que callVerifierAgent[Batch] inyecta en el reason. Esta cuenta
+  // es la señal accionable para alerting: skipped alto por "no aplica" es OK,
+  // pero verifierErrors alto significa que la infra del verifier está degradada
+  // y criterios reales NO se están midiendo (falsos PASS silenciosos).
+  const verifierErrors = verdicts.filter(
+    (v) => v.status === 'skipped' && v.reason?.startsWith(VERIFIER_INFRA_ERROR_PREFIX),
+  ).length;
 
   // Breakdown por kind (acceptance-criteria, tests-passing, technical-design,
   // code-written, no-errors, security-scan, design-coverage-check,
@@ -1114,6 +1663,7 @@ function emitVerifierSummary(
     passed,
     failed,
     skipped,
+    verifierErrors,
     passRate: total > 0 ? Math.round((passed / total) * 100) : 0,
     byKind,
     tl: {
@@ -1139,16 +1689,18 @@ function emitVerifierSummary(
   // Mensaje legible humano + payload JSON estructurado.
   const summary =
     `verify.completed ${passed}/${total} passed ` +
-    `(${failed} failed, ${skipped} skipped, ${payload.passRate}%)` +
+    `(${failed} failed, ${skipped} skipped${verifierErrors > 0 ? ` [${verifierErrors} verifier-err]` : ''}, ${payload.passRate}%)` +
     (tlVerdicts.length > 0
       ? ` | TL: ${tlByCategory.checklist.passed}/${tlByCategory.checklist.total}cl + ${tlByCategory.contract.passed}/${tlByCategory.contract.total}ct + ${tlByCategory.validation.passed}/${tlByCategory.validation.total}vl + ${tlByCategory.errors.passed}/${tlByCategory.errors.total}er`
       : '')
     + (qaVerdicts.length > 0 ? ` | QA: ${qaVerdicts.filter(v => v.status === 'passed').length}/${qaVerdicts.length}` : '');
 
-  // Loggear con WARN si hay regresión (failed > 0), INFO si todo verde.
-  // Esto facilita alerting: cualquier WARN/ERROR del event `forge.verify.completed`
-  // es señal accionable de que el agente no cumplió lo esperado.
-  if (failed > 0) {
+  // Loggear con WARN si hay regresión (failed > 0) O si el medidor falló
+  // (verifierErrors > 0). Esto facilita alerting: cualquier WARN/ERROR del
+  // event `forge.verify.completed` es señal accionable — failed = el agente
+  // no cumplió; verifierErrors = la infra del verifier no pudo medir (criterios
+  // pasaron como `skipped` sin verificarse → riesgo de falso PASS silencioso).
+  if (failed > 0 || verifierErrors > 0) {
     logger.warn(payload, summary);
   } else {
     logger.info(payload, summary);
@@ -1174,7 +1726,7 @@ async function callVerifierAgent(
     externalSecrets: ExternalSecretForWorker[];
   },
 ): Promise<CriterionVerdict> {
-  const verdict: VerifierAgentVerdict = await runVerifierAgent({
+  const verdict: VerifierAgentVerdict = await runVerifierAgentWithRetry({
     workdir,
     criterion: { kind: criterion.kind, text: criterion.text, description: criterion.description },
     storyTitle: agentContext.storyTitle,
@@ -1221,9 +1773,15 @@ async function callVerifierAgent(
       verdict.evidencePaths.length > 0
         ? `Evidencias examinadas por el verifier:\n${verdict.evidencePaths.map((p) => `  - ${p}`).join('\n')}`
         : null,
-    status: verdict.passed ? 'passed' : 'failed',
+    // Un fallo del VERIFICADOR (timeout/spawn/parse) NO es un fallo del
+    // CRITERIO. Mapeamos a `skipped` (no bloqueante) en vez de `failed`:
+    // penalizar al agente por un rate limit o cold-start del verifier es
+    // un falso negativo. El `reason` deja explícito que fue infra, y
+    // emitVerifierSummary cuenta estos como `verifierErrors` aparte para
+    // observabilidad. Principio: un fallo del medidor ≠ fallo de lo medido.
+    status: verdict.verifierError ? 'skipped' : verdict.passed ? 'passed' : 'failed',
     reason: verdict.verifierError
-      ? `Verifier agent error (${verdict.verifierError}): ${verdict.reason}`
+      ? `${VERIFIER_INFRA_ERROR_PREFIX}${verdict.verifierError}) — criterio NO verificado (no contado como fallo): ${verdict.reason}`
       : verdict.reason,
     // Propaga usage del CLI claude → CriterionVerdict para cost tracking
     // y forensics. Ausente si el verifier falló antes de obtener wrapper
@@ -1278,7 +1836,7 @@ async function callVerifierAgentBatch(
     description: c.description,
   }));
 
-  const verdictMap = await runVerifierAgentBatch({
+  const verdictMap = await runVerifierAgentBatchWithRetry({
     workdir,
     criteria: batchInput,
     storyTitle: agentContext.storyTitle,
@@ -1322,9 +1880,13 @@ async function callVerifierAgentBatch(
         v.evidencePaths.length > 0
           ? `Evidencias examinadas por el verifier batch:\n${v.evidencePaths.map((p) => `  - ${p}`).join('\n')}`
           : null,
-      status: v.passed ? 'passed' : 'failed',
+      // Mismo principio que el single-verifier (~línea 1230): un fallo del
+      // VERIFICADOR (timeout/spawn/parse/batch.missing_verdict) NO es un fallo
+      // del CRITERIO → `skipped` no bloqueante, no `failed`. emitVerifierSummary
+      // los cuenta como `verifierErrors` aparte. Medidor ≠ medido.
+      status: v.verifierError ? 'skipped' : v.passed ? 'passed' : 'failed',
       reason: v.verifierError
-        ? `Verifier agent error (${v.verifierError}): ${v.reason}`
+        ? `${VERIFIER_INFRA_ERROR_PREFIX}${v.verifierError}) — criterio NO verificado (no contado como fallo): ${v.reason}`
         : v.reason,
       usage: v.usage,
     };

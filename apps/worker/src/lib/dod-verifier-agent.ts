@@ -4,6 +4,7 @@ import type { ExternalSecretForWorker } from '@cenzontle/shared';
 import { logger } from './logger.js';
 import { wrapWithSandbox } from './sandbox.js';
 import { buildSecretEnv, makeRedactor } from './secrets.js';
+import { buildSecurityReviewPrompt, type SecurityReviewContext } from './prompts/security-review.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -101,6 +102,22 @@ const VERIFIER_MOCK = process.env.DOD_VERIFIER_MOCK === '1';
  * timeouts en repos > 1000 archivos.
  */
 const VERIFIER_TIMEOUT_MS = Number(process.env.DOD_VERIFIER_TIMEOUT_MS ?? 90_000);
+
+/**
+ * Reintentos del verifier ante fallos de INFRA (no del criterio). El disparador
+ * es `stdoutLength=0`: si el proceso `claude` murió sin emitir UN SOLO byte de
+ * stdout (timeout en cold-start, spawn EAGAIN, exit nonzero por rate-limit/auth),
+ * es matemáticamente imposible que haya verificado algo → reintentar es seguro
+ * y correcto. NO reintentamos fallos CON output (parse drift del modelo) ni
+ * fallos deterministas (sandbox.unavailable): ahí el verifier SÍ corrió o el
+ * setup está roto, y reintentar solo quema tokens/tiempo sin cambiar el verdict.
+ *
+ * 2 reintentos (3 intentos totales) con backoff exponencial + jitter. Override
+ * con `DOD_VERIFIER_MAX_RETRIES=0` para desactivar, o subir el base con
+ * `DOD_VERIFIER_RETRY_BASE_MS`.
+ */
+const VERIFIER_MAX_RETRIES = Math.max(0, Number(process.env.DOD_VERIFIER_MAX_RETRIES ?? 2));
+const VERIFIER_RETRY_BASE_MS = Math.max(0, Number(process.env.DOD_VERIFIER_RETRY_BASE_MS ?? 2_000));
 
 /**
  * Output máximo del verifier en bytes. El JSON final es pequeño (~500
@@ -873,6 +890,122 @@ export async function runVerifierAgent(input: {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
+// RETRY LAYER — reintento ante fallos de infra "vacíos" (stdoutLength=0)
+// ═══════════════════════════════════════════════════════════════════════════
+//
+// `runVerifierAgent`/`runVerifierAgentBatch` son single-shot puros (un spawn).
+// Esta capa los envuelve con reintento + backoff cuando el verifier muere SIN
+// producir output — señal limpia de fallo de infra (no del criterio medido).
+// Mantener el single-shot puro hace testeable cada capa por separado (SRP).
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/**
+ * ¿Este verdict es un fallo de INFRA transitorio que vale la pena reintentar?
+ *
+ * Dos condiciones, AMBAS necesarias:
+ *  1. El `verifierError` es de un tipo transitorio: `timeout` (cold-start /
+ *     hang en handshake), `spawn.error` (EAGAIN/ENOMEM al forkear), o
+ *     `exit.*` (el CLI salió nonzero — típico de rate-limit o auth fail que
+ *     escriben a stderr y no a stdout). NO incluye `sandbox.unavailable`
+ *     (determinista) ni `*.parse.failed` (el verifier SÍ corrió y emitió texto).
+ *  2. `stdoutLength=0`: el proceso no emitió NI UN byte de stdout. Si hubo
+ *     output (parse drift del modelo), el verifier corrió → reintentar repite
+ *     el mismo resultado quemando tokens. Cero output = no verificó nada.
+ */
+function isRetryableInfraFailure(v: VerifierAgentVerdict): boolean {
+  const e = v.verifierError;
+  if (!e) return false;
+  const transient = e === 'timeout' || e === 'spawn.error' || e.startsWith('exit.');
+  if (!transient) return false;
+  return (v.rawOutput?.length ?? 0) === 0;
+}
+
+/**
+ * ¿La sesión batch ENTERA murió sin output? Solo reintentamos el batch cuando
+ * TODOS los verdicts son el mismo fallo de infra vacío (la sesión completa no
+ * arrancó). Un batch con verdicts parciales (algunos passed, otros
+ * `batch.missing_verdict`) NO es stdoutLength=0 — ahí el modelo sí corrió.
+ */
+function isRetryableBatchFailure(m: Map<string, VerifierAgentVerdict>): boolean {
+  if (m.size === 0) return false;
+  return Array.from(m.values()).every((v) => isRetryableInfraFailure(v));
+}
+
+/**
+ * Loop de reintento genérico con backoff exponencial + jitter. Corre `attempt`,
+ * y mientras `shouldRetry(result)` sea true y queden reintentos, espera el
+ * backoff y vuelve a intentar. Devuelve el último resultado (exitoso o no).
+ *
+ * Backoff: base * 2^(n-1) + jitter(0, base/2). El jitter decorrelaciona
+ * reintentos simultáneos (varios criterios single en paralelo que pegan el
+ * mismo rate-limit a la vez) para no recrear el thundering herd.
+ */
+async function withVerifierRetry<T>(
+  attempt: () => Promise<T>,
+  shouldRetry: (result: T) => boolean,
+  describe: (result: T) => string,
+  logContext: Record<string, unknown>,
+): Promise<T> {
+  let result = await attempt();
+  for (let n = 1; n <= VERIFIER_MAX_RETRIES; n++) {
+    if (!shouldRetry(result)) return result;
+    const backoff =
+      VERIFIER_RETRY_BASE_MS * 2 ** (n - 1) +
+      Math.floor(Math.random() * (VERIFIER_RETRY_BASE_MS / 2));
+    logger.warn(
+      {
+        event: 'dod.verifier_agent.retry',
+        attempt: n,
+        maxRetries: VERIFIER_MAX_RETRIES,
+        backoffMs: backoff,
+        failure: describe(result),
+        ...logContext,
+      },
+      `Verifier infra failure (stdoutLength=0) — retry ${n}/${VERIFIER_MAX_RETRIES} tras ${backoff}ms: ${describe(result)}`,
+    );
+    await sleep(backoff);
+    result = await attempt();
+  }
+  return result;
+}
+
+/**
+ * `runVerifierAgent` + reintento ante fallos de infra vacíos. Este es el entry
+ * point que debe usar el caller (dod-verifier.ts) en vez del single-shot crudo.
+ */
+export async function runVerifierAgentWithRetry(
+  input: Parameters<typeof runVerifierAgent>[0],
+): Promise<VerifierAgentVerdict> {
+  return withVerifierRetry(
+    () => runVerifierAgent(input),
+    isRetryableInfraFailure,
+    (v) => `${v.verifierError}: ${v.reason.slice(0, 120)}`,
+    { mode: 'single', criterion: input.criterion.text.slice(0, 80) },
+  );
+}
+
+/**
+ * `runVerifierAgentBatch` + reintento ante muerte total de la sesión batch.
+ * Entry point para el caller batch (dod-verifier.ts).
+ */
+export async function runVerifierAgentBatchWithRetry(
+  input: Parameters<typeof runVerifierAgentBatch>[0],
+): Promise<Map<string, VerifierAgentVerdict>> {
+  return withVerifierRetry(
+    () => runVerifierAgentBatch(input),
+    isRetryableBatchFailure,
+    (m) => {
+      const first = m.values().next().value as VerifierAgentVerdict | undefined;
+      return first ? `${first.verifierError}: ${first.reason.slice(0, 120)}` : 'batch vacío';
+    },
+    { mode: 'batch', criteriaCount: input.criteria.length },
+  );
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
 // BATCH VERIFIER (OPTIMIZATION #1) — N criteria → 1 LLM call
 // ═══════════════════════════════════════════════════════════════════════════
 //
@@ -1414,7 +1547,7 @@ export async function runVerifierAgentBatch(input: {
       resolve(out);
     });
 
-    child.on('close', () => {
+    child.on('close', (exitCode, signal) => {
       clearTimeout(timeoutHandle);
       const measuredDurationMs = Date.now() - spawnStartedAt;
 
@@ -1440,6 +1573,37 @@ export async function runVerifierAgentBatch(input: {
         return resolve(out);
       }
 
+      // Exit nonzero ANTES del JSON.parse (paridad con el single, qa-reviewer
+      // BUG-01 2026-05-28): un rate-limit/auth-fail sale con exit≠0 y stdout
+      // vacío. Sin esta rama caía al JSON.parse → `cli.parse.failed`, que NO es
+      // retryable, así que el retry de infra del batch nunca se disparaba en el
+      // caso más común. Con `exit.${code}` + rawOutput vacío, isRetryableInfra
+      // Failure lo reintenta como corresponde.
+      if (exitCode !== 0) {
+        logger.warn(
+          {
+            event: 'dod.verifier_agent.batch_exit_nonzero',
+            count: input.criteria.length,
+            exitCode,
+            signal,
+            measuredDurationMs,
+            stdoutLength: stdout.length,
+            stderrTail: redactText(stderr.slice(-500)),
+          },
+          `Batch verifier exit ${exitCode}${signal ? ` (signal=${signal})` : ''}`,
+        );
+        for (const c of input.criteria) {
+          out.set(c.criterionId, {
+            passed: false,
+            reason: `Batch verifier terminó con exit code ${exitCode}${signal ? ` (signal=${signal})` : ''}. Stderr: ${stderr.slice(-300) || '(vacío)'}`,
+            evidencePaths: [],
+            verifierError: `exit.${exitCode}`,
+            rawOutput: stdout,
+          });
+        }
+        return resolve(out);
+      }
+
       let cliJson: ClaudeCliJsonOutput;
       try {
         cliJson = JSON.parse(stdout.trim());
@@ -1458,7 +1622,7 @@ export async function runVerifierAgentBatch(input: {
             passed: false,
             reason: `Batch CLI output no parseable: ${(err as Error).message}`,
             evidencePaths: [],
-            verifierError: 'cli.parse.failed',
+            verifierError: 'cli_wrapper.parse.failed',
             rawOutput: stdout,
           });
         }
@@ -1589,6 +1753,449 @@ export async function runVerifierAgentBatch(input: {
       }
 
       resolve(out);
+    });
+  });
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// CODE-SECURITY REVIEW — réplica headless del comando /security-review
+// ═══════════════════════════════════════════════════════════════════════════
+//
+// Verifier dedicado de seguridad: spawnea claude con el prompt pixel-perfect de
+// `/security-review` (ver prompts/security-review.ts) contra el diff
+// origin/<base>..HEAD. A diferencia del verifier de criterios (Haiku, effort
+// low, 90s), este usa un modelo capaz + más tiempo: una revisión de seguridad
+// con un modelo débil que da falsa confianza es peor que no tenerla.
+
+/**
+ * Modelo del code-security review. Default Sonnet (postura de seguridad fuerte).
+ * Baja a Haiku con `CODE_SECURITY_MODEL=claude-haiku-4-5-20251001` si el costo
+ * por story es prohibitivo — a cambio de menos profundidad en el análisis.
+ */
+const CODE_SECURITY_MODEL = process.env.CODE_SECURITY_MODEL ?? 'claude-sonnet-4-6';
+/**
+ * Effort del review. 'medium' por default (balance profundidad/costo). 'high'
+ * para máxima rigurosidad en repos sensibles. NO usamos 'low' — la revisión de
+ * seguridad necesita razonar sobre data-flow, no es un check factual atómico.
+ */
+const CODE_SECURITY_EFFORT = process.env.CODE_SECURITY_EFFORT ?? 'medium';
+/**
+ * Timeout del review. 5 min default — lee múltiples archivos + razona sobre
+ * cada superficie de ataque. Override con `CODE_SECURITY_TIMEOUT_MS`.
+ */
+const CODE_SECURITY_TIMEOUT_MS = Number(process.env.CODE_SECURITY_TIMEOUT_MS ?? 300_000);
+/**
+ * Bytes máximos del diff inyectado al prompt. El diff es solo el punto de
+ * partida — claude tiene tools de archivo (Read/Grep) para profundizar más
+ * allá de lo truncado. Cap para no inflar el prompt en stories grandes.
+ */
+const CODE_SECURITY_DIFF_MAX_BYTES = Number(process.env.CODE_SECURITY_DIFF_MAX_BYTES ?? 200_000);
+
+export interface CodeSecurityReviewResult {
+  /**
+   * 'passed' = 0 findings HIGH. 'failed' = ≥1 HIGH (bloqueante). 'skipped' =
+   * no se pudo medir (timeout/spawn/parse/sin base) — NUNCA cuenta como fallo
+   * del agente (principio medidor≠medido).
+   */
+  status: 'passed' | 'failed' | 'skipped';
+  highCount: number;
+  mediumCount: number;
+  summary: string;
+  /** Reporte markdown completo del modelo (para output del verdict / forensics). */
+  markdown: string;
+  /** Razón técnica si el review mismo falló (no findings del código). */
+  verifierError?: string;
+  usage?: {
+    inputTokens: number;
+    outputTokens: number;
+    cacheCreationInputTokens: number;
+    cacheReadInputTokens: number;
+    totalCostUsd: number;
+    durationMs: number;
+    apiDurationMs: number;
+  };
+}
+
+/**
+ * Captura el contexto git que el prompt de security-review inyecta: status,
+ * archivos modificados, commits y el diff completo del rango origin/<base>..HEAD.
+ * Cada `git` que falle degrada a string vacío (el prompt lo maneja con sus
+ * fallbacks "(sin cambios)" etc.) — nunca tira.
+ */
+async function captureSecurityReviewContext(
+  workdir: string,
+  baseBranch: string,
+): Promise<SecurityReviewContext> {
+  const env = { HOME: process.env.HOME ?? '', PATH: process.env.PATH ?? '' };
+  const range = `origin/${baseBranch}..HEAD`;
+  const run = async (args: string[], maxBuffer = 1024 * 1024): Promise<string> => {
+    try {
+      const { stdout } = await execFileAsync('git', args, { cwd: workdir, env, maxBuffer });
+      return stdout;
+    } catch {
+      return '';
+    }
+  };
+  const [gitStatus, filesModified, commits] = await Promise.all([
+    run(['status', '--porcelain']),
+    run(['diff', '--name-only', range]),
+    run(['log', '--no-decorate', range]),
+  ]);
+  // Diff con maxBuffer holgado (20MB) para capturar diffs grandes y truncar
+  // nosotros — no dejar que execFile tire por MAXBUFFER y perder TODO el diff.
+  let diffContent = await run(['diff', range], 20 * 1024 * 1024);
+  if (diffContent.length > CODE_SECURITY_DIFF_MAX_BYTES) {
+    diffContent =
+      diffContent.slice(0, CODE_SECURITY_DIFF_MAX_BYTES) +
+      `\n\n... (diff truncado a ${CODE_SECURITY_DIFF_MAX_BYTES} bytes — usá las herramientas de archivo para leer el resto) ...`;
+  }
+  return { gitStatus, filesModified, commits, diffContent };
+}
+
+/**
+ * Extrae el verdict machine-readable del output del modelo. Busca la ÚLTIMA
+ * ocurrencia de `VERDICT_JSON:` y parsea el primer `{...}` balanceado después.
+ * Devuelve null si no hay marker o el JSON no parsea con el shape esperado.
+ */
+function extractSecurityVerdict(
+  modelOutput: string,
+): { highCount: number; mediumCount: number; summary: string } | null {
+  const marker = 'VERDICT_JSON:';
+  const markerIdx = modelOutput.lastIndexOf(marker);
+  if (markerIdx === -1) return null;
+  const after = modelOutput.slice(markerIdx + marker.length);
+  const start = after.indexOf('{');
+  if (start === -1) return null;
+  let depth = 0;
+  let inString = false;
+  let escaped = false;
+  for (let i = start; i < after.length; i++) {
+    const c = after[i];
+    if (escaped) {
+      escaped = false;
+      continue;
+    }
+    if (inString) {
+      if (c === '\\') escaped = true;
+      else if (c === '"') inString = false;
+      continue;
+    }
+    if (c === '"') inString = true;
+    else if (c === '{') depth++;
+    else if (c === '}') {
+      depth--;
+      if (depth === 0) {
+        try {
+          const parsed = JSON.parse(after.slice(start, i + 1));
+          const hc = parsed.highCount;
+          const mc = parsed.mediumCount;
+          // Exigimos enteros FINITOS y no-negativos. Un `NaN`/`-1`/`Infinity`
+          // (model drift) no es interpretable como conteo de findings — devolver
+          // null hace que el caller lo trate como verdict.parse.failed → skipped,
+          // en vez de pasar silenciosamente porque `NaN > 0 === false` (qa BUG-04).
+          if (
+            typeof hc === 'number' && Number.isFinite(hc) && hc >= 0 &&
+            typeof mc === 'number' && Number.isFinite(mc) && mc >= 0
+          ) {
+            return {
+              highCount: Math.floor(hc),
+              mediumCount: Math.floor(mc),
+              summary: typeof parsed.summary === 'string' ? parsed.summary : '',
+            };
+          }
+        } catch {
+          // JSON inválido — no hay mejor candidato.
+        }
+        return null;
+      }
+    }
+  }
+  return null;
+}
+
+/**
+ * Ejecuta el code-security review headless. Spawnea claude con el prompt de
+ * /security-review contra origin/<base>..HEAD, parsea el VERDICT_JSON, y mapea:
+ *   - highCount > 0  → status 'failed' (bloqueante)
+ *   - highCount == 0 → status 'passed' (mediumCount se reporta, no bloquea)
+ *   - fallo del review mismo → status 'skipped' + verifierError (no bloquea)
+ */
+export async function runCodeSecurityReview(input: {
+  workdir: string;
+  baseBranch: string;
+  anthropicApiKey: string;
+  externalSecrets: ExternalSecretForWorker[];
+  model?: string;
+  effort?: string;
+}): Promise<CodeSecurityReviewResult> {
+  const reviewModel = input.model ?? CODE_SECURITY_MODEL;
+  const reviewEffort = input.effort ?? CODE_SECURITY_EFFORT;
+
+  if (VERIFIER_MOCK) {
+    logger.warn(
+      { event: 'dod.code_security.mocked' },
+      '[MOCK] code-security review deshabilitado por DOD_VERIFIER_MOCK=1 — skipped sin validación real',
+    );
+    return {
+      status: 'skipped',
+      highCount: 0,
+      mediumCount: 0,
+      summary: '[MOCK MODE] code-security review deshabilitado vía DOD_VERIFIER_MOCK=1.',
+      markdown: '',
+      verifierError: 'mocked',
+    };
+  }
+
+  const ctx = await captureSecurityReviewContext(input.workdir, input.baseBranch);
+
+  // Sin diff y sin archivos modificados no hay superficie nueva que revisar →
+  // passed trivial (no introdujo código = no introdujo vulns). Evita gastar un
+  // spawn de Sonnet en un no-op.
+  if (ctx.diffContent.trim().length === 0 && ctx.filesModified.trim().length === 0) {
+    return {
+      status: 'passed',
+      highCount: 0,
+      mediumCount: 0,
+      summary: 'Sin cambios en origin/' + input.baseBranch + '..HEAD — nada que revisar.',
+      markdown: '',
+    };
+  }
+
+  const prompt = buildSecurityReviewPrompt(ctx);
+
+  let sandboxed;
+  try {
+    sandboxed = wrapWithSandbox(
+      resolveClaudeBin(),
+      [
+        '-p',
+        prompt,
+        '--dangerously-skip-permissions',
+        '--permission-mode',
+        'bypassPermissions',
+        '--model',
+        reviewModel,
+        '--effort',
+        reviewEffort,
+        '--output-format',
+        'json',
+      ],
+      input.workdir,
+    );
+  } catch (err) {
+    return {
+      status: 'skipped',
+      highCount: 0,
+      mediumCount: 0,
+      summary: 'Setup del review falló (sandbox).',
+      markdown: '',
+      verifierError: 'sandbox.unavailable',
+    };
+  }
+
+  const spawnStartedAt = Date.now();
+  const redactText = makeRedactor(input.externalSecrets.map((s) => s.value));
+
+  logger.info(
+    {
+      event: 'dod.code_security.spawn',
+      model: reviewModel,
+      effort: reviewEffort,
+      diffBytes: ctx.diffContent.length,
+      filesModified: ctx.filesModified.split('\n').filter(Boolean).length,
+    },
+    `[code-security] model=${reviewModel} effort=${reviewEffort} diff=${ctx.diffContent.length}b`,
+  );
+
+  return new Promise<CodeSecurityReviewResult>((resolve) => {
+    let stdout = '';
+    let stderr = '';
+    let stdoutBytes = 0;
+    let timedOut = false;
+
+    const useUserSession = process.env.FACTORY_WORKER_USE_USER_SESSION === '1';
+    const oauthToken = process.env.CLAUDE_CODE_OAUTH_TOKEN;
+
+    const child = spawn(sandboxed.bin, sandboxed.args, {
+      cwd: input.workdir,
+      env: {
+        ...buildSecretEnv(input.externalSecrets),
+        HOME: process.env.HOME ?? '',
+        PATH: process.env.PATH ?? '',
+        USER: process.env.USER ?? '',
+        LANG: process.env.LANG ?? 'en_US.UTF-8',
+        ...(useUserSession
+          ? oauthToken
+            ? { CLAUDE_CODE_OAUTH_TOKEN: oauthToken }
+            : {}
+          : { ANTHROPIC_API_KEY: input.anthropicApiKey }),
+      },
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+
+    const timeoutHandle = setTimeout(() => {
+      timedOut = true;
+      try {
+        child.kill('SIGTERM');
+        setTimeout(() => {
+          if (!child.killed) child.kill('SIGKILL');
+        }, 3000).unref();
+      } catch {
+        // ignore
+      }
+    }, CODE_SECURITY_TIMEOUT_MS);
+
+    child.stdout?.on('data', (chunk: Buffer) => {
+      stdoutBytes += chunk.length;
+      // Headroom amplio: el review emite markdown largo + el wrapper JSON.
+      if (stdoutBytes <= MAX_OUTPUT_BYTES * 10) {
+        stdout += chunk.toString('utf-8');
+      }
+    });
+    child.stderr?.on('data', (chunk: Buffer) => {
+      if (stderr.length < 10_000) stderr += chunk.toString('utf-8');
+    });
+
+    child.on('error', (err) => {
+      clearTimeout(timeoutHandle);
+      resolve({
+        status: 'skipped',
+        highCount: 0,
+        mediumCount: 0,
+        summary: `Spawn error: ${err.message}`,
+        markdown: '',
+        verifierError: 'spawn.error',
+      });
+    });
+
+    child.on('close', (exitCode, signal) => {
+      clearTimeout(timeoutHandle);
+      const measuredDurationMs = Date.now() - spawnStartedAt;
+
+      if (timedOut) {
+        logger.warn(
+          { event: 'dod.code_security.timeout', measuredDurationMs, stdoutLength: stdoutBytes },
+          `code-security review timeout (${CODE_SECURITY_TIMEOUT_MS / 1000}s)`,
+        );
+        return resolve({
+          status: 'skipped',
+          highCount: 0,
+          mediumCount: 0,
+          summary: `Review excedió timeout de ${CODE_SECURITY_TIMEOUT_MS / 1000}s.`,
+          markdown: '',
+          verifierError: 'timeout',
+        });
+      }
+
+      if (exitCode !== 0) {
+        logger.warn(
+          {
+            event: 'dod.code_security.exit_nonzero',
+            exitCode,
+            signal,
+            measuredDurationMs,
+            stdoutLength: stdoutBytes,
+            stderrTail: redactText(stderr.slice(-500)),
+          },
+          `code-security review exit ${exitCode}${signal ? ` (signal=${signal})` : ''}`,
+        );
+        return resolve({
+          status: 'skipped',
+          highCount: 0,
+          mediumCount: 0,
+          summary: `Review terminó con exit ${exitCode}${signal ? ` (signal=${signal})` : ''}.`,
+          markdown: '',
+          verifierError: `exit.${exitCode}`,
+        });
+      }
+
+      let cliJson: ClaudeCliJsonOutput;
+      try {
+        cliJson = JSON.parse(stdout.trim()) as ClaudeCliJsonOutput;
+      } catch (err) {
+        logger.warn(
+          {
+            event: 'dod.code_security.wrapper_parse_fail',
+            err: (err as Error).message,
+            stdoutTail: redactText(stdout.slice(-300)),
+          },
+          'code-security review: CLI wrapper JSON no parseable',
+        );
+        return resolve({
+          status: 'skipped',
+          highCount: 0,
+          mediumCount: 0,
+          summary: 'CLI wrapper JSON no parseable.',
+          markdown: '',
+          verifierError: 'cli_wrapper.parse.failed',
+        });
+      }
+
+      const usage = {
+        inputTokens: cliJson.usage?.input_tokens ?? 0,
+        outputTokens: cliJson.usage?.output_tokens ?? 0,
+        cacheCreationInputTokens: cliJson.usage?.cache_creation_input_tokens ?? 0,
+        cacheReadInputTokens: cliJson.usage?.cache_read_input_tokens ?? 0,
+        totalCostUsd: cliJson.total_cost_usd ?? 0,
+        durationMs: cliJson.duration_ms ?? measuredDurationMs,
+        apiDurationMs: cliJson.duration_api_ms ?? 0,
+      };
+
+      const modelOutput = cliJson.result ?? '';
+      const verdict = extractSecurityVerdict(modelOutput);
+
+      logger.info(
+        {
+          event: 'dod.code_security.usage',
+          model: reviewModel,
+          inputTokens: usage.inputTokens,
+          outputTokens: usage.outputTokens,
+          totalCostUsd: usage.totalCostUsd,
+          durationMs: usage.durationMs,
+          highCount: verdict?.highCount,
+          mediumCount: verdict?.mediumCount,
+        },
+        `[code-security.cost] cost=$${usage.totalCostUsd.toFixed(4)} duration=${(usage.durationMs / 1000).toFixed(1)}s high=${verdict?.highCount ?? '?'} medium=${verdict?.mediumCount ?? '?'}`,
+      );
+
+      if (!verdict) {
+        logger.warn(
+          {
+            event: 'dod.code_security.verdict_parse_fail',
+            modelOutputTail: redactText(modelOutput.slice(-500)),
+          },
+          'code-security review emitió texto pero no VERDICT_JSON parseable',
+        );
+        return resolve({
+          status: 'skipped',
+          highCount: 0,
+          mediumCount: 0,
+          summary: 'El review no emitió un VERDICT_JSON parseable.',
+          markdown: modelOutput,
+          verifierError: 'verdict.parse.failed',
+          usage,
+        });
+      }
+
+      // HIGH bloquea; MEDIUM se reporta pero no falla la historia.
+      const status = verdict.highCount > 0 ? 'failed' : 'passed';
+      logger.info(
+        {
+          event: 'dod.code_security.verdict',
+          status,
+          highCount: verdict.highCount,
+          mediumCount: verdict.mediumCount,
+        },
+        `code-security verdict: ${status.toUpperCase()} — ${verdict.highCount} HIGH, ${verdict.mediumCount} MEDIUM`,
+      );
+      resolve({
+        status,
+        highCount: verdict.highCount,
+        mediumCount: verdict.mediumCount,
+        summary: verdict.summary,
+        markdown: modelOutput,
+        usage,
+      });
     });
   });
 }

@@ -2,12 +2,17 @@ import {
   BadRequestException,
   Injectable,
 } from '@nestjs/common';
+import type { DodCanonicalKind } from '@cenzontle/shared';
 import { PrismaService } from '../../prisma/prisma.service';
 import type { UpsertDodCriteriaDto } from './dto/upsert-dod-criteria.dto';
 import { InjectPinoLogger, PinoLogger } from 'nestjs-pino';
 
 export interface DodCriterionPublic {
   id: string;
+  // Modelo de LECTURA desde DB — `string | null` a propósito (no
+  // `DodCanonicalKind | null`): la columna podría contener kinds legacy y un
+  // read model no debe mentir sobre lo que la DB realmente puede tener. La
+  // garantía de canonicidad se aplica en la ESCRITURA (DEFAULT_DOD_CRITERIA).
   kind: string | null;
   text: string;
   description: string;
@@ -21,21 +26,18 @@ export interface DodCriterionPublic {
  * la fuente de verdad cuando el operador hace "Restaurar defaults" — los
  * valores acá ganan sobre lo que esté en DB para los criterios con `kind`.
  *
- * Orden canónico:
- *  0. code-written            (status quo)
- *  1. acceptance-criteria     (NUEVO — el más citado por las fuentes)
- *  2. tests-passing           (REFINADO — quita threshold arbitrario 90%)
- *  3. no-errors               (status quo)
- *  4. security-scan           (REACTIVADO — must-have para AI agents)
- *  5. design-coverage-check   (NUEVO — Layer 1 sobre componentManifest del diseño)
- *  6. pr-created              (status quo)
- *  7. docs-updated            (status quo)
+ * Los `kind` son `DodCanonicalKind` (fuente única de verdad en
+ * `@cenzontle/shared`). Tipar este array contra ese union hace que un typo o
+ * un kind no canónico sea un ERROR de compilación — antes era string libre y
+ * podía driftear silenciosamente respecto al mapa `VERIFIERS` del worker
+ * (architecture-reviewer 2026-05-28).
  *
  * Si en el futuro se cambia un criterio estándar (text o description),
  * actualizar acá Y crear migration de backfill para los installs existentes.
+ * Para agregar un kind nuevo: agregarlo primero a `DOD_CANONICAL_KINDS`.
  */
 const DEFAULT_DOD_CRITERIA: ReadonlyArray<{
-  kind: string;
+  kind: DodCanonicalKind;
   text: string;
   description: string;
 }> = [
@@ -73,7 +75,13 @@ const DEFAULT_DOD_CRITERIA: ReadonlyArray<{
     kind: 'security-scan',
     text: 'Sin vulnerabilidades críticas de seguridad',
     description:
-      'Tu código no debe introducir vulnerabilidades de severidad crítica/alta detectables por herramientas estándar (npm audit, dependabot, semgrep). En particular: cero command injection, cero SQL injection, cero secretos hardcoded, cero XSS en componentes que renderean input del usuario. Validá inputs en los boundaries del sistema (endpoints, queries DB, exec de comandos shell).',
+      'Tu código no debe introducir vulnerabilidades de severidad crítica/alta detectables por herramientas estándar (npm audit, dependabot, semgrep). En particular: cero command injection, cero SQL injection, cero secretos hardcoded, cero XSS en componentes que renderean input del usuario. Validá inputs en los boundaries del sistema (endpoints, queries DB, exec de comandos shell). El worker corre `npm audit` DIFERENCIAL (origin/<base> vs HEAD) y solo falla por advisories NUEVOS que tu branch introdujo — los preexistentes de la base no penalizan.',
+  },
+  {
+    kind: 'code-security',
+    text: 'Revisión de seguridad del código (HIGH = bloqueante)',
+    description:
+      'Revisión de seguridad profunda del diff (réplica del comando /security-review de Claude Code): un agente de seguridad independiente audita el código nuevo de tu branch buscando vulnerabilidades de ALTA confianza y explotabilidad real — injection (SQL/command/template/NoSQL), path traversal, auth/authz bypass, secretos hardcodeados, crypto débil, RCE por deserialización, XSS, exposición de datos sensibles. Solo los findings HIGH (directamente explotables: RCE, data breach, auth bypass) bloquean la historia; los MEDIUM se reportan para visibilidad pero no fallan. NO introduzcas código que cruce un boundary de privilegio sin validar, que interpole input no saneado en queries/comandos/HTML, ni que loguee secretos en plaintext.',
   },
   {
     kind: 'design-coverage-check',
@@ -91,7 +99,7 @@ const DEFAULT_DOD_CRITERIA: ReadonlyArray<{
     kind: 'docs-updated',
     text: 'Documentación actualizada',
     description:
-      'Si tu cambio modifica APIs públicas, comportamiento del usuario, comandos CLI, variables de entorno, o flujos de auth, actualiza la documentación correspondiente (README, docs/, CLAUDE.md) en el mismo PR. Cambios internos sin impacto visible no requieren docs.',
+      'Si tu cambio toca código de aplicación, DEBES actualizar documentación en el mismo PR. Regla concreta (el worker la verifica DETERMINÍSTICAMENTE: si el diff toca código, debe tocar también un archivo de docs): actualizá el README con lo que aplique — qué hace la feature, cómo correrla, estructura del proyecto. Escalá la doc al tamaño del cambio: una sección corta en el README para algo simple; para una decisión arquitectónica significativa (elección de patrón, contrato de API, trade-off de diseño) agregá además un ADR en docs/adr/NNNN-titulo.md (un archivo NUEVO por decisión — así no genera conflictos entre historias del mismo sprint). Basta con tocar un archivo de docs (README, cualquier *.md, docs/**, AGENTS.md o CLAUDE.md). Cambios SOLO de config (deps/lockfile) no requieren docs.',
   },
 ];
 

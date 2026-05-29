@@ -33,7 +33,7 @@ interface PreviewInstance {
    *  el fallback de SHA (la integration branch ya no existe en remote). El
    *  preview muestra el snapshot exacto del epic en ese SHA. */
   commitSha?: string;
-  projectType: 'static' | 'node';
+  projectType: 'static' | 'node' | 'vite';
   error?: string;
   logs: string[]; // últimas N lines del stdout/stderr para diagnóstico
 }
@@ -269,24 +269,19 @@ export class PreviewService {
       `[preview:${batchId}] Stopping preview (pid=${instance.pid}, port=${instance.port})`,
     );
 
-    if (instance.process && !instance.process.killed) {
-      try {
-        instance.process.kill('SIGTERM');
-        // SIGKILL fallback tras 5s si SIGTERM no funcionó
-        setTimeout(() => {
-          if (instance.process && !instance.process.killed) {
-            try {
-              instance.process.kill('SIGKILL');
-            } catch {
-              // proceso ya muerto
-            }
-          }
-        }, 5000).unref();
-      } catch (err) {
-        this.logger.warn(
-          `[preview:${batchId}] kill failed: ${(err as Error).message}`,
-        );
-      }
+    // Matamos el GRUPO de procesos (no solo el `sh -c` padre). El dev server se
+    // spawnea `detached:true` → líder de su propio grupo, así que esto señaliza
+    // a sh + pnpm + vite/serve juntos. Antes matábamos solo el `sh` y vite
+    // quedaba huérfano (reparentado a init) reteniendo el puerto y sirviendo 404
+    // desde el workdir ya borrado (bug 2026-05-28).
+    if (instance.pid != null) {
+      // Capturamos el pid como PRIMITIVO local — el closure del SIGKILL diferido
+      // NO debe re-leer `instance.pid` a los 5s: si hubo un re-start del mismo
+      // batch, `instance` ya fue reemplazado, y leer un pid stale (potencialmente
+      // reciclado por el SO) podría matar un proceso ajeno (qa-reviewer 2026-05-28).
+      const pid = instance.pid;
+      this.killProcessGroup(pid, 'SIGTERM');
+      setTimeout(() => this.killProcessGroup(pid, 'SIGKILL'), 5000).unref();
     }
 
     instance.status = 'stopped';
@@ -312,7 +307,7 @@ export class PreviewService {
     port?: number;
     branch?: string;
     commitSha?: string;
-    projectType?: 'static' | 'node';
+    projectType?: 'static' | 'node' | 'vite';
     startedAt?: Date;
     error?: string;
     logsTail?: string[];
@@ -473,6 +468,28 @@ export class PreviewService {
     return config?.devBranch ?? 'dev';
   }
 
+  /**
+   * Mata el GRUPO de procesos liderado por `pid` (el `sh -c` se spawnea
+   * `detached:true` → es group leader). `process.kill(-pid)` con pid negativo
+   * señaliza a TODO el grupo (sh + pnpm + vite/esbuild/serve), evitando que los
+   * nietos queden huérfanos reteniendo el puerto. Si el grupo ya no existe
+   * (ESRCH), cae al kill del pid solo. Nunca tira.
+   */
+  private killProcessGroup(pid: number | null, signal: NodeJS.Signals): boolean {
+    if (pid == null) return false;
+    try {
+      process.kill(-pid, signal); // negativo = process group
+      return true;
+    } catch {
+      try {
+        process.kill(pid, signal); // fallback: el pid individual
+        return true;
+      } catch {
+        return false; // ya muerto / sin permiso
+      }
+    }
+  }
+
   private allocatePort(): number | null {
     const usedPorts = new Set(
       Array.from(this.previews.values()).map((p) => p.port),
@@ -631,17 +648,49 @@ export class PreviewService {
     let hasDevScript = false;
     let pkgName: string | null = null;
     let detectReason = 'no package.json (HTML estático)';
+    let devScript = '';
     try {
       const pkgRaw = await fs.readFile(packageJsonPath, 'utf-8');
       const pkg = JSON.parse(pkgRaw);
       pkgName = typeof pkg?.name === 'string' ? pkg.name : null;
-      hasDevScript = typeof pkg?.scripts?.dev === 'string';
+      devScript = typeof pkg?.scripts?.dev === 'string' ? pkg.scripts.dev : '';
+      hasDevScript = devScript.length > 0;
       detectReason = hasDevScript
-        ? `package.json con scripts.dev="${pkg.scripts.dev}"`
+        ? `package.json con scripts.dev="${devScript}"`
         : `package.json sin scripts.dev`;
     } catch (err) {
       detectReason = `no package.json legible (${(err as Error).message.slice(0, 80)})`;
     }
+
+    // Vite detection: un app Vite TIENE index.html en el ROOT (es su entry de
+    // build, no un archivo suelto). El override "root HTML → static" de abajo lo
+    // clasificaría mal → npx serve sirve el index.html crudo que apunta a
+    // /src/main.tsx → el browser NO ejecuta TSX → página en BLANCO. Lo ruteamos
+    // a un dev server que transpila /src al vuelo. (root-cause 2026-05-28).
+    const viteConfigCandidates = [
+      'vite.config.ts', 'vite.config.js', 'vite.config.mjs',
+      'vite.config.cjs', 'vite.config.mts', 'vite.config.cts',
+    ];
+    let hasViteConfig = false;
+    for (const candidate of viteConfigCandidates) {
+      try {
+        await fs.access(join(instance.workdir, candidate));
+        hasViteConfig = true;
+        break;
+      } catch {
+        // sigue probando
+      }
+    }
+    // Discriminador robusto (qa-reviewer HIGH 2026-05-28): el DEV SCRIPT es la
+    // señal autoritativa de qué dev server correr. NO usamos "vite en deps":
+    // vitest arrastra `vite` a devDependencies, así que un proyecto Next+vitest
+    // tiene la dep vite pero su dev script es `next dev` → debe correr next, NO
+    // vite. Por eso: es Vite si el dev script invoca vite, O si hay vite.config
+    // y el dev script NO es next.
+    const devScriptHasVite = /\bvite\b/.test(devScript);
+    const devScriptHasNext = /\bnext\b/.test(devScript);
+    const isViteApp = devScriptHasVite || (hasViteConfig && !devScriptHasNext);
+    const viteSignal = devScriptHasVite ? 'dev script = vite' : 'vite.config.* (dev≠next)';
 
     // Detectar HTMLs huérfanos en root (que next dev ignoraría).
     // index.html es el más claro indicador, pero también consideramos otros
@@ -659,9 +708,14 @@ export class PreviewService {
     // output que el operador quiere previsualizar — no la página template
     // del scaffold. `npx serve` sin index.html muestra directory listing
     // navegable, mejor que `next dev` mostrando un template vacío.
-    let finalProjectType: 'static' | 'node';
+    let finalProjectType: 'static' | 'node' | 'vite';
     let overrideReason: string | null = null;
-    if (rootHtmlFiles.length > 0) {
+    if (isViteApp) {
+      // PRIMERO — antes del override de root-HTML. El index.html de Vite ES su
+      // entry; servirlo estático = página en blanco. Lo corre el dev server.
+      finalProjectType = 'vite';
+      overrideReason = `vite detectado (${viteSignal}) — el index.html del root es el ENTRY de Vite, no un archivo suelto; se sirve vía dev server que transpila /src/*.tsx (servirlo estático daría página en blanco)`;
+    } else if (rootHtmlFiles.length > 0) {
       finalProjectType = 'static';
       overrideReason = hasRootIndexHtml
         ? `override → static: hay index.html en root (${rootHtmlFiles.length} HTML files total) — next dev los ignoraría`
@@ -733,11 +787,30 @@ export class PreviewService {
       LC_ALL: process.env.LC_ALL ?? 'en_US.UTF-8',
     };
 
-    if (finalProjectType === 'node') {
+    if (finalProjectType === 'vite') {
+      // Vite NO lee PORT env (a diferencia de Next/CRA) — usa los flags CLI
+      // --port/--host. `pnpm exec vite` corre el binario tras el install con
+      // NUESTRO puerto, y transpila /src/*.tsx al vuelo (lo que el static serve
+      // no puede hacer → era la causa de la página en blanco). El install corre
+      // postinstall scripts del agente → mismo env whitelist que el path node.
+      cmd = 'sh';
+      // --strictPort (qa-reviewer 2026-05-28): sin él, si el puerto asignado
+      // está ocupado (ej. un `serve` huérfano de un preview anterior), Vite
+      // auto-incrementa SILENCIOSAMENTE a otro puerto → waitForPort(port) hace
+      // timeout sin pista. Con --strictPort, Vite falla con error claro que va
+      // a los logs del preview.
+      args = [
+        '-c',
+        `pnpm install --silent && pnpm exec vite --port ${instance.port} --host ${SAFE_BIND_HOST} --strictPort`,
+      ];
+      env = {
+        ...baseSafeEnv,
+        BROWSER: 'none', // evita que vite abra browser automático
+      };
+    } else if (finalProjectType === 'node') {
       // Node project: pnpm install + pnpm dev
       // CAVEAT: pnpm dev puede no respetar --port. Inyectamos via PORT env
-      // var (Vite/Next/CRA todos lo respetan). Si el proyecto usa otro
-      // mecanismo, el dev server binde al puerto default y el preview falla.
+      // var (Next/CRA lo respetan; Vite NO — por eso Vite tiene su rama arriba).
       cmd = 'sh';
       args = ['-c', `pnpm install --silent && PORT=${instance.port} pnpm run dev`];
       env = {
@@ -768,7 +841,13 @@ export class PreviewService {
       cwd: instance.workdir,
       env,
       stdio: ['ignore', 'pipe', 'pipe'],
-      // detached: false → child muere si API muere (lo que queremos)
+      // detached:true → el child es líder de un grupo de procesos NUEVO (setsid).
+      // Crítico para poder matar TODO el árbol (sh→pnpm→vite/esbuild) con
+      // `process.kill(-pid)` en stop/timeout. Sin esto, matar el `sh` deja vite
+      // huérfano reteniendo el puerto (bug 2026-05-28). NO hacemos unref() → la
+      // API sigue trackeando el child (recibe exit/error y lo limpia en
+      // cleanupAll al shutdown graceful).
+      detached: true,
     });
     instance.process = child;
     instance.pid = child.pid ?? null;
@@ -899,8 +978,12 @@ export class PreviewService {
       this.appendLog(instance, msg);
       instance.status = 'error';
       instance.error = msg;
-      // Mate el child que está atorado
-      if (!child.killed) child.kill('SIGTERM');
+      // Mata el GRUPO atorado (sh + pnpm + vite/esbuild) — no solo el `sh`, o
+      // los nietos quedan huérfanos reteniendo el puerto. pid primitivo para el
+      // closure diferido (mismo rationale que stopPreview).
+      const stuckPid = child.pid ?? null;
+      this.killProcessGroup(stuckPid, 'SIGTERM');
+      setTimeout(() => this.killProcessGroup(stuckPid, 'SIGKILL'), 5000).unref();
       return;
     }
     this.logger.log(

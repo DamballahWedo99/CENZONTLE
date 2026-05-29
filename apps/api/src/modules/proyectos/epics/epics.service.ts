@@ -26,7 +26,6 @@ import { AuthService } from '../../auth/auth.service';
 import { InitiativesService } from '../initiatives/initiatives.service';
 import { StoriesService } from '../stories/stories.service';
 import { StoryDependenciesService } from '../stories/dependencies/story-dependencies.service';
-import { ChangelogService } from '../changelog/changelog.service';
 import { CreateEpicDto } from './dto/create-epic.dto';
 import { UpdateEpicDto } from './dto/update-epic.dto';
 import { EpicQueryDto } from './dto/epic-query.dto';
@@ -49,6 +48,7 @@ import {
 import { DesignBundleService } from './design-bundle.service';
 import {
   assertUserCanAccessEpicPods,
+  assertUserCanAssignPods,
 } from './epic-access.util';
 import {
   buildDiagramMarkdown,
@@ -136,7 +136,6 @@ export class EpicsService {
     private storyDependenciesService: StoryDependenciesService,
     private designBundle: DesignBundleService,
     private authService: AuthService,
-    private changelogService: ChangelogService,
     @InjectPinoLogger(EpicsService.name) private readonly logger: PinoLogger,
   ) {}
 
@@ -510,8 +509,14 @@ export class EpicsService {
     return mapped;
   }
 
-  async create(dto: CreateEpicDto) {
+  async create(dto: CreateEpicDto, user: AuthenticatedUser) {
     this.logger.info({ title: dto.title, initiativeId: dto.initiativeId }, `[create] START title="${dto.title}" initiativeId=${dto.initiativeId}`);
+
+    // Resource-scoped authz (CWE-639/BOLA, cerrado 2026-05-28): el caller solo
+    // puede crear una épica asignándola a pods a los que pertenece. Sin esto,
+    // un rol con CREATE_EPIC del pod A podía crear épicas en el pod B (write
+    // cross-pod). `update`/`remove` ya enforzaban pod-intersection; `create` no.
+    assertUserCanAssignPods(user, dto.podIds ?? []);
 
     // Necesitamos la iniciativa padre para construir el epic folder anidado.
     const parent = await this.prisma.initiative.findUnique({
@@ -634,6 +639,15 @@ export class EpicsService {
       user,
       existing.pods.map((p) => p.podId),
     );
+
+    // El check de arriba valida los pods ACTUALES (¿puede tocar esta épica?),
+    // pero NO los pods de DESTINO de un reassignment. Sin esto, un PO de pod-A
+    // podía tomar una épica que comparte pod-A y PATCH-reasignarla a pod-B
+    // (CWE-639 vía reassignment, security-reviewer HIGH 2026-05-28). El destino
+    // debe ser subconjunto de los pods del caller.
+    if (dto.podIds !== undefined) {
+      assertUserCanAssignPods(user, dto.podIds);
+    }
 
     const incomingMarkdown = dto.markdown;
     const hasMarkdownChanges = incomingMarkdown !== undefined && incomingMarkdown !== existing.markdown;

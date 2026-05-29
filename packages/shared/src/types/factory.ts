@@ -800,6 +800,40 @@ export interface TechnicalRequirement {
 }
 
 /**
+ * Fuente ÚNICA de verdad de los `kind` canónicos de criterios DoD.
+ *
+ * Por qué existe (architecture-reviewer 2026-05-28): los kinds vivían
+ * duplicados como strings libres en DOS mapas paralelos sin contrato común —
+ * `DEFAULT_DOD_CRITERIA` (backend `dod.service.ts`) y `VERIFIERS`
+ * (worker `dod-verifier.ts`). Un rename en uno sin el otro hacía que el
+ * criterio cayera silenciosamente al path "sin spec" → escalaba a un verifier
+ * Layer 3 genérico (Haiku) en vez del evaluador correcto, sin error ni warning.
+ *
+ * Atando ambos mapas a `DodCanonicalKind`, un typo o rename ahora es un ERROR
+ * de compilación, no un drift en runtime. Los criterios CUSTOM del operador
+ * tienen `kind=null` (no canónico) — por eso los campos `kind` siguen siendo
+ * `DodCanonicalKind | null`, no `DodCanonicalKind` a secas.
+ *
+ * Al agregar un kind nuevo: agregarlo acá PRIMERO; recién entonces el backend
+ * y el worker pueden referenciarlo con seguridad de tipos.
+ */
+export const DOD_CANONICAL_KINDS = [
+  'code-written',
+  'acceptance-criteria',
+  'technical-design',
+  'tests-passing',
+  'no-errors',
+  'security-scan',
+  'code-security',
+  'design-coverage-check',
+  'pr-created',
+  'docs-updated',
+] as const;
+
+/** Unión de los kinds canónicos de DoD. Custom del operador = `null` (aparte). */
+export type DodCanonicalKind = (typeof DOD_CANONICAL_KINDS)[number];
+
+/**
  * Shape mínimo del criterio DoD que el worker recibe del backend para
  * verificar. Subset del modelo de DB — solo lo que el verifier o el
  * agente necesita.

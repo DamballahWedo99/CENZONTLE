@@ -76,8 +76,8 @@ export class EpicsController {
   @Post()
   @Permissions(Permission.CREATE_EPIC)
   @ApiOperation({ summary: 'Crear una épica' })
-  create(@Body() dto: CreateEpicDto) {
-    return this.epicsService.create(dto);
+  create(@Body() dto: CreateEpicDto, @CurrentUser() user: AuthenticatedUser) {
+    return this.epicsService.create(dto, user);
   }
 
   @Patch(':id')

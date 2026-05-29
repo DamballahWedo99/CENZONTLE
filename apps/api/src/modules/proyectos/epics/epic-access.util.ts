@@ -62,3 +62,35 @@ export function assertUserCanAccessStoryByEpic(
     throw new ForbiddenException('Sin acceso a esta historia');
   }
 }
+
+/**
+ * Authz para CREAR un recurso ASIGNÁNDOLO a pods (CWE-639 / BOLA en el create
+ * path, cerrado 2026-05-28). A diferencia de los access helpers de arriba
+ * (intersección = "¿puede tocar este recurso EXISTENTE?"), al crear exigimos
+ * SUBCONJUNTO: el caller solo puede asignar pods a los que pertenece. Esto
+ * cierra completamente el vector — incluyendo el caso donde el atacante mezcla
+ * un pod propio con uno ajeno (la intersección lo dejaría pasar; el subconjunto
+ * no).
+ *
+ * Política:
+ *  - `AltaGerencia` siempre puede (admin bypass).
+ *  - `podIds` vacío ⇒ permitido: sin pods asignados no hay escalación cross-pod
+ *    (no rompe la creación de recursos sin pod). El fail-closed-on-empty de los
+ *    access helpers aplica a recursos existentes, no a la creación.
+ *  - Cualquier pod en `podIds` que NO pertenezca al caller ⇒ Forbidden.
+ */
+export function assertUserCanAssignPods(
+  user: AuthenticatedUser,
+  podIds: readonly string[],
+): void {
+  if (user.role === UserRole.AltaGerencia) return;
+  if (podIds.length === 0) return;
+
+  const userPodIds = new Set(user.podIds ?? []);
+  const foreign = podIds.filter((pid) => !userPodIds.has(pid));
+  if (foreign.length > 0) {
+    throw new ForbiddenException(
+      `No autorizado: no perteneces a el/los pod(s) destino: ${foreign.join(', ')}`,
+    );
+  }
+}

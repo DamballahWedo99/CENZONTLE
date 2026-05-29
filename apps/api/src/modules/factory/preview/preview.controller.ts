@@ -133,7 +133,7 @@ export class PreviewController {
     url?: string;
     port?: number;
     branch?: string;
-    projectType?: 'static' | 'node';
+    projectType?: 'static' | 'node' | 'vite';
     startedAt?: Date;
     error?: string;
     logsTail?: string[];
