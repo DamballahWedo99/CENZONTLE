@@ -94,6 +94,90 @@ async function git(
 export type { ClaimedStory } from '@cenzontle/shared';
 
 /**
+ * Patrones que NUNCA deben llegar a un commit del Forge: dependencias y
+ * artefactos de build. Si el agente los commitea, el diff explota (el caso
+ * real del 2026-05-27: 37k archivos / 6.4M líneas de node_modules → el
+ * escaneo de secretos pre-push excede maxBuffer y aborta el push).
+ */
+const MANDATORY_GITIGNORE_PATTERNS = [
+  'node_modules/',
+  '.next/',
+  'out/',
+  'dist/',
+  'build/',
+  '.turbo/',
+  '.cache/',
+  'coverage/',
+  '.nyc_output/',
+  '*.tsbuildinfo',
+  'tsconfig.tsbuildinfo',
+  '.vercel/',
+  '.lighthouseci/',
+  '.DS_Store',
+  '*.log',
+];
+
+/** Dirs concretos a sacar del índice si el agente los stageó/commiteó. */
+const BUILD_ARTIFACT_DIRS = [
+  'node_modules',
+  '.next',
+  'out',
+  'dist',
+  'build',
+  '.turbo',
+  '.cache',
+  'coverage',
+  '.nyc_output',
+];
+
+/**
+ * GARANTÍA determinista del harness: asegura que el workdir tenga un
+ * `.gitignore` con los patrones obligatorios ANTES de que el worker stagee
+ * nada. Devuelve cuántos patrones agregó.
+ *
+ * Por qué vive en el worker y NO solo en el prompt: el agente (LLM) puede
+ * olvidar crear `.gitignore`, crear uno incompleto, o que `create-next-app`
+ * lo sobrescriba. Confiar en el prompt = no-determinista → el bug vuelve.
+ * El worker es código que SIEMPRE corre → garantiza la invariante.
+ * Principio de harness engineering: no delegar invariantes al modelo.
+ */
+async function ensureGitignorePatterns(workdir: string, runId: string): Promise<number> {
+  const gitignorePath = join(workdir, '.gitignore');
+  let existing = '';
+  try {
+    existing = await fs.readFile(gitignorePath, 'utf-8');
+  } catch {
+    // No existe — se crea desde cero abajo.
+  }
+  // Normaliza un patrón para comparación SEMÁNTICA: quita slash inicial/final
+  // y sufijos `/*` para que `/node_modules`, `node_modules`, `node_modules/`
+  // y `node_modules/*` se traten como el mismo patrón (qa-reviewer #5 — evita
+  // duplicar líneas y logs engañosos).
+  const normalize = (p: string): string =>
+    p.trim().replace(/^\//, '').replace(/\/\*?$/, '');
+  const existingNormalized = new Set(
+    existing
+      .split('\n')
+      .map((l) => l.trim())
+      .filter((l) => l.length > 0 && !l.startsWith('#'))
+      .map(normalize),
+  );
+  const missing = MANDATORY_GITIGNORE_PATTERNS.filter(
+    (p) => !existingNormalized.has(normalize(p)),
+  );
+  if (missing.length === 0) return 0;
+
+  const header = existing.trim().length > 0 ? `${existing.trimEnd()}\n` : '';
+  const block = `\n# === CENZONTLE Forge — patrones obligatorios (auto-añadidos) ===\n${missing.join('\n')}\n`;
+  await fs.writeFile(gitignorePath, header + block, { encoding: 'utf-8' });
+  logger.info(
+    { event: 'git.gitignore.ensured', runId, addedCount: missing.length, patterns: missing },
+    `.gitignore: añadidos ${missing.length} patrón(es) obligatorio(s) faltante(s)`,
+  );
+  return missing.length;
+}
+
+/**
  * Redacta credenciales embebidas en una URL de clone/remote del texto de un
  * error de git. Cuando `git clone`/`git push` falla por auth, git suele
  * incluir la URL completa en su mensaje — p.ej.
@@ -851,6 +935,37 @@ export async function runStory(
         { event: 'git.clone.ok', runId, branch, baseBranch },
         `Repo clonado y checked out a ${branch}`,
       );
+
+      // OBS — Snapshot del estado git post-clone (baseline para detectar
+      // drift posterior). Si más adelante el push falla con "origin does not
+      // appear", comparar contra este snapshot revela si el agente reescribió
+      // el `.git/` durante el run (ej. corriendo `git init` o
+      // `npx create-next-app`). Try/catch para que un fallo del snapshot
+      // NUNCA aborte el run.
+      try {
+        const remoteCheck = await git(['remote', '-v'], workdir);
+        const headCheck = await git(['rev-parse', '--short', 'HEAD'], workdir);
+        const remoteLines = remoteCheck.stdout.split('\n').filter(Boolean);
+        logger.info(
+          {
+            event: 'git.workdir.snapshot.post_clone',
+            runId,
+            remotesCount: remoteLines.length,
+            originPresent: remoteLines.some((l) => l.startsWith('origin')),
+            headSha: headCheck.stdout.trim(),
+          },
+          `Post-clone snapshot: ${remoteLines.length} remote(s), origin=${remoteLines.some((l) => l.startsWith('origin')) ? 'sí' : 'NO'}, HEAD=${headCheck.stdout.trim()}`,
+        );
+      } catch (snapErr) {
+        logger.warn(
+          {
+            event: 'git.workdir.snapshot.post_clone.fail',
+            runId,
+            error: (snapErr as Error).message,
+          },
+          `Snapshot post-clone falló (no bloqueante)`,
+        );
+      }
     } catch (err) {
       // Q5 (2026-05-21): el clone del repo es un prerrequisito DURO. Si el
       // repo estaba configurado (repoUrl != null) pero el clone falla
@@ -2205,6 +2320,9 @@ export async function runStory(
         qaTestCases: claimed.qaTestCases ?? [],
         technicalRequirements: claimed.technicalRequirements ?? [],
         branch,
+        // Base branch para el security-scan diferencial (audita origin/<base>
+        // vs HEAD y solo falla por advisories nuevos). null en runs local-only.
+        baseBranch,
         anthropicApiKey,
         // Secretos externos del org — el verifier los inyecta en el env de
         // `pnpm test`/`lint`/etc. y en sus propios spawns (paridad con el
@@ -2601,33 +2719,143 @@ export async function runStory(
           await fs.unlink(join(workdir, '.env')).catch(() => undefined);
         }
 
-        // 1. Verificar si hay archivos modificados sin commit (claude
-        //    típicamente NO hace commit por sí mismo; los archivos quedan
-        //    como working tree changes). Si los hay, auto-commit.
-        const status = await git(['status', '--porcelain'], workdir);
-        if (status.stdout.trim().length > 0) {
-          markCriterion('auto.commit', 'in_progress');
-          logger.info(
-            { event: 'git.autocommit.start', runId, changedLines: status.stdout.split('\n').length },
-            `Auto-commit: claude dejó cambios sin commit, agregando todos`,
+        // GARANTÍA determinista del harness: colapsar el trabajo del agente a
+        // UN commit limpio que respeta .gitignore. Cubre dos fallas reales
+        // observadas del agente (2026-05-27):
+        //   A) deja node_modules/builds untracked → `git add -A` los agarraría.
+        //   B) commitea node_modules en SU PROPIO commit → el diff explota
+        //      (37k archivos) y el escaneo pre-push aborta por maxBuffer.
+        // El worker NO confía en que el agente haya creado .gitignore — el
+        // principio es no delegar invariantes deterministas al LLM.
+        markCriterion('auto.commit', 'in_progress');
+
+        // 1. Garantizar .gitignore robusto ANTES de cualquier staging.
+        const gitignoreAdded = await ensureGitignorePatterns(workdir, runId);
+
+        // 2. Colapsar TODOS los commits que el agente haya hecho sobre la
+        //    baseBranch a un estado limpio en staging. `--soft` preserva los
+        //    cambios. Si el agente NO commiteó (caso A), HEAD ya ES
+        //    origin/baseBranch → no-op inofensivo.
+        await git(['reset', '--soft', `origin/${baseBranch}`], workdir).catch((err) => {
+          logger.warn(
+            { event: 'git.autocommit.reset_soft_failed', runId, error: (err as Error).message },
+            `reset --soft a origin/${baseBranch} falló (no bloqueante) — sigo con el staging actual`,
           );
-          await git(['add', '-A'], workdir);
+        });
+
+        // 3. Sacar del índice cualquier artefacto de build/deps que el agente
+        //    haya stageado o commiteado (escenario B). `--ignore-unmatch`
+        //    evita error si el path no estaba tracked. maxBuffer alineado al
+        //    del diff scan (500MB): node_modules con 37k archivos genera
+        //    stdout masivo y un buffer chico abortaría EL paso que limpia el
+        //    bug que estamos arreglando (qa-reviewer #3). NO silenciamos el
+        //    error — lo logueamos para que el paso 5 de verificación decida.
+        await git(
+          ['rm', '-r', '--cached', '-q', '--ignore-unmatch', ...BUILD_ARTIFACT_DIRS],
+          workdir,
+          500 * 1024 * 1024,
+        ).catch((err) => {
+          logger.warn(
+            { event: 'git.autocommit.rm_cached_failed', runId, error: (err as Error).message },
+            `git rm --cached de artefactos falló — el paso de verificación reintentará`,
+          );
+        });
+
+        // 4. Re-stage TODO el working tree — ahora respeta el .gitignore.
+        await git(['add', '-A'], workdir);
+
+        // 5. RED DE SEGURIDAD (qa-reviewer #1/#2/#3): tras la limpieza, verificar
+        //    que NINGÚN artefacto siguió tracked. Si el reset o el rm --cached
+        //    fallaron silenciosamente, acá lo detectamos. Reintentamos el rm
+        //    una vez más y re-stageamos. Esta verificación es lo que garantiza
+        //    la invariante incluso si los pasos 2-3 fallaron parcialmente.
+        const trackedArtifacts = await git(
+          ['ls-files', '--', ...BUILD_ARTIFACT_DIRS],
+          workdir,
+          500 * 1024 * 1024,
+        ).catch(() => ({ stdout: '', stderr: '' }));
+        if (trackedArtifacts.stdout.trim().length > 0) {
+          const stillTracked = trackedArtifacts.stdout.trim().split('\n').length;
+          logger.warn(
+            { event: 'git.autocommit.artifacts_still_tracked', runId, count: stillTracked },
+            `${stillTracked} artefacto(s) AÚN tracked tras limpieza — segundo intento de rm --cached`,
+          );
           await git(
-            [
-              'commit',
-              '-m',
-              `Forge: ${storyTitle}\n\nAuto-commit by CENZONTLE Forge worker (run ${runId.slice(0, 8)})`,
-            ],
+            ['rm', '-r', '--cached', '-q', '--ignore-unmatch', ...BUILD_ARTIFACT_DIRS],
             workdir,
+            500 * 1024 * 1024,
+          ).catch((err) => {
+            // Si el segundo intento también falla, abortamos el commit: es
+            // preferible NO pushear a pushear node_modules (que rompería el
+            // scan pre-push de todos modos). El run queda como error revisable.
+            logger.error(
+              { event: 'git.autocommit.rm_cached_retry_failed', runId, error: (err as Error).message },
+              `Segundo rm --cached falló — abortando auto-commit para no pushear artefactos`,
+            );
+          });
+          await git(['add', '-A'], workdir);
+        }
+
+        // 6. Confirmar que ningún artefacto sobrevivió a los dos intentos. Si
+        //    sobrevivió, NO commiteamos: marcar failed y dejar que el flujo de
+        //    push lo trate como run con error (workdir preservado para debug).
+        const finalArtifactCheck = await git(
+          ['ls-files', '--', ...BUILD_ARTIFACT_DIRS],
+          workdir,
+          500 * 1024 * 1024,
+        ).catch(() => ({ stdout: '', stderr: '' }));
+        if (finalArtifactCheck.stdout.trim().length > 0) {
+          markCriterion('auto.commit', 'failed');
+          pushFailed = true;
+          errorMessage =
+            'Auto-commit abortado: artefactos de build (node_modules/.next/...) ' +
+            'no pudieron removerse del índice tras 2 intentos. Revisar el workdir.';
+          logger.error(
+            { event: 'git.autocommit.aborted_dirty_index', runId },
+            errorMessage,
           );
-          markCriterion('auto.commit', 'completed');
         } else {
-          // Claude hizo su propio commit (working tree limpio). No es bug —
-          // el milestone "cambios committeados" se cumple igual, solo que
-          // por el agente en vez de por el worker. Sin esto, el badge UI
-          // muestra "X/12" en lugar de "X/12 done" porque auto.commit
-          // queda en 'pending' aunque conceptualmente el commit existe.
-          markCriterion('auto.commit', 'completed');
+          // 7. Commit limpio sólo si quedó algo staged tras la limpieza.
+          const staged = await git(
+            ['diff', '--cached', '--name-only'],
+            workdir,
+            500 * 1024 * 1024,
+          );
+          const stagedFiles = staged.stdout.trim().split('\n').filter(Boolean);
+          if (stagedFiles.length > 0) {
+            logger.info(
+              {
+                event: 'git.autocommit.start',
+                runId,
+                stagedFiles: stagedFiles.length,
+                gitignorePatternsAdded: gitignoreAdded,
+              },
+              `Auto-commit limpio: ${stagedFiles.length} archivo(s), .gitignore +${gitignoreAdded} patrón(es)`,
+            );
+            await git(
+              [
+                'commit',
+                '-m',
+                `Forge: ${storyTitle}\n\nAuto-commit by CENZONTLE Forge worker (run ${runId.slice(0, 8)})`,
+              ],
+              workdir,
+            );
+            markCriterion('auto.commit', 'completed');
+          } else {
+            // Índice limpio Y vacío: el agente no produjo cambios válidos (todo
+            // era artefacto, o no tocó nada). El push posterior detecta
+            // aheadCount=0 y skipea. Logueamos el contexto para distinguir este
+            // caso de un fallo de staging (qa-reviewer #4).
+            logger.warn(
+              {
+                event: 'git.autocommit.empty_after_clean',
+                runId,
+                gitignorePatternsAdded: gitignoreAdded,
+              },
+              `Sin archivos válidos para commitear tras limpieza (índice limpio, 0 staged)`,
+            );
+            markCriterion('auto.commit', 'completed');
+          }
         }
 
         // 2. Verificar que hay al menos 1 commit ahead de baseBranch.
@@ -2690,7 +2918,19 @@ export async function runStory(
           }
         }
 
-        if (aheadCount === 0) {
+        if (pushFailed) {
+          // El auto-commit abortó por artefactos no removibles del índice
+          // (pushFailed ya seteado arriba). Si el agente había dejado commits
+          // propios que el `reset --soft` no pudo deshacer, aheadCount > 0 —
+          // pero ESOS commits contienen node_modules. NUNCA los pusheamos.
+          // Early-skip explícito antes de tocar el remote (qa-reviewer re-review
+          // HIGH: el abort seteaba pushFailed pero el flujo caía igual al push).
+          logger.error(
+            { event: 'git.push.skip.dirty_index', runId, branch, aheadCount },
+            `Push omitido — el auto-commit abortó por artefactos no removibles. ` +
+              `El commit NO llega al remote aunque aheadCount=${aheadCount}.`,
+          );
+        } else if (aheadCount === 0) {
           logger.warn(
             { event: 'git.push.skip.empty', runId, branch },
             `No hay commits ahead de ${baseBranch} — claude no produjo cambios. Skip push.`,
@@ -2731,6 +2971,73 @@ export async function runStory(
           //    branch existe en el remote. Si falla, `pushFailed=true` y el
           //    branch NO se reporta como pushed.
           markCriterion('branch.pushed', 'in_progress');
+
+          // OBS — Preflight pre-push: verificar que el remote `origin` sigue
+          // configurado. Si el agente corrió `git init`, `create-next-app`
+          // o equivalente durante el run, el `.git/` pudo haber sido
+          // reescrito y `origin` puede haber desaparecido. Sin este check,
+          // el push falla con "fatal: 'origin' does not appear to be a git
+          // repository" y el operador no entiende la causa.
+          //
+          // Si detectamos que falta `origin`, intentamos AUTO-RECOVERY
+          // re-agregando el remote con el `repoUrl` original. El push
+          // posterior debería funcionar. Si el recovery falla, el push
+          // explotará con el error original — y al menos tenemos el log
+          // explícito de qué pasó.
+          try {
+            const remoteCheck = await git(['remote', '-v'], workdir);
+            const remoteLines = remoteCheck.stdout.split('\n').filter(Boolean);
+            const originPresent = remoteLines.some((l) => l.startsWith('origin'));
+            if (!originPresent) {
+              logger.error(
+                {
+                  event: 'git.push.preflight.no_origin',
+                  runId,
+                  branch,
+                  remotesFound: remoteLines.length,
+                },
+                `Preflight pre-push: el workdir NO tiene remote 'origin' configurado. ` +
+                  `Causa típica: el agente reescribió el .git/ durante el run ` +
+                  `(corrió 'git init', 'npx create-next-app', o equivalente que ` +
+                  `regenera el repo). Intentando recovery: re-agregar origin.`,
+              );
+              try {
+                await git(['remote', 'add', 'origin', repoUrl!], workdir);
+                logger.info(
+                  { event: 'git.push.preflight.recovery_applied', runId, branch },
+                  `Recovery aplicado: 'origin' re-agregado. Reintentando push.`,
+                );
+              } catch (recoveryErr) {
+                logger.error(
+                  {
+                    event: 'git.push.preflight.recovery_failed',
+                    runId,
+                    error: (recoveryErr as Error).message,
+                  },
+                  `Recovery falló: no se pudo re-agregar 'origin'. El push va a explotar.`,
+                );
+              }
+            } else {
+              logger.info(
+                {
+                  event: 'git.push.preflight.ok',
+                  runId,
+                  remotesCount: remoteLines.length,
+                },
+                `Preflight pre-push OK: origin presente (${remoteLines.length} remote(s) configurados).`,
+              );
+            }
+          } catch (preErr) {
+            logger.warn(
+              {
+                event: 'git.push.preflight.check_failed',
+                runId,
+                error: (preErr as Error).message,
+              },
+              `Preflight pre-push no se pudo ejecutar (no bloqueante; el push real igual va a intentar)`,
+            );
+          }
+
           logger.info(
             {
               event: 'git.push.start',

@@ -41,6 +41,14 @@ async function bootstrap() {
   app.useGlobalPipes(new ValidationPipe({ whitelist: true, transform: true }));
   app.useGlobalFilters(new PrismaExceptionFilter());
 
+  // Shutdown hooks: sin esto, `onModuleDestroy` NO dispara en SIGINT/SIGTERM
+  // (Ctrl-C), así que `PreviewModule.cleanupAll()` nunca corría al reiniciar la
+  // API → los dev servers de preview (spawneados `detached`) quedaban huérfanos
+  // reteniendo puertos y sirviendo 404 desde dirs borrados (bug 2026-05-28).
+  // Con los hooks, Ctrl-C → onModuleDestroy → cleanupAll mata los grupos de
+  // proceso. Bonus: PrismaService.$disconnect() también corre limpio.
+  app.enableShutdownHooks();
+
   if (process.env.NODE_ENV !== "production") {
     const config = new DocumentBuilder()
       .setTitle("Cenzontle API")
