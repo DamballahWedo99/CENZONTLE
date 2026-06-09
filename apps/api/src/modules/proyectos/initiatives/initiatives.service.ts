@@ -11,6 +11,7 @@ import { UserRole } from '@cenzontle/shared';
 import { PrismaService } from '../../prisma/prisma.service';
 import { VaultService } from '../../vault/vault.service';
 import { VaultFolderService } from '../../vault/vault-folder.service';
+import { DocumentsService } from '../../documents/documents.service';
 import { IntegrationsService } from '../../integrations/integrations.service';
 import { CreateInitiativeDto } from './dto/create-initiative.dto';
 import { UpdateInitiativeDto } from './dto/update-initiative.dto';
@@ -19,11 +20,17 @@ import {
   initiativeFolderPath,
   initiativeIndexPath,
   initiativeDefinitionPath,
+  initiativeDocumentPath,
   isLegacyVaultPath,
   isNewFormatVaultPath,
   type InitiativeRef,
 } from '../vault-paths';
 import { buildFrontmatter } from '../vault-frontmatter';
+import {
+  syncDocumentsToVault,
+  toSyncDocuments,
+  noteSlugSource,
+} from '../document-vault-sync';
 import { InjectPinoLogger, PinoLogger } from 'nestjs-pino';
 
 const PENDING_TRACKER_SENTINEL = '__pending__';
@@ -54,6 +61,7 @@ export class InitiativesService {
     private prisma: PrismaService,
     private vault: VaultService,
     private vaultFolder: VaultFolderService,
+    private documents: DocumentsService,
     private integrationsService: IntegrationsService,
     @InjectPinoLogger(InitiativesService.name) private readonly logger: PinoLogger,
   ) {}
@@ -550,6 +558,42 @@ export class InitiativesService {
       data,
       include: INITIATIVE_INCLUDE,
     });
+
+    // ── Dual-write de documentos al vault ──
+    // Si el update tocó `documents`, sincronizamos las notas markdown del vault
+    // (frontmatter + texto extraído). FAIL-SOFT total dentro de
+    // syncDocumentsToVault: el update de la iniciativa nunca se cae por esto.
+    // El path usa `newName` porque, si hubo rename, el folder ya se movió y los
+    // documentos viven bajo el nuevo slug. Solo aplica en formato nuevo (el
+    // folder anidado donde viven `documentos/`) — paritario con EpicsService:
+    // en iniciativas legacy/sin-vault no hay folder al que escribir y el sync
+    // generaría warns espurios.
+    if (
+      dto.documents !== undefined &&
+      existing.vaultPath &&
+      isNewFormatVaultPath(existing.vaultPath)
+    ) {
+      const oldDocs = toSyncDocuments(existing.documents);
+      const newDocs = toSyncDocuments(result.documents);
+      await syncDocumentsToVault(
+        oldDocs,
+        newDocs,
+        { documents: this.documents, vault: this.vault, logger: this.logger },
+        {
+          // El slug de la nota combina nombre + sufijo del `id` (storage key)
+          // para que dos docs con el mismo `name` no colisionen en el path.
+          buildNotePath: (doc) =>
+            initiativeDocumentPath(
+              { id: existing.id, name: newName },
+              noteSlugSource(doc),
+            ),
+          commitScope: 'docs(initiative-doc)',
+          entityId: id,
+          failedEvent: 'initiative.document_vault_sync.failed',
+        },
+      );
+    }
+
     this.logger.info({ id }, `[update] DONE id=${id}`);
     return result;
   }

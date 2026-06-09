@@ -15,6 +15,7 @@ import { ChangelogController } from './changelog/changelog.controller';
 import { ChangelogService } from './changelog/changelog.service';
 import { AgentToolsModule } from '../factory/agent-tools/agent-tools.module';
 import { CodeRepositoriesModule } from '../code-repositories/code-repositories.module';
+import { DocumentsModule } from '../documents/documents.module';
 import { IntegrationsModule } from '../integrations/integrations.module';
 import { AuthModule } from '../auth/auth.module';
 import { OrgAnthropicConfigModule } from '../org-anthropic-config/org-anthropic-config.module';
@@ -35,6 +36,7 @@ import { VaultMigrationService } from './migration/vault-migration.service';
   imports: [
     AgentToolsModule,
     CodeRepositoriesModule,
+    DocumentsModule,
     IntegrationsModule,
     AuthModule,
     OrgAnthropicConfigModule,

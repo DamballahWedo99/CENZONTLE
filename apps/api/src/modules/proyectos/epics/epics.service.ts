@@ -21,6 +21,7 @@ import {
 import { PrismaService } from '../../prisma/prisma.service';
 import { VaultService } from '../../vault/vault.service';
 import { VaultFolderService } from '../../vault/vault-folder.service';
+import { DocumentsService } from '../../documents/documents.service';
 import { IntegrationsService } from '../../integrations/integrations.service';
 import { AuthService } from '../../auth/auth.service';
 import { InitiativesService } from '../initiatives/initiatives.service';
@@ -38,6 +39,7 @@ import {
   epicDependencyPath,
   epicDesignPath,
   epicDesignBundleFolderPath,
+  epicDocumentPath,
   epicMatrixPath,
   isLegacyVaultPath,
   isNewFormatVaultPath,
@@ -45,6 +47,11 @@ import {
   type EpicRef,
   type EpicDiagramKind,
 } from '../vault-paths';
+import {
+  syncDocumentsToVault,
+  toSyncDocuments,
+  noteSlugSource,
+} from '../document-vault-sync';
 import { DesignBundleService } from './design-bundle.service';
 import {
   assertUserCanAccessEpicPods,
@@ -130,6 +137,7 @@ export class EpicsService {
     private prisma: PrismaService,
     private vault: VaultService,
     private vaultFolder: VaultFolderService,
+    private documents: DocumentsService,
     private integrationsService: IntegrationsService,
     private initiativesService: InitiativesService,
     private storiesService: StoriesService,
@@ -775,6 +783,41 @@ export class EpicsService {
       }
       return tx.epic.findUniqueOrThrow({ where: { id }, include: EPIC_INCLUDE });
     });
+
+    // ── Dual-write de documentos al vault ──
+    // Si el update tocó `documents`, sincronizamos las notas markdown del vault
+    // (frontmatter + texto extraído). Paritario con InitiativesService.update.
+    // FAIL-SOFT total dentro de syncDocumentsToVault. Solo aplica en formato
+    // nuevo (el folder anidado donde viven `documentos/`). El path usa
+    // `newTitle` porque, si hubo rename, el folder ya se movió.
+    if (
+      dto.documents !== undefined &&
+      existing.vaultPath &&
+      isNewFormatVaultPath(existing.vaultPath)
+    ) {
+      const iniRef: InitiativeRef = {
+        id: existing.initiative.id,
+        name: existing.initiative.name,
+      };
+      const epicRef: EpicRef = { id: existing.id, title: newTitle };
+      const oldDocs = toSyncDocuments(existing.documents);
+      const newDocs = toSyncDocuments(epic.documents);
+      await syncDocumentsToVault(
+        oldDocs,
+        newDocs,
+        { documents: this.documents, vault: this.vault, logger: this.logger },
+        {
+          // El slug de la nota combina nombre + sufijo del `id` (storage key)
+          // para que dos docs con el mismo `name` no colisionen en el path.
+          buildNotePath: (doc) =>
+            epicDocumentPath(iniRef, epicRef, noteSlugSource(doc)),
+          commitScope: 'docs(epic-doc)',
+          entityId: id,
+          failedEvent: 'epic.document_vault_sync.failed',
+        },
+      );
+    }
+
     this.logger.info({ id }, `[update] DONE id=${id}`);
     return mapEpic(epic);
   }

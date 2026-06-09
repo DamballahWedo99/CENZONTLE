@@ -22,6 +22,7 @@ import { ForgePlannerService } from './forge-planner.service';
 import { AgentTokenSettingsService } from '../../agent-token-settings/agent-token-settings.service';
 import { StoriesService } from '../../proyectos/stories/stories.service';
 import { ExternalSecretsService } from '../../external-secrets/external-secrets.service';
+import { VaultService } from '../../vault/vault.service';
 import { computeRunStats } from '../queue/run-stats';
 import { classifySecretDependencies } from './secret-deps';
 import { RunProgressDto } from './dto/run-progress.dto';
@@ -324,6 +325,7 @@ export class AgentRunService {
     private readonly conflictResolver: ConflictResolverService,
     private readonly planner: ForgePlannerService,
     private readonly agentTokens: AgentTokenSettingsService,
+    private readonly vault: VaultService,
     // Logger general del service. Para logs del context engineering
     // específicamente, usamos `forgeClaimLogger` con namespace separado
     // que produce eventos `forge.claim.*` queryables en Loki/Grafana.
@@ -1118,10 +1120,22 @@ export class AgentRunService {
       }
     }
 
+    // Diseño de referencia INLINEADO (causa raíz 2026-06-02): leemos el código
+    // fuente del/los primary file(s) del diseño aprobado de la épica del vault
+    // server-side y lo pasamos al prompt-builder para que lo meta DIRECTO en el
+    // prompt. Así el agente recibe el diseño sin depender de `vault_read` (tool
+    // que el worker NO expone). Fail-soft total: si algo falla devuelve [] y el
+    // flow degrada al comportamiento previo (el agente improvisa).
+    const designReferenceFiles = await this.loadDesignReferenceFiles(
+      materialized.epicId,
+      materialized.runId,
+    );
+
     // Construimos el prompt FUERA del transaction — string concatenation
     // no afecta locks. Recibe las 4 piezas de contexto enriquecido cuando
     // están disponibles (PO + Technical + QA + diagrama) + el DAG context
-    // + el plan del advisor (si el planner pudo generarlo).
+    // + el plan del advisor (si el planner pudo generarlo) + el código fuente
+    // del diseño de referencia inlineado (si la épica tiene bundle).
     const prompt = this.promptBuilder.buildStoryPrompt({
       epicTitle: materialized.epicTitle,
       epicMarkdown: materialized.epicMarkdown,
@@ -1133,6 +1147,7 @@ export class AgentRunService {
       completedSiblings: materialized.completedSiblings,
       dodCriteria: materialized.dodCriteria,
       advisorPlan: plannerResult.plan,
+      designReferenceFiles,
     });
 
     // Parsers que escalan el contexto a granularidad per-criterion en el
@@ -1962,6 +1977,160 @@ export class AgentRunService {
         `diagram.parse_failed epic=${epicId.slice(0, 8)} — ${(err as Error).message}`,
       );
       return null;
+    }
+  }
+
+  /**
+   * Carga el código fuente COMPLETO del/los primary file(s) del diseño aprobado
+   * de la épica para INLINEARLO en el prompt del coder (causa raíz 2026-06-02).
+   *
+   * Problema que resuelve: el handoff del diseño le pide al agente hacer
+   * `vault_read` del primary file (ej. `aerovia.html`) y replicarlo pixel-
+   * perfect, PERO el worker spawnea `claude -p` SIN la tool `vault_read` (solo
+   * Read/Write/Bash sobre su sandbox) y el archivo del diseño vive FUERA del
+   * workdir. Resultado: el agente nunca recibía el diseño y lo improvisaba.
+   * Leyendo el contenido server-side acá y pasándolo a `buildStoryPrompt`, el
+   * diseño SIEMPRE llega al modelo sin depender de una tool que el worker no
+   * expone.
+   *
+   * Por cada `EpicDesign` con `bundleVaultPath` Y un `componentManifest`
+   * con `primaryFilePath` válido: construye el path completo (normalizando a
+   * UNA sola `/` entre el bundle y el relativo del primary), lo lee del vault
+   * y acumula `{ path, content }`. Designs sin bundle (legacy URL handoff) o
+   * sin manifest se saltan silenciosamente.
+   *
+   * FAIL-SOFT TOTAL: cualquier excepción (query DB, vault read, shape inválido)
+   * se traga con un warn estructurado y devuelve `[]`. El claim NUNCA se cae
+   * por esto — sin diseño inlineado el flow degrada al comportamiento previo
+   * (el agente improvisa, como hacía antes del fix). Pérdida de fidelidad, NO
+   * de liveness.
+   */
+  private async loadDesignReferenceFiles(
+    epicId: string,
+    runId: string,
+  ): Promise<Array<{ path: string; content: string }>> {
+    try {
+      const epicWithDesigns = await this.prisma.epic.findUnique({
+        where: { id: epicId },
+        select: { designs: true },
+      });
+      const designs = (epicWithDesigns?.designs ?? []) as unknown as Array<{
+        bundleVaultPath?: unknown;
+        componentManifest?: unknown;
+      }>;
+
+      const files: Array<{ path: string; content: string }> = [];
+      // Dedup por path: una épica podría tener 2 designs apuntando al mismo
+      // primary (re-upload) — evitamos inlinear el mismo HTML dos veces.
+      const seenPaths = new Set<string>();
+
+      for (const design of designs) {
+        const bundleVaultPath = design.bundleVaultPath;
+        const manifest = design.componentManifest;
+        // Validamos shape igual que el bloque de componentManifests existente:
+        // bundleVaultPath debe ser string no vacío y el manifest debe traer un
+        // primaryFilePath string. Cualquier otra cosa (legacy/null) → skip.
+        if (typeof bundleVaultPath !== 'string' || bundleVaultPath.trim().length === 0) {
+          continue;
+        }
+        if (
+          manifest === null ||
+          typeof manifest !== 'object' ||
+          typeof (manifest as { primaryFilePath?: unknown }).primaryFilePath !== 'string'
+        ) {
+          continue;
+        }
+        const primaryFilePath = (manifest as { primaryFilePath: string }).primaryFilePath;
+        if (primaryFilePath.trim().length === 0) continue;
+
+        // Path completo = bundleVaultPath + primaryFilePath con EXACTAMENTE una
+        // `/` de junta. `bundleVaultPath` normalmente ya trae trailing slash
+        // (epics.service lo persiste así), pero normalizamos por robustez ante
+        // datos legacy que pudieran no tenerlo.
+        const fullPath = `${bundleVaultPath.replace(/\/+$/, '')}/${primaryFilePath.replace(/^\/+/, '')}`;
+
+        // SECURITY (CWE-22 / CWE-639): tanto `bundleVaultPath` como
+        // `primaryFilePath` viven en el JSONB de `epic.designs`, nominalmente
+        // user-supplied vía Create/UpdateEpicDto. Un actor con EDIT_EPIC podría
+        // plantar `primaryFilePath="../../../secrets/keys.md"` para exfiltrar
+        // contenido FUERA del bundle inlineándolo en el prompt que viaja al
+        // worker. Replicamos la guarda de path-traversal que epics.service ya
+        // aplica sobre bundleVaultPath (líneas ~1938) — fail-closed: skip + log,
+        // nunca leemos un path con traversal. Coste cero: un primary legítimo
+        // generado por el extractor nunca contiene estos caracteres.
+        if (
+          fullPath.includes('..') ||
+          fullPath.includes('\\') ||
+          fullPath.includes('//') ||
+          // eslint-disable-next-line no-control-regex
+          /[\x00-\x1f]/.test(fullPath)
+        ) {
+          this.forgeClaimLogger.warn(
+            {
+              event: 'claim.design_inline.unsafe_path',
+              runId,
+              epicId,
+              fullPath,
+            },
+            `[claim] Skipped design primary with unsafe path (traversal/control chars) — epic=${epicId.slice(0, 8)} path="${fullPath}"`,
+          );
+          continue;
+        }
+
+        // Anclaje (defensa en profundidad sobre la guarda de `..`): el primary
+        // DEBE vivir dentro del subtree de su `bundleVaultPath` (server-anclado
+        // al folder `disenos/<design>/` de la épica). Si por dato legacy el join
+        // escapara del bundle, no lo leemos. Mismo patrón `startsWith(prefix)`
+        // que deleteDesign (epics.service ~1957).
+        const bundlePrefix = `${bundleVaultPath.replace(/\/+$/, '')}/`;
+        if (!fullPath.startsWith(bundlePrefix)) {
+          this.forgeClaimLogger.warn(
+            { event: 'claim.design_inline.outside_bundle', runId, epicId, fullPath },
+            `[claim] Skipped design primary fuera de su bundle subtree — epic=${epicId.slice(0, 8)} path="${fullPath}"`,
+          );
+          continue;
+        }
+
+        if (seenPaths.has(fullPath)) continue;
+        seenPaths.add(fullPath);
+
+        // Inner try/catch: un error transitorio leyendo ESTE primary (GitHub
+        // 5xx/rate-limit/timeout) NO debe descartar los diseños ya acumulados
+        // (qa-reviewer F-01). Skip de este archivo + seguir.
+        let note;
+        try {
+          note = await this.vault.readNote(fullPath);
+        } catch (readErr) {
+          this.forgeClaimLogger.warn(
+            {
+              event: 'claim.design_inline.read_failed',
+              runId,
+              epicId,
+              fullPath,
+              error: (readErr as Error).message,
+            },
+            `[claim] Failed reading design primary "${fullPath}" — skip this file, keep the rest. epic=${epicId.slice(0, 8)}`,
+          );
+          continue;
+        }
+        if (!note || typeof note.content !== 'string' || note.content.trim().length === 0) {
+          continue;
+        }
+        files.push({ path: fullPath, content: note.content });
+      }
+
+      return files;
+    } catch (err) {
+      this.forgeClaimLogger.warn(
+        {
+          event: 'claim.design_inline.load_failed',
+          runId,
+          epicId,
+          error: (err as Error).message,
+        },
+        `[claim] Failed to inline design reference files — coder will fall back to improvising (no pixel-perfect source). epic=${epicId.slice(0, 8)}`,
+      );
+      return [];
     }
   }
 

@@ -217,3 +217,52 @@ describe('ForgePromptBuilderService.extractAcceptanceCriteria', () => {
     });
   });
 });
+
+/**
+ * Spec de `buildDesignReferenceSection` — inline del diseño de referencia en el
+ * prompt del coder (fix pixel-perfect 2026-06-02). Cubre los gaps que el
+ * qa-reviewer marcó (F-07): fence anti-colisión, caps de tamaño, filtro de
+ * vacíos (sin header huérfano), y el banner anti-prompt-injection (security).
+ * Función estática pura (input: archivos, output: string[]).
+ */
+describe('ForgePromptBuilderService.buildDesignReferenceSection', () => {
+  const build = (files?: Array<{ path: string; content: string }>): string =>
+    ForgePromptBuilderService.buildDesignReferenceSection(files).join('\n');
+
+  it('devuelve [] sin archivos (undefined o lista vacía)', () => {
+    expect(ForgePromptBuilderService.buildDesignReferenceSection(undefined)).toEqual([]);
+    expect(ForgePromptBuilderService.buildDesignReferenceSection([])).toEqual([]);
+  });
+
+  it('omite la sección entera si ningún archivo tiene contenido real (sin header huérfano)', () => {
+    expect(
+      ForgePromptBuilderService.buildDesignReferenceSection([{ path: 'a.html', content: '   \n  ' }]),
+    ).toEqual([]);
+  });
+
+  it('inlinea el contenido con header, banner anti-inyección y path del archivo', () => {
+    const out = build([{ path: 'disenos/home/aerovia.html', content: '<div>hola</div>' }]);
+    expect(out).toContain('DISEÑO DE REFERENCIA');
+    expect(out).toContain('DATOS de referencia'); // banner anti-prompt-injection (security)
+    expect(out).toContain('### Archivo: disenos/home/aerovia.html');
+    expect(out).toContain('<div>hola</div>');
+  });
+
+  it('usa fence mínimo de 4 backticks cuando el HTML no tiene backticks', () => {
+    const out = build([{ path: 'a.html', content: '<p>sin backticks</p>' }]);
+    expect(out).toContain('````');
+  });
+
+  it('el fence es más largo que la corrida máxima de backticks del HTML (anti-colisión)', () => {
+    // contenido con 4 backticks seguidos → el fence DEBE ser ≥5 para no colisionar
+    const out = build([{ path: 'a.html', content: 'antes ```` despues' }]);
+    expect(out).toContain('`````'); // 5 backticks (fence)
+    expect(out).toContain('antes ```` despues'); // el contenido sobrevive intacto
+  });
+
+  it('trunca un archivo que excede el cap por-archivo', () => {
+    const huge = 'x'.repeat(ForgePromptBuilderService.MAX_DESIGN_FILE_CHARS + 50);
+    const out = build([{ path: 'big.html', content: huge }]);
+    expect(out).toContain('TRUNCADO');
+  });
+});
