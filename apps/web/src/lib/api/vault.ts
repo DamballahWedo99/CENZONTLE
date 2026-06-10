@@ -1,3 +1,4 @@
+import type { VaultConnectionsStatus } from '@cenzontle/shared';
 import { apiFetch } from './client';
 
 export interface VaultTreeNode {
@@ -64,6 +65,45 @@ export function deleteVaultFile(path: string, message?: string, vaultId?: string
     method: 'DELETE',
     body: JSON.stringify({ path, message }),
   });
+}
+
+/**
+ * Mapa path → tags de TODOS los documentos del vault. Alimenta la vista de
+ * grafo: sin esto, los nodos solo tendrían tags de los docs ya abiertos.
+ */
+export function getAllVaultTags(vaultId?: string) {
+  const qs = vaultId ? `?vaultId=${encodeURIComponent(vaultId)}` : '';
+  return apiFetch<Record<string, string[]>>(`/vault/tags${qs}`);
+}
+
+// Contrato compartido con la API — vive en @cenzontle/shared (types/vault.ts);
+// se re-exporta aquí para que los consumidores del cliente HTTP tengan todo
+// el contrato del vault en un solo import.
+export type { VaultConnectionsStatus };
+
+/**
+ * Dispara el agente IA de conexiones (fire-and-forget en el backend).
+ * Responde 202 con el snapshot inicial; el progreso se pollea con
+ * getVaultConnectionsStatus. 409 si ya hay un job en curso.
+ */
+export function runVaultConnections(vaultId?: string) {
+  const qs = vaultId ? `?vaultId=${encodeURIComponent(vaultId)}` : '';
+  return apiFetch<VaultConnectionsStatus>(`/vault/connections${qs}`, { method: 'POST' });
+}
+
+export function getVaultConnectionsStatus(vaultId?: string) {
+  const qs = vaultId ? `?vaultId=${encodeURIComponent(vaultId)}` : '';
+  return apiFetch<VaultConnectionsStatus>(`/vault/connections/status${qs}`);
+}
+
+/**
+ * Fecha ISO de la última generación de conexiones (derivada del git history
+ * del vault), o null si nunca se generaron. Usada por el dashboard para
+ * datar la última corrida sin necesidad de un job en curso.
+ */
+export function getVaultConnectionsLastRun(vaultId?: string) {
+  const qs = vaultId ? `?vaultId=${encodeURIComponent(vaultId)}` : '';
+  return apiFetch<{ lastRunAt: string | null }>(`/vault/connections/last-run${qs}`);
 }
 
 export interface VaultCommit {

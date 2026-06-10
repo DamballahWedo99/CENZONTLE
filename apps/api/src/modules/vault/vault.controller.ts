@@ -7,14 +7,17 @@ import {
   HttpStatus,
   NotFoundException,
   Param,
+  Post,
   Put,
   Query,
   UseGuards,
 } from '@nestjs/common';
 import { ApiOperation, ApiTags } from '@nestjs/swagger';
+import { Throttle } from '@nestjs/throttler';
 import { Permission } from '@cenzontle/shared';
 import { Permissions } from '../auth/decorators';
 import { VaultService } from './vault.service';
+import { VaultConnectionsService } from './vault-connections.service';
 import { VaultAccessGuard } from './guards/vault-access.guard';
 import { WriteFileDto } from './dto/write-file.dto';
 import { DeleteFileDto } from './dto/delete-file.dto';
@@ -47,7 +50,10 @@ function assertSafePath(path: string): void {
 @ApiTags('Vault')
 @Controller('vault')
 export class VaultController {
-  constructor(private readonly vault: VaultService) {}
+  constructor(
+    private readonly vault: VaultService,
+    private readonly connections: VaultConnectionsService,
+  ) {}
 
   @Get('config')
   @ApiOperation({ summary: 'Información de configuración pública del vault (sin token). No expone datos sensibles — solo owner/repo/branch/connected.' })
@@ -69,6 +75,40 @@ export class VaultController {
     const detail = await this.vault.getCommitDetail(sha, vaultId);
     if (!detail) throw new NotFoundException('Commit no encontrado');
     return detail;
+  }
+
+  @Get('tags')
+  @UseGuards(VaultAccessGuard)
+  @ApiOperation({ summary: 'Mapa path → tags de todos los documentos .md del vault. Alimenta las conexiones de la vista de grafo. Acepta `?vaultId=X` para browse-mode.' })
+  async getAllTags(@Query('vaultId') vaultId?: string) {
+    return this.connections.getAllTags(vaultId);
+  }
+
+  @Post('connections')
+  @UseGuards(VaultAccessGuard)
+  @Permissions(Permission.MANAGE_DOCUMENTS)
+  @HttpCode(HttpStatus.ACCEPTED)
+  // Cada job dispara llamadas LLM con costo real ($) sobre todo el vault —
+  // el lock de un-job-a-la-vez ya rechaza concurrencia, pero el throttle
+  // evita ráfagas de re-intentos que encadenen jobs caros back-to-back.
+  @Throttle({ default: { ttl: 60_000, limit: 3 } })
+  @ApiOperation({ summary: 'Dispara el agente IA que analiza todos los documentos del vault y escribe tags al frontmatter para crear conexiones en el grafo. Fire-and-forget: pollear GET /vault/connections/status. 409 si ya hay un job en curso.' })
+  runConnections(@Query('vaultId') vaultId?: string) {
+    return this.connections.start(vaultId);
+  }
+
+  @Get('connections/status')
+  @UseGuards(VaultAccessGuard)
+  @ApiOperation({ summary: 'Estado del job de conexiones IA (un job a la vez por proceso): fase, progreso y resumen final. Acepta `?vaultId=X`; si el job en curso pertenece a otro vault, devuelve idle (no filtra metadatos cross-vault).' })
+  getConnectionsStatus(@Query('vaultId') vaultId?: string) {
+    return this.connections.getStatus(vaultId);
+  }
+
+  @Get('connections/last-run')
+  @UseGuards(VaultAccessGuard)
+  @ApiOperation({ summary: 'Fecha ISO de la última generación de conexiones IA, derivada del git history del vault (commit-marcador del agente). null si nunca se generaron. Acepta `?vaultId=X`.' })
+  async getConnectionsLastRun(@Query('vaultId') vaultId?: string) {
+    return { lastRunAt: await this.connections.getLastRunAt(vaultId) };
   }
 
   @Get('tree')

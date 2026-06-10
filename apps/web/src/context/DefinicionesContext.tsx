@@ -18,6 +18,7 @@ import {
   writeVaultFile,
   deleteVaultFile,
   getVaultChangelog,
+  getAllVaultTags,
   type VaultTreeNode,
   type VaultCommit,
 } from '@/lib/api/vault';
@@ -364,6 +365,19 @@ function vaultTreeToDefinicionNodes(vaultNodes: VaultTreeNode[]): DefinicionNode
   }
 
   return out;
+}
+
+/**
+ * Aplica el mapa path → tags (de GET /vault/tags) al árbol recién mapeado.
+ * El id de cada DefinicionNode ES su path en el vault, así que el lookup
+ * es directo. Solo documentos — los folders no tienen frontmatter.
+ */
+function applyVaultTags(nodes: DefinicionNode[], tagsByPath: Record<string, string[]>): DefinicionNode[] {
+  return nodes.map((n) => ({
+    ...n,
+    ...(n.type === 'document' && tagsByPath[n.id] ? { tags: tagsByPath[n.id] } : {}),
+    ...(n.children ? { children: applyVaultTags(n.children, tagsByPath) } : {}),
+  }));
 }
 
 /** Deriva el path vault completo para un nodo nuevo dentro de un parent. */
@@ -1017,8 +1031,15 @@ export function DefinicionesProvider({ children }: { children: ReactNode }) {
     try {
       // Lee del vault que el user está VIENDO (puede ser distinto del activo
       // si abrió otro desde el dropdown). Sin override, lee del activo.
-      const vaultTree = await getVaultTree(VAULT_ROOT, browseVaultIdRef.current);
-      const mapped = vaultTreeToDefinicionNodes(vaultTree);
+      // Los tags de TODOS los docs se cargan en paralelo: el grafo los
+      // necesita completos para dibujar conexiones (sin esto solo tendría
+      // los tags de documentos ya abiertos en la sesión). Si el endpoint
+      // falla, el árbol carga igual — el grafo degrada a jerarquía sola.
+      const [vaultTree, allTags] = await Promise.all([
+        getVaultTree(VAULT_ROOT, browseVaultIdRef.current),
+        getAllVaultTags(browseVaultIdRef.current).catch(() => ({}) as Record<string, string[]>),
+      ]);
+      const mapped = applyVaultTags(vaultTreeToDefinicionNodes(vaultTree), allTags);
       dispatch({ type: 'LOAD_TREE_SUCCESS', tree: mapped });
     } catch (err: any) {
       const msg = err?.message || 'Error cargando el vault';
