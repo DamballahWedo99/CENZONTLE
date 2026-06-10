@@ -137,6 +137,42 @@ describe('VaultAccessGuard — BOLA cross-vault (CWE-639)', () => {
     await expect(guard.canActivate(ctx)).rejects.toThrow(ForbiddenException);
   });
 
+  it('BLOQUEA ataque por body: vaultId en body se IGNORA, valida contra el activo (A) y deniega', async () => {
+    // CWE-639 reabierto por endpoints query-only: el atacante con acceso a B
+    // (pod-b) intenta operar sobre el ACTIVO A poniendo {vaultId:B} en el body
+    // SIN query param. Antes del fix el guard resolvía `query ?? body` → B y
+    // pasaba, mientras el handler (que lee solo @Query) operaba sobre A. Ahora
+    // el guard ignora el body, resuelve el ACTIVO A, y el atacante (sin pod-a)
+    // es denegado — guard y handler convergen al mismo vault.
+    mockConfigs.findAll.mockResolvedValue([VAULT_A]);
+
+    const ctx = makeContext({
+      user: { role: UserRole.Viewer, podIds: ['pod-b'] },
+      body: { vaultId: 'vault-b' },
+    });
+
+    await expect(guard.canActivate(ctx)).rejects.toThrow(ForbiddenException);
+    // El guard resolvió el activo vía findAll, NUNCA miró el body vía findOne.
+    expect(mockConfigs.findAll).toHaveBeenCalled();
+    expect(mockConfigs.findOne).not.toHaveBeenCalled();
+  });
+
+  it('vaultId en body no concede acceso: con pod del activo pasa, pero por ser el activo (no el body)', async () => {
+    // Espejo del test anterior: el body se ignora por completo. El user tiene
+    // pod-a, así que pasa — pero porque el target resuelto es el ACTIVO A, no
+    // porque el body diga vault-b. Confirma que el body es inerte en ambas
+    // direcciones (ni concede ni redirige el target).
+    mockConfigs.findAll.mockResolvedValue([VAULT_A]);
+
+    const ctx = makeContext({
+      user: { role: UserRole.Viewer, podIds: ['pod-a'] },
+      body: { vaultId: 'vault-b' },
+    });
+
+    await expect(guard.canActivate(ctx)).resolves.toBe(true);
+    expect(mockConfigs.findOne).not.toHaveBeenCalled();
+  });
+
   it('AltaGerencia (MANAGE_INTEGRATIONS) bypassa todos los checks incluso cross-vault', async () => {
     const ctx = makeContext({
       user: { role: UserRole.AltaGerencia, podIds: [] },
