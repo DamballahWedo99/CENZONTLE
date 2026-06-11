@@ -56,6 +56,7 @@ import { InlineEpicCreator } from './InlineEpicCreator';
 import { EpicAgentPromptBar } from './EpicAgentPromptBar';
 import { AgentThinkingDisplay } from './agent-thinking';
 import { EpicProposalList } from './EpicProposalList';
+import { ExecutiveSummaryPanel } from './executive-summary/ExecutiveSummaryPanel';
 import type { ProposedEpic, EpicGenerationEvent, Epic } from '@cenzontle/shared';
 import { createEpic as apiCreateEpic } from '@/lib/api/epics';
 import { getCachedSession, invalidateCache, removeCachedProposal, cancelEpicGeneration } from '@/lib/api/epic-generation';
@@ -1233,6 +1234,15 @@ function InitiativeFullPageInner({ initiativeId }: InitiativeFullPageProps) {
 
             {/* ── Tab: Resumen ── */}
             <TabsContent value="resumen" className="mt-8 space-y-8">
+              {/* Resumen ejecutivo IA — snapshot de métricas + narrativa */}
+              <ExecutiveSummaryPanel initiativeId={initiative.id} />
+
+              {/* Divisor hacia las visualizaciones en vivo (estado local) */}
+              <div className="flex items-center gap-3 pt-2">
+                <h2 className="text-base font-semibold tracking-tight">Métricas en vivo</h2>
+                <div className="flex-1 border-t" />
+              </div>
+
               {/* Story distribution */}
               <section>
                 <h3 className="text-sm font-semibold uppercase tracking-wider text-muted-foreground mb-4">Distribución de Historias</h3>

@@ -52,7 +52,10 @@ export class DiagramGenerationController {
    *  - Leer/sobrescribir/resetear el cache del diagrama de otros pods.
    *
    * Espejo del patrón en story/epic generation. AltaGerencia bypass; resto
-   * requiere intersección no-vacía de podIds.
+   * requiere intersección no-vacía de podIds. Los podIds de la épica se
+   * derivan de la UNIÓN de EpicPod y Story.podId (relación independiente en
+   * el schema): derivar solo de EpicPod bloqueaba a usuarios cuyo pod
+   * trabaja las historias de la épica.
    */
   private async assertUserCanAccessEpic(
     user: AuthenticatedUser,
@@ -62,16 +65,27 @@ export class DiagramGenerationController {
 
     const epic = await this.prisma.epic.findUnique({
       where: { id: epicId },
-      select: { id: true, pods: { select: { podId: true } } },
+      select: {
+        id: true,
+        pods: { select: { podId: true } },
+        stories: { select: { podId: true } },
+      },
     });
     if (!epic) throw new NotFoundException('Épica no encontrada');
 
-    if (epic.pods.length === 0) {
+    // Unión de podIds: filas EpicPod + podId directo de cada historia
+    const epicPodIds = new Set<string>();
+    for (const ep of epic.pods) epicPodIds.add(ep.podId);
+    for (const story of epic.stories) {
+      if (story.podId) epicPodIds.add(story.podId);
+    }
+
+    if (epicPodIds.size === 0) {
       throw new ForbiddenException('Sin acceso a esta épica');
     }
 
     const userPodIds = new Set(user.podIds);
-    const hasAccess = epic.pods.some((ep) => userPodIds.has(ep.podId));
+    const hasAccess = [...epicPodIds].some((pid) => userPodIds.has(pid));
     if (!hasAccess) throw new ForbiddenException('Sin acceso a esta épica');
   }
 
