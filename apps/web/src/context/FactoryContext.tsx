@@ -6,7 +6,6 @@ import type {
   FactoryAgent,
   FactoryState,
   FactoryStory,
-  FactoryPR,
   LogEntry,
   CostBreakdown,
   PipelineLayerState,
@@ -20,7 +19,6 @@ import type {
 import {
   FactoryStatus,
   AgentStatus,
-  PRStatus,
   GateDecision,
   WaveStatus,
   ReleaseTriggerMode,
@@ -45,7 +43,6 @@ interface FactoryContextState {
   pipeline: PipelineLayerState[];
   agents: FactoryAgent[];
   stories: FactoryStory[];
-  prs: FactoryPR[];
   tests: TestSuite[];
   gates: HumanGate[];
   logs: LogEntry[];
@@ -76,6 +73,10 @@ interface FactoryContextState {
 // mockLogs, mockGates, mockEvolution, mockPipeline y los batches/nodos hard-
 // codeados) se eliminaron — el dashboard solo muestra datos reales o empty
 // states honestos cuando no hay nada que mostrar.
+//
+// El slice `prs` se retiró por completo: el dashboard /factory/prs ahora hace
+// fetch propio a GET /factory/prs (ver PRPipeline.tsx) y no depende del
+// contexto. Quedó sin consumidores tras esa migración.
 
 const initialState: FactoryContextState = {
   factory: {
@@ -95,7 +96,6 @@ const initialState: FactoryContextState = {
   pipeline: [],
   agents: [],
   stories: [],
-  prs: [],
   tests: [],
   gates: [],
   logs: [],
@@ -179,7 +179,6 @@ interface FactoryContextValue {
   // Backward-compatible computed object (used by FactoryTopBar, AgentGrid, etc.)
   computed: {
     activeAgentCount: number;
-    openPRCount: number;
     testPassRate: number;
     currentWave: number;
     totalWaves: number;
@@ -189,7 +188,6 @@ interface FactoryContextValue {
   getCurrentWave: () => Wave | null;
   getStoryById: (id: string) => FactoryStory | undefined;
   getAgentForStory: (storyId: string) => FactoryAgent | undefined;
-  getPRForStory: (storyId: string) => FactoryPR | undefined;
   getTotalCost: () => number;
   getAgentCount: () => number;
   // Computed scalars
@@ -317,10 +315,6 @@ export function FactoryProvider({ children }: { children: ReactNode }) {
     return state.agents.find((a) => a.storyId === storyId);
   }, [state.agents]);
 
-  const getPRForStory = useCallback((storyId: string): FactoryPR | undefined => {
-    return state.prs.find((p) => p.storyId === storyId);
-  }, [state.prs]);
-
   const getTotalCost = useCallback((): number => {
     return state.agents.reduce((sum, a) => sum + a.cost, 0);
   }, [state.agents]);
@@ -355,14 +349,6 @@ export function FactoryProvider({ children }: { children: ReactNode }) {
       (a) => a.status !== AgentStatus.Idle && a.status !== AgentStatus.Done
     ).length;
 
-    const openPRCount = state.prs.filter(
-      (p) =>
-        p.status === PRStatus.Open ||
-        p.status === PRStatus.InReview ||
-        p.status === PRStatus.Draft ||
-        p.status === PRStatus.ChangesRequested
-    ).length;
-
     const totalTestCases = state.tests.reduce((sum, t) => sum + t.total, 0);
     const passedTestCases = state.tests.reduce((sum, t) => sum + t.passed, 0);
     const testPassRate = totalTestCases > 0
@@ -379,8 +365,8 @@ export function FactoryProvider({ children }: { children: ReactNode }) {
     const currentWave = runningWave ? runningWave.number : completedWaves;
     const totalWaves = batch?.waves.length ?? 0;
 
-    return { activeAgentCount, openPRCount, testPassRate, currentWave, totalWaves };
-  }, [state.agents, state.prs, state.tests, state.factory.currentBatch]);
+    return { activeAgentCount, testPassRate, currentWave, totalWaves };
+  }, [state.agents, state.tests, state.factory.currentBatch]);
 
   // --- Context value ---
 
@@ -393,7 +379,6 @@ export function FactoryProvider({ children }: { children: ReactNode }) {
       getCurrentWave,
       getStoryById,
       getAgentForStory,
-      getPRForStory,
       getTotalCost,
       getAgentCount,
       pendingGatesCount,
@@ -408,7 +393,6 @@ export function FactoryProvider({ children }: { children: ReactNode }) {
       getCurrentWave,
       getStoryById,
       getAgentForStory,
-      getPRForStory,
       getTotalCost,
       getAgentCount,
       pendingGatesCount,

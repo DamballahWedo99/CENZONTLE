@@ -35,16 +35,6 @@ export enum AgentStatus {
   Error = 'error',
 }
 
-export enum PRStatus {
-  Draft = 'draft',
-  Open = 'open',
-  InReview = 'in-review',
-  ChangesRequested = 'changes-requested',
-  Approved = 'approved',
-  Merged = 'merged',
-  Closed = 'closed',
-}
-
 export enum TestCategory {
   Unit = 'unit',
   Integration = 'integration',
@@ -301,26 +291,6 @@ export interface FactoryAgent {
   filesModified?: number | null;
 }
 
-export interface FactoryPR {
-  id: string;
-  number: number;
-  title: string;
-  storyKey: string;
-  storyId: string;
-  agentId: string;
-  branch: string;
-  targetBranch: string;
-  status: PRStatus;
-  reviewFeedback: string | null;
-  retryCount: number;
-  additions: number;
-  deletions: number;
-  files: number;
-  ciStatus: 'pending' | 'running' | 'passed' | 'failed';
-  createdAt: string;
-  updatedAt: string;
-}
-
 export interface TestSuite {
   id: string;
   category: TestCategory;
@@ -456,7 +426,6 @@ export type FactoryEvent =
   | { type: 'factory:status'; data: FactoryState }
   | { type: 'agent:update'; data: FactoryAgent }
   | { type: 'story:update'; data: FactoryStory }
-  | { type: 'pr:update'; data: FactoryPR }
   | { type: 'test:update'; data: TestSuite }
   | { type: 'gate:update'; data: HumanGate }
   | { type: 'log:entry'; data: LogEntry }

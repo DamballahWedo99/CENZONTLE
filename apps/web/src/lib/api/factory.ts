@@ -832,3 +832,68 @@ export function stopPreview(batchId: string) {
 export function getPreviewStatus(batchId: string) {
   return apiFetch<PreviewStatusResponse>(`/factory/batch/${batchId}/preview`);
 }
+
+// ──────────────────────────────────────────────────────────────────────
+// Forge PRs — feed de pull requests del flujo Forge (/factory/prs)
+// ──────────────────────────────────────────────────────────────────────
+
+export interface ForgePrsResponse {
+  /** URL del repo activo en GitHub (ej. `https://github.com/owner/repo`).
+   *  NULL en sandbox — sin code repository forgeWritable configurado. */
+  repoUrl: string | null;
+  /** Rama destino del staging (`BranchStrategyConfig.devBranch`, ej. 'dev'). */
+  stagingBranch: string;
+  /** Todos los PRs del flujo Forge, ordenados por createdAt desc. */
+  prs: ForgePrItem[];
+}
+
+/**
+ * Un PR del flujo Forge. Dos variantes según `kind`:
+ *  - 'story': PR de una historia individual → integration branch del epic.
+ *  - 'staging': PR consolidado del epic (integration branch → devBranch).
+ */
+export interface ForgePrItem {
+  /** `run-<runId>` para stories | `staging-<epicId>` para consolidados. */
+  id: string;
+  kind: 'story' | 'staging';
+  number: number;
+  /** Link directo al PR en GitHub. NULL en sandbox (sin repo). */
+  url: string | null;
+  title: string;
+  batchId: string;
+  epicId: string;
+  epicTitle: string;
+  /** NULL para staging — no pertenece a una story individual. */
+  storyId: string | null;
+  storyTitle: string | null;
+  /** Nombre del compute node que corrió la story. NULL para staging. */
+  agentName: string | null;
+  /** Head branch (ej. `forge/epic-xxxx/story-yyyy`). */
+  branch: string;
+  /** Base branch — integration branch (stories) o stagingBranch (staging). */
+  targetBranch: string;
+  status: 'draft' | 'open' | 'merged' | 'closed';
+  /** True = status real de GitHub; false = inferido de BD (sandbox o fallo
+   *  de fetch a GitHub). Cuando es false, el diffstat viene null. */
+  live: boolean;
+  /** Diffstat real de GitHub. NULL cuando live=false. */
+  additions: number | null;
+  deletions: number | null;
+  files: number | null;
+  /** Veredicto del DoD verifier del run. NULL para staging. */
+  dodStatus: 'pending' | 'passed' | 'failed' | null;
+  /** Attempts del DoD loop (1 = clean). NULL para staging. */
+  attempts: number | null;
+  createdAt: string;
+  mergedAt: string | null;
+}
+
+/**
+ * Feed completo de PRs del Forge para el dashboard /factory/prs. Incluye
+ * tanto PRs de stories (head → integration branch) como los consolidados
+ * de staging (integration branch → devBranch). Polling sugerido: 15s — los
+ * PRs cambian al ritmo del Forge, no necesita el polling de 5s de /nodes.
+ */
+export function getForgePrs() {
+  return apiFetch<ForgePrsResponse>('/factory/prs');
+}
