@@ -1,79 +1,135 @@
 'use client';
 
-import { useState, useMemo } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { cn } from '@/lib/utils';
-import { useFactory } from '@/context/FactoryContext';
-import type { FactoryPR } from '@cenzontle/shared';
-import { PRStatus } from '@cenzontle/shared';
+import {
+  getForgePrs,
+  type ForgePrItem,
+  type ForgePrsResponse,
+} from '@/lib/api/factory';
 import {
   GitPullRequest,
   ExternalLink,
   Bot,
   GitBranch,
+  GitMerge,
   FileCode,
   RotateCcw,
   Clock,
-  MessageSquare,
-  Check,
+  Database,
   AlertTriangle,
   Filter,
+  Loader2,
 } from 'lucide-react';
 import { formatDistanceToNowStrict } from 'date-fns';
 
 // -- Config -------------------------------------------------------------------
 
-const STATUS_CFG: Record<PRStatus, { label: string; dot: string; bg: string; text: string }> = {
-  [PRStatus.Draft]:            { label: 'Draft',     dot: 'bg-gray-400',    bg: 'bg-gray-500/15',    text: 'text-gray-400' },
-  [PRStatus.Open]:             { label: 'Open',      dot: 'bg-blue-400',    bg: 'bg-blue-500/15',    text: 'text-blue-400' },
-  [PRStatus.InReview]:         { label: 'In Review', dot: 'bg-cyan-400', bg: 'bg-cyan-500/15', text: 'text-cyan-400' },
-  [PRStatus.ChangesRequested]: { label: 'Changes',   dot: 'bg-amber-400',   bg: 'bg-amber-500/15',   text: 'text-amber-400' },
-  [PRStatus.Approved]:         { label: 'Approved',  dot: 'bg-emerald-400', bg: 'bg-emerald-500/15', text: 'text-emerald-400' },
-  [PRStatus.Merged]:           { label: 'Merged',    dot: 'bg-emerald-400', bg: 'bg-emerald-500/80', text: 'text-white' },
-  [PRStatus.Closed]:           { label: 'Closed',    dot: 'bg-red-400',     bg: 'bg-red-500/15',     text: 'text-red-400' },
+/** Polling del feed — 15s: los PRs cambian al ritmo del Forge, no hace falta
+ *  el polling agresivo de 5s de /factory/nodes. */
+const POLL_INTERVAL_MS = 15_000;
+
+type PrStatus = ForgePrItem['status'];
+type PrKind = ForgePrItem['kind'];
+
+const STATUS_CFG: Record<PrStatus, { label: string; dot: string; bg: string; text: string }> = {
+  draft:  { label: 'Draft',  dot: 'bg-gray-400',    bg: 'bg-gray-500/15',    text: 'text-gray-400' },
+  open:   { label: 'Open',   dot: 'bg-blue-400',    bg: 'bg-blue-500/15',    text: 'text-blue-400' },
+  merged: { label: 'Merged', dot: 'bg-emerald-400', bg: 'bg-emerald-500/80', text: 'text-white' },
+  closed: { label: 'Closed', dot: 'bg-red-400',     bg: 'bg-red-500/15',     text: 'text-red-400' },
 };
 
-const CI_DOT: Record<FactoryPR['ciStatus'], string> = {
-  pending: 'bg-gray-400',
-  running: 'bg-blue-400 animate-pulse',
+/** Dot de color del veredicto del DoD verifier (solo PRs de story). */
+const DOD_DOT: Record<NonNullable<ForgePrItem['dodStatus']>, string> = {
   passed:  'bg-emerald-400',
   failed:  'bg-red-400',
+  pending: 'bg-gray-400',
 };
 
-type StatusFilter = 'all' | PRStatus;
+type StatusFilter = 'all' | PrStatus;
+type KindFilter = 'all' | PrKind;
 
-const FILTER_OPTIONS: { value: StatusFilter; label: string }[] = [
-  { value: 'all',                    label: 'All' },
-  { value: PRStatus.Open,            label: 'Open' },
-  { value: PRStatus.InReview,        label: 'In Review' },
-  { value: PRStatus.ChangesRequested,label: 'Changes' },
-  { value: PRStatus.Approved,        label: 'Approved' },
-  { value: PRStatus.Merged,          label: 'Merged' },
-  { value: PRStatus.Draft,           label: 'Draft' },
+const STATUS_FILTER_OPTIONS: { value: StatusFilter; label: string }[] = [
+  { value: 'all',    label: 'All' },
+  { value: 'open',   label: 'Open' },
+  { value: 'merged', label: 'Merged' },
+  { value: 'closed', label: 'Closed' },
+  { value: 'draft',  label: 'Draft' },
+];
+
+const KIND_FILTER_OPTIONS: { value: KindFilter; label: string }[] = [
+  { value: 'all',     label: 'All' },
+  { value: 'story',   label: 'Stories' },
+  { value: 'staging', label: 'Staging' },
 ];
 
 // -- Helpers ------------------------------------------------------------------
 
-function timeAgo(iso: string): string {
+function timeAgo(iso: string, addSuffix = false): string {
   try {
-    return formatDistanceToNowStrict(new Date(iso), { addSuffix: false });
+    return formatDistanceToNowStrict(new Date(iso), { addSuffix });
   } catch {
     return '--';
   }
 }
 
+/** Grupo de PRs de un mismo batch — staging primero, luego stories desc. */
+interface BatchGroup {
+  batchId: string;
+  epicTitle: string;
+  /** createdAt más reciente entre los PRs del grupo — ordena grupos desc. */
+  latestCreatedAt: number;
+  staging: ForgePrItem[];
+  stories: ForgePrItem[];
+}
+
+/** Epoch ms NaN-safe: un ISO corrupto cae a 0 (fin de la lista) en vez de
+ *  envenenar el sort con NaN (orden implementation-defined). */
+function timestampOf(iso: string): number {
+  const t = new Date(iso).getTime();
+  return Number.isNaN(t) ? 0 : t;
+}
+
+function byCreatedAtDesc(a: ForgePrItem, b: ForgePrItem): number {
+  return timestampOf(b.createdAt) - timestampOf(a.createdAt);
+}
+
+function groupByBatch(prs: ForgePrItem[]): BatchGroup[] {
+  const map = new Map<string, BatchGroup>();
+  for (const pr of prs) {
+    let group = map.get(pr.batchId);
+    if (!group) {
+      group = {
+        batchId: pr.batchId,
+        epicTitle: pr.epicTitle,
+        latestCreatedAt: 0,
+        staging: [],
+        stories: [],
+      };
+      map.set(pr.batchId, group);
+    }
+    const created = timestampOf(pr.createdAt);
+    if (created > group.latestCreatedAt) group.latestCreatedAt = created;
+    (pr.kind === 'staging' ? group.staging : group.stories).push(pr);
+  }
+  const groups = [...map.values()];
+  for (const group of groups) {
+    group.staging.sort(byCreatedAtDesc);
+    group.stories.sort(byCreatedAtDesc);
+  }
+  return groups.sort((a, b) => b.latestCreatedAt - a.latestCreatedAt);
+}
+
 // -- Sub-components -----------------------------------------------------------
 
-function StatsBar({ prs }: { prs: FactoryPR[] }) {
+function StatsBar({ prs }: { prs: ForgePrItem[] }) {
   const counts = useMemo(() => {
-    const map: Partial<Record<PRStatus, number>> = {};
+    const map: Partial<Record<PrStatus, number>> = {};
     for (const pr of prs) map[pr.status] = (map[pr.status] ?? 0) + 1;
     return map;
   }, [prs]);
 
-  const order: PRStatus[] = [
-    PRStatus.Merged, PRStatus.Approved, PRStatus.InReview,
-    PRStatus.ChangesRequested, PRStatus.Open, PRStatus.Draft, PRStatus.Closed,
-  ];
+  const order: PrStatus[] = ['merged', 'open', 'draft', 'closed'];
 
   return (
     <div className="flex items-center gap-3 px-4 py-1.5 text-[11px] font-medium text-muted-foreground tabular-nums select-none flex-wrap">
@@ -91,7 +147,7 @@ function StatsBar({ prs }: { prs: FactoryPR[] }) {
   );
 }
 
-function StatusBadge({ status }: { status: PRStatus }) {
+function StatusBadge({ status }: { status: PrStatus }) {
   const cfg = STATUS_CFG[status];
   return (
     <span className={cn('inline-flex items-center rounded-full px-2 py-0.5 text-[11px] font-medium leading-none shrink-0', cfg.bg, cfg.text)}>
@@ -100,60 +156,142 @@ function StatusBadge({ status }: { status: PRStatus }) {
   );
 }
 
-function ReviewBlock({ feedback, status }: { feedback: string; status: PRStatus }) {
-  const isApproved = status === PRStatus.Approved || status === PRStatus.Merged;
+/** Pills de filtro con semántica radiogroup — compartido por Status y Type. */
+function FilterPills<T extends string>({
+  options,
+  value,
+  onChange,
+  ariaLabel,
+}: {
+  options: { value: T; label: string }[];
+  value: T;
+  onChange: (value: T) => void;
+  ariaLabel: string;
+}) {
   return (
-    <div
-      className={cn(
-        'mt-2 rounded-lg border px-3 py-2 text-xs leading-relaxed',
-        isApproved
-          ? 'border-emerald-500/30 bg-emerald-500/5 text-emerald-300'
-          : 'border-amber-500/30 bg-amber-500/5 text-amber-300',
-      )}
-    >
-      <div className="flex items-start gap-2">
-        <div className="shrink-0 mt-0.5">
-          {isApproved ? (
-            <Check className="h-3.5 w-3.5 text-emerald-400" aria-hidden="true" />
-          ) : (
-            <AlertTriangle className="h-3.5 w-3.5 text-amber-400" aria-hidden="true" />
+    <div className="flex items-center gap-0.5" role="radiogroup" aria-label={ariaLabel}>
+      {options.map((opt) => (
+        <button
+          key={opt.value}
+          type="button"
+          role="radio"
+          aria-checked={value === opt.value}
+          onClick={() => onChange(opt.value)}
+          className={cn(
+            'px-2 py-0.5 rounded text-[11px] font-medium transition-colors',
+            value === opt.value
+              ? 'bg-muted text-foreground'
+              : 'text-muted-foreground hover:text-foreground hover:bg-muted/50',
           )}
-        </div>
-        <div>
-          <span className="font-semibold text-[11px] uppercase tracking-wider block mb-0.5">
-            Claude Review
-          </span>
-          <p className="text-foreground/80">{feedback}</p>
-        </div>
-      </div>
+        >
+          {opt.label}
+        </button>
+      ))}
     </div>
   );
 }
 
-function PRCard({ pr, agentName }: { pr: FactoryPR; agentName: string }) {
+/** Diffstat `+a/-d` — gris cuando no hay datos de GitHub (live=false). */
+function DiffStat({ additions, deletions }: Pick<ForgePrItem, 'additions' | 'deletions'>) {
+  if (additions === null || deletions === null) {
+    return (
+      <span className="tabular-nums text-muted-foreground/50">
+        +&ndash;<span className="mx-0.5">/</span>-&ndash;
+      </span>
+    );
+  }
+  return (
+    <span className="tabular-nums">
+      <span className="text-emerald-400">+{additions}</span>
+      <span className="mx-0.5 text-muted-foreground/50">/</span>
+      <span className="text-red-400">-{deletions}</span>
+    </span>
+  );
+}
+
+function BatchGroupHeader({ group }: { group: BatchGroup }) {
+  const count = group.staging.length + group.stories.length;
+  return (
+    <header className="flex items-center gap-2 px-4 py-1.5 bg-muted/40 border-b border-border">
+      <span className="text-[11px] font-semibold uppercase tracking-wider text-muted-foreground truncate">
+        {group.epicTitle}
+      </span>
+      <span className="inline-flex items-center justify-center rounded-full bg-muted px-1.5 py-0.5 text-[10px] font-medium text-muted-foreground tabular-nums shrink-0">
+        {count} {count === 1 ? 'PR' : 'PRs'}
+      </span>
+    </header>
+  );
+}
+
+function PRCard({ pr }: { pr: ForgePrItem }) {
+  const isStaging = pr.kind === 'staging';
+  const retries = pr.attempts !== null && pr.attempts > 1 ? pr.attempts - 1 : 0;
+
   return (
     <article
-      className="border-b border-border px-4 py-3 hover:bg-muted/30 transition-colors"
+      className={cn(
+        'border-b border-border px-4 py-3 transition-colors',
+        // El PR de staging se destaca del resto del grupo: borde violeta a la
+        // izquierda + fondo sutil — es el consolidado que mergea a dev.
+        isStaging
+          ? 'border-l-2 border-l-violet-400/70 bg-violet-500/[0.06] hover:bg-violet-500/10'
+          : 'hover:bg-muted/30',
+      )}
       aria-label={`Pull request ${pr.number}: ${pr.title}`}
     >
-      {/* Line 1: number, title, status */}
+      {/* Línea 1: número, título, badges de estado */}
       <div className="flex items-start justify-between gap-3">
         <div className="flex items-center gap-2 min-w-0">
           <span className="font-mono text-xs text-muted-foreground shrink-0">#{pr.number}</span>
           <span className="text-sm font-semibold text-foreground truncate">{pr.title}</span>
         </div>
-        <StatusBadge status={pr.status} />
+        <div className="flex items-center gap-1.5 shrink-0">
+          {isStaging && (
+            <span className="inline-flex items-center gap-1 rounded-full bg-violet-500/15 px-2 py-0.5 text-[11px] font-medium leading-none text-violet-400">
+              <GitMerge className="h-3 w-3" aria-hidden="true" />
+              Staging &rarr; {pr.targetBranch}
+            </span>
+          )}
+          <StatusBadge status={pr.status} />
+          {!pr.live && (
+            <span
+              role="img"
+              title="Estado inferido de la BD — sin conexión a GitHub"
+              aria-label="Estado inferido de la BD — sin conexión a GitHub"
+              className="inline-flex"
+            >
+              <Database className="h-3 w-3 text-muted-foreground/60" aria-hidden="true" />
+            </span>
+          )}
+        </div>
       </div>
 
-      {/* Line 2: story, agent, branches */}
+      {/* Línea 2: contexto (story + agente | epic) + branches */}
       <div className="flex items-center gap-1.5 mt-1 text-[11px] text-muted-foreground flex-wrap">
-        <span className="font-mono">{pr.storyKey}</span>
-        <span className="text-border">&middot;</span>
-        <span className="inline-flex items-center gap-1">
-          <Bot className="h-3 w-3" aria-hidden="true" />
-          {agentName}
-        </span>
-        <span className="text-border">&middot;</span>
+        {isStaging ? (
+          <>
+            <span className="truncate max-w-[280px]">{pr.epicTitle}</span>
+            <span className="text-border">&middot;</span>
+          </>
+        ) : (
+          <>
+            {pr.storyTitle && (
+              <>
+                <span className="truncate max-w-[280px]">{pr.storyTitle}</span>
+                <span className="text-border">&middot;</span>
+              </>
+            )}
+            {pr.agentName && (
+              <>
+                <span className="inline-flex items-center gap-1">
+                  <Bot className="h-3 w-3" aria-hidden="true" />
+                  {pr.agentName}
+                </span>
+                <span className="text-border">&middot;</span>
+              </>
+            )}
+          </>
+        )}
         <span className="inline-flex items-center gap-1 font-mono">
           <GitBranch className="h-3 w-3" aria-hidden="true" />
           {pr.branch}
@@ -162,53 +300,68 @@ function PRCard({ pr, agentName }: { pr: FactoryPR; agentName: string }) {
         <span className="font-mono">{pr.targetBranch}</span>
       </div>
 
-      {/* Line 3: diff stats, CI, age, retries */}
+      {/* Línea 3: diffstat, files, DoD, edad, retries */}
       <div className="flex items-center gap-3 mt-1.5 text-xs text-muted-foreground flex-wrap">
-        <span className="tabular-nums">
-          <span className="text-emerald-400">+{pr.additions}</span>
-          <span className="mx-0.5 text-muted-foreground/50">/</span>
-          <span className="text-red-400">-{pr.deletions}</span>
-        </span>
-        <span className="text-border">&middot;</span>
-        <span className="inline-flex items-center gap-1">
-          <FileCode className="h-3 w-3" aria-hidden="true" />
-          {pr.files} files
-        </span>
-        <span className="text-border">&middot;</span>
-        <span className="inline-flex items-center gap-1">
-          CI: <span className={cn('h-2 w-2 rounded-full inline-block', CI_DOT[pr.ciStatus])} aria-label={`CI ${pr.ciStatus}`} />
-          {pr.ciStatus}
-        </span>
+        <DiffStat additions={pr.additions} deletions={pr.deletions} />
+        {pr.files !== null && (
+          <>
+            <span className="text-border">&middot;</span>
+            <span className="inline-flex items-center gap-1">
+              <FileCode className="h-3 w-3" aria-hidden="true" />
+              {pr.files} files
+            </span>
+          </>
+        )}
+        {pr.dodStatus !== null && (
+          <>
+            <span className="text-border">&middot;</span>
+            <span className="inline-flex items-center gap-1">
+              DoD:
+              <span
+                className={cn('h-2 w-2 rounded-full inline-block', DOD_DOT[pr.dodStatus])}
+                aria-hidden="true"
+              />
+              {pr.dodStatus}
+            </span>
+          </>
+        )}
         <span className="text-border">&middot;</span>
         <span className="inline-flex items-center gap-1">
           <Clock className="h-3 w-3" aria-hidden="true" />
-          {timeAgo(pr.createdAt)}
+          {pr.mergedAt ? `merged ${timeAgo(pr.mergedAt, true)}` : timeAgo(pr.createdAt)}
         </span>
-        {pr.retryCount > 0 && (
+        {retries > 0 && (
           <>
             <span className="text-border">&middot;</span>
             <span className="inline-flex items-center gap-0.5 rounded-full bg-amber-500/15 px-1.5 py-0.5 text-[11px] font-medium text-amber-400">
               <RotateCcw className="h-3 w-3" aria-hidden="true" />
-              {pr.retryCount}
+              {retries} {retries === 1 ? 'retry' : 'retries'}
             </span>
           </>
         )}
       </div>
 
-      {/* GitHub link */}
-      <button
-        type="button"
-        disabled
-        className="inline-flex items-center gap-1 mt-2 text-[11px] font-medium text-muted-foreground/60 cursor-not-allowed"
-        aria-label={`View pull request ${pr.number} on GitHub (link disabled in demo)`}
-      >
-        <ExternalLink className="h-3 w-3" aria-hidden="true" />
-        Ver en GitHub &rarr;
-      </button>
-
-      {/* Claude Review feedback */}
-      {pr.reviewFeedback && (
-        <ReviewBlock feedback={pr.reviewFeedback} status={pr.status} />
+      {/* GitHub link — habilitado cuando el backend resolvió la URL real */}
+      {pr.url ? (
+        <a
+          href={pr.url}
+          target="_blank"
+          rel="noopener noreferrer"
+          className="inline-flex items-center gap-1 mt-2 text-[11px] font-medium text-blue-400 hover:underline"
+        >
+          <ExternalLink className="h-3 w-3" aria-hidden="true" />
+          Ver en GitHub &rarr;
+        </a>
+      ) : (
+        <button
+          type="button"
+          disabled
+          className="inline-flex items-center gap-1 mt-2 text-[11px] font-medium text-muted-foreground/60 cursor-not-allowed"
+          aria-label={`Pull request ${pr.number} sin link — no hay repositorio de GitHub configurado`}
+        >
+          <ExternalLink className="h-3 w-3" aria-hidden="true" />
+          Ver en GitHub &rarr;
+        </button>
       )}
     </article>
   );
@@ -217,32 +370,108 @@ function PRCard({ pr, agentName }: { pr: FactoryPR; agentName: string }) {
 // -- Main Component -----------------------------------------------------------
 
 export function PRPipeline() {
-  const { state } = useFactory();
-  const prs = state.prs;
-  const agents = state.agents;
+  const [data, setData] = useState<ForgePrsResponse | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+  const [statusFilter, setStatusFilter] = useState<StatusFilter>('all');
+  const [kindFilter, setKindFilter] = useState<KindFilter>('all');
 
-  const [filter, setFilter] = useState<StatusFilter>('all');
+  // Ref estable al fetch del effect — habilita el botón "Reintentar" sin
+  // recrear el effect ni duplicar el interval (mismo patrón que batch/[id]).
+  const fetchPrsRef = useRef<() => void>(() => undefined);
 
-  const sorted = useMemo(
-    () => [...prs].sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime()),
-    [prs],
-  );
+  useEffect(() => {
+    let cancelled = false;
+
+    const fetchPrs = async () => {
+      try {
+        const res = await getForgePrs();
+        if (cancelled) return;
+        setData(res);
+        setError(null);
+      } catch (err) {
+        if (cancelled) return;
+        // En re-polls conservamos la data previa — solo registramos el error;
+        // el banner discreto avisa que el feed puede estar stale.
+        setError(err instanceof Error ? err.message : 'Error desconocido');
+      } finally {
+        if (!cancelled) setLoading(false);
+      }
+    };
+
+    fetchPrsRef.current = () => void fetchPrs();
+
+    void fetchPrs();
+    const interval = setInterval(() => void fetchPrs(), POLL_INTERVAL_MS);
+    return () => {
+      cancelled = true;
+      clearInterval(interval);
+    };
+  }, []);
+
+  const handleRetry = useCallback(() => {
+    // Guard contra clicks rápidos: sin esto cada click lanza un fetch
+    // concurrente y el último en resolver gana de forma no determinística.
+    if (loading) return;
+    setLoading(true);
+    fetchPrsRef.current();
+  }, [loading]);
+
+  const prs = useMemo(() => data?.prs ?? [], [data]);
 
   const filtered = useMemo(
-    () => (filter === 'all' ? sorted : sorted.filter((pr) => pr.status === filter)),
-    [sorted, filter],
+    () =>
+      prs.filter(
+        (pr) =>
+          (statusFilter === 'all' || pr.status === statusFilter) &&
+          (kindFilter === 'all' || pr.kind === kindFilter),
+      ),
+    [prs, statusFilter, kindFilter],
   );
 
+  const groups = useMemo(() => groupByBatch(filtered), [filtered]);
+
+  // Totales del header — solo suman los PRs con diffstat real (live=true);
+  // los null de sandbox no aportan al agregado.
   const totals = useMemo(() => {
     let additions = 0, deletions = 0, files = 0;
-    for (const pr of prs) { additions += pr.additions; deletions += pr.deletions; files += pr.files; }
+    for (const pr of prs) {
+      if (pr.additions !== null) additions += pr.additions;
+      if (pr.deletions !== null) deletions += pr.deletions;
+      if (pr.files !== null) files += pr.files;
+    }
     return { additions, deletions, files };
   }, [prs]);
 
-  const targetBranch = prs[0]?.targetBranch ?? 'forge/sprint-batch';
+  const hasActiveFilter = statusFilter !== 'all' || kindFilter !== 'all';
 
-  const getAgentName = (agentId: string) =>
-    agents.find((a) => a.id === agentId)?.name ?? agentId;
+  // -- Loading inicial (sin data previa) --
+  if (loading && !data) {
+    return (
+      <div className="rounded-xl border border-border bg-card flex items-center justify-center h-full py-32">
+        <Loader2 className="h-6 w-6 animate-spin text-muted-foreground" aria-hidden="true" />
+      </div>
+    );
+  }
+
+  // -- Error sin data que mostrar --
+  if (!data) {
+    return (
+      <div className="rounded-xl border border-border bg-card flex flex-col items-center justify-center h-full py-32 gap-3">
+        <AlertTriangle className="h-6 w-6 text-amber-400" aria-hidden="true" />
+        <span className="text-sm text-muted-foreground">
+          {error ?? 'No se pudieron cargar los pull requests.'}
+        </span>
+        <button
+          type="button"
+          onClick={handleRetry}
+          className="rounded-lg border border-border px-4 py-2 text-sm text-foreground hover:bg-muted transition-colors"
+        >
+          Reintentar
+        </button>
+      </div>
+    );
+  }
 
   return (
     <div className="rounded-xl border border-border bg-card overflow-hidden flex flex-col h-full">
@@ -269,10 +498,18 @@ export function PRPipeline() {
           <span className="text-border">|</span>
           <span className="inline-flex items-center gap-1 font-mono">
             <GitBranch className="h-3 w-3" aria-hidden="true" />
-            {targetBranch}
+            {data.stagingBranch}
           </span>
         </div>
       </div>
+
+      {/* Error de re-poll — discreto, la data previa sigue visible */}
+      {error && (
+        <div className="flex items-center gap-2 px-4 py-1.5 text-[11px] text-amber-400 bg-amber-500/10 border-b border-border">
+          <AlertTriangle className="h-3 w-3 shrink-0" aria-hidden="true" />
+          <span>Error al refrescar: {error} — mostrando datos previos.</span>
+        </div>
+      )}
 
       {/* Stats bar */}
       <div className="border-b border-border bg-background">
@@ -285,46 +522,65 @@ export function PRPipeline() {
         <span className="text-[11px] text-muted-foreground font-medium uppercase tracking-wider select-none">
           Status
         </span>
-        <div className="flex items-center gap-0.5" role="radiogroup" aria-label="Filter by PR status">
-          {FILTER_OPTIONS.map((opt) => (
-            <button
-              key={opt.value}
-              type="button"
-              role="radio"
-              aria-checked={filter === opt.value}
-              onClick={() => setFilter(opt.value)}
-              className={cn(
-                'px-2 py-0.5 rounded text-[11px] font-medium transition-colors',
-                filter === opt.value
-                  ? 'bg-muted text-foreground'
-                  : 'text-muted-foreground hover:text-foreground hover:bg-muted/50',
-              )}
-            >
-              {opt.label}
-            </button>
-          ))}
-        </div>
-        {filter !== 'all' && (
+        <FilterPills
+          options={STATUS_FILTER_OPTIONS}
+          value={statusFilter}
+          onChange={setStatusFilter}
+          ariaLabel="Filter by PR status"
+        />
+        <span className="text-border select-none">|</span>
+        <span className="text-[11px] text-muted-foreground font-medium uppercase tracking-wider select-none">
+          Type
+        </span>
+        <FilterPills
+          options={KIND_FILTER_OPTIONS}
+          value={kindFilter}
+          onChange={setKindFilter}
+          ariaLabel="Filter by PR type"
+        />
+        {hasActiveFilter && (
           <span className="text-[11px] text-muted-foreground tabular-nums ml-auto">
             {filtered.length} of {prs.length}
           </span>
         )}
       </div>
 
-      {/* PR cards */}
+      {/* PR cards agrupadas por batch */}
       <div className="flex-1 overflow-y-auto bg-background" role="feed" aria-label="Pull request cards">
-        {filtered.length === 0 ? (
-          <div className="flex flex-col items-center justify-center h-full py-16 gap-2">
-            <MessageSquare className="h-6 w-6 text-muted-foreground/50" aria-hidden="true" />
+        {prs.length === 0 ? (
+          <div className="flex flex-col items-center justify-center h-full py-16 gap-2 px-6 text-center">
+            <GitPullRequest className="h-6 w-6 text-muted-foreground/50" aria-hidden="true" />
             <span className="text-sm text-muted-foreground">
-              {filter === 'all'
-                ? 'No pull requests in the current batch.'
-                : `No PRs with status "${STATUS_CFG[filter as PRStatus].label}".`}
+              No hay pull requests del Forge todavía.
+            </span>
+            <span className="text-xs text-muted-foreground/70">
+              Los PRs aparecen aquí cuando el Forge procesa historias de un batch.
+            </span>
+            {data.repoUrl === null && (
+              <span className="text-xs text-amber-400/80 mt-1">
+                No hay repositorio de GitHub con escritura del Forge configurado
+                (Factory Settings &rarr; Código).
+              </span>
+            )}
+          </div>
+        ) : filtered.length === 0 ? (
+          <div className="flex flex-col items-center justify-center h-full py-16 gap-2">
+            <Filter className="h-6 w-6 text-muted-foreground/50" aria-hidden="true" />
+            <span className="text-sm text-muted-foreground">
+              Ningún PR coincide con los filtros.
             </span>
           </div>
         ) : (
-          filtered.map((pr) => (
-            <PRCard key={pr.id} pr={pr} agentName={getAgentName(pr.agentId)} />
+          groups.map((group) => (
+            <section key={group.batchId} aria-label={`PRs del batch ${group.epicTitle}`}>
+              <BatchGroupHeader group={group} />
+              {group.staging.map((pr) => (
+                <PRCard key={pr.id} pr={pr} />
+              ))}
+              {group.stories.map((pr) => (
+                <PRCard key={pr.id} pr={pr} />
+              ))}
+            </section>
           ))
         )}
       </div>

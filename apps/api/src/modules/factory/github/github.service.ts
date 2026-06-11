@@ -641,6 +641,59 @@ export class GitHubService {
   }
 
   /**
+   * Snapshot completo de un PR para el dashboard de PRs del Forge.
+   *
+   * Distinto de `getPullRequestStatus` (que es el subset mínimo para la
+   * lógica de merge): este incluye título, diffstat (additions/deletions/
+   * changedFiles), draft flag y timestamps — todo lo que el dashboard
+   * necesita y que NO se persiste en Prisma (el estado de un PR de story
+   * vive solo en GitHub; ver completeRun: autoMergeOk solo se loggea).
+   *
+   * Un solo `pulls.get` trae todo — el caller (ForgePrsService) cachea con
+   * TTL asimétrico para no quemar rate limit con el polling del dashboard.
+   */
+  async getPullRequestSnapshot(prNumber: number): Promise<{
+    number: number;
+    title: string;
+    state: 'open' | 'closed';
+    merged: boolean;
+    draft: boolean;
+    additions: number;
+    deletions: number;
+    changedFiles: number;
+    headBranch: string;
+    baseBranch: string;
+    htmlUrl: string;
+    createdAt: string;
+    mergedAt: string | null;
+  }> {
+    const { octokit, config } = await this.getActiveRepoClient();
+    const { owner, repo } = config;
+
+    const pr = await octokit.pulls.get({
+      owner,
+      repo,
+      pull_number: prNumber,
+    });
+
+    return {
+      number: pr.data.number,
+      title: pr.data.title,
+      state: pr.data.state as 'open' | 'closed',
+      merged: pr.data.merged,
+      draft: pr.data.draft ?? false,
+      additions: pr.data.additions,
+      deletions: pr.data.deletions,
+      changedFiles: pr.data.changed_files,
+      headBranch: pr.data.head.ref,
+      baseBranch: pr.data.base.ref,
+      htmlUrl: pr.data.html_url,
+      createdAt: pr.data.created_at,
+      mergedAt: pr.data.merged_at ?? null,
+    };
+  }
+
+  /**
    * Borra una branch del remote. Usado en cleanup tras merge consolidado
    * (si BranchStrategyConfig.autoDeleteForgeBranch=true).
    *
