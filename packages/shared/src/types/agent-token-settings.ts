@@ -41,6 +41,36 @@ export const AGENT_EFFORT_DESCRIPTIONS: Record<AgentEffortLevel, string> = {
 };
 
 /**
+ * Modelos seleccionables para los agentes de Proyectos (PO/TL/QA/épicas/
+ * diagramas/asistente). DISTINTO de FORGE_WORKER_MODELS: estos agentes corren
+ * vía el SDK con `thinking: {type:'adaptive'}` + `output_config.effort`, así
+ * que SOLO se permiten modelos que soportan ambos. Haiku queda fuera a
+ * propósito (no soporta adaptive thinking → 400 en cada turno).
+ *
+ * Fuente de verdad de la whitelist server-side. El catálogo rico (pricing,
+ * descripciones, verificación en vivo) vive en apps/api y la deriva de aquí.
+ */
+export const PROJECT_AGENT_MODELS = [
+  'claude-fable-5',
+  'claude-opus-4-8',
+  'claude-opus-4-7',
+  'claude-opus-4-6',
+  'claude-sonnet-4-6',
+] as const;
+export type ProjectAgentModel = typeof PROJECT_AGENT_MODELS[number];
+
+export const PROJECT_AGENT_MODEL_LABELS: Record<ProjectAgentModel, string> = {
+  'claude-fable-5': 'Claude Fable 5',
+  'claude-opus-4-8': 'Claude Opus 4.8',
+  'claude-opus-4-7': 'Claude Opus 4.7',
+  'claude-opus-4-6': 'Claude Opus 4.6',
+  'claude-sonnet-4-6': 'Claude Sonnet 4.6',
+};
+
+/** Modelo por defecto de los agentes de Proyectos (calibrado con Sonnet 4.6). */
+export const DEFAULT_PROJECT_AGENT_MODEL: ProjectAgentModel = 'claude-sonnet-4-6';
+
+/**
  * Modelos válidos para el Forge Worker (coder agent que corre Claude Code CLI).
  * Distinto del set para los agentes story-gen porque el CLI maneja el rango
  * completo de modelos production-grade.
@@ -103,29 +133,40 @@ export const FORGE_WORKER_EFFORT_DESCRIPTIONS: Record<ForgeWorkerEffortLevel, st
 
 export interface AgentTokenSettings {
   // Stories — Product Owner
+  storyPoModel: ProjectAgentModel;
   storyPoEffort: AgentEffortLevel;
   storyPoMaxTokens: number;
   storyPoThinkingEnabled: boolean;
 
   // Stories — Tech Lead
+  storyTlModel: ProjectAgentModel;
   storyTlEffort: AgentEffortLevel;
   storyTlMaxTokens: number;
   storyTlThinkingEnabled: boolean;
 
   // Stories — QA
+  storyQaModel: ProjectAgentModel;
   storyQaEffort: AgentEffortLevel;
   storyQaMaxTokens: number;
   storyQaThinkingEnabled: boolean;
 
   // Epics (max_tokens dinámico → este es el cap superior)
+  epicModel: ProjectAgentModel;
   epicEffort: AgentEffortLevel;
   epicMaxTokens: number;
   epicThinkingEnabled: boolean;
 
   // Diagrams (principal + integration doc comparten config)
+  diagramModel: ProjectAgentModel;
   diagramEffort: AgentEffortLevel;
   diagramMaxTokens: number;
   diagramThinkingEnabled: boolean;
+
+  // Assistant — chatbot lateral de edición de iniciativas/épicas/historias
+  assistantModel: ProjectAgentModel;
+  assistantEffort: AgentEffortLevel;
+  assistantMaxTokens: number;
+  assistantThinkingEnabled: boolean;
 
   // Forge Worker — coder agent (Claude Code CLI)
   forgeWorkerModel: ForgeWorkerModel;
@@ -155,21 +196,30 @@ export interface AgentTokenSettings {
 
 /** Defaults coincidentes con los `@default(...)` del schema Prisma. */
 export const DEFAULT_AGENT_TOKEN_SETTINGS: Omit<AgentTokenSettings, 'updatedAt' | 'updatedBy'> = {
+  storyPoModel: DEFAULT_PROJECT_AGENT_MODEL,
   storyPoEffort: 'medium',
   storyPoMaxTokens: 28_000,
   storyPoThinkingEnabled: true,
+  storyTlModel: DEFAULT_PROJECT_AGENT_MODEL,
   storyTlEffort: 'medium',
   storyTlMaxTokens: 64_000,
   storyTlThinkingEnabled: true,
+  storyQaModel: DEFAULT_PROJECT_AGENT_MODEL,
   storyQaEffort: 'medium',
   storyQaMaxTokens: 64_000,
   storyQaThinkingEnabled: true,
+  epicModel: DEFAULT_PROJECT_AGENT_MODEL,
   epicEffort: 'medium',
   epicMaxTokens: 64_000,
   epicThinkingEnabled: true,
+  diagramModel: DEFAULT_PROJECT_AGENT_MODEL,
   diagramEffort: 'medium',
   diagramMaxTokens: 64_000,
   diagramThinkingEnabled: true,
+  assistantModel: DEFAULT_PROJECT_AGENT_MODEL,
+  assistantEffort: 'medium',
+  assistantMaxTokens: 32_000,
+  assistantThinkingEnabled: true,
   forgeWorkerModel: 'claude-sonnet-4-6',
   forgeWorkerEffort: 'high',
   forgeWorkerMaxRunDurationMs: 1_800_000, // 30 min — default conservador
@@ -188,12 +238,14 @@ export const AGENT_TOKEN_BOUNDS = {
 } as const;
 
 /** Identificador discriminator para iterar agentes en UI. */
-export type AgentKey = 'storyPo' | 'storyTl' | 'storyQa' | 'epic' | 'diagram';
+export type AgentKey = 'storyPo' | 'storyTl' | 'storyQa' | 'epic' | 'diagram' | 'assistant';
 
 type EditableField = keyof Omit<AgentTokenSettings, 'updatedAt' | 'updatedBy'>;
 
 export interface AgentDescriptor {
   key: AgentKey;
+  /** Selector de modelo Claude del agente (whitelist PROJECT_AGENT_MODELS). */
+  modelField: EditableField;
   effortField: EditableField;
   maxTokensField: EditableField;
   /** Toggle on/off del adaptive thinking. Cuando false, el agente NO emite
@@ -206,6 +258,7 @@ export interface AgentDescriptor {
 export const AGENT_DESCRIPTORS: ReadonlyArray<AgentDescriptor> = [
   {
     key: 'storyPo',
+    modelField: 'storyPoModel',
     effortField: 'storyPoEffort',
     maxTokensField: 'storyPoMaxTokens',
     enabledField: 'storyPoThinkingEnabled',
@@ -214,6 +267,7 @@ export const AGENT_DESCRIPTORS: ReadonlyArray<AgentDescriptor> = [
   },
   {
     key: 'storyTl',
+    modelField: 'storyTlModel',
     effortField: 'storyTlEffort',
     maxTokensField: 'storyTlMaxTokens',
     enabledField: 'storyTlThinkingEnabled',
@@ -222,6 +276,7 @@ export const AGENT_DESCRIPTORS: ReadonlyArray<AgentDescriptor> = [
   },
   {
     key: 'storyQa',
+    modelField: 'storyQaModel',
     effortField: 'storyQaEffort',
     maxTokensField: 'storyQaMaxTokens',
     enabledField: 'storyQaThinkingEnabled',
@@ -230,6 +285,7 @@ export const AGENT_DESCRIPTORS: ReadonlyArray<AgentDescriptor> = [
   },
   {
     key: 'epic',
+    modelField: 'epicModel',
     effortField: 'epicEffort',
     maxTokensField: 'epicMaxTokens',
     enabledField: 'epicThinkingEnabled',
@@ -238,11 +294,22 @@ export const AGENT_DESCRIPTORS: ReadonlyArray<AgentDescriptor> = [
   },
   {
     key: 'diagram',
+    modelField: 'diagramModel',
     effortField: 'diagramEffort',
     maxTokensField: 'diagramMaxTokens',
     enabledField: 'diagramThinkingEnabled',
     label: 'Diagramas',
     description:
       'Genera diagramas y documentos de integración (agente principal + doc). Excluye el layout pass — es estructural y determinista, no usa thinking.',
+  },
+  {
+    key: 'assistant',
+    modelField: 'assistantModel',
+    effortField: 'assistantEffort',
+    maxTokensField: 'assistantMaxTokens',
+    enabledField: 'assistantThinkingEnabled',
+    label: 'Asistente de edición',
+    description:
+      'Chatbot lateral que propone ediciones de iniciativas, épicas e historias con diff y apply human-in-the-loop.',
   },
 ] as const;

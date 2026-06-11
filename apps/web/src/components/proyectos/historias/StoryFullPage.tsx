@@ -24,7 +24,9 @@ import {
   ChangelogAction,
   ChangelogEntityType,
   type UserStory,
+  type AssistantProposal,
 } from '@cenzontle/shared';
+import { AssistantChatSidebar } from '../assistant/AssistantChatSidebar';
 import { StatusBadge } from '../shared/StatusBadge';
 import { PodBadge } from '../shared/PodBadge';
 import { StoryPointsBadge } from '../shared/StoryPointsBadge';
@@ -53,6 +55,7 @@ import {
   ExternalLink,
   Loader2,
   ChevronDown,
+  Sparkles,
 } from 'lucide-react';
 import { LinearIcon } from '@/components/icons/LinearIcon';
 import { Tooltip, TooltipTrigger, TooltipContent, TooltipProvider } from '@/components/ui/tooltip';
@@ -246,12 +249,17 @@ function StoryFullPageInner({ storyId }: StoryFullPageProps) {
     qa?: { markdown?: string };
   } | null>(null);
 
+  // Si el usuario aplica una propuesta del asistente antes de que el fetch
+  // inicial resuelva (vault lento), el .then no debe pisar el contenido ya
+  // aplicado con la data stale del API.
+  const vaultMutatedRef = useRef(false);
+
   useEffect(() => {
     if (!storyId) return;
     let cancelled = false;
     apiGetStory(storyId, true)
       .then((data) => {
-        if (cancelled) return;
+        if (cancelled || vaultMutatedRef.current) return;
         if (data.content) setVaultContent(data.content);
       })
       .catch(() => {});
@@ -376,6 +384,7 @@ function StoryFullPageInner({ storyId }: StoryFullPageProps) {
   const [editPO, setEditPO] = useState<string>('');
   const [editTechnical, setEditTechnical] = useState<string>('');
   const [editQA, setEditQA] = useState<string>('');
+  const [assistantOpen, setAssistantOpen] = useState(false);
 
   // Changelog for this story
   const storyChangelog = useMemo(() => {
@@ -416,6 +425,40 @@ function StoryFullPageInner({ storyId }: StoryFullPageProps) {
   }, [story, epic, initiative, setBreadcrumb, siblingStories]);
 
   // --- Edit handlers ---
+
+  // Apply de propuestas del asistente: mismo write-path que handleSave
+  // (PATCH sección + dispatch + sync de vaultContent local).
+  const handleApplyAssistantProposal = useCallback(
+    async (proposal: AssistantProposal) => {
+      if (!story) throw new Error('Historia no disponible');
+      vaultMutatedRef.current = true;
+      if (proposal.target === 'story_po') {
+        await apiUpdateStory(story.id, { po: { markdown: proposal.newContent } });
+        dispatch({
+          type: 'UPDATE_STORY',
+          payload: { id: story.id, changes: { po: { markdown: proposal.newContent } } },
+        });
+        setVaultContent((prev) => ({ ...(prev ?? {}), po: { markdown: proposal.newContent } }));
+      } else if (proposal.target === 'story_technical') {
+        await apiUpdateStory(story.id, { technical: { markdown: proposal.newContent } });
+        dispatch({
+          type: 'UPDATE_STORY',
+          payload: { id: story.id, changes: { technical: { markdown: proposal.newContent } } },
+        });
+        setVaultContent((prev) => ({ ...(prev ?? {}), technical: { markdown: proposal.newContent } }));
+      } else if (proposal.target === 'story_qa') {
+        await apiUpdateStory(story.id, { qa: { markdown: proposal.newContent } });
+        dispatch({
+          type: 'UPDATE_STORY',
+          payload: { id: story.id, changes: { qa: { markdown: proposal.newContent } } },
+        });
+        setVaultContent((prev) => ({ ...(prev ?? {}), qa: { markdown: proposal.newContent } }));
+      } else {
+        throw new Error('Propuesta no aplicable a esta historia');
+      }
+    },
+    [story, dispatch],
+  );
 
   const handleStartEdit = useCallback(() => {
     if (!story) return;
@@ -531,8 +574,8 @@ function StoryFullPageInner({ storyId }: StoryFullPageProps) {
   const qaRow = epic?.qaMatrix?.rows.find((r) => r.storyId === story.id);
 
   return (
-    <div className="h-full min-h-0">
-      <div className="h-full min-h-0 overflow-y-auto">
+    <div className="h-full min-h-0 flex">
+      <div className="h-full min-h-0 overflow-y-auto flex-1 min-w-0">
         <div className="mx-auto max-w-7xl px-6 py-8">
 
           {/* Back button */}
@@ -605,6 +648,19 @@ function StoryFullPageInner({ storyId }: StoryFullPageProps) {
                           </TooltipContent>
                         </Tooltip>
                       ) : null}
+                      <Tooltip>
+                        <TooltipTrigger asChild>
+                          <Button
+                            variant="ghost"
+                            size="icon"
+                            onClick={() => setAssistantOpen((v) => !v)}
+                            className={`text-muted-foreground hover:text-foreground ${assistantOpen ? 'bg-muted text-foreground' : ''}`}
+                          >
+                            <Sparkles className="h-4 w-4" />
+                          </Button>
+                        </TooltipTrigger>
+                        <TooltipContent>Asistente de edición IA</TooltipContent>
+                      </Tooltip>
                       <Tooltip>
                         <TooltipTrigger asChild>
                           <Button variant="ghost" size="icon" onClick={handleStartEdit} className="text-muted-foreground hover:text-foreground">
@@ -948,6 +1004,16 @@ function StoryFullPageInner({ storyId }: StoryFullPageProps) {
           )}
         </div>
       </div>
+
+      <AssistantChatSidebar
+        entityType="story"
+        entityId={storyId}
+        entityTitle={story.title}
+        open={assistantOpen}
+        onClose={() => setAssistantOpen(false)}
+        onApplyProposal={handleApplyAssistantProposal}
+      />
+
       {story && (
         <TypeToConfirmDialog
           open={deleteOpen}

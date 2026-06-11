@@ -531,21 +531,26 @@ model AgentTokenSettings {
   // Stories — Product Owner agent
   // effort ∈ 'low' | 'medium' | 'high' (validado en service/DTO).
   // 'max' solo soportado en modelos Opus; agregar cuando se haga upgrade.
+  // model: id Claude (whitelist PROJECT_AGENT_MODELS — adaptive thinking + effort).
+  storyPoModel           String  @default("claude-sonnet-4-6")
   storyPoEffort          String  @default("medium")
   storyPoMaxTokens       Int     @default(28000)
   storyPoThinkingEnabled Boolean @default(true)
 
   // Stories — Tech Lead agent
+  storyTlModel           String  @default("claude-sonnet-4-6")
   storyTlEffort          String  @default("medium")
   storyTlMaxTokens       Int     @default(64000)
   storyTlThinkingEnabled Boolean @default(true)
 
   // Stories — QA agent
+  storyQaModel           String  @default("claude-sonnet-4-6")
   storyQaEffort          String  @default("medium")
   storyQaMaxTokens       Int     @default(64000)
   storyQaThinkingEnabled Boolean @default(true)
 
   // Epics agent (max_tokens dinámico → este valor es el cap superior)
+  epicModel           String  @default("claude-sonnet-4-6")
   epicEffort          String  @default("medium")
   epicMaxTokens       Int     @default(64000)
   epicThinkingEnabled Boolean @default(true)
@@ -555,9 +560,17 @@ model AgentTokenSettings {
   // diagrama gasta MUCHO budget en thinking validando estructura (ciclos,
   // layer assignments, edge labels), y se quedaba sin tokens antes de
   // estructurar el submit_diagram. Subir a 64000 lo alinea con epicMaxTokens.
+  diagramModel           String  @default("claude-sonnet-4-6")
   diagramEffort          String  @default("medium")
   diagramMaxTokens       Int     @default(64000)
   diagramThinkingEnabled Boolean @default(true)
+
+  // Assistant agent — chatbot lateral de edición (iniciativas/épicas/historias).
+  // Mismo shape SDK (adaptive thinking + effort) que los agentes de generación.
+  assistantModel           String  @default("claude-sonnet-4-6")
+  assistantEffort          String  @default("medium")
+  assistantMaxTokens       Int     @default(32000)
+  assistantThinkingEnabled Boolean @default(true)
 
   // Forge Worker — coder agent (Claude Code CLI). Configurable desde
   // /factory/settings → tab "Factory". Reemplaza el approach de env vars

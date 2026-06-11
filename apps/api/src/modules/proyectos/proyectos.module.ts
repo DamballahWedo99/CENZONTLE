@@ -31,6 +31,9 @@ import { DiagramCacheService } from './diagrams/generation/diagram-cache.service
 import { DiagramSessionCacheService } from './diagrams/generation/diagram-session-cache.service';
 import { VaultMigrationController } from './migration/vault-migration.controller';
 import { VaultMigrationService } from './migration/vault-migration.service';
+import { AssistantChatController } from './assistant/assistant-chat.controller';
+import { AssistantChatService } from './assistant/assistant-chat.service';
+import { AssistantSessionService } from './assistant/assistant-session.service';
 
 @Module({
   imports: [
@@ -53,6 +56,7 @@ import { VaultMigrationService } from './migration/vault-migration.service';
     StoriesController,
     StoryDependenciesController,
     ChangelogController,
+    AssistantChatController, // Prefijo propio /proyectos/assistant-chat — sin colisión con :id catch-alls
   ],
   providers: [
     PodsService,
@@ -70,6 +74,8 @@ import { VaultMigrationService } from './migration/vault-migration.service';
     StoryProposalCacheService,
     VaultMigrationService,
     ChangelogService,
+    AssistantChatService,
+    AssistantSessionService,
   ],
   exports: [PodsService, InitiativesService, EpicsService, StoriesService, StoryDependenciesService, ChangelogService],
 })

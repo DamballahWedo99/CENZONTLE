@@ -56,7 +56,8 @@ import { InlineEpicCreator } from './InlineEpicCreator';
 import { EpicAgentPromptBar } from './EpicAgentPromptBar';
 import { AgentThinkingDisplay } from './agent-thinking';
 import { EpicProposalList } from './EpicProposalList';
-import type { ProposedEpic, EpicGenerationEvent, Epic } from '@cenzontle/shared';
+import type { ProposedEpic, EpicGenerationEvent, Epic, AssistantProposal } from '@cenzontle/shared';
+import { AssistantChatSidebar } from '../assistant/AssistantChatSidebar';
 import { createEpic as apiCreateEpic } from '@/lib/api/epics';
 import { getCachedSession, invalidateCache, removeCachedProposal, cancelEpicGeneration } from '@/lib/api/epic-generation';
 import { publishInitiativeToTracker } from '@/lib/api/integrations';
@@ -215,6 +216,20 @@ function InitiativeFullPageInner({ initiativeId }: InitiativeFullPageProps) {
   const [editOwner, setEditOwner] = useState('');
   const [editStartDate, setEditStartDate] = useState('');
   const [editTargetDate, setEditTargetDate] = useState('');
+  const [assistantOpen, setAssistantOpen] = useState(false);
+
+  // Apply de propuestas del asistente: mismo write-path que handleSave
+  // (PATCH + dispatch). El sidebar marca la propuesta como aplicada si no throws.
+  const handleApplyAssistantProposal = async (proposal: AssistantProposal) => {
+    if (!initiative || proposal.target !== 'initiative_description') {
+      throw new Error('Propuesta no aplicable a esta iniciativa');
+    }
+    await apiUpdateInitiative(initiative.id, { description: proposal.newContent });
+    dispatch({
+      type: 'UPDATE_INITIATIVE',
+      payload: { id: initiative.id, changes: { description: proposal.newContent } },
+    });
+  };
   // Tab state URL-synced (ver mismo patrón en Story/EpicFullPage). Default
   // 'descripcion' cuando la URL no trae `?tab=`.
   const pathname = usePathname();
@@ -737,8 +752,8 @@ function InitiativeFullPageInner({ initiativeId }: InitiativeFullPageProps) {
   };
 
   return (
-    <div className="h-full min-h-0">
-      <div className="h-full min-h-0 overflow-y-auto">
+    <div className="h-full min-h-0 flex">
+      <div className="h-full min-h-0 overflow-y-auto flex-1 min-w-0">
         <div className="mx-auto px-6 py-8 max-w-7xl">
           {/* ── Header ── */}
           <div className="mb-8">
@@ -793,6 +808,19 @@ function InitiativeFullPageInner({ initiativeId }: InitiativeFullPageProps) {
                           <TooltipContent>Publicar como Linear Initiative</TooltipContent>
                         </Tooltip>
                       ) : null}
+                      <Tooltip>
+                        <TooltipTrigger asChild>
+                          <Button
+                            variant="ghost"
+                            size="icon"
+                            onClick={() => setAssistantOpen((v) => !v)}
+                            className={`text-muted-foreground hover:text-foreground ${assistantOpen ? 'bg-muted text-foreground' : ''}`}
+                          >
+                            <Sparkles className="h-4 w-4" />
+                          </Button>
+                        </TooltipTrigger>
+                        <TooltipContent>Asistente de edición IA</TooltipContent>
+                      </Tooltip>
                       <Tooltip>
                         <TooltipTrigger asChild>
                           <Button variant="ghost" size="icon" onClick={handleStartEdit} className="text-muted-foreground hover:text-foreground">
@@ -1415,6 +1443,15 @@ function InitiativeFullPageInner({ initiativeId }: InitiativeFullPageProps) {
           </Tabs>
         </div>
       </div>
+
+      <AssistantChatSidebar
+        entityType="initiative"
+        entityId={initiativeId}
+        entityTitle={initiative.name}
+        open={assistantOpen}
+        onClose={() => setAssistantOpen(false)}
+        onApplyProposal={handleApplyAssistantProposal}
+      />
 
       <TypeToConfirmDialog
         open={deleteOpen}

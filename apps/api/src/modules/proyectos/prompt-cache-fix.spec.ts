@@ -800,14 +800,16 @@ describe('Prompt cache anti-thrashing fix — source-level regression', () => {
       expect(orderBlock![0]).not.toMatch(/ADVISOR_GUIDANCE/);
     });
 
-    it('PO usa MODEL (Sonnet 4.6), NO HAIKU_MODEL — revertido tras smoke test', () => {
+    it('PO usa el modelo configurable por org, NO HAIKU_MODEL — revertido tras smoke test', () => {
       // El user observó que el PO con Haiku quedaba inferior en calidad
-      // narrativa. Sonnet entrega mejor prosa para los 5 headings.
-      // Pattern: el caller del PO en runAgentLoop pasa `model: MODEL` con
-      // un comentario que menciona el revert desde Haiku.
+      // narrativa (revert 2026-05-04). Desde el selector de modelo (2026-06-10)
+      // el caller pasa `model` resuelto de OrgAnthropicConfigService.getModel()
+      // — cuya whitelist excluye Haiku — y el comentario preserva el porqué.
       expect(STORY_SERVICE).toMatch(
-        /role:\s*'po',\s*\n[\s\S]{0,500}revertido desde Haiku[\s\S]{0,500}model:\s*MODEL,/,
+        /role:\s*'po',\s*\n[\s\S]{0,500}Haiku[\s\S]{0,500}model,/,
       );
+      // Garantía dura: el caller del PO no pasa HAIKU_MODEL.
+      expect(STORY_SERVICE).not.toMatch(/role:\s*'po',\s*\n[\s\S]{0,300}HAIKU_MODEL/);
     });
 
     it('runQAAgent valida con recovery automática para strategies-as-string (Sonnet bug)', () => {

@@ -5,9 +5,11 @@ import {
   AGENT_TOKEN_BOUNDS,
   FORGE_WORKER_EFFORT_LEVELS,
   FORGE_WORKER_MODELS,
+  PROJECT_AGENT_MODELS,
   type AgentEffortLevel,
   type ForgeWorkerEffortLevel,
   type ForgeWorkerModel,
+  type ProjectAgentModel,
 } from '@cenzontle/shared';
 
 const T = AGENT_TOKEN_BOUNDS;
@@ -20,6 +22,10 @@ const T = AGENT_TOKEN_BOUNDS;
  * adaptive thinking de Anthropic.
  */
 export class UpdateAgentTokenSettingsDto {
+  @ApiPropertyOptional({ enum: PROJECT_AGENT_MODELS, description: 'Modelo Claude del agente PO' })
+  @IsOptional() @IsIn(PROJECT_AGENT_MODELS as unknown as string[])
+  storyPoModel?: ProjectAgentModel;
+
   @ApiPropertyOptional({ enum: AGENT_EFFORT_LEVELS, description: 'Esfuerzo del adaptive thinking del agente PO' })
   @IsOptional() @IsIn(AGENT_EFFORT_LEVELS as unknown as string[])
   storyPoEffort?: AgentEffortLevel;
@@ -31,6 +37,10 @@ export class UpdateAgentTokenSettingsDto {
   @ApiPropertyOptional({ description: 'Activar/desactivar adaptive thinking del agente PO' })
   @IsOptional() @IsBoolean()
   storyPoThinkingEnabled?: boolean;
+
+  @ApiPropertyOptional({ enum: PROJECT_AGENT_MODELS, description: 'Modelo Claude del agente TL' })
+  @IsOptional() @IsIn(PROJECT_AGENT_MODELS as unknown as string[])
+  storyTlModel?: ProjectAgentModel;
 
   @ApiPropertyOptional({ enum: AGENT_EFFORT_LEVELS, description: 'Esfuerzo del adaptive thinking del agente TL' })
   @IsOptional() @IsIn(AGENT_EFFORT_LEVELS as unknown as string[])
@@ -44,6 +54,10 @@ export class UpdateAgentTokenSettingsDto {
   @IsOptional() @IsBoolean()
   storyTlThinkingEnabled?: boolean;
 
+  @ApiPropertyOptional({ enum: PROJECT_AGENT_MODELS, description: 'Modelo Claude del agente QA' })
+  @IsOptional() @IsIn(PROJECT_AGENT_MODELS as unknown as string[])
+  storyQaModel?: ProjectAgentModel;
+
   @ApiPropertyOptional({ enum: AGENT_EFFORT_LEVELS, description: 'Esfuerzo del adaptive thinking del agente QA' })
   @IsOptional() @IsIn(AGENT_EFFORT_LEVELS as unknown as string[])
   storyQaEffort?: AgentEffortLevel;
@@ -55,6 +69,10 @@ export class UpdateAgentTokenSettingsDto {
   @ApiPropertyOptional({ description: 'Activar/desactivar adaptive thinking del agente QA' })
   @IsOptional() @IsBoolean()
   storyQaThinkingEnabled?: boolean;
+
+  @ApiPropertyOptional({ enum: PROJECT_AGENT_MODELS, description: 'Modelo Claude del agente de épicas' })
+  @IsOptional() @IsIn(PROJECT_AGENT_MODELS as unknown as string[])
+  epicModel?: ProjectAgentModel;
 
   @ApiPropertyOptional({ enum: AGENT_EFFORT_LEVELS, description: 'Esfuerzo del adaptive thinking del agente de épicas' })
   @IsOptional() @IsIn(AGENT_EFFORT_LEVELS as unknown as string[])
@@ -68,6 +86,10 @@ export class UpdateAgentTokenSettingsDto {
   @IsOptional() @IsBoolean()
   epicThinkingEnabled?: boolean;
 
+  @ApiPropertyOptional({ enum: PROJECT_AGENT_MODELS, description: 'Modelo Claude de los agentes de diagramas' })
+  @IsOptional() @IsIn(PROJECT_AGENT_MODELS as unknown as string[])
+  diagramModel?: ProjectAgentModel;
+
   @ApiPropertyOptional({ enum: AGENT_EFFORT_LEVELS, description: 'Esfuerzo del adaptive thinking de los agentes de diagramas' })
   @IsOptional() @IsIn(AGENT_EFFORT_LEVELS as unknown as string[])
   diagramEffort?: AgentEffortLevel;
@@ -79,6 +101,26 @@ export class UpdateAgentTokenSettingsDto {
   @ApiPropertyOptional({ description: 'Activar/desactivar adaptive thinking de los agentes de diagramas' })
   @IsOptional() @IsBoolean()
   diagramThinkingEnabled?: boolean;
+
+  // ════════════════════════════════════════════════════════════════════
+  // Assistant (chatbot lateral de edición — iniciativas/épicas/historias)
+  // ════════════════════════════════════════════════════════════════════
+
+  @ApiPropertyOptional({ enum: PROJECT_AGENT_MODELS, description: 'Modelo Claude del asistente de edición' })
+  @IsOptional() @IsIn(PROJECT_AGENT_MODELS as unknown as string[])
+  assistantModel?: ProjectAgentModel;
+
+  @ApiPropertyOptional({ enum: AGENT_EFFORT_LEVELS, description: 'Esfuerzo del adaptive thinking del asistente de edición' })
+  @IsOptional() @IsIn(AGENT_EFFORT_LEVELS as unknown as string[])
+  assistantEffort?: AgentEffortLevel;
+
+  @ApiPropertyOptional({ minimum: T.maxTokens.min, maximum: T.maxTokens.max })
+  @IsOptional() @IsInt() @Min(T.maxTokens.min) @Max(T.maxTokens.max)
+  assistantMaxTokens?: number;
+
+  @ApiPropertyOptional({ description: 'Activar/desactivar adaptive thinking del asistente de edición' })
+  @IsOptional() @IsBoolean()
+  assistantThinkingEnabled?: boolean;
 
   // ════════════════════════════════════════════════════════════════════
   // Forge Worker (coder agent — Claude Code CLI)

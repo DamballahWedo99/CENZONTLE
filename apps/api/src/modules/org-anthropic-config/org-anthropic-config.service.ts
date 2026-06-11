@@ -4,9 +4,26 @@ import {
   NotFoundException,
   OnApplicationBootstrap,
 } from '@nestjs/common';
+import Anthropic from '@anthropic-ai/sdk';
 import { PrismaService } from '../prisma/prisma.service';
 import { CryptoService } from '../vault/crypto.service';
+import {
+  ANTHROPIC_MODEL_CATALOG,
+  type AnthropicModelInfo,
+} from './anthropic-model-catalog';
 import { InjectPinoLogger, PinoLogger } from 'nestjs-pino';
+
+/** Respuesta del catálogo de modelos para los selectores por agente de la UI. */
+export interface AvailableModelsResult {
+  /** 'live' = verificado contra GET /v1/models con la key de la org. */
+  source: 'live' | 'fallback';
+  models: Array<
+    AnthropicModelInfo & {
+      /** Presente en la respuesta en vivo de la API (undefined en fallback). */
+      availableInApi?: boolean;
+    }
+  >;
+}
 
 /**
  * Service singleton para gestionar la API key de Anthropic a nivel de
@@ -40,6 +57,13 @@ export class OrgAnthropicConfigService implements OnApplicationBootstrap {
   private static readonly CACHE_TTL_MS = 5 * 60 * 1000;
   private cachedPlaintext: string | null = null;
   private cacheExpiresAt = 0;
+
+  // Cache del listado en vivo de GET /v1/models (10 min). El listado solo lo
+  // pide la UI de settings — el TTL largo evita golpear la API de Anthropic
+  // en cada render sin sacrificar frescura útil.
+  private static readonly MODELS_CACHE_TTL_MS = 10 * 60 * 1000;
+  private cachedLiveModelIds: Set<string> | null = null;
+  private liveModelsCacheExpiresAt = 0;
 
   constructor(
     private readonly prisma: PrismaService,
@@ -181,7 +205,12 @@ export class OrgAnthropicConfigService implements OnApplicationBootstrap {
       where: { id: OrgAnthropicConfigService.SINGLETON_ID },
     });
     if (!config) {
-      return { configured: false, maskedKey: null, updatedAt: null, updatedBy: null };
+      return {
+        configured: false,
+        maskedKey: null,
+        updatedAt: null,
+        updatedBy: null,
+      };
     }
     return {
       configured: !!config.apiKeyCiphertext,
@@ -189,5 +218,77 @@ export class OrgAnthropicConfigService implements OnApplicationBootstrap {
       updatedAt: config.updatedAt.toISOString(),
       updatedBy: config.updatedBy,
     };
+  }
+
+  // ─────────────────────────────────────────────────────────────────────
+  //   Catálogo de modelos (para el selector por agente de Tokens IA)
+  // ─────────────────────────────────────────────────────────────────────
+
+  /**
+   * Listado para los selectores de modelo de la UI: catálogo curado (pricing
+   * + descripciones + compatibilidad) verificado contra `GET /v1/models` con
+   * la API key de la org cuando es posible.
+   *
+   * La verificación en vivo aporta dos cosas: confirma que la key funciona
+   * y marca si algún modelo del catálogo ya no está disponible para esta
+   * organización. Si no hay key o la API falla, degrada al catálogo puro
+   * (`source: 'fallback'`) — los selectores siguen siendo usables.
+   *
+   * La elección de modelo POR AGENTE se persiste en AgentTokenSettings (no
+   * aquí) — este service solo expone el catálogo para poblar la UI.
+   */
+  async listAvailableModels(): Promise<AvailableModelsResult> {
+    const liveIds = await this.fetchLiveModelIds();
+
+    if (!liveIds) {
+      return {
+        source: 'fallback',
+        models: ANTHROPIC_MODEL_CATALOG.map((m) => ({ ...m })),
+      };
+    }
+
+    return {
+      source: 'live',
+      models: ANTHROPIC_MODEL_CATALOG.map((m) => ({
+        ...m,
+        availableInApi: liveIds.has(m.id),
+      })),
+    };
+  }
+
+  /**
+   * IDs de modelos visibles para la key de la org vía Models API (cacheado
+   * 10 min). Null si no hay key configurada o la llamada falla — el caller
+   * degrada al catálogo. Timeout corto: esto alimenta una pantalla de
+   * settings, no puede colgarse medio minuto.
+   */
+  private async fetchLiveModelIds(): Promise<Set<string> | null> {
+    if (this.cachedLiveModelIds && Date.now() < this.liveModelsCacheExpiresAt) {
+      return this.cachedLiveModelIds;
+    }
+    let apiKey: string;
+    try {
+      apiKey = await this.getApiKeyPlaintext();
+    } catch {
+      return null; // key no configurada — fallback silencioso
+    }
+    try {
+      const client = new Anthropic({ apiKey, timeout: 5_000, maxRetries: 1 });
+      const ids = new Set<string>();
+      // El iterador auto-pagina; el catálogo actual cabe en la primera página
+      // pero no asumimos el page size.
+      for await (const model of client.models.list()) {
+        ids.add(model.id);
+      }
+      this.cachedLiveModelIds = ids;
+      this.liveModelsCacheExpiresAt = Date.now() + OrgAnthropicConfigService.MODELS_CACHE_TTL_MS;
+      return ids;
+    } catch (err) {
+      this.logger.warn(
+        { err: (err as Error)?.message },
+        '[listAvailableModels] GET /v1/models falló — usando catálogo local',
+      );
+      return null;
+    }
   }
 }

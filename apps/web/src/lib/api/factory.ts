@@ -394,6 +394,36 @@ export interface AnthropicConfigResponse {
   updatedBy: string | null;
 }
 
+/** Un modelo del catálogo (curado + verificación en vivo) para los selectores por agente. */
+export interface AnthropicModelOption {
+  id: string;
+  displayName: string;
+  description: string;
+  contextWindow: number;
+  maxOutput: number;
+  pricing: { inputPerMTok: number; outputPerMTok: number };
+  /** Compatible con el shape de los agentes (adaptive thinking + effort). */
+  agentCompatible: boolean;
+  recommended?: boolean;
+  legacy?: boolean;
+  /** Presente en GET /v1/models de Anthropic (solo cuando source='live'). */
+  availableInApi?: boolean;
+}
+
+export interface AnthropicModelsResponse {
+  /** 'live' = verificado contra la API de Anthropic con la key de la org. */
+  source: 'live' | 'fallback';
+  models: AnthropicModelOption[];
+}
+
+/**
+ * Catálogo de modelos para los selectores por agente de Tokens IA. La elección
+ * por agente se persiste vía updateAgentTokenSettings. Solo Alta Gerencia.
+ */
+export function getAnthropicModels() {
+  return apiFetch<AnthropicModelsResponse>('/factory/anthropic-config/models');
+}
+
 /** Lee metadata pública de la API key (sin plaintext). Solo Alta Gerencia. */
 export function getAnthropicConfig() {
   return apiFetch<AnthropicConfigResponse>('/factory/anthropic-config');

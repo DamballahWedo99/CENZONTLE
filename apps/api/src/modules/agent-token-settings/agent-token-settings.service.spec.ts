@@ -9,21 +9,31 @@ import { createMockPinoLogger } from '../../common/testing/mock-pino-logger';
 function makeMockPrisma(initialRow?: Partial<Record<string, unknown>>) {
   const row = {
     id: 'singleton',
+    storyPoModel: 'claude-sonnet-4-6',
     storyPoEffort: 'high',
     storyPoMaxTokens: 28000,
     storyPoThinkingEnabled: true,
+    storyTlModel: 'claude-sonnet-4-6',
     storyTlEffort: 'high',
     storyTlMaxTokens: 44000,
     storyTlThinkingEnabled: true,
+    storyQaModel: 'claude-sonnet-4-6',
     storyQaEffort: 'high',
     storyQaMaxTokens: 44000,
     storyQaThinkingEnabled: true,
+    epicModel: 'claude-sonnet-4-6',
     epicEffort: 'high',
     epicMaxTokens: 64000,
     epicThinkingEnabled: true,
+    diagramModel: 'claude-sonnet-4-6',
     diagramEffort: 'high',
     diagramMaxTokens: 64000,
     diagramThinkingEnabled: true,
+    // Assistant (chatbot lateral de edición) — defaults alineados con schema.
+    assistantModel: 'claude-sonnet-4-6',
+    assistantEffort: 'medium',
+    assistantMaxTokens: 32000,
+    assistantThinkingEnabled: true,
     // Forge Worker (coder agent CLI) — defaults alineados con schema.
     forgeWorkerModel: 'claude-sonnet-4-6',
     forgeWorkerEffort: 'high',
@@ -139,27 +149,41 @@ describe('AgentTokenSettingsService', () => {
   });
 
   describe('helpers tipados', () => {
-    it('getStoryPo/Tl/Qa devuelven { effort, maxTokens, enabled }', async () => {
+    it('getStoryPo/Tl/Qa devuelven { model, effort, maxTokens, enabled }', async () => {
       const prisma = makeMockPrisma();
       const service = new AgentTokenSettingsService(prisma, createMockPinoLogger());
 
-      expect(await service.getStoryPo()).toEqual({ effort: 'high', maxTokens: 28000, enabled: true });
-      expect(await service.getStoryTl()).toEqual({ effort: 'high', maxTokens: 44000, enabled: true });
-      expect(await service.getStoryQa()).toEqual({ effort: 'high', maxTokens: 44000, enabled: true });
+      expect(await service.getStoryPo()).toEqual({ model: 'claude-sonnet-4-6', effort: 'high', maxTokens: 28000, enabled: true });
+      expect(await service.getStoryTl()).toEqual({ model: 'claude-sonnet-4-6', effort: 'high', maxTokens: 44000, enabled: true });
+      expect(await service.getStoryQa()).toEqual({ model: 'claude-sonnet-4-6', effort: 'high', maxTokens: 44000, enabled: true });
     });
 
-    it('getEpic devuelve { effort, maxTokensCap, enabled }', async () => {
+    it('getEpic devuelve { model, effort, maxTokensCap, enabled }', async () => {
       const prisma = makeMockPrisma();
       const service = new AgentTokenSettingsService(prisma, createMockPinoLogger());
 
-      expect(await service.getEpic()).toEqual({ effort: 'high', maxTokensCap: 64000, enabled: true });
+      expect(await service.getEpic()).toEqual({ model: 'claude-sonnet-4-6', effort: 'high', maxTokensCap: 64000, enabled: true });
     });
 
-    it('getDiagram devuelve { effort, maxTokens, enabled }', async () => {
+    it('getDiagram devuelve { model, effort, maxTokens, enabled }', async () => {
       const prisma = makeMockPrisma();
       const service = new AgentTokenSettingsService(prisma, createMockPinoLogger());
 
-      expect(await service.getDiagram()).toEqual({ effort: 'high', maxTokens: 64000, enabled: true });
+      expect(await service.getDiagram()).toEqual({ model: 'claude-sonnet-4-6', effort: 'high', maxTokens: 64000, enabled: true });
+    });
+
+    it('getAssistant devuelve { model, effort, maxTokens, enabled }', async () => {
+      const prisma = makeMockPrisma();
+      const service = new AgentTokenSettingsService(prisma, createMockPinoLogger());
+
+      expect(await service.getAssistant()).toEqual({ model: 'claude-sonnet-4-6', effort: 'medium', maxTokens: 32000, enabled: true });
+    });
+
+    it('getStoryPo: model fuera de whitelist (BD legacy) cae al default Sonnet 4.6', async () => {
+      const prisma = makeMockPrisma({ storyPoModel: 'claude-haiku-4-5-20251001' });
+      const service = new AgentTokenSettingsService(prisma, createMockPinoLogger());
+
+      expect((await service.getStoryPo()).model).toBe('claude-sonnet-4-6');
     });
   });
 
