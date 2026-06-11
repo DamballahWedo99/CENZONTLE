@@ -71,11 +71,12 @@ function buildService(): StoryGenerationService {
     getApiKeyPlaintext: jest.fn().mockResolvedValue('sk-test'),
   } as AnyObj;
   // tokenSettings sí se invoca desde runPOAgent/runTLAgent/runQAAgent — mock
-  // real con los métodos tipados que el service usa.
+  // real con los métodos tipados que el service usa. El `model` ahora viene de
+  // aquí (selección por agente), no de orgAnthropic.getModel().
   const tokenSettingsStub = {
-    getStoryPo: jest.fn().mockResolvedValue({ thinking: 10000, maxTokens: 28000 }),
-    getStoryTl: jest.fn().mockResolvedValue({ thinking: 12000, maxTokens: 44000 }),
-    getStoryQa: jest.fn().mockResolvedValue({ thinking: 12000, maxTokens: 44000 }),
+    getStoryPo: jest.fn().mockResolvedValue({ model: 'claude-sonnet-4-6', effort: 'medium', maxTokens: 28000, enabled: true }),
+    getStoryTl: jest.fn().mockResolvedValue({ model: 'claude-sonnet-4-6', effort: 'medium', maxTokens: 44000, enabled: true }),
+    getStoryQa: jest.fn().mockResolvedValue({ model: 'claude-sonnet-4-6', effort: 'medium', maxTokens: 44000, enabled: true }),
   } as AnyObj;
   // Mock minimal del logger pino — el constructor lo invoca al evaluar
   // STORY_AGENT_CONCURRENCY. Sin esto: TypeError reading 'info'/'warn'.
@@ -466,6 +467,34 @@ describe('Integración — handoff llega al request HTTP de Anthropic', () => {
     // Los messages del primer turn son solo el user (initialUserContent).
     expect(firstCall.messages).toHaveLength(1);
     expect(firstCall.messages[0].role).toBe('user');
+  });
+
+  it('regresión: con claude-fable-5 (whitelist, NO prefijo sonnet/opus) el request mantiene thinking adaptive', async () => {
+    // Fix del BLOCK de qa-reviewer (2026-06-10): el guard de adaptive thinking
+    // usaba startsWith('claude-sonnet'|'claude-opus'), que excluía a fable-5
+    // (whitelisted como seleccionable) → thinking se desactivaba en silencio.
+    // Ahora deriva de PROJECT_AGENT_MODELS.includes(model).
+    const { Subject } = require('rxjs');
+    const subject = new Subject();
+
+    const svc = service as any;
+    svc.tokenSettings.getStoryPo.mockResolvedValueOnce({
+      model: 'claude-fable-5',
+      effort: 'high',
+      maxTokens: 28000,
+      enabled: true,
+    });
+
+    const commonAny = baseContext() as any;
+    const commonContextBlock = svc.buildCommonContextBlock(commonAny);
+
+    await svc.runPOAgent(commonAny, commonContextBlock, undefined, 3, false, undefined, subject, Date.now());
+
+    expect(streamCalls.length).toBeGreaterThanOrEqual(1);
+    expect(streamCalls[0].model).toBe('claude-fable-5');
+    // El guard NO debe haber suprimido el thinking para fable-5.
+    expect(streamCalls[0].thinking).toEqual({ type: 'adaptive' });
+    expect(streamCalls[0].output_config).toEqual({ effort: 'high' });
   });
 
   it('cuando designSkipped=true, el system[0].text contiene la directiva de skip y NO el handoff', async () => {

@@ -22,13 +22,23 @@ import { randomUUID } from 'crypto';
 import type { EpicGenerationEvent, ProposedEpic, Priority, EpicStatus } from '@cenzontle/shared';
 import { Subject } from 'rxjs';
 import { scrubSecrets } from '../../../../common/utils/scrub-secrets.util';
+import {
+  appendNudgeToLastUserMessage,
+  extractResultPreview,
+  getToolLabel,
+  sanitizeToolArgs,
+  summarizeToolResult,
+  toolTimeout,
+} from '../../../../common/utils/agent-loop.util';
 import { sanitizeUserPromptForLLM } from '../../../../common/utils/sanitize-llm-input.util';
 import { AgentTokenSettingsService } from '../../../agent-token-settings/agent-token-settings.service';
 import { InjectPinoLogger, PinoLogger } from 'nestjs-pino';
 
 const MAX_TOOL_ITERATIONS = 15;
-// Sonnet 4.6 — soporta adaptive thinking + effort levels.
-const MODEL = 'claude-sonnet-4-6';
+// El modelo es configurable POR AGENTE (AgentTokenSettings.epicModel,
+// seleccionable en /factory/settings → Tokens IA) — se resuelve una vez por run
+// junto al effort/maxTokens. Cambiarlo a mitad de loop rompería los thinking
+// blocks firmados (signatures por modelo).
 // Tope global de bytes acumulados en attachments multimodales por request.
 // Protege contra DoS por acumulación (15 iteraciones × N PDFs × 20 MB) y
 // limita el costo de tokens enviados a Anthropic. ~60 MB ≈ ~15 PDFs típicos.
@@ -62,6 +72,16 @@ function maxTokensForCount(count: number, cap: number): number {
 //   3. UI renderice textos patologicos.
 const MAX_FIELD_LEN = 20_000;
 const MAX_TITLE_LEN = 300;
+
+/** Labels de tools para la timeline de la UI (param de getToolLabel). */
+const TOOL_LABELS: Record<string, string> = {
+  explore_code: 'Explorando codigo',
+  vault_glob: 'Explorando Vault',
+  vault_grep: 'Buscando en Vault',
+  vault_read: 'Leyendo del Vault',
+  web_search: 'Investigando en la web',
+  read_initiative_documents: 'Leyendo documentos',
+};
 
 function cap(s: string, n = MAX_FIELD_LEN): string {
   return s.length > n ? s.slice(0, n) : s;
@@ -190,6 +210,9 @@ export class EpicGenerationService {
       subject.complete();
       return;
     }
+
+    // Modelo del agente de épicas — resuelto UNA VEZ y fijo para todo el run.
+    const { model } = await this.tokenSettings.getEpic();
 
     // --- Phase tracking ---
     let currentPhase: string = 'researching';
@@ -387,12 +410,7 @@ REGLAS DUROS:
       if (iteration === MAX_TOOL_ITERATIONS - 2) {
         const nudgeText =
           'Ya tienes suficiente contexto. Llama a submit_proposals AHORA con las epicas basadas en lo que has descubierto. No hagas mas busquedas.';
-        const last = messages[messages.length - 1];
-        if (last && last.role === 'user' && Array.isArray(last.content)) {
-          last.content.push({ type: 'text', text: nudgeText });
-        } else if (last && last.role === 'user' && typeof last.content === 'string') {
-          last.content = `${last.content}\n\n${nudgeText}`;
-        } else {
+        if (!appendNudgeToLastUserMessage(messages, nudgeText)) {
           messages.push({ role: 'user', content: nudgeText });
         }
       }
@@ -418,7 +436,7 @@ REGLAS DUROS:
       // `finalMessage()` espera al `message_stop`, drop-in con `create()`.
       const stream = client.messages.stream(
         {
-          model: MODEL,
+          model,
           max_tokens: maxTokens,
           // 2 cache breakpoints: systemPrompt + contextBlock. El segundo captura
           // el contexto pesado (initiative + epics existentes + pods + repos)
@@ -589,7 +607,7 @@ REGLAS DUROS:
               step: 'tool_use',
               tool: 'web_search',
               label: 'Investigando en la web',
-              toolArgs: serverBlock.input ? this.sanitizeToolArgs(serverBlock.input as Record<string, unknown>) : undefined,
+              toolArgs: serverBlock.input ? sanitizeToolArgs(serverBlock.input as Record<string, unknown>) : undefined,
               timestamp: new Date().toISOString(),
             },
           });
@@ -705,14 +723,14 @@ REGLAS DUROS:
           continue;
         }
 
-        const toolLabel = this.getToolLabel(tool.name);
+        const toolLabel = getToolLabel(TOOL_LABELS, tool.name);
         subject.next({
           data: {
             type: 'step_start',
             step: 'tool_use',
             tool: tool.name,
             label: toolLabel,
-            toolArgs: this.sanitizeToolArgs(toolBlock.input as Record<string, unknown>),
+            toolArgs: sanitizeToolArgs(toolBlock.input as Record<string, unknown>),
             timestamp: new Date().toISOString(),
           },
         });
@@ -721,7 +739,7 @@ REGLAS DUROS:
         // Timeout más holgado para tools multimodales: sharp + base64 de PDFs
         // grandes puede exceder 10s fácilmente.
         const timerMs = tool.executeMultimodal ? 20_000 : 10_000;
-        const timer = this.timeout(timerMs);
+        const timer = toolTimeout(timerMs);
         try {
           let result: string;
           if (tool.executeMultimodal) {
@@ -768,9 +786,9 @@ REGLAS DUROS:
               type: 'step_done',
               step: 'tool_use',
               tool: tool.name,
-              summary: this.summarizeToolResult(result),
+              summary: summarizeToolResult(result),
               durationMs: Date.now() - stepStartTime,
-              resultPreview: this.extractResultPreview(result),
+              resultPreview: extractResultPreview(result),
               timestamp: new Date().toISOString(),
             },
           });
@@ -875,83 +893,6 @@ REGLAS DUROS:
     const valid = ['critical', 'high', 'medium', 'low'];
     const str = String(raw ?? 'medium').toLowerCase();
     return (valid.includes(str) ? str : 'medium') as Priority;
-  }
-
-  /**
-   * Sanea los argumentos de una tool antes de emitirlos por SSE / persistir
-   * en cache. Dos responsabilidades:
-   *   1. Truncar strings largos (tope 100 chars) para no saturar la UI.
-   *   2. Correr `scrubSecrets` en CADA string leaf — incluyendo objetos /
-   *      arrays anidados — para que un prompt injection que haga que el
-   *      modelo invoque p. ej. `code_grep({ pattern: "ghp_..." })` no
-   *      filtre el token por el evento `step_start.toolArgs`. El evento se
-   *      emite ANTES de ejecutar la tool, así que incluso si la ejecución
-   *      falla el cliente ya vio el secreto sin esta defensa.
-   */
-  private sanitizeToolArgs(input: Record<string, unknown>): Record<string, unknown> {
-    return this.sanitizeToolArgValue(input) as Record<string, unknown>;
-  }
-
-  private sanitizeToolArgValue(val: unknown): unknown {
-    if (typeof val === 'string') {
-      const truncated = val.length > 100 ? val.slice(0, 100) + '\u2026' : val;
-      return scrubSecrets(truncated);
-    }
-    if (Array.isArray(val)) {
-      return val.map((item) => this.sanitizeToolArgValue(item));
-    }
-    if (val !== null && typeof val === 'object') {
-      const out: Record<string, unknown> = {};
-      for (const [key, inner] of Object.entries(val as Record<string, unknown>)) {
-        out[key] = this.sanitizeToolArgValue(inner);
-      }
-      return out;
-    }
-    return val;
-  }
-
-  private extractResultPreview(result: string): string | undefined {
-    // Defense in depth: envolvemos TODO el flujo en scrubSecrets porque el
-    // `result` viene de tools que en el peor caso pueden devolver contenido
-    // de .git/config o mensajes de error con PATs embebidos. El scrub final
-    // garantiza que nada con patrón de token llegue a SSE ni al cache.
-    const preview = this.computeRawPreview(result);
-    return preview === undefined ? undefined : scrubSecrets(preview);
-  }
-
-  private computeRawPreview(result: string): string | undefined {
-    try {
-      const parsed = JSON.parse(result);
-
-      // Code exploration: show file paths or snippet titles
-      if (Array.isArray(parsed.results) && parsed.results.length > 0) {
-        return parsed.results
-          .slice(0, 5)
-          .map((r: Record<string, unknown>) => r.title || r.path || r.name || JSON.stringify(r).slice(0, 80))
-          .join(' · ');
-      }
-
-      // Documents: show document titles
-      if (Array.isArray(parsed.documents) && parsed.documents.length > 0) {
-        return parsed.documents
-          .slice(0, 5)
-          .map((d: Record<string, unknown>) => d.title || d.name || 'Documento')
-          .join(' · ');
-      }
-
-      // Raw content: show excerpt
-      if (typeof parsed.content === 'string' && parsed.content.length > 0) {
-        return parsed.content.slice(0, 300) + (parsed.content.length > 300 ? '…' : '');
-      }
-
-      // Fallback: show first 300 chars of the stringified result
-      const str = JSON.stringify(parsed);
-      if (str.length > 2) return str.slice(0, 300) + (str.length > 300 ? '…' : '');
-
-      return undefined;
-    } catch {
-      return result.slice(0, 300) + (result.length > 300 ? '…' : '');
-    }
   }
 
   private buildSystemPrompt(count: number, webSearch: boolean): string {
@@ -1153,36 +1094,4 @@ ${safePrompt}
     return parts.join('\n\n');
   }
 
-  private getToolLabel(name: string): string {
-    const labels: Record<string, string> = {
-      explore_code: 'Explorando codigo',
-      vault_glob: 'Explorando Vault',
-      vault_grep: 'Buscando en Vault',
-      vault_read: 'Leyendo del Vault',
-      web_search: 'Investigando en la web',
-      read_initiative_documents: 'Leyendo documentos',
-    };
-    return labels[name] ?? name;
-  }
-
-  private summarizeToolResult(result: string): string {
-    try {
-      const parsed = JSON.parse(result);
-      if (parsed.results) return `${parsed.results.length} resultados`;
-      if (parsed.documents) return `${parsed.documents.length} documentos`;
-      if (parsed.content) return `Contenido leido (${parsed.content.length} chars)`;
-      return 'Completado';
-    } catch {
-      return 'Completado';
-    }
-  }
-
-  private timeout(ms: number): Promise<never> & { clear: () => void } {
-    let timerId: NodeJS.Timeout;
-    const promise = new Promise<never>((_, reject) => {
-      timerId = setTimeout(() => reject(new Error(`Tool timeout (${ms}ms)`)), ms);
-    });
-    (promise as any).clear = () => clearTimeout(timerId!);
-    return promise as Promise<never> & { clear: () => void };
-  }
 }

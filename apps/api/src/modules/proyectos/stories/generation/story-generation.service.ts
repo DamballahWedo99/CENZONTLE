@@ -32,6 +32,7 @@ import {
 } from '../../vault-paths';
 import { CodeRepoCloneService } from '../../../code-repositories/code-repo-clone.service';
 import type { AgentTool, AgentToolContext, ToolAttachment } from '../../../factory/agent-tools/agent-tool.interface';
+import { PROJECT_AGENT_MODELS } from '@cenzontle/shared';
 import type {
   StoryGenerationEvent,
   ProposedStory,
@@ -47,13 +48,34 @@ import type {
   DiscoveredDependencyType,
 } from '@cenzontle/shared';
 import { scrubSecrets } from '../../../../common/utils/scrub-secrets.util';
+import {
+  extractResultPreview,
+  getToolLabel,
+  sanitizeToolArgs,
+  summarizeToolResult,
+  toolTimeout,
+} from '../../../../common/utils/agent-loop.util';
 import { AgentTokenSettingsService } from '../../../agent-token-settings/agent-token-settings.service';
 import { InjectPinoLogger, PinoLogger } from 'nestjs-pino';
 
-// Sonnet 4.6 — soporta adaptive thinking + effort levels + web_search_20260209
-// con dynamic filtering. Migrado desde claude-sonnet-4-20250514 (Sonnet 4.0)
-// que solo soportaba thinking modo `enabled` con budget_tokens fijo.
-const MODEL = 'claude-sonnet-4-6';
+/** Labels de tools para la timeline de la UI (param de getToolLabel). */
+const TOOL_LABELS: Record<string, string> = {
+  code_glob: 'Buscando archivos de codigo',
+  code_grep: 'Buscando en codigo',
+  code_read: 'Leyendo codigo',
+  vault_glob: 'Explorando Vault',
+  vault_grep: 'Buscando en Vault',
+  vault_read: 'Leyendo del Vault',
+  web_search: 'Investigando en la web',
+  read_initiative_documents: 'Leyendo documentos',
+};
+
+// El modelo de los agentes PO/TL/QA es configurable POR AGENTE
+// (AgentTokenSettings.story{Po,Tl,Qa}Model, seleccionable en /factory/settings
+// → Tokens IA). Cada sub-agente toma su modelo de su getter junto al
+// effort/maxTokens y lo fija para todo su loop — cambiar de modelo a mitad de
+// run rompería los thinking blocks firmados (signatures por modelo).
+// DEPS_AUDITOR y STORY_ORDER siguen en Haiku fijo (mecánicos, sin adaptive thinking).
 // Haiku 4.5 como executor para agentes puramente mecánicos:
 //   - DEPS_AUDITOR: audit boolean de vendors externos vs env vars declaradas
 //   - STORY_ORDER: extracción determinista de edges (lee tech designs, emite
@@ -1946,12 +1968,9 @@ NO disenes tecnicamente ni propongas tests — eso es trabajo del Tech Lead y de
     const poTokens = await this.tokenSettings.getStoryPo();
     const output = await this.runAgentLoop({
       role: 'po',
-      // Sonnet 4.6 — revertido desde Haiku 4.5 (2026-05-04). El user observó
-      // que el texto del PO con Haiku quedaba inferior en calidad narrativa.
-      // Sonnet entrega mejor prosa para los 5 headings (Antecedentes, Objetivo,
-      // Historia de usuario, Qué/Cómo/Cuándo, Criterios) — más rico en
-      // contexto del dominio y lenguaje natural de PO real.
-      model: MODEL,
+      // Modelo configurable por agente (whitelist excluye Haiku — revert
+      // 2026-05-04: la prosa del PO con Haiku quedaba inferior).
+      model: poTokens.model,
       commonContextBlock,
       roleSystemPrompt,
       tools: claudeTools,
@@ -2286,7 +2305,7 @@ NO cambies titles, descriptions, acceptanceCriteria — esos estan congelados. S
     const tlTokens = await this.tokenSettings.getStoryTl();
     const output = await this.runAgentLoop({
       role: 'technical',
-      model: MODEL, // Sonnet 4.6 — agente arquitectónico (decisiones técnicas profundas)
+      model: tlTokens.model, // configurable por agente — arquitectónico (decisiones técnicas profundas)
       commonContextBlock,
       roleSystemPrompt,
       tools: claudeTools,
@@ -2772,7 +2791,7 @@ NO cambies PO ni technical. Si una historia es dificil de testear, dilo en \`qa.
     const qaTokens = await this.tokenSettings.getStoryQa();
     const output = await this.runAgentLoop({
       role: 'qa',
-      model: MODEL, // Sonnet 4.6 — QA toma decisiones sobre testing strategy + edge cases
+      model: qaTokens.model, // configurable por agente — QA: testing strategy + edge cases
       commonContextBlock,
       roleSystemPrompt,
       tools: claudeTools,
@@ -3896,11 +3915,13 @@ Reglas:
     const activeBreakpoints: string[] = [];
     if (commonContextChars >= 4096) activeBreakpoints.push('commonContext');
     if (roleSystemChars >= 4096) activeBreakpoints.push('roleSystemPrompt');
-    // Adaptive thinking soportado solo en Sonnet/Opus. Para Haiku, el log
-    // muestra 'unsupported(haiku)' para evitar confusión cuando thinkingEnabled=true
-    // pero el modelo no soporta esa feature.
+    // Adaptive thinking soportado por TODOS los modelos de la whitelist de
+    // agentes de Proyectos (Fable/Opus/Sonnet — Haiku queda fuera). Derivamos
+    // de PROJECT_AGENT_MODELS en vez de prefijos frágiles: agregar un modelo
+    // nuevo a la whitelist lo cubre automáticamente. Para Haiku (deps/order),
+    // el log muestra 'unsupported(haiku)' cuando thinkingEnabled=true.
     const modelSupportsAdaptiveThinkingOuter =
-      model.startsWith('claude-sonnet') || model.startsWith('claude-opus');
+      (PROJECT_AGENT_MODELS as readonly string[]).includes(model);
     const thinkingDisplay = !modelSupportsAdaptiveThinkingOuter
       ? `unsupported(${model.replace('claude-', '')})`
       : thinkingEnabled
@@ -3969,13 +3990,13 @@ Reglas:
       //    adaptive thinking activo si el caller lo pidió.
       const isForcedTerminalTurn =
         !!forceTerminalOnLastIter && iteration === maxIterations - 1;
-      // Adaptive thinking SOLO está soportado por Sonnet 4.6, Opus 4.6/4.7,
-      // y Mythos Preview. Haiku 4.5 NO lo soporta — la API responde 400 con
-      // "adaptive thinking is not supported on this model" si lo enviamos.
-      // Detectamos por prefijo del modelo. Para Haiku, thinkingActive=false
+      // Adaptive thinking soportado por todos los modelos de la whitelist de
+      // agentes de Proyectos (Fable/Opus/Sonnet). Haiku 4.5 NO lo soporta — la
+      // API responde 400 si lo enviamos. Derivamos de PROJECT_AGENT_MODELS
+      // (no de prefijos): para Haiku (deps/order) thinkingActive=false
       // independientemente de lo que pida el caller.
       const modelSupportsAdaptiveThinking =
-        model.startsWith('claude-sonnet') || model.startsWith('claude-opus');
+        (PROJECT_AGENT_MODELS as readonly string[]).includes(model);
       const thinkingActive = thinkingEnabled && !isForcedTerminalTurn && modelSupportsAdaptiveThinking;
 
       // Namespace `beta` (no `client.messages.stream()`) porque el `advisor`
@@ -4229,7 +4250,7 @@ Reglas:
               step: 'tool_use',
               tool: 'web_search',
               label: 'Investigando en la web',
-              toolArgs: sb.input ? this.sanitizeToolArgs(sb.input as Record<string, unknown>) : undefined,
+              toolArgs: sb.input ? sanitizeToolArgs(sb.input as Record<string, unknown>) : undefined,
               role,
               timestamp: new Date().toISOString(),
             },
@@ -4344,14 +4365,14 @@ Reglas:
           continue;
         }
 
-        const toolLabel = this.getToolLabel(tool.name);
+        const toolLabel = getToolLabel(TOOL_LABELS, tool.name);
         subject.next({
           data: {
             type: 'step_start',
             step: 'tool_use',
             tool: tool.name,
             label: toolLabel,
-            toolArgs: this.sanitizeToolArgs(toolBlock.input as Record<string, unknown>),
+            toolArgs: sanitizeToolArgs(toolBlock.input as Record<string, unknown>),
             role,
             timestamp: new Date().toISOString(),
           },
@@ -4359,7 +4380,7 @@ Reglas:
 
         const stepStartTime = Date.now();
         const timerMs = tool.executeMultimodal ? 20_000 : 10_000;
-        const timer = this.timeout(timerMs);
+        const timer = toolTimeout(timerMs);
         try {
           let result: string;
           if (tool.executeMultimodal) {
@@ -4401,9 +4422,9 @@ Reglas:
               type: 'step_done',
               step: 'tool_use',
               tool: tool.name,
-              summary: this.summarizeToolResult(result),
+              summary: summarizeToolResult(result),
               durationMs: Date.now() - stepStartTime,
-              resultPreview: this.extractResultPreview(result),
+              resultPreview: extractResultPreview(result),
               role,
               timestamp: new Date().toISOString(),
             },
@@ -5847,94 +5868,6 @@ Análisis:
 - Story 0 podría leer avatar_url para incluirlo en respuesta → \`{from: 0, blockedBy: 1, hardness: "soft", reason: "shared_model", description: "Story 0 puede retornar avatar_url solo si Story 1 ya migró el schema; sin migración el campo es null"}\`
 
 Idioma: español para descriptions. Sé concreto: nombra el endpoint, columna, modelo, evento específico.`;
-  }
-
-  private sanitizeToolArgs(input: Record<string, unknown>): Record<string, unknown> {
-    return this.sanitizeToolArgValue(input) as Record<string, unknown>;
-  }
-
-  private sanitizeToolArgValue(val: unknown): unknown {
-    if (typeof val === 'string') {
-      const truncated = val.length > 100 ? val.slice(0, 100) + '\u2026' : val;
-      return scrubSecrets(truncated);
-    }
-    if (Array.isArray(val)) {
-      return val.map((item) => this.sanitizeToolArgValue(item));
-    }
-    if (val !== null && typeof val === 'object') {
-      const out: Record<string, unknown> = {};
-      for (const [key, inner] of Object.entries(val as Record<string, unknown>)) {
-        out[key] = this.sanitizeToolArgValue(inner);
-      }
-      return out;
-    }
-    return val;
-  }
-
-  private extractResultPreview(result: string): string | undefined {
-    const preview = this.computeRawPreview(result);
-    return preview === undefined ? undefined : scrubSecrets(preview);
-  }
-
-  private computeRawPreview(result: string): string | undefined {
-    try {
-      const parsed = JSON.parse(result);
-      if (Array.isArray(parsed.results) && parsed.results.length > 0) {
-        return parsed.results
-          .slice(0, 5)
-          .map((r: Record<string, unknown>) => r.title || r.path || r.name || JSON.stringify(r).slice(0, 80))
-          .join(' · ');
-      }
-      if (Array.isArray(parsed.documents) && parsed.documents.length > 0) {
-        return parsed.documents
-          .slice(0, 5)
-          .map((d: Record<string, unknown>) => d.title || d.name || 'Documento')
-          .join(' · ');
-      }
-      if (typeof parsed.content === 'string' && parsed.content.length > 0) {
-        return parsed.content.slice(0, 300) + (parsed.content.length > 300 ? '…' : '');
-      }
-      const str = JSON.stringify(parsed);
-      if (str.length > 2) return str.slice(0, 300) + (str.length > 300 ? '…' : '');
-      return undefined;
-    } catch {
-      return result.slice(0, 300) + (result.length > 300 ? '…' : '');
-    }
-  }
-
-  private getToolLabel(name: string): string {
-    const labels: Record<string, string> = {
-      code_glob: 'Buscando archivos de codigo',
-      code_grep: 'Buscando en codigo',
-      code_read: 'Leyendo codigo',
-      vault_glob: 'Explorando Vault',
-      vault_grep: 'Buscando en Vault',
-      vault_read: 'Leyendo del Vault',
-      web_search: 'Investigando en la web',
-      read_initiative_documents: 'Leyendo documentos',
-    };
-    return labels[name] ?? name;
-  }
-
-  private summarizeToolResult(result: string): string {
-    try {
-      const parsed = JSON.parse(result);
-      if (parsed.results) return `${parsed.results.length} resultados`;
-      if (parsed.documents) return `${parsed.documents.length} documentos`;
-      if (parsed.content) return `Contenido leido (${parsed.content.length} chars)`;
-      return 'Completado';
-    } catch {
-      return 'Completado';
-    }
-  }
-
-  private timeout(ms: number): Promise<never> & { clear: () => void } {
-    let timerId: NodeJS.Timeout;
-    const promise = new Promise<never>((_, reject) => {
-      timerId = setTimeout(() => reject(new Error(`Tool timeout (${ms}ms)`)), ms);
-    });
-    (promise as any).clear = () => clearTimeout(timerId!);
-    return promise as Promise<never> & { clear: () => void };
   }
 
   /** Preview corto del input del terminal tool para logging. */

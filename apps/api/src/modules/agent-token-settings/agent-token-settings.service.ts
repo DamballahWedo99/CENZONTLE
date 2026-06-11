@@ -7,10 +7,13 @@ import {
   type AgentEffortLevel,
   type AgentTokenSettings as AgentTokenSettingsPublic,
   DEFAULT_AGENT_TOKEN_SETTINGS,
+  DEFAULT_PROJECT_AGENT_MODEL,
   FORGE_WORKER_EFFORT_LEVELS,
   FORGE_WORKER_MODELS,
   type ForgeWorkerEffortLevel,
   type ForgeWorkerModel,
+  PROJECT_AGENT_MODELS,
+  type ProjectAgentModel,
 } from '@cenzontle/shared';
 import { PrismaService } from '../prisma/prisma.service';
 import { InjectPinoLogger, PinoLogger } from 'nestjs-pino';
@@ -104,29 +107,34 @@ export class AgentTokenSettingsService {
    * el caller NO debe enviar `thinking: { type: 'adaptive' }` ni
    * `output_config.effort` al SDK de Anthropic.
    */
-  async getStoryPo(): Promise<{ effort: AgentEffortLevel; maxTokens: number; enabled: boolean }> {
+  async getStoryPo(): Promise<{ model: ProjectAgentModel; effort: AgentEffortLevel; maxTokens: number; enabled: boolean }> {
     const s = await this.get();
-    return { effort: s.storyPoEffort, maxTokens: s.storyPoMaxTokens, enabled: s.storyPoThinkingEnabled };
+    return { model: s.storyPoModel, effort: s.storyPoEffort, maxTokens: s.storyPoMaxTokens, enabled: s.storyPoThinkingEnabled };
   }
 
-  async getStoryTl(): Promise<{ effort: AgentEffortLevel; maxTokens: number; enabled: boolean }> {
+  async getStoryTl(): Promise<{ model: ProjectAgentModel; effort: AgentEffortLevel; maxTokens: number; enabled: boolean }> {
     const s = await this.get();
-    return { effort: s.storyTlEffort, maxTokens: s.storyTlMaxTokens, enabled: s.storyTlThinkingEnabled };
+    return { model: s.storyTlModel, effort: s.storyTlEffort, maxTokens: s.storyTlMaxTokens, enabled: s.storyTlThinkingEnabled };
   }
 
-  async getStoryQa(): Promise<{ effort: AgentEffortLevel; maxTokens: number; enabled: boolean }> {
+  async getStoryQa(): Promise<{ model: ProjectAgentModel; effort: AgentEffortLevel; maxTokens: number; enabled: boolean }> {
     const s = await this.get();
-    return { effort: s.storyQaEffort, maxTokens: s.storyQaMaxTokens, enabled: s.storyQaThinkingEnabled };
+    return { model: s.storyQaModel, effort: s.storyQaEffort, maxTokens: s.storyQaMaxTokens, enabled: s.storyQaThinkingEnabled };
   }
 
-  async getEpic(): Promise<{ effort: AgentEffortLevel; maxTokensCap: number; enabled: boolean }> {
+  async getEpic(): Promise<{ model: ProjectAgentModel; effort: AgentEffortLevel; maxTokensCap: number; enabled: boolean }> {
     const s = await this.get();
-    return { effort: s.epicEffort, maxTokensCap: s.epicMaxTokens, enabled: s.epicThinkingEnabled };
+    return { model: s.epicModel, effort: s.epicEffort, maxTokensCap: s.epicMaxTokens, enabled: s.epicThinkingEnabled };
   }
 
-  async getDiagram(): Promise<{ effort: AgentEffortLevel; maxTokens: number; enabled: boolean }> {
+  async getDiagram(): Promise<{ model: ProjectAgentModel; effort: AgentEffortLevel; maxTokens: number; enabled: boolean }> {
     const s = await this.get();
-    return { effort: s.diagramEffort, maxTokens: s.diagramMaxTokens, enabled: s.diagramThinkingEnabled };
+    return { model: s.diagramModel, effort: s.diagramEffort, maxTokens: s.diagramMaxTokens, enabled: s.diagramThinkingEnabled };
+  }
+
+  async getAssistant(): Promise<{ model: ProjectAgentModel; effort: AgentEffortLevel; maxTokens: number; enabled: boolean }> {
+    const s = await this.get();
+    return { model: s.assistantModel, effort: s.assistantEffort, maxTokens: s.assistantMaxTokens, enabled: s.assistantThinkingEnabled };
   }
 
   /**
@@ -178,21 +186,30 @@ export class AgentTokenSettingsService {
   // ─────────────────────────────────────────────────────────────────────
 
   private toPublic(row: {
+    storyPoModel: string;
     storyPoEffort: string;
     storyPoMaxTokens: number;
     storyPoThinkingEnabled: boolean;
+    storyTlModel: string;
     storyTlEffort: string;
     storyTlMaxTokens: number;
     storyTlThinkingEnabled: boolean;
+    storyQaModel: string;
     storyQaEffort: string;
     storyQaMaxTokens: number;
     storyQaThinkingEnabled: boolean;
+    epicModel: string;
     epicEffort: string;
     epicMaxTokens: number;
     epicThinkingEnabled: boolean;
+    diagramModel: string;
     diagramEffort: string;
     diagramMaxTokens: number;
     diagramThinkingEnabled: boolean;
+    assistantModel: string;
+    assistantEffort: string;
+    assistantMaxTokens: number;
+    assistantThinkingEnabled: boolean;
     forgeWorkerModel: string;
     forgeWorkerEffort: string;
     forgeWorkerMaxRunDurationMs: number;
@@ -209,6 +226,14 @@ export class AgentTokenSettingsService {
     const effort = (s: string): AgentEffortLevel =>
       s === 'low' || s === 'medium' || s === 'high' ? s : 'medium';
 
+    // Cast model→ProjectAgentModel. El DTO valida en write; defense in depth
+    // al leer: si la BD trae un id fuera de la whitelist (downgrade del
+    // catálogo, SQL directo), default al modelo calibrado (Sonnet 4.6).
+    const projectModel = (s: string): ProjectAgentModel =>
+      (PROJECT_AGENT_MODELS as readonly string[]).includes(s)
+        ? (s as ProjectAgentModel)
+        : DEFAULT_PROJECT_AGENT_MODEL;
+
     // Casts para Forge Worker — set de modelos + efforts más amplio que los
     // agentes story-gen (acepta xhigh/max + opus). Defense in depth: si la
     // BD tiene valor inválido por algún downgrade, default a Sonnet + high.
@@ -222,21 +247,30 @@ export class AgentTokenSettingsService {
         : 'high';
 
     return {
+      storyPoModel: projectModel(row.storyPoModel),
       storyPoEffort: effort(row.storyPoEffort),
       storyPoMaxTokens: row.storyPoMaxTokens,
       storyPoThinkingEnabled: row.storyPoThinkingEnabled,
+      storyTlModel: projectModel(row.storyTlModel),
       storyTlEffort: effort(row.storyTlEffort),
       storyTlMaxTokens: row.storyTlMaxTokens,
       storyTlThinkingEnabled: row.storyTlThinkingEnabled,
+      storyQaModel: projectModel(row.storyQaModel),
       storyQaEffort: effort(row.storyQaEffort),
       storyQaMaxTokens: row.storyQaMaxTokens,
       storyQaThinkingEnabled: row.storyQaThinkingEnabled,
+      epicModel: projectModel(row.epicModel),
       epicEffort: effort(row.epicEffort),
       epicMaxTokens: row.epicMaxTokens,
       epicThinkingEnabled: row.epicThinkingEnabled,
+      diagramModel: projectModel(row.diagramModel),
       diagramEffort: effort(row.diagramEffort),
       diagramMaxTokens: row.diagramMaxTokens,
       diagramThinkingEnabled: row.diagramThinkingEnabled,
+      assistantModel: projectModel(row.assistantModel),
+      assistantEffort: effort(row.assistantEffort),
+      assistantMaxTokens: row.assistantMaxTokens,
+      assistantThinkingEnabled: row.assistantThinkingEnabled,
       forgeWorkerModel: forgeModel(row.forgeWorkerModel),
       forgeWorkerEffort: forgeEffort(row.forgeWorkerEffort),
       // Clamp defensivo del max-run-duration al rango configurado en

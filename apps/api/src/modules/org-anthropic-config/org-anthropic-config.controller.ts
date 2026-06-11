@@ -56,4 +56,14 @@ export class OrgAnthropicConfigController {
     this.authz.assertCanManageFleet(user);
     await this.service.setApiKey(dto.plaintext, user.sub);
   }
+
+  @Get('models')
+  @ApiOperation({
+    summary:
+      'Catálogo de modelos Claude para los selectores por agente: catálogo curado (pricing, descripciones, compatibilidad) verificado en vivo contra GET /v1/models cuando hay key. La elección por agente se persiste vía /agent-token-settings. Solo Alta Gerencia.',
+  })
+  async listModels(@CurrentUser() user: AuthenticatedUser) {
+    this.authz.assertCanManageFleet(user);
+    return this.service.listAvailableModels();
+  }
 }

@@ -5,7 +5,6 @@ import {
   Loader2,
   Check,
   AlertCircle,
-  Sparkles,
   Lightbulb,
   Code2,
   TestTube2,
@@ -14,6 +13,7 @@ import {
   RotateCcw,
   Cpu,
   FolderKanban,
+  MessageSquare,
 } from 'lucide-react';
 import {
   AGENT_DESCRIPTORS,
@@ -22,17 +22,27 @@ import {
   AGENT_EFFORT_DESCRIPTIONS,
   AGENT_TOKEN_BOUNDS,
   DEFAULT_AGENT_TOKEN_SETTINGS,
+  PROJECT_AGENT_MODEL_LABELS,
   type AgentEffortLevel,
   type AgentKey,
   type AgentTokenSettings,
   type ForgeWorkerEffortLevel,
   type ForgeWorkerModel,
+  type ProjectAgentModel,
 } from '@cenzontle/shared';
 import { Input } from '@/components/ui/input';
 import { Button } from '@/components/ui/button';
 import { Switch } from '@/components/ui/switch';
 import { Tabs, TabsList, TabsTrigger, TabsContent } from '@/components/ui/tabs';
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from '@/components/ui/select';
 import { getAgentTokenSettings, updateAgentTokenSettings } from '@/lib/api/agent-token-settings';
+import { getAnthropicModels, type AnthropicModelOption } from '@/lib/api/factory';
 import { ApiError } from '@/lib/api/client';
 import { ForgeWorkerSection } from './ForgeWorkerSection';
 
@@ -56,6 +66,7 @@ const AGENT_ICON: Record<AgentKey, typeof Lightbulb> = {
   storyQa: TestTube2,
   epic: Layers,
   diagram: Workflow,
+  assistant: MessageSquare,
 };
 
 // Color accent por agente — tinte sutil para el icono del header de cada card.
@@ -65,6 +76,7 @@ const AGENT_ACCENT: Record<AgentKey, string> = {
   storyQa: 'text-emerald-500 dark:text-emerald-400',
   epic: 'text-violet-500 dark:text-violet-400',
   diagram: 'text-fuchsia-500 dark:text-fuchsia-400',
+  assistant: 'text-cyan-500 dark:text-cyan-400',
 };
 
 // Etiqueta corta para los segment buttons del effort. Las descripciones largas
@@ -95,6 +107,10 @@ export function AgentTokensSection() {
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [savedRecently, setSavedRecently] = useState(false);
+  // Catálogo de modelos para los selectores por agente (curado + verificado
+  // en vivo). Vacío = aún cargando o falló; el selector cae a mostrar solo el
+  // valor persistido (siempre seleccionable) en ese caso.
+  const [modelOptions, setModelOptions] = useState<AnthropicModelOption[]>([]);
 
   useEffect(() => {
     if (!savedRecently) return;
@@ -127,7 +143,26 @@ export function AgentTokensSection() {
     };
   }, []);
 
-  const handleField = (field: keyof EditableSettings, value: number | AgentEffortLevel) => {
+  // Catálogo de modelos para los selectores (best-effort — no bloquea la UI
+  // de tokens si falla; los selectores caen al valor persistido).
+  useEffect(() => {
+    let cancelled = false;
+    getAnthropicModels()
+      .then((res) => {
+        if (!cancelled) setModelOptions(res.models);
+      })
+      .catch(() => {
+        /* selector degrada al valor persistido */
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  const handleField = (
+    field: keyof EditableSettings,
+    value: number | AgentEffortLevel | ProjectAgentModel,
+  ) => {
     setSettings((prev) => ({ ...prev, [field]: value }));
     setSavedRecently(false);
   };
@@ -180,7 +215,8 @@ export function AgentTokensSection() {
   // Los 3 agentes de "Historias" comparten contexto, separarlos visualmente
   // de Épicas/Diagramas reduce el "wall of cards" del diseño anterior.
   const storyAgents = AGENT_DESCRIPTORS.filter((d) => d.key.startsWith('story'));
-  const standaloneAgents = AGENT_DESCRIPTORS.filter((d) => !d.key.startsWith('story'));
+  const standaloneAgents = AGENT_DESCRIPTORS.filter((d) => d.key === 'epic' || d.key === 'diagram');
+  const assistantAgents = AGENT_DESCRIPTORS.filter((d) => d.key === 'assistant');
 
   return (
     <div className="space-y-6">
@@ -257,9 +293,12 @@ export function AgentTokensSection() {
                 <AgentCard
                   key={desc.key}
                   desc={desc}
+                  models={modelOptions}
+                  modelValue={settings[desc.modelField] as ProjectAgentModel}
                   effortValue={settings[desc.effortField] as AgentEffortLevel}
                   maxTokensValue={settings[desc.maxTokensField] as number}
                   enabledValue={settings[desc.enabledField] as boolean}
+                  onModelChange={(v) => handleField(desc.modelField, v)}
                   onEffortChange={(v) => handleField(desc.effortField, v)}
                   onMaxTokensChange={(v) => handleField(desc.maxTokensField, v)}
                   onEnabledChange={(v) => handleToggle(desc.enabledField, v)}
@@ -283,9 +322,41 @@ export function AgentTokensSection() {
                 <AgentCard
                   key={desc.key}
                   desc={desc}
+                  models={modelOptions}
+                  modelValue={settings[desc.modelField] as ProjectAgentModel}
                   effortValue={settings[desc.effortField] as AgentEffortLevel}
                   maxTokensValue={settings[desc.maxTokensField] as number}
                   enabledValue={settings[desc.enabledField] as boolean}
+                  onModelChange={(v) => handleField(desc.modelField, v)}
+                  onEffortChange={(v) => handleField(desc.effortField, v)}
+                  onMaxTokensChange={(v) => handleField(desc.maxTokensField, v)}
+                  onEnabledChange={(v) => handleToggle(desc.enabledField, v)}
+                />
+              ))}
+            </div>
+          </section>
+
+          {/* Grupo: Asistente de edición (chatbot lateral, conversacional) */}
+          <section className="space-y-3">
+            <div className="flex items-baseline gap-2">
+              <h4 className="text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">
+                Asistente
+              </h4>
+              <span className="text-[10px] text-muted-foreground/60">
+                Chat lateral de edición (multiturno)
+              </span>
+            </div>
+            <div className="space-y-2.5">
+              {assistantAgents.map((desc) => (
+                <AgentCard
+                  key={desc.key}
+                  desc={desc}
+                  models={modelOptions}
+                  modelValue={settings[desc.modelField] as ProjectAgentModel}
+                  effortValue={settings[desc.effortField] as AgentEffortLevel}
+                  maxTokensValue={settings[desc.maxTokensField] as number}
+                  enabledValue={settings[desc.enabledField] as boolean}
+                  onModelChange={(v) => handleField(desc.modelField, v)}
                   onEffortChange={(v) => handleField(desc.effortField, v)}
                   onMaxTokensChange={(v) => handleField(desc.maxTokensField, v)}
                   onEnabledChange={(v) => handleToggle(desc.enabledField, v)}
@@ -386,9 +457,12 @@ export function AgentTokensSection() {
 
 interface AgentCardProps {
   desc: (typeof AGENT_DESCRIPTORS)[number];
+  models: AnthropicModelOption[];
+  modelValue: ProjectAgentModel;
   effortValue: AgentEffortLevel;
   maxTokensValue: number;
   enabledValue: boolean;
+  onModelChange: (value: ProjectAgentModel) => void;
   onEffortChange: (value: AgentEffortLevel) => void;
   onMaxTokensChange: (value: number) => void;
   onEnabledChange: (value: boolean) => void;
@@ -396,15 +470,34 @@ interface AgentCardProps {
 
 function AgentCard({
   desc,
+  models,
+  modelValue,
   effortValue,
   maxTokensValue,
   enabledValue,
+  onModelChange,
   onEffortChange,
   onMaxTokensChange,
   onEnabledChange,
 }: AgentCardProps) {
   const Icon = AGENT_ICON[desc.key];
   const accent = AGENT_ACCENT[desc.key];
+
+  // Opciones del selector: compatibles con agentes (adaptive thinking + effort)
+  // y disponibles para la key de la org. Si la verificación en vivo dejó la
+  // lista vacía (p.ej. key scoped a otra org → todos availableInApi:false),
+  // caemos a TODOS los compatibles del catálogo: bloquear la edición es peor
+  // que ofrecer una opción que el backend igual re-valida por whitelist. El
+  // valor persistido SIEMPRE se incluye como fallback (más abajo) aunque el
+  // catálogo no haya cargado — así el Select nunca queda sin opciones.
+  const compatibleModels = models.filter((m) => m.agentCompatible);
+  const liveAvailable = compatibleModels.filter((m) => m.availableInApi !== false);
+  const selectableModels = liveAvailable.length > 0 ? liveAvailable : compatibleModels;
+  const noneLiveAvailable = compatibleModels.length > 0 && liveAvailable.length === 0;
+  const modelLabel = (id: string): string =>
+    models.find((m) => m.id === id)?.displayName ??
+    PROJECT_AGENT_MODEL_LABELS[id as ProjectAgentModel] ??
+    id;
   const tokensPct = Math.round(
     ((maxTokensValue - AGENT_TOKEN_BOUNDS.maxTokens.min) /
       (AGENT_TOKEN_BOUNDS.maxTokens.max - AGENT_TOKEN_BOUNDS.maxTokens.min)) * 100,
@@ -449,6 +542,49 @@ function AgentCard({
             </div>
           </div>
         </div>
+      </div>
+
+      {/* Selector de modelo Claude del agente */}
+      <div className="border-t border-border/40 px-4 py-3">
+        <label className="mb-1.5 block text-[10px] font-medium uppercase tracking-wider text-muted-foreground">
+          Modelo
+        </label>
+        <Select value={modelValue} onValueChange={(v) => onModelChange(v as ProjectAgentModel)}>
+          <SelectTrigger className="h-9 text-sm">
+            <SelectValue>{modelLabel(modelValue)}</SelectValue>
+          </SelectTrigger>
+          <SelectContent>
+            {selectableModels.map((m) => (
+              <SelectItem key={m.id} value={m.id} className="text-sm">
+                <span className="flex items-center gap-2">
+                  <span>{m.displayName}</span>
+                  {m.recommended && (
+                    <span className="text-[10px] text-muted-foreground">· recomendado</span>
+                  )}
+                  {m.legacy && (
+                    <span className="text-[10px] text-muted-foreground/60">· gen. anterior</span>
+                  )}
+                  <span className="text-[10px] text-muted-foreground/60 tabular-nums">
+                    ${m.pricing.inputPerMTok}/${m.pricing.outputPerMTok} MTok
+                  </span>
+                </span>
+              </SelectItem>
+            ))}
+            {/* Fallback: si el modelo persistido no está en el catálogo
+                cargado, igual lo ofrecemos para que el Select no quede vacío. */}
+            {!selectableModels.some((m) => m.id === modelValue) && (
+              <SelectItem value={modelValue} className="text-sm">
+                {modelLabel(modelValue)}
+              </SelectItem>
+            )}
+          </SelectContent>
+        </Select>
+        {noneLiveAvailable && (
+          <p className="mt-1.5 text-[10px] text-amber-600 dark:text-amber-500">
+            La API key de la organización no reporta disponibilidad para estos modelos —
+            mostrando el catálogo completo. Verifica la key si la selección falla.
+          </p>
+        )}
       </div>
 
       {/* Body: effort segmented + max_tokens con barra de utilización */}

@@ -1298,3 +1298,91 @@ export const DEFAULT_FILTERS: ProyectosFilters = {
   trackerKey: '',
 };
 
+// --- Assistant chat (agente editor de iniciativas/épicas/historias) ---
+
+/** Entidad sobre la que conversa el asistente. */
+export type AssistantEntityType = 'initiative' | 'epic' | 'story';
+
+/**
+ * Sección editable que una propuesta del asistente puede reemplazar.
+ * El mapeo target → API de escritura vive en el frontend:
+ *   initiative_description → PATCH /proyectos/iniciativas/:id { description }
+ *   epic_markdown          → PATCH /proyectos/epicas/:id { markdown }
+ *   story_po               → PATCH /proyectos/historias/:id { po: { markdown } }
+ *   story_technical        → PATCH /proyectos/historias/:id { technical: { markdown } }
+ *   story_qa               → PATCH /proyectos/historias/:id { qa: { markdown } }
+ */
+export type AssistantProposalTarget =
+  | 'initiative_description'
+  | 'epic_markdown'
+  | 'story_po'
+  | 'story_technical'
+  | 'story_qa';
+
+/**
+ * Propuesta de edición emitida por el agente. El usuario la revisa como diff
+ * y decide aplicarla — el asistente NUNCA escribe directo. `oldContent` es el
+ * snapshot del contenido vigente al momento de proponer (resuelto server-side,
+ * no por el modelo) para que el frontend pueda detectar staleness al aplicar.
+ */
+export interface AssistantProposal {
+  /** ID único de la propuesta (prop-<uuid>). */
+  id: string;
+  target: AssistantProposalTarget;
+  /** Etiqueta corta de la propuesta (ej. "Criterios de aceptación medibles"). */
+  title: string;
+  /** Explicación breve de qué cambió y por qué. */
+  summary: string;
+  /** Contenido vigente de la sección al momento de proponer. */
+  oldContent: string;
+  /** Contenido completo propuesto para la sección. */
+  newContent: string;
+}
+
+/** Feedback del usuario sobre una propuesta, enviado en el siguiente turno. */
+export interface AssistantProposalFeedback {
+  id: string;
+  status: 'applied' | 'rejected';
+}
+
+interface AssistantChatEventBase {
+  timestamp?: string;
+}
+
+/** Eventos SSE emitidos durante un turno del asistente. */
+export type AssistantChatEvent =
+  | (AssistantChatEventBase & { type: 'session'; sessionId: string })
+  | (AssistantChatEventBase & { type: 'text_delta'; delta: string })
+  | (AssistantChatEventBase & { type: 'thinking_delta'; delta: string })
+  | (AssistantChatEventBase & { type: 'tool_start'; tool: string; label: string; toolArgs?: Record<string, unknown> })
+  | (AssistantChatEventBase & { type: 'tool_done'; tool: string; summary?: string; durationMs?: number })
+  | (AssistantChatEventBase & { type: 'proposal'; proposal: AssistantProposal })
+  | (AssistantChatEventBase & { type: 'done' })
+  | (AssistantChatEventBase & { type: 'error'; message: string });
+
+/**
+ * Transcript persistida de la conversación — los eventos SSE de cada turno
+ * compactados a segmentos (un `text` consolidado en vez de N text_deltas).
+ * Es lo que el frontend rehidrata al recargar la página.
+ */
+export type AssistantTranscriptSegment =
+  | { kind: 'text'; content: string }
+  | { kind: 'thinking'; content: string }
+  | { kind: 'tool'; tool: string; label: string; summary?: string }
+  | { kind: 'proposal'; proposal: AssistantProposal };
+
+export interface AssistantTranscriptMessage {
+  role: 'user' | 'assistant';
+  segments: AssistantTranscriptSegment[];
+}
+
+/** Estado resuelto de una propuesta (las pendientes no aparecen en el mapa). */
+export type AssistantProposalResolution = 'applied' | 'rejected';
+
+/** Snapshot de sesión que devuelve GET /assistant-chat/:entityType/:entityId/session. */
+export interface AssistantSessionSnapshot {
+  sessionId: string;
+  transcript: AssistantTranscriptMessage[];
+  proposalStatuses: Record<string, AssistantProposalResolution>;
+}
+

@@ -72,7 +72,9 @@ import type {
   ProposedStory,
   StoryGenerationEvent,
   DiscoveredDependency,
+  AssistantProposal,
 } from '@cenzontle/shared';
+import { AssistantChatSidebar } from '../assistant/AssistantChatSidebar';
 import { useDiagramCacheHydration } from '@/hooks/useDiagramCacheHydration';
 import {
   Calendar,
@@ -96,6 +98,7 @@ import {
   ExternalLink,
   Loader2,
   AlertTriangle,
+  Sparkles,
 } from 'lucide-react';
 import { LinearIcon } from '@/components/icons/LinearIcon';
 import { Tooltip, TooltipTrigger, TooltipContent, TooltipProvider } from '@/components/ui/tooltip';
@@ -400,6 +403,20 @@ function EpicFullPageInner({ epicId }: { epicId: string }) {
   const [isSaving, setIsSaving] = useState(false);
   const [deleteOpen, setDeleteOpen] = useState(false);
   const [publishingTracker, setPublishingTracker] = useState(false);
+  const [assistantOpen, setAssistantOpen] = useState(false);
+
+  // Apply de propuestas del asistente: mismo write-path que handleSave
+  // (PATCH + dispatch). El sidebar marca la propuesta como aplicada si no throws.
+  const handleApplyAssistantProposal = async (proposal: AssistantProposal) => {
+    if (!rawEpic || proposal.target !== 'epic_markdown') {
+      throw new Error('Propuesta no aplicable a esta épica');
+    }
+    await apiUpdateEpic(rawEpic.id, { markdown: proposal.newContent });
+    dispatch({
+      type: 'UPDATE_EPIC',
+      payload: { id: rawEpic.id, changes: { markdown: proposal.newContent } },
+    });
+  };
 
   const handlePublishToLinear = async () => {
     if (!rawEpic) return;
@@ -1267,9 +1284,9 @@ function EpicFullPageInner({ epicId }: { epicId: string }) {
 
 
   return (
-    <div className="h-full min-h-0">
+    <div className="h-full min-h-0 flex">
       {/* Scrollable content */}
-      <div className="h-full min-h-0 overflow-y-auto">
+      <div className="h-full min-h-0 overflow-y-auto flex-1 min-w-0">
         <div className="mx-auto px-6 py-8 max-w-7xl">
         {/* Title + metadata header */}
         <div className="mb-8">
@@ -1358,6 +1375,19 @@ function EpicFullPageInner({ epicId }: { epicId: string }) {
                       <TooltipContent>
                         {showChecklist ? 'Ocultar checklist del protocolo' : 'Ver checklist del protocolo'}
                       </TooltipContent>
+                    </Tooltip>
+                    <Tooltip>
+                      <TooltipTrigger asChild>
+                        <Button
+                          variant="ghost"
+                          size="icon"
+                          onClick={() => setAssistantOpen((v) => !v)}
+                          className={`text-muted-foreground hover:text-foreground ${assistantOpen ? 'bg-muted text-foreground' : ''}`}
+                        >
+                          <Sparkles className="h-4 w-4" />
+                        </Button>
+                      </TooltipTrigger>
+                      <TooltipContent>Asistente de edición IA</TooltipContent>
                     </Tooltip>
                     <Tooltip>
                       <TooltipTrigger asChild>
@@ -2105,6 +2135,15 @@ function EpicFullPageInner({ epicId }: { epicId: string }) {
 
         </div>
       </div>
+
+      <AssistantChatSidebar
+        entityType="epic"
+        entityId={epicId}
+        entityTitle={epic.title}
+        open={assistantOpen}
+        onClose={() => setAssistantOpen(false)}
+        onApplyProposal={handleApplyAssistantProposal}
+      />
 
       {rawEpic && (
         <TypeToConfirmDialog

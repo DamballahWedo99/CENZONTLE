@@ -57,8 +57,16 @@ const SSE_PATH_RE = new RegExp(
     '[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$',
   'i',
 );
+// Asistente de edición: POST /proyectos/assistant-chat/<entityType>/<uuid>
+// también responde text/event-stream (turno de chat con agente). El DELETE
+// de sesión vive bajo `assistant-chat/session/<uuid>` y NO matchea (JSON).
+const ASSISTANT_SSE_PATH_RE = new RegExp(
+  '^proyectos/assistant-chat/(?:initiative|epic|story)/' +
+    '[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$',
+  'i',
+);
 function isSseEndpoint(apiPath: string): boolean {
-  return SSE_PATH_RE.test(apiPath);
+  return SSE_PATH_RE.test(apiPath) || ASSISTANT_SSE_PATH_RE.test(apiPath);
 }
 
 async function proxyRequest(
