@@ -1,5 +1,6 @@
 // Domain types
 export * from "./types/proyectos";
+export * from "./types/executive-summary";
 export * from "./types/factory";
 export * from "./types/auth";
 export * from "./types/aprobacion";
