@@ -56,8 +56,13 @@ export class StoryGenerationController {
    *
    * Regla de acceso:
    *   - `AltaGerencia` tiene acceso global (no se requiere interseccion).
-   *   - El resto de roles debe tener al menos un `podId` en comun con los pods de la epica.
-   *   - Una epica sin pods asignados solo es accesible para AltaGerencia.
+   *   - Los podIds de la epica se derivan de la UNION de EpicPod y
+   *     Story.podId — relacion independiente en el schema. El contenido que
+   *     este controller expone (historias existentes, contexto del agente)
+   *     se agrega a nivel historia: derivar solo de EpicPod bloqueaba a
+   *     usuarios cuyo pod trabaja las historias de la epica.
+   *   - El resto de roles debe tener al menos un `podId` en comun con esa union.
+   *   - Una epica sin pods en ninguna fuente solo es accesible para AltaGerencia.
    */
   private async assertUserCanAccessEpic(
     user: AuthenticatedUser,
@@ -67,16 +72,27 @@ export class StoryGenerationController {
 
     const epic = await this.prisma.epic.findUnique({
       where: { id: epicId },
-      select: { id: true, pods: { select: { podId: true } } },
+      select: {
+        id: true,
+        pods: { select: { podId: true } },
+        stories: { select: { podId: true } },
+      },
     });
     if (!epic) throw new NotFoundException('Épica no encontrada');
 
-    if (epic.pods.length === 0) {
+    // Union de podIds: filas EpicPod + podId directo de cada historia
+    const epicPodIds = new Set<string>();
+    for (const ep of epic.pods) epicPodIds.add(ep.podId);
+    for (const story of epic.stories) {
+      if (story.podId) epicPodIds.add(story.podId);
+    }
+
+    if (epicPodIds.size === 0) {
       throw new ForbiddenException('Sin acceso a esta épica');
     }
 
     const userPodIds = new Set(user.podIds);
-    const hasAccess = epic.pods.some((ep) => userPodIds.has(ep.podId));
+    const hasAccess = [...epicPodIds].some((pid) => userPodIds.has(pid));
     if (!hasAccess) throw new ForbiddenException('Sin acceso a esta épica');
   }
 

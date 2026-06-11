@@ -45,8 +45,17 @@ export class VaultAccessGuard implements CanActivate {
     // Sin esto, un user autorizado para el activo podría pasar otro vaultId
     // en query y operar (read/write/delete) sobre un vault al que su pod
     // no pertenece. CWE-639 BOLA — fix de security-reviewer HIGH 2026-05-04.
-    const requestedVaultId = (request.query?.vaultId ??
-      request.body?.vaultId) as string | undefined;
+    //
+    // SOLO se considera `query.vaultId`, NUNCA `body.vaultId`: todos los
+    // handlers resuelven su target desde `@Query('vaultId')`, así que mirar
+    // el body abriría una divergencia guard/handler. Un atacante con acceso
+    // al vault B podría mandar `{vaultId: B}` en el body SIN query → el guard
+    // validaría B (PASS) mientras el handler (query undefined) opera sobre el
+    // vault ACTIVO A, al que el atacante no tiene acceso. El body-parser corre
+    // antes del ValidationPipe, así que `whitelist:true` no elimina ese campo
+    // a tiempo. Ningún cliente legítimo manda vaultId por body — el cliente
+    // web siempre usa query string. CWE-639 (reabierto por endpoints query-only).
+    const requestedVaultId = request.query?.vaultId as string | undefined;
 
     let target: { allowedPodIds: string[]; roleDefaults: Record<string, string> };
     if (requestedVaultId) {

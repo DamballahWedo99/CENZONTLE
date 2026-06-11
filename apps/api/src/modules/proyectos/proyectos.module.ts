@@ -22,6 +22,8 @@ import { OrgAnthropicConfigModule } from '../org-anthropic-config/org-anthropic-
 import { EpicGenerationController } from './epics/generation/epic-generation.controller';
 import { EpicGenerationService } from './epics/generation/epic-generation.service';
 import { ProposalCacheService } from './epics/generation/proposal-cache.service';
+import { ExecutiveSummaryController } from './initiatives/executive-summary/executive-summary.controller';
+import { ExecutiveSummaryService } from './initiatives/executive-summary/executive-summary.service';
 import { StoryGenerationController } from './stories/generation/story-generation.controller';
 import { StoryGenerationService } from './stories/generation/story-generation.service';
 import { StoryProposalCacheService } from './stories/generation/story-proposal-cache.service';
@@ -47,6 +49,7 @@ import { AssistantSessionService } from './assistant/assistant-session.service';
   controllers: [
     PodsController,
     EpicGenerationController, // Must register before InitiativesController (same prefix, more specific route)
+    ExecutiveSummaryController, // Sin conflicto de prefijo con InitiativesController — agrupado aquí junto a los demás agentes SSE
     StoryGenerationController, // Must register before StoriesController (prefix /proyectos/story-generation vs /proyectos/historias)
     DiagramGenerationController, // Must register before EpicsController (prefix /proyectos/diagrams-generation vs /proyectos/epicas)
     VaultMigrationController, // Admin endpoint: POST /admin/vault/migration/run
@@ -65,6 +68,7 @@ import { AssistantSessionService } from './assistant/assistant-session.service';
     DesignBundleService,
     EpicGenerationService,
     ProposalCacheService,
+    ExecutiveSummaryService,
     DiagramGenerationService,
     DiagramCacheService,
     DiagramSessionCacheService,

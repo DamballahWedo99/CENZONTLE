@@ -71,6 +71,10 @@ model Initiative {
   documents   Json             @default("[]")
   tracker     Json?            // TrackerReference apuntando al Linear Initiative (o futuros providers)
 
+  // Último resumen ejecutivo generado (ExecutiveSummary de @cenzontle/shared).
+  // Métricas deterministas + narrativa IA. Se sobreescribe en cada generación.
+  executiveSummary Json?
+
   // Path to the markdown file in the vault (GitHub repo)
   vaultPath   String?
 

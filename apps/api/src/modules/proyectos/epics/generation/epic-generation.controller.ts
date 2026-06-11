@@ -47,12 +47,16 @@ export class EpicGenerationController {
    *
    * Regla de acceso:
    *   - `AltaGerencia` tiene acceso global (bypass).
-   *   - Si la iniciativa no tiene epicas, permitir acceso a cualquier usuario con
-   *     CREATE_EPIC (@Permissions ya valido). Este caso es LEGITIMO: generar las
-   *     primeras epicas de una iniciativa recien creada. El leak es minimo porque
-   *     no hay <existing_epics> que exponer.
-   *   - Si la iniciativa ya tiene epicas con pods asignados, el usuario debe tener
-   *     al menos un podId en comun con alguna de esas epicas.
+   *   - Los podIds de la iniciativa se derivan de la UNION de EpicPod y
+   *     Story.podId — no solo de EpicPod. `Story.podId` es una relacion
+   *     independiente en el schema: epicas sin filas EpicPod pero con
+   *     historias asignadas a pods caian en la rama "sin pods → permitir",
+   *     exponiendo contenido via SSE a cualquier usuario con CREATE_EPIC.
+   *   - Si la union queda vacia, permitir acceso a cualquier usuario con
+   *     CREATE_EPIC (@Permissions ya valido). Este caso es LEGITIMO: generar
+   *     las primeras epicas de una iniciativa recien creada. El leak es
+   *     minimo porque no hay <existing_epics> que exponer.
+   *   - Con pods asignados, el usuario debe tener al menos un podId en comun.
    */
   private async assertUserCanAccessInitiative(
     user: AuthenticatedUser,
@@ -67,21 +71,25 @@ export class EpicGenerationController {
         epics: {
           select: {
             pods: { select: { podId: true } },
+            stories: { select: { podId: true } },
           },
         },
       },
     });
     if (!initiative) throw new NotFoundException('Iniciativa no encontrada');
 
-    // Coleccion de todos los podIds de todas las epicas de la iniciativa
+    // Union de podIds: filas EpicPod + podId directo de cada historia
     const initiativePodIds = new Set<string>();
     for (const epic of initiative.epics) {
       for (const ep of epic.pods) {
         initiativePodIds.add(ep.podId);
       }
+      for (const story of epic.stories) {
+        if (story.podId) initiativePodIds.add(story.podId);
+      }
     }
 
-    // Iniciativa sin epicas o sin pods asignados → permitir (caso de "primera epica")
+    // Iniciativa sin pods en ninguna fuente → permitir (caso de "primera epica")
     if (initiativePodIds.size === 0) return;
 
     // Caso con contenido → exigir interseccion

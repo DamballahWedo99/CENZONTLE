@@ -2,8 +2,9 @@
 
 import React, { useState, useCallback, useEffect, useRef } from 'react';
 import { useSearchParams } from 'next/navigation';
-import { Search, Network, List, BookMarked, SlidersHorizontal, History, Shield, RefreshCw, Loader2, AlertCircle, ChevronDown, Check, Eye, Link2 } from 'lucide-react';
+import { Search, Network, List, BookMarked, SlidersHorizontal, History, Shield, RefreshCw, Loader2, AlertCircle, ChevronDown, Check, Eye, Link2, Sparkles, X } from 'lucide-react';
 import { useDefiniciones } from '@/context/DefinicionesContext';
+import { runVaultConnections, getVaultConnectionsStatus, getVaultConnectionsLastRun, type VaultConnectionsStatus } from '@/lib/api/vault';
 import { useAuthContext } from '@/context/AuthContext';
 import { DefinicionNode } from '@/types/definiciones';
 import { Permission } from '@cenzontle/shared';
@@ -25,6 +26,33 @@ import {
 } from '@/components/ui/dropdown-menu';
 
 type ViewMode = 'tree' | 'graph' | 'changelog' | 'access';
+
+const CONNECTIONS_POLL_MS = 2500;
+
+const CONNECTIONS_PHASE_LABELS: Record<string, string> = {
+  reading: 'Leyendo documentos',
+  analyzing: 'Analizando conexiones',
+  writing: 'Escribiendo tags',
+};
+
+/**
+ * Formato relativo en español ("hace 5m/3h/2d", o fecha corta si es viejo).
+ * Mismo patrón que ChangelogView.formatRelativeTime — el codebase mantiene
+ * estos helpers locales por componente (ver ReleaseBoard, PRPipeline).
+ */
+function formatRelativeTime(iso: string): string {
+  const then = new Date(iso).getTime();
+  if (Number.isNaN(then)) return '';
+  const secs = Math.floor((Date.now() - then) / 1000);
+  if (secs < 60) return 'hace un momento';
+  const mins = Math.floor(secs / 60);
+  if (mins < 60) return `hace ${mins}m`;
+  const hours = Math.floor(mins / 60);
+  if (hours < 24) return `hace ${hours}h`;
+  const days = Math.floor(hours / 24);
+  if (days < 7) return `hace ${days}d`;
+  return new Date(iso).toLocaleDateString('es-MX', { day: 'numeric', month: 'short', year: 'numeric' });
+}
 
 export function DefinicionesExplorer() {
   const { state, setSearch, selectNode, expandFolder, loading, error, reloadTree, vaults, vaultsLoaded, activeVaultId, viewingVaultId, effectiveVaultId, switchVault } = useDefiniciones();
@@ -60,6 +88,75 @@ export function DefinicionesExplorer() {
   }, [state.tree, selectNode, expandFolder]);
   const [viewMode, setViewMode] = useState<ViewMode>('tree');
   const [showForceControls, setShowForceControls] = useState(false);
+
+  // === Agente de conexiones IA ===
+  // El backend corre un solo job a la vez (fire-and-forget); aquí solo se
+  // dispara y se pollea el status. Al terminar, reloadTree refresca árbol +
+  // tags y el grafo dibuja las conexiones nuevas.
+  const [connections, setConnections] = useState<VaultConnectionsStatus | null>(null);
+  const [connectionsNotice, setConnectionsNotice] = useState<{ kind: 'done' | 'error'; message: string } | null>(null);
+  // Última generación de conexiones (ISO), derivada del git history del vault.
+  // Persiste entre sesiones y reinicios — el vault es la fuente de verdad.
+  const [connectionsLastRun, setConnectionsLastRun] = useState<string | null>(null);
+  const connectionsRunning = connections?.status === 'running';
+  const canRunConnections = hasPermission(Permission.MANAGE_DOCUMENTS);
+  // En browse-mode el agente opera sobre el vault que se está viendo; sin
+  // override opera sobre el activo (mismo contrato que el resto de la API).
+  const connectionsVaultParam = isBrowseMode ? (effectiveVaultId ?? undefined) : undefined;
+
+  // Al montar (y al cambiar de vault): detectar un job en curso y datar la
+  // última generación desde el git history. Ambas lecturas en paralelo.
+  useEffect(() => {
+    if (!fullyLoaded || vaults.length === 0) return;
+    let cancelled = false;
+    getVaultConnectionsStatus(connectionsVaultParam)
+      .then((s) => {
+        if (!cancelled && s.status === 'running') setConnections(s);
+      })
+      .catch(() => { /* status no disponible: el botón queda en reposo */ });
+    getVaultConnectionsLastRun(connectionsVaultParam)
+      .then((r) => {
+        if (!cancelled) setConnectionsLastRun(r.lastRunAt);
+      })
+      .catch(() => { /* sin git history disponible: no mostramos fecha */ });
+    return () => { cancelled = true; };
+  }, [fullyLoaded, vaults.length, connectionsVaultParam]);
+
+  // Polling mientras el job corre. Al pasar a done/error el cleanup corta el interval.
+  useEffect(() => {
+    if (!connectionsRunning) return;
+    const timer = setInterval(() => {
+      getVaultConnectionsStatus(connectionsVaultParam)
+        .then((s) => {
+          setConnections(s);
+          if (s.status === 'done') {
+            setConnectionsNotice({
+              kind: 'done',
+              message: `Conexiones generadas: ${s.updatedDocuments} de ${s.totalDocuments} documentos actualizados · ${s.sharedTags} tags compartidos${s.skippedDocuments > 0 ? ` · ${s.skippedDocuments} documentos omitidos por límite` : ''}.`,
+            });
+            // El job acaba de terminar: su finishedAt es la última generación
+            // más fresca, sin necesidad de re-consultar el git history.
+            if (s.finishedAt) setConnectionsLastRun(s.finishedAt);
+            void reloadTree();
+          } else if (s.status === 'error') {
+            setConnectionsNotice({ kind: 'error', message: s.error ?? 'Error generando conexiones' });
+          }
+        })
+        .catch(() => { /* error transitorio de red: el próximo tick reintenta */ });
+    }, CONNECTIONS_POLL_MS);
+    return () => clearInterval(timer);
+  }, [connectionsRunning, connectionsVaultParam, reloadTree]);
+
+  const handleRunConnections = useCallback(async () => {
+    setConnectionsNotice(null);
+    try {
+      const s = await runVaultConnections(connectionsVaultParam);
+      setConnections(s);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : 'No se pudo iniciar el agente de conexiones';
+      setConnectionsNotice({ kind: 'error', message });
+    }
+  }, [connectionsVaultParam]);
 
   // Deep-link desde otros módulos (ej: sidepanel de pasos del diagrama):
   // abrir `/proyectos/definiciones?path=epics/{id}-{slug}/diagrams/{type}.md`
@@ -179,6 +276,50 @@ export function DefinicionesExplorer() {
             </div>
           )}
           <TooltipProvider>
+          {canRunConnections && (
+            <div className="flex items-center gap-2">
+              {connectionsRunning && connections ? (
+                <span className="text-xs text-muted-foreground tabular-nums whitespace-nowrap">
+                  {CONNECTIONS_PHASE_LABELS[connections.phase ?? ''] ?? 'Procesando'}
+                  {connections.totalDocuments > 0 && connections.phase === 'reading'
+                    ? ` ${connections.processedDocuments}/${connections.totalDocuments}`
+                    : ''}
+                  …
+                </span>
+              ) : connectionsLastRun ? (
+                <span className="hidden md:inline text-xs text-muted-foreground whitespace-nowrap">
+                  Conexiones · {formatRelativeTime(connectionsLastRun)}
+                </span>
+              ) : null}
+              <Tooltip>
+                <TooltipTrigger asChild>
+                  <Button
+                    variant="ghost"
+                    size="icon"
+                    className="h-8 w-8"
+                    onClick={() => void handleRunConnections()}
+                    disabled={connectionsRunning || loading || vaults.length === 0}
+                  >
+                    <Sparkles className={`h-4 w-4 ${connectionsRunning ? 'animate-pulse text-amber-500' : ''}`} />
+                  </Button>
+                </TooltipTrigger>
+                <TooltipContent>
+                  {connectionsRunning ? (
+                    'El agente está generando conexiones…'
+                  ) : (
+                    <div className="text-center">
+                      <p>Generar conexiones del grafo (agente IA)</p>
+                      <p className="text-[10px] text-muted-foreground mt-0.5">
+                        {connectionsLastRun
+                          ? `Última generación: ${formatRelativeTime(connectionsLastRun)}`
+                          : 'Aún no se han generado'}
+                      </p>
+                    </div>
+                  )}
+                </TooltipContent>
+              </Tooltip>
+            </div>
+          )}
           <Tooltip>
             <TooltipTrigger asChild>
               <Button
@@ -284,6 +425,32 @@ export function DefinicionesExplorer() {
           <BookMarked className="h-10 w-10 mb-3 opacity-20" />
           <p className="text-sm font-medium">Sin acceso a vaults</p>
           <p className="text-xs mt-1 max-w-xs">Tu célula no tiene vaults asignados. Contacta a un administrador para configurar el acceso.</p>
+        </div>
+      )}
+
+      {/* Resultado del agente de conexiones (descartable) */}
+      {connectionsNotice && (
+        <div
+          className={`mb-3 flex items-start gap-2 rounded-md border p-3 text-sm ${
+            connectionsNotice.kind === 'done'
+              ? 'border-amber-500/40 bg-amber-500/10'
+              : 'border-destructive/40 bg-destructive/10'
+          }`}
+        >
+          <Sparkles
+            className={`h-4 w-4 shrink-0 mt-0.5 ${
+              connectionsNotice.kind === 'done' ? 'text-amber-500' : 'text-destructive'
+            }`}
+          />
+          <p className="flex-1 text-xs text-muted-foreground mt-0.5">{connectionsNotice.message}</p>
+          <Button
+            variant="ghost"
+            size="icon"
+            className="h-6 w-6 shrink-0"
+            onClick={() => setConnectionsNotice(null)}
+          >
+            <X className="h-3.5 w-3.5" />
+          </Button>
         </div>
       )}
 
