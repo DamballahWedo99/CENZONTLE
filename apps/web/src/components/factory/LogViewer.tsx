@@ -1,33 +1,429 @@
 'use client';
 
-import { Terminal } from 'lucide-react';
+import { useState, useMemo, useRef, useEffect, useCallback, Fragment } from 'react';
+import { cn } from '@/lib/utils';
+import { useForgeLogs } from '@/hooks/use-forge-logs';
+import type { ForgeLogEntry } from '@/lib/api/factory';
+import {
+  Terminal,
+  Filter,
+  Search,
+  Info,
+  AlertTriangle,
+  XCircle,
+  ChevronDown,
+  Clock,
+  WifiOff,
+} from 'lucide-react';
+
+type SourceFilter = 'all' | ForgeLogEntry['source'];
+type LevelFilter = 'all' | ForgeLogEntry['level'];
+type TimeRange = '1h' | '6h' | '24h' | 'all';
+
+/**
+ * Fuentes REALES del stream (`GET /factory/logs`):
+ *  - forge: lifecycle del batch en la cola (enqueue, branch, PRs, staging)
+ *  - agent: lifecycle del AgentRun (iniciado, en curso, completado, fallido)
+ *  - worker: milestones técnicos del runner (clone, commit, push, PR)
+ *  - dod: veredictos del DoD verifier por criterio/attempt
+ */
+const SOURCE_OPTIONS: { value: SourceFilter; label: string }[] = [
+  { value: 'all', label: 'Todas' },
+  { value: 'forge', label: 'Forge' },
+  { value: 'agent', label: 'Agente' },
+  { value: 'worker', label: 'Worker' },
+  { value: 'dod', label: 'DoD' },
+];
+
+const LEVEL_OPTIONS: { value: LevelFilter; label: string }[] = [
+  { value: 'all', label: 'Todos' },
+  { value: 'info', label: 'Info' },
+  { value: 'warn', label: 'Warn' },
+  { value: 'error', label: 'Error' },
+];
+
+const TIME_RANGES: { value: TimeRange; label: string }[] = [
+  { value: '1h', label: '1h' },
+  { value: '6h', label: '6h' },
+  { value: '24h', label: '24h' },
+  { value: 'all', label: 'Todo' },
+];
+
+const SOURCE_BADGE: Record<ForgeLogEntry['source'], { bg: string; text: string }> = {
+  forge: { bg: 'bg-violet-500/15', text: 'text-violet-400' },
+  agent: { bg: 'bg-blue-500/15', text: 'text-blue-400' },
+  worker: { bg: 'bg-amber-500/15', text: 'text-amber-400' },
+  dod: { bg: 'bg-emerald-500/15', text: 'text-emerald-400' },
+};
+
+const LEVEL_ICON = {
+  info: { Icon: Info, color: 'text-blue-400' },
+  warn: { Icon: AlertTriangle, color: 'text-amber-400' },
+  error: { Icon: XCircle, color: 'text-red-400' },
+} as const;
+
+const TIME_MS: Record<Exclude<TimeRange, 'all'>, number> = {
+  '1h': 3_600_000,
+  '6h': 21_600_000,
+  '24h': 86_400_000,
+};
+
+// -- Helpers -----------------------------------------------------------------
+
+function fmtTime(iso: string): string {
+  try {
+    return new Date(iso).toLocaleTimeString('en-GB', {
+      hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false,
+    });
+  } catch {
+    return '--:--:--';
+  }
+}
+
+function highlightMatch(text: string, query: string): React.ReactNode {
+  if (!query) return text;
+  const escaped = query.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const parts = text.split(new RegExp(`(${escaped})`, 'gi'));
+  return parts.map((part, i) =>
+    part.toLowerCase() === query.toLowerCase() ? (
+      <mark key={i} className="bg-yellow-400/30 text-inherit rounded-sm px-0.5">{part}</mark>
+    ) : (
+      <Fragment key={i}>{part}</Fragment>
+    ),
+  );
+}
+
+// -- Sub-components ----------------------------------------------------------
+
+function PillGroup<T extends string>({
+  label,
+  options,
+  value,
+  onChange,
+  ariaLabel,
+}: {
+  label: string;
+  options: { value: T; label: string }[];
+  value: T;
+  onChange: (v: T) => void;
+  ariaLabel: string;
+}) {
+  return (
+    <div className="flex items-center gap-2">
+      <span className="text-[11px] text-muted-foreground font-medium uppercase tracking-wider select-none">
+        {label}
+      </span>
+      <div className="flex items-center gap-0.5" role="radiogroup" aria-label={ariaLabel}>
+        {options.map((opt) => (
+          <button
+            key={opt.value}
+            type="button"
+            role="radio"
+            aria-checked={value === opt.value}
+            onClick={() => onChange(opt.value)}
+            className={cn(
+              'px-2 py-0.5 rounded text-[11px] font-medium transition-colors',
+              value === opt.value
+                ? 'bg-muted text-foreground'
+                : 'text-muted-foreground hover:text-foreground hover:bg-muted/50',
+            )}
+          >
+            {opt.label}
+          </button>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function StatsBar({ total, info, warn, error }: { total: number; info: number; warn: number; error: number }) {
+  return (
+    <div className="flex items-center gap-3 px-4 py-1.5 text-[11px] font-medium text-muted-foreground tabular-nums select-none">
+      <span>{total} eventos</span>
+      <span className="text-border">|</span>
+      <span className="flex items-center gap-1"><span className="h-1.5 w-1.5 rounded-full bg-blue-400 inline-block" />{info} info</span>
+      <span className="flex items-center gap-1"><span className="h-1.5 w-1.5 rounded-full bg-amber-400 inline-block" />{warn} warn</span>
+      <span className="flex items-center gap-1"><span className="h-1.5 w-1.5 rounded-full bg-red-400 inline-block" />{error} error</span>
+    </div>
+  );
+}
+
+function VolumeBar({ info, warn, error, total }: { info: number; warn: number; error: number; total: number }) {
+  if (total === 0) return null;
+  const pctI = (info / total) * 100;
+  const pctW = (warn / total) * 100;
+  const pctE = (error / total) * 100;
+  return (
+    <div className="mx-4 mb-2 h-1.5 rounded-full overflow-hidden bg-muted flex" aria-label={`Volumen: ${info} info, ${warn} warn, ${error} error`}>
+      {pctI > 0 && <div className="bg-blue-400/70 h-full transition-all duration-300" style={{ width: `${pctI}%` }} />}
+      {pctW > 0 && <div className="bg-amber-400/70 h-full transition-all duration-300" style={{ width: `${pctW}%` }} />}
+      {pctE > 0 && <div className="bg-red-400/70 h-full transition-all duration-300" style={{ width: `${pctE}%` }} />}
+    </div>
+  );
+}
+
+function LogRow({ entry, query, expanded, onToggle }: {
+  entry: ForgeLogEntry; query: string; expanded: boolean; onToggle: () => void;
+}) {
+  const src = SOURCE_BADGE[entry.source];
+  const lvl = LEVEL_ICON[entry.level];
+
+  return (
+    <div
+      className={cn(
+        'group border-l-2 transition-colors',
+        entry.level === 'error' && 'bg-red-500/5 border-l-red-400',
+        entry.level === 'warn' && 'bg-amber-500/5 border-l-amber-400',
+        entry.level === 'info' && 'border-l-transparent hover:border-l-blue-400/50',
+      )}
+    >
+      <button
+        type="button"
+        onClick={onToggle}
+        className="w-full flex items-center gap-2.5 px-4 py-1.5 font-mono text-xs leading-5 text-left hover:bg-muted/40 transition-colors"
+        aria-expanded={expanded}
+      >
+        <span className="text-muted-foreground shrink-0 tabular-nums select-none">{fmtTime(entry.timestamp)}</span>
+        <span className={cn('inline-flex items-center rounded px-1.5 text-[10px] font-medium leading-4 shrink-0 min-w-[52px] justify-center', src.bg, src.text)}>
+          {entry.source}
+        </span>
+        <lvl.Icon className={cn('h-3.5 w-3.5 shrink-0', lvl.color)} aria-label={`Nivel: ${entry.level}`} />
+        <span className={cn(
+          'flex-1 truncate',
+          entry.level === 'error' && 'text-red-300',
+          entry.level === 'warn' && 'text-amber-300',
+          entry.level === 'info' && 'text-foreground',
+        )}>
+          {highlightMatch(entry.message, query)}
+        </span>
+        <ChevronDown className={cn(
+          'h-3 w-3 text-muted-foreground shrink-0 transition-transform opacity-0 group-hover:opacity-100',
+          expanded && 'rotate-180 opacity-100',
+        )} />
+      </button>
+
+      {expanded && (
+        <div className="px-4 pb-2.5 pt-0.5 ml-[72px] font-mono text-[11px] space-y-1 border-t border-border/50">
+          <p className="text-foreground whitespace-pre-wrap break-words">{entry.message}</p>
+          <div className="flex flex-wrap items-center gap-x-4 gap-y-1 pt-1 text-muted-foreground">
+            <span>Épica: <span className="text-foreground">{entry.epicTitle}</span></span>
+            {entry.storyTitle && (
+              <span>Historia: <span className="text-foreground">{entry.storyTitle}</span></span>
+            )}
+            <span>Batch: <span className="text-foreground">{entry.batchId}</span></span>
+            <span>Source ID: <span className="text-foreground">{entry.sourceId}</span></span>
+            <span>Timestamp: <span className="text-foreground">{entry.timestamp}</span></span>
+            <span className={cn(
+              'inline-flex items-center gap-1 rounded px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wider',
+              entry.level === 'info' && 'bg-blue-500/15 text-blue-400',
+              entry.level === 'warn' && 'bg-amber-500/15 text-amber-400',
+              entry.level === 'error' && 'bg-red-500/15 text-red-400',
+            )}>
+              {entry.level}
+            </span>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+/** Skeleton de la primera carga — evita el flash de "sin actividad". */
+function LoadingRows() {
+  return (
+    <div className="divide-y divide-border/40" aria-hidden="true">
+      {Array.from({ length: 8 }, (_, i) => (
+        <div key={i} className="flex items-center gap-2.5 px-4 py-2">
+          <div className="h-3 w-14 rounded bg-muted animate-pulse" />
+          <div className="h-3 w-12 rounded bg-muted animate-pulse" />
+          <div
+            className="h-3 rounded bg-muted animate-pulse"
+            style={{ width: `${30 + ((i * 17) % 45)}%` }}
+          />
+        </div>
+      ))}
+    </div>
+  );
+}
+
+// -- Main Component ----------------------------------------------------------
 
 /**
  * Vista de logs del Forge (/factory/logs).
  *
- * No existe todavía un endpoint de log aggregation del factory — la
- * versión anterior de esta vista (filtros por source/level/rango, búsqueda
- * full-text, análisis de volumen) leía el slice mock `state.logs` del
- * FactoryContext, que tras la limpieza de mocks legacy quedó vacío para
- * siempre. Se redujo a un empty state honesto (2026-06-11; el historial de
- * git preserva la UI como referencia).
- *
- * Cuando exista la fuente real (p.ej. el shipper a Loki pendiente de
- * deploy, o un endpoint que exponga el output de los AgentRuns), reconectar
- * con el patrón de /factory/cost: contrato en el service + espejo en
- * `lib/api/factory.ts` + hook con polling (ver use-cost-analytics.ts).
+ * Lee el stream real de `GET /factory/logs` (eventos derivados del estado
+ * persistido: cola, runs, milestones del worker, veredictos DoD) vía
+ * `useForgeLogs` con polling 15s. Tres estados honestos además del stream:
+ * skeleton (primera carga), "no disponible" (todos los polls fallaron) y
+ * "sin actividad" (backend OK pero ningún batch encolado aún). Ante un poll
+ * fallido con datos previos, el stream se conserva y el header cambia el
+ * badge Live por un aviso de reconexión (`degraded`).
  */
 export function LogViewer() {
+  const { logs, loading, degraded, fetchedAt } = useForgeLogs();
+
+  const [source, setSource] = useState<SourceFilter>('all');
+  const [level, setLevel] = useState<LevelFilter>('all');
+  const [timeRange, setTimeRange] = useState<TimeRange>('all');
+  const [query, setQuery] = useState('');
+  const [expandedId, setExpandedId] = useState<string | null>(null);
+  const scrollRef = useRef<HTMLDivElement>(null);
+
+  const toggleRow = useCallback((id: string) => {
+    setExpandedId((prev) => (prev === id ? null : id));
+  }, []);
+
+  // Reloj para el filtro de rango temporal: el timestamp del último poll
+  // exitoso (15s de granularidad — de sobra para rangos de 1h+). Mantiene
+  // el useMemo puro: react-hooks/purity prohíbe Date.now() en render.
+  const clockMs = fetchedAt ?? 0;
+
+  const filtered = useMemo(() => {
+    if (!logs) return [];
+    const lowerQ = query.toLowerCase();
+
+    // El backend ya ordena DESC — aquí solo se filtra.
+    return logs.filter((e) => {
+      if (source !== 'all' && e.source !== source) return false;
+      if (level !== 'all' && e.level !== level) return false;
+      if (timeRange !== 'all') {
+        const age = clockMs - new Date(e.timestamp).getTime();
+        if (age > TIME_MS[timeRange]) return false;
+      }
+      if (lowerQ && !e.message.toLowerCase().includes(lowerQ)) return false;
+      return true;
+    });
+  }, [logs, source, level, timeRange, query, clockMs]);
+
+  const counts = useMemo(() => {
+    let info = 0, warn = 0, error = 0;
+    for (const e of filtered) {
+      if (e.level === 'info') info++;
+      else if (e.level === 'warn') warn++;
+      else error++;
+    }
+    return { total: filtered.length, info, warn, error };
+  }, [filtered]);
+
+  // Volver arriba SOLO cuando cambian los filtros — nunca en los polls:
+  // dependiendo de filtered.length, cada refresco de 15s con eventos nuevos
+  // expulsaría al usuario de donde estaba leyendo (qa-reviewer 2026-06-11).
+  useEffect(() => {
+    scrollRef.current?.scrollTo({ top: 0 });
+  }, [source, level, timeRange, query]);
+
+  const isLive = !loading && logs !== null && !degraded;
+
   return (
-    <div className="rounded-xl border border-border bg-card px-6 py-16 flex flex-col items-center text-center gap-3">
-      <Terminal className="h-10 w-10 text-muted-foreground/50" aria-hidden="true" />
-      <h3 className="text-base font-semibold text-foreground">
-        Logs del Forge sin conectar
-      </h3>
-      <p className="text-sm text-muted-foreground max-w-md">
-        El dashboard aún no recibe logs agregados del factory. Esta vista se
-        activará cuando exista la fuente real de log streaming.
-      </p>
+    <div className="rounded-xl border border-border bg-card overflow-hidden flex flex-col h-full">
+      {/* Header */}
+      <div className="flex items-center gap-3 px-4 py-3 border-b border-border">
+        <Terminal className="h-4 w-4 text-muted-foreground shrink-0" />
+        <h2 className="text-sm font-semibold text-foreground">Logs</h2>
+        <span className="inline-flex items-center justify-center rounded-full bg-muted px-2 py-0.5 text-[11px] font-medium text-muted-foreground tabular-nums">
+          {counts.total}
+        </span>
+        {isLive && (
+          <span className="inline-flex items-center gap-1.5 text-[10px] font-semibold uppercase tracking-wider text-emerald-400">
+            <span className="relative flex h-2 w-2">
+              <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-emerald-400 opacity-75" />
+              <span className="relative inline-flex h-2 w-2 rounded-full bg-emerald-400" />
+            </span>
+            Live
+          </span>
+        )}
+        {degraded && logs !== null && (
+          <span
+            className="inline-flex items-center gap-1.5 text-[10px] font-semibold uppercase tracking-wider text-amber-400"
+            title="El último refresco falló — mostrando los datos conocidos. Se reintenta cada 15s."
+          >
+            <WifiOff className="h-3 w-3" />
+            Reconectando
+          </span>
+        )}
+        <div className="flex-1" />
+        <div className="relative max-w-[220px] w-full">
+          <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 h-3.5 w-3.5 text-muted-foreground pointer-events-none" />
+          <input
+            type="search"
+            placeholder="Buscar en los logs…"
+            value={query}
+            onChange={(e) => setQuery(e.target.value)}
+            className="w-full rounded-md border border-border bg-background py-1 pl-8 pr-3 text-xs text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-1 focus:ring-ring"
+            aria-label="Buscar en los mensajes de log"
+          />
+        </div>
+      </div>
+
+      {/* Stats + Volume */}
+      <div className="border-b border-border bg-background">
+        <StatsBar {...counts} />
+        <VolumeBar {...counts} />
+      </div>
+
+      {/* Filters */}
+      <div className="flex items-center gap-4 px-4 py-2 border-b border-border bg-background flex-wrap">
+        <Filter className="h-3 w-3 text-muted-foreground shrink-0" />
+        <PillGroup label="Fuente" options={SOURCE_OPTIONS} value={source} onChange={setSource} ariaLabel="Filtrar por fuente" />
+        <div className="h-4 w-px bg-border hidden sm:block" />
+        <PillGroup label="Nivel" options={LEVEL_OPTIONS} value={level} onChange={setLevel} ariaLabel="Filtrar por nivel" />
+        <div className="h-4 w-px bg-border hidden sm:block" />
+        <PillGroup
+          label=""
+          options={TIME_RANGES}
+          value={timeRange}
+          onChange={setTimeRange}
+          ariaLabel="Filtrar por rango de tiempo"
+        />
+        <Clock className="h-3 w-3 text-muted-foreground -ml-1 shrink-0" />
+      </div>
+
+      {/* Log stream */}
+      <div
+        ref={scrollRef}
+        className="flex-1 overflow-y-auto bg-background"
+        role="log"
+        aria-label="Stream de logs"
+        aria-live="polite"
+      >
+        {loading ? (
+          <LoadingRows />
+        ) : logs === null ? (
+          <div className="flex flex-col items-center justify-center h-full py-16 gap-2 px-6 text-center">
+            <WifiOff className="h-6 w-6 text-muted-foreground/50" />
+            <span className="text-sm font-medium text-foreground">Logs del Forge no disponibles</span>
+            <span className="text-sm text-muted-foreground max-w-md">
+              No se pudo conectar con el API. Se reintenta automáticamente cada 15s.
+            </span>
+          </div>
+        ) : logs.length === 0 ? (
+          <div className="flex flex-col items-center justify-center h-full py-16 gap-2 px-6 text-center">
+            <Terminal className="h-6 w-6 text-muted-foreground/50" />
+            <span className="text-sm font-medium text-foreground">El Forge aún no registra actividad</span>
+            <span className="text-sm text-muted-foreground max-w-md">
+              Los eventos aparecerán aquí cuando una épica entre a la cola: lifecycle
+              del batch, runs de los agentes, milestones del worker y veredictos del DoD.
+            </span>
+          </div>
+        ) : filtered.length === 0 ? (
+          <div className="flex flex-col items-center justify-center h-full py-16 gap-2">
+            <Terminal className="h-6 w-6 text-muted-foreground/50" />
+            <span className="text-sm text-muted-foreground">Ningún evento coincide con los filtros actuales.</span>
+          </div>
+        ) : (
+          <div className="divide-y divide-border/40">
+            {filtered.map((entry) => (
+              <LogRow
+                key={entry.id}
+                entry={entry}
+                query={query}
+                expanded={expandedId === entry.id}
+                onToggle={() => toggleRow(entry.id)}
+              />
+            ))}
+          </div>
+        )}
+      </div>
     </div>
   );
 }
