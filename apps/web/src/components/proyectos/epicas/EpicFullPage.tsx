@@ -46,6 +46,7 @@ import { PriorityIndicator } from '../shared/PriorityIndicator';
 import { PodBadge } from '../shared/PodBadge';
 import { ProgressBar } from '../shared/ProgressBar';
 import { StoryPointsBadge } from '../shared/StoryPointsBadge';
+import { EstimateDeviationBadge, classifyVelocityRatio } from '../shared/EstimateDeviationBadge';
 import { DownloadMenu } from '../shared/DownloadMenu';
 import { EpicDiagrams } from './EpicDiagrams';
 import { EpicDocuments } from './EpicDocuments';
@@ -61,6 +62,7 @@ import { StoryAgentPromptBar } from './StoryAgentPromptBar';
 import { StoryProposalList } from './StoryProposalList';
 import { streamStoryProposals } from '@/lib/story-agent';
 import { useScreenWakeLock } from '@/hooks/use-screen-wake-lock';
+import { useStoryVelocity } from '@/hooks/use-story-velocity';
 import {
   getCachedStorySession,
   removeCachedStoryProposal,
@@ -398,6 +400,12 @@ function EpicFullPageInner({ epicId }: { epicId: string }) {
     const progress = stories.length > 0 ? Math.round((doneStories / stories.length) * 100) : 0;
     return { ...rawEpic, initiative, pods, stories, progress };
   }, [rawEpic, state.initiatives, state.pods, state.stories]);
+
+  // Velocity del batch del Forge para esta épica (fetch único, sin polling —
+  // dato histórico). Si la épica nunca se encoló o quedó fuera de la ventana
+  // de 50 batches de /factory/velocity, `velocityBatch` es null y la
+  // mini-sección no se muestra.
+  const { batch: velocityBatch } = useStoryVelocity({ epicId });
 
   const [isEditing, setIsEditing] = useState(false);
   const [isSaving, setIsSaving] = useState(false);
@@ -1716,6 +1724,40 @@ function EpicFullPageInner({ epicId }: { epicId: string }) {
                     <span className="text-sm font-medium tabular-nums">{donePoints}/{totalPoints} SP</span>
                   </div>
                   <ProgressBar progress={epic.progress} />
+                </div>
+              )}
+
+              {/* ── Velocity ── puntos entregados vs planeados del batch más
+                  reciente de la épica en el Forge + veredicto de calibración
+                  estimado-vs-real. `classification` se deriva client-side
+                  porque VelocityBatch trae ratio crudo (el backend solo
+                  clasifica historias individuales). */}
+              {velocityBatch && (
+                <div className="mt-4 rounded-lg border bg-muted/20 p-3">
+                  <div className="flex items-center justify-between gap-3 mb-1.5">
+                    <span className="text-[10px] uppercase tracking-widest font-semibold text-muted-foreground">
+                      Velocity
+                    </span>
+                    <EstimateDeviationBadge
+                      ratio={velocityBatch.ratio}
+                      classification={classifyVelocityRatio(velocityBatch.ratio)}
+                    />
+                  </div>
+                  <div className="flex items-center justify-between mb-1.5">
+                    <span className="text-xs text-muted-foreground">
+                      {velocityBatch.storiesDone}/{velocityBatch.storiesCount} historias del batch
+                    </span>
+                    <span className="text-sm font-medium tabular-nums">
+                      {velocityBatch.pointsDelivered}/{velocityBatch.pointsPlanned} SP entregados
+                    </span>
+                  </div>
+                  <ProgressBar
+                    progress={
+                      velocityBatch.pointsPlanned > 0
+                        ? Math.round((velocityBatch.pointsDelivered / velocityBatch.pointsPlanned) * 100)
+                        : 0
+                    }
+                  />
                 </div>
               )}
             </div>

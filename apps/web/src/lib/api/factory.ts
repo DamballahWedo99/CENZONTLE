@@ -1,4 +1,9 @@
-import type { CriterionEvent, DodVerificationEntry } from '@cenzontle/shared';
+import type {
+  CostAnalyticsResponse,
+  CriterionEvent,
+  DodVerificationEntry,
+  VelocityAnalyticsResponse,
+} from '@cenzontle/shared';
 import { apiFetch } from './client';
 
 /**
@@ -902,87 +907,18 @@ export function getForgePrs() {
 // Cost Analytics — agregados de costo del Forge (/factory/cost)
 // ──────────────────────────────────────────────────────────────────────
 
-/**
- * Componente del run que origina el costo: el planner descompone la story,
- * el generator (coder) la implementa y el verifier corre el DoD loop.
- */
-export type CostComponentKey = 'planner' | 'generator' | 'verifier';
-
-/** Totales de un componente: costo + split de tokens new/cached. */
-export interface CostComponentTotals {
-  costUsd: number;
-  /** Tokens "nuevos": input + output + cache_creation (billable a precio
-   *  completo, sin cache_read). */
-  tokensNew: number;
-  /** Tokens cached (cache_read), separados para transparencia. */
-  tokensCached: number;
-}
-
-/**
- * Agregado de costo de un batch (épica encolada al Forge). El backend suma
- * across TODOS los runs de las stories del batch — retries incluidos.
- */
-export interface CostAnalyticsBatch {
-  batchId: string;
-  epicId: string;
-  epicTitle: string;
-  /** ISO timestamp. Los batches vienen ordenados ASC por este campo —
-   *  los charts de tendencia lo consumen tal cual, sin re-ordenar. */
-  enqueuedAt: string;
-  completedAt: string | null;
-  storiesCount: number;
-  storiesDone: number;
-  /** Stories con al menos un run que reportó costo. Denominador honesto
-   *  para cost/story — storiesCount incluye stories aún sin ejecutar. */
-  storiesWithCost: number;
-  costUsd: number;
-  tokensNew: number;
-  tokensCached: number;
-  byComponent: Record<CostComponentKey, CostComponentTotals>;
-  runsCount: number;
-  /** Runs con attempts > 1 — el DoD verifier forzó al menos un retry. */
-  retriedRuns: number;
-}
-
-/** Costo agregado de una story individual del Forge. */
-export interface CostAnalyticsStory {
-  storyId: string;
-  storyTitle: string;
-  batchId: string;
-  epicTitle: string;
-  status: string;
-  /** Suma across TODOS los runs de la story (retries incluidos). */
-  costUsd: number;
-  tokensNew: number;
-  /** Attempts del DoD loop. NULL si el run nunca llegó al verifier. */
-  attempts: number | null;
-}
-
-/** Totales globales del dashboard de costos. */
-export interface CostAnalyticsTotals {
-  costUsd: number;
-  tokensNew: number;
-  tokensCached: number;
-  batchesCount: number;
-  storiesWithCost: number;
-  /** Run-rate mensual real: costo de los runs de los últimos 30 días. */
-  last30DaysCostUsd: number;
-  byComponent: Record<CostComponentKey, CostComponentTotals>;
-}
-
-/**
- * Respuesta de `GET /factory/cost` — todo lo que el dashboard /factory/cost
- * renderiza. Cero derivaciones inventadas en el frontend: lo que no viene
- * aquí, no se muestra.
- */
-export interface CostAnalyticsResponse {
-  generatedAt: string;
-  totals: CostAnalyticsTotals;
-  /** ASC por enqueuedAt. */
-  batches: CostAnalyticsBatch[];
-  /** DESC por costUsd, solo stories con costo > 0. */
-  stories: CostAnalyticsStory[];
-}
+// El contrato es canónico en @cenzontle/shared (packages/shared/src/types/
+// factory.ts, sección COST ANALYTICS) — se re-exporta aquí para que hooks y
+// componentes consuman todo desde '@/lib/api/factory', igual que el resto de
+// los dashboards del Forge.
+export type {
+  CostAnalyticsBatch,
+  CostAnalyticsResponse,
+  CostAnalyticsStory,
+  CostAnalyticsTotals,
+  CostComponentKey,
+  CostComponentTotals,
+} from '@cenzontle/shared';
 
 /**
  * Agregados de costo del Forge para el dashboard /factory/cost. Polling
@@ -1045,4 +981,32 @@ export interface ForgeLogsResponse {
  */
 export function getForgeLogs() {
   return apiFetch<ForgeLogsResponse>('/factory/logs');
+}
+
+// ──────────────────────────────────────────────────────────────────────
+// Velocity Tracker — estimación vs esfuerzo real (/factory/velocity)
+// ──────────────────────────────────────────────────────────────────────
+
+// El contrato es canónico en @cenzontle/shared (packages/shared/src/types/
+// factory.ts, sección VELOCITY TRACKER) — se re-exporta aquí para que hooks
+// y componentes consuman todo desde '@/lib/api/factory', igual que el resto
+// de los dashboards del Forge.
+export type {
+  VelocityAnalyticsResponse,
+  VelocityBatch,
+  VelocityCalibrationRow,
+  VelocityClassification,
+  VelocityStoryBreakdown,
+  VelocityTotals,
+  VelocityWeeklyPoint,
+} from '@cenzontle/shared';
+
+/**
+ * Cruce de estimación (Story.storyPoints) contra esfuerzo real medido de los
+ * AgentRuns (costo + duración + attempts) para el dashboard /factory/velocity.
+ * Polling sugerido: 30s — el backend agrega across todos los runs, mismo
+ * orden de costo que `/factory/cost`.
+ */
+export function getVelocityAnalytics() {
+  return apiFetch<VelocityAnalyticsResponse>('/factory/velocity');
 }

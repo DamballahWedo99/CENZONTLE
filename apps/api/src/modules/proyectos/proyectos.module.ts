@@ -14,6 +14,7 @@ import { StoryDependenciesService } from './stories/dependencies/story-dependenc
 import { ChangelogController } from './changelog/changelog.controller';
 import { ChangelogService } from './changelog/changelog.service';
 import { AgentToolsModule } from '../factory/agent-tools/agent-tools.module';
+import { VelocityCalibrationModule } from '../factory/velocity/velocity-calibration.module';
 import { CodeRepositoriesModule } from '../code-repositories/code-repositories.module';
 import { DocumentsModule } from '../documents/documents.module';
 import { IntegrationsModule } from '../integrations/integrations.module';
@@ -40,6 +41,7 @@ import { AssistantSessionService } from './assistant/assistant-session.service';
 @Module({
   imports: [
     AgentToolsModule,
+    VelocityCalibrationModule,
     CodeRepositoriesModule,
     DocumentsModule,
     IntegrationsModule,

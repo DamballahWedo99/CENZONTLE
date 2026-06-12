@@ -30,6 +30,7 @@ import { AssistantChatSidebar } from '../assistant/AssistantChatSidebar';
 import { StatusBadge } from '../shared/StatusBadge';
 import { PodBadge } from '../shared/PodBadge';
 import { StoryPointsBadge } from '../shared/StoryPointsBadge';
+import { EstimateDeviationBadge } from '../shared/EstimateDeviationBadge';
 import { DownloadMenu } from '../shared/DownloadMenu';
 import { StoryDependencies } from './StoryDependencies';
 import { StoryPOTab } from './editor/StoryPOTab';
@@ -61,6 +62,7 @@ import { LinearIcon } from '@/components/icons/LinearIcon';
 import { Tooltip, TooltipTrigger, TooltipContent, TooltipProvider } from '@/components/ui/tooltip';
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover';
 import { Skeleton } from '@/components/ui/skeleton';
+import { useStoryVelocity } from '@/hooks/use-story-velocity';
 import { publishStoryToTracker } from '@/lib/api/integrations';
 import { ApiError } from '@/lib/api/client';
 import type { TrackerReference } from '@cenzontle/shared';
@@ -283,6 +285,14 @@ function StoryFullPageInner({ storyId }: StoryFullPageProps) {
   const initiative = useMemo(() => (epic ? state.initiatives.find((i) => i.id === epic.initiativeId) ?? null : null), [epic, state.initiatives]);
   const pod = useMemo(() => (story ? state.pods.find((p) => p.id === story.podId) ?? null : null), [story, state.pods]);
   const sprint = useMemo(() => (story?.sprintId ? state.sprints.find((s) => s.id === story.sprintId) ?? null : null), [story, state.sprints]);
+
+  // Velocity (desviación estimado-vs-real) — solo aplica a historias done:
+  // antes de eso no hay esfuerzo final que comparar contra los SP. Los hooks
+  // no pueden ser condicionales, así que el gating va en el parámetro: sin
+  // storyId el hook NO fetchea (ver use-story-velocity).
+  const { story: velocityStory } = useStoryVelocity({
+    storyId: story?.status === StoryStatus.Done ? story.id : undefined,
+  });
 
   // Loading flag para los 3 markdowns de la historia (PO/Technical/QA).
   // `vaultContent === null` significa que el API call `apiGetStory(id, true)`
@@ -779,6 +789,14 @@ function StoryFullPageInner({ storyId }: StoryFullPageProps) {
                 <div className="flex flex-wrap items-center gap-3 mt-4">
                   <StatusBadge status={story.status} />
                   <StoryPointsBadge points={story.storyPoints} />
+                  {/* Badge de calibración estimado-vs-real — solo en done y si
+                      la historia cae en la ventana de /factory/velocity. */}
+                  {story.status === StoryStatus.Done && velocityStory && (
+                    <EstimateDeviationBadge
+                      ratio={velocityStory.ratio}
+                      classification={velocityStory.classification}
+                    />
+                  )}
                   {story.tracker?.externalKey && (
                     <span className="font-mono text-xs rounded-md bg-muted px-2 py-0.5 text-muted-foreground">{story.tracker.externalKey}</span>
                   )}

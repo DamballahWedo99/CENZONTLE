@@ -1,84 +1,32 @@
 import { Injectable } from '@nestjs/common';
 import { InjectPinoLogger, PinoLogger } from 'nestjs-pino';
-import { AuthenticatedUser, UserRole } from '@cenzontle/shared';
+import {
+  AuthenticatedUser,
+  UserRole,
+  type CostAnalyticsBatch,
+  type CostAnalyticsResponse,
+  type CostAnalyticsStory,
+  type CostAnalyticsTotals,
+} from '@cenzontle/shared';
 import { PrismaService } from '../../prisma/prisma.service';
 import {
   COST_COMPONENT_KEYS,
   computeRunComponentStats,
   emptyByComponent,
   emptyComponentTotals,
-  type CostComponentKey,
-  type CostComponentTotals,
 } from './cost-stats';
 
 // ════════════════════════════════════════════════════════════════════════
 // Forge cost analytics — agregación read-time de los usage Json de AgentRun
 // ════════════════════════════════════════════════════════════════════════
 //
+// El contrato de respuesta (CostAnalytics*) es canónico en @cenzontle/shared
+// (sección COST ANALYTICS) — compartido con el frontend.
+//
 // Todos los números son estimates client-side del SDK de Anthropic, NO
 // billing oficial — el dashboard los presenta como orden de magnitud para
 // decisiones operativas (¿cuánto cuesta un batch?, ¿cuánto cuestan los
 // retries?), no para conciliación contable.
-
-export type { CostComponentKey, CostComponentTotals } from './cost-stats';
-
-export interface CostAnalyticsBatch {
-  batchId: string;
-  epicId: string;
-  epicTitle: string;
-  /** ISO. */
-  enqueuedAt: string;
-  /** Max completedAt across runs del batch. NULL si ningún run completó. */
-  completedAt: string | null;
-  storiesCount: number;
-  storiesDone: number;
-  /** Stories cuyo(s) run(s) aportaron costo > 0. */
-  storiesWithCost: number;
-  costUsd: number;
-  tokensNew: number;
-  tokensCached: number;
-  byComponent: Record<CostComponentKey, CostComponentTotals>;
-  /** Total de AgentRuns del batch (todos, no solo el más reciente por story). */
-  runsCount: number;
-  /** Runs con attempts > 1 — el DoD verifier rechazó al menos un intento. */
-  retriedRuns: number;
-}
-
-export interface CostAnalyticsStory {
-  storyId: string;
-  storyTitle: string;
-  batchId: string;
-  epicTitle: string;
-  /** StoryStatus en el wire. */
-  status: string;
-  /** Suma across TODOS los runs de la story (los retries cuestan dinero real). */
-  costUsd: number;
-  tokensNew: number;
-  /** Attempts del run más reciente (orderBy startedAt desc). NULL sin runs. */
-  attempts: number | null;
-}
-
-export interface CostAnalyticsTotals {
-  costUsd: number;
-  tokensNew: number;
-  tokensCached: number;
-  /** Batches visibles dentro de la ventana (últimos MAX_BATCHES), hayan gastado o no. */
-  batchesCount: number;
-  storiesWithCost: number;
-  /** Suma de costo de runs con startedAt >= now - 30 días — run-rate mensual real. */
-  last30DaysCostUsd: number;
-  byComponent: Record<CostComponentKey, CostComponentTotals>;
-}
-
-export interface CostAnalyticsResponse {
-  /** ISO now. */
-  generatedAt: string;
-  totals: CostAnalyticsTotals;
-  /** Orden cronológico ASC por enqueuedAt. */
-  batches: CostAnalyticsBatch[];
-  /** Solo stories con costUsd > 0, orden DESC por costUsd. */
-  stories: CostAnalyticsStory[];
-}
 
 /** Ventana del run-rate mensual: runs iniciados en los últimos 30 días. */
 const THIRTY_DAYS_MS = 30 * 24 * 60 * 60 * 1000;
