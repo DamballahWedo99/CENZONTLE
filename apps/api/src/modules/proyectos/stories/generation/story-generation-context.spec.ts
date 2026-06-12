@@ -78,6 +78,11 @@ function buildService(): StoryGenerationService {
     getStoryTl: jest.fn().mockResolvedValue({ model: 'claude-sonnet-4-6', effort: 'medium', maxTokens: 44000, enabled: true }),
     getStoryQa: jest.fn().mockResolvedValue({ model: 'claude-sonnet-4-6', effort: 'medium', maxTokens: 44000, enabled: true }),
   } as AnyObj;
+  // velocityCalibration se invoca desde runPOAgent (bloque <calibracion_historica>);
+  // null = "sin datos suficientes", el camino neutro para estos tests de prompts.
+  const velocityCalibrationStub = {
+    getCalibrationPromptBlock: jest.fn().mockResolvedValue(null),
+  } as AnyObj;
   // Mock minimal del logger pino — el constructor lo invoca al evaluar
   // STORY_AGENT_CONCURRENCY. Sin esto: TypeError reading 'info'/'warn'.
   const loggerStub = {
@@ -91,6 +96,7 @@ function buildService(): StoryGenerationService {
     orgAnthropicStub,
     empty, empty, empty, empty, empty, empty, empty, empty, empty, empty, empty,
     tokenSettingsStub,
+    velocityCalibrationStub,
     loggerStub,
   );
 }

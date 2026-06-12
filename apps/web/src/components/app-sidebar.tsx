@@ -16,6 +16,7 @@ import {
   GitPullRequest,
   TestTube2,
   DollarSign,
+  Gauge,
   ScrollText,
   Brain,
   Rocket,
@@ -82,6 +83,7 @@ const factoryItems = [
   { title: "Tests", url: "/factory/tests", icon: TestTube2 },
   { title: "Release Board", url: "/factory/release-board", icon: Rocket },
   { title: "Cost", url: "/factory/cost", icon: DollarSign },
+  { title: "Velocity", url: "/factory/velocity", icon: Gauge },
   { title: "Logs", url: "/factory/logs", icon: ScrollText },
   { title: "Evolution", url: "/factory/evolution", icon: Brain },
 ]

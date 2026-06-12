@@ -827,3 +827,233 @@ export interface DodVerificationEntry {
   verdicts: CriterionVerdict[];
 }
 
+// === COST ANALYTICS (GET /factory/cost) ===
+//
+// Agregación read-time de los usage Json de cada AgentRun por batch (épica
+// encolada) y por story. Todos los números son estimates client-side del SDK
+// de Anthropic, NO billing oficial — orden de magnitud para decisiones
+// operativas (¿cuánto cuesta un batch?, ¿cuánto cuestan los retries?), no para
+// conciliación contable. Contrato compartido api↔web (antes duplicado en el
+// service del API y en lib/api/factory del web).
+
+/**
+ * Componente del run que origina el costo: el planner descompone la story,
+ * el generator (coder) la implementa y el verifier corre el DoD loop.
+ */
+export type CostComponentKey = 'planner' | 'generator' | 'verifier';
+
+/** Totales de un componente: costo + split de tokens new/cached. */
+export interface CostComponentTotals {
+  costUsd: number;
+  /** Tokens "nuevos": input + output + cache_creation (billable a precio
+   *  completo, sin cache_read). */
+  tokensNew: number;
+  /** Tokens cached (cache_read), separados para transparencia. */
+  tokensCached: number;
+}
+
+/**
+ * Agregado de costo de un batch (épica encolada al Forge). El backend suma
+ * across TODOS los runs de las stories del batch — retries incluidos.
+ */
+export interface CostAnalyticsBatch {
+  batchId: string;
+  epicId: string;
+  epicTitle: string;
+  /** ISO timestamp. Los batches vienen ordenados ASC por este campo —
+   *  los charts de tendencia lo consumen tal cual, sin re-ordenar. */
+  enqueuedAt: string;
+  /** Max completedAt across runs del batch. NULL si ningún run completó. */
+  completedAt: string | null;
+  storiesCount: number;
+  storiesDone: number;
+  /** Stories con al menos un run que reportó costo. Denominador honesto
+   *  para cost/story — storiesCount incluye stories aún sin ejecutar. */
+  storiesWithCost: number;
+  costUsd: number;
+  tokensNew: number;
+  tokensCached: number;
+  byComponent: Record<CostComponentKey, CostComponentTotals>;
+  /** Total de AgentRuns del batch (todos, no solo el más reciente por story). */
+  runsCount: number;
+  /** Runs con attempts > 1 — el DoD verifier forzó al menos un retry. */
+  retriedRuns: number;
+}
+
+/** Costo agregado de una story individual del Forge. */
+export interface CostAnalyticsStory {
+  storyId: string;
+  storyTitle: string;
+  batchId: string;
+  epicTitle: string;
+  /** StoryStatus en el wire. */
+  status: string;
+  /** Suma across TODOS los runs de la story (los retries cuestan dinero real). */
+  costUsd: number;
+  tokensNew: number;
+  /** Attempts del run más reciente (orderBy startedAt desc). NULL sin runs. */
+  attempts: number | null;
+}
+
+/** Totales globales del dashboard de costos. */
+export interface CostAnalyticsTotals {
+  costUsd: number;
+  tokensNew: number;
+  tokensCached: number;
+  /** Batches visibles dentro de la ventana (últimos MAX_BATCHES), hayan gastado o no. */
+  batchesCount: number;
+  storiesWithCost: number;
+  /** Run-rate mensual real: costo de los runs de los últimos 30 días. */
+  last30DaysCostUsd: number;
+  byComponent: Record<CostComponentKey, CostComponentTotals>;
+}
+
+/**
+ * Respuesta de `GET /factory/cost` — todo lo que el dashboard /factory/cost
+ * renderiza. Cero derivaciones inventadas en el frontend: lo que no viene
+ * aquí, no se muestra.
+ */
+export interface CostAnalyticsResponse {
+  /** ISO now. */
+  generatedAt: string;
+  totals: CostAnalyticsTotals;
+  /** Orden cronológico ASC por enqueuedAt. */
+  batches: CostAnalyticsBatch[];
+  /** Solo stories con costUsd > 0, orden DESC por costUsd. */
+  stories: CostAnalyticsStory[];
+}
+
+// === VELOCITY TRACKER (GET /factory/velocity) ===
+//
+// Cruza la estimación (Story.storyPoints) contra el esfuerzo real medido de
+// los AgentRuns (costo USD + duración + attempts del DoD) para responder
+// "¿esta historia de 5 SP efectivamente valió 5 SP?". Derivado 100% read-time
+// desde Prisma (sin tablas nuevas), mismo patrón y ventana que /factory/cost.
+//
+// El effort score se normaliza contra la MEDIANA de la población visible
+// (historias done con costo > 0 en la ventana): effortScore = 1.0 se lee
+// "esfuerzo de la historia mediana". expectedEffort = storyPoints/medianSP,
+// y ratio = effortScore/expectedEffort clasifica con factor 1.5 simétrico.
+
+/** Veredicto de calibración de una historia: ¿valió sus SP estimados? */
+export type VelocityClassification = 'over' | 'calibrated' | 'under' | 'no-data';
+
+export interface VelocityStoryBreakdown {
+  storyId: string;
+  storyTitle: string;
+  batchId: string;
+  epicId: string;
+  epicTitle: string;
+  /** StoryStatus en el wire (backlog|...|done|blocked). */
+  status: string;
+  storyPoints: number;
+  /** Gasto real agregado de TODOS los runs (failed/abandoned incluidos —
+   *  también costaron dinero), planner + generator + verifier. */
+  costUsd: number;
+  /** Σ (completedAt - startedAt) de runs con ambos timestamps. */
+  durationMs: number;
+  /** Σ run.attempts — ciclos del DoD loop más re-lanzamientos manuales. */
+  totalAttempts: number;
+  runsCount: number;
+  /** Índice compuesto normalizado vs medianas; null si la historia no tiene
+   *  costo medible o la población no alcanza MIN_SAMPLES. */
+  effortScore: number | null;
+  /** effortScore / (storyPoints / medianSP). >1 costó más de lo presupuestado. */
+  ratio: number | null;
+  classification: VelocityClassification;
+  /** ISO — prioridad: max completedAt de runs completed > ChangelogEntry
+   *  status→done (cierres humanos) > story.updatedAt si está done. */
+  completedAt: string | null;
+}
+
+export interface VelocityBatch {
+  batchId: string;
+  epicId: string;
+  epicTitle: string;
+  enqueuedAt: string;
+  /** Max completedAt entre las historias del batch; null si nada terminó. */
+  completedAt: string | null;
+  storiesCount: number;
+  storiesDone: number;
+  /** Σ storyPoints de todas las historias del batch. */
+  pointsPlanned: number;
+  /** Σ storyPoints de las historias done. */
+  pointsDelivered: number;
+  costUsd: number;
+  durationMs: number;
+  totalAttempts: number;
+  /** Σ effortScore de las historias con score; null si ninguna lo tiene. */
+  effortTotal: number | null;
+  /** effortTotal vs puntos entregados (normalizado por medianSP). */
+  ratio: number | null;
+}
+
+/** Bucket semanal para el trend de velocity (semana ISO, lunes). */
+export interface VelocityWeeklyPoint {
+  /** ISO date (YYYY-MM-DD) del lunes de la semana. */
+  weekStart: string;
+  pointsDelivered: number;
+  storiesDone: number;
+}
+
+/**
+ * Fila de la tabla de calibración por bucket Fibonacci. Además del dashboard,
+ * esta tabla se inyecta (formateada como `<calibracion_historica>`) al prompt
+ * del PO agent que estima storyPoints — el loop de aprendizaje del sistema.
+ */
+export interface VelocityCalibrationRow {
+  /** Bucket Fibonacci: 1, 2, 3, 5, 8 o 13. */
+  storyPoints: number;
+  /** Historias done con costo en este bucket. Mostrar SIEMPRE en la UI —
+   *  con poblaciones chicas las medianas son volátiles. */
+  samples: number;
+  avgCostUsd: number;
+  avgDurationMs: number;
+  avgAttempts: number;
+  avgEffortScore: number;
+  /** avgEffortScore vs esfuerzo esperado del bucket (sp/medianSP).
+   *  >1 = el bucket tiende a SUB-estimarse; <1 = a SOBRE-estimarse. */
+  ratioVsExpected: number | null;
+}
+
+export interface VelocityTotals {
+  pointsPlanned: number;
+  pointsDelivered: number;
+  /** SP entregados en los últimos 30 días (por completedAt de la historia). */
+  last30DaysPointsDelivered: number;
+  /**
+   * Promedio de pointsDelivered de las últimas 4 semanas calendario. La
+   * semana en curso cuenta a peso completo en el denominador aunque esté
+   * parcial — KPI conservador: al inicio de semana (o de proyecto) el
+   * promedio se ve más bajo de lo que cerrará, nunca inflado.
+   */
+  avgWeeklyVelocity4w: number;
+  /** % de historias clasificadas como 'calibrated' sobre las que tienen score. */
+  calibratedPct: number;
+  /** Mediana de ratio de las historias con score; null sin muestras. */
+  globalRatio: number | null;
+  /** Historias done con costo > 0 y SP > 0 — la población de referencia. */
+  sampleSize: number;
+  /** Medianas poblacionales usadas para normalizar; null si sampleSize <
+   *  MIN_SAMPLES (todo se reporta como no-data). */
+  medians: {
+    costUsd: number;
+    durationMs: number;
+    attempts: number;
+    storyPoints: number;
+  } | null;
+}
+
+export interface VelocityAnalyticsResponse {
+  generatedAt: string;
+  totals: VelocityTotals;
+  /** ASC por weekStart. */
+  weekly: VelocityWeeklyPoint[];
+  /** ASC por enqueuedAt (igual que /factory/cost). */
+  batches: VelocityBatch[];
+  /** Flat — el drill por batch se agrupa client-side (patrón cost). */
+  stories: VelocityStoryBreakdown[];
+  /** Solo buckets con samples > 0. */
+  calibration: VelocityCalibrationRow[];
+}
+

@@ -9,13 +9,10 @@
 // Mantener costUsd/tokensNew alineados: si un usage gana campos nuevos,
 // actualizar los dos para que sigan sumando exactamente lo mismo.
 
-export type CostComponentKey = 'planner' | 'generator' | 'verifier';
-
-export interface CostComponentTotals {
-  costUsd: number;
-  tokensNew: number;
-  tokensCached: number;
-}
+// El contrato de componente (key + totals) es canónico en @cenzontle/shared
+// para que api y web compartan el shape; los valores/lógica (COST_COMPONENT_KEYS,
+// emptyByComponent, computeRunComponentStats) viven aquí porque son del backend.
+import type { CostComponentKey, CostComponentTotals } from '@cenzontle/shared';
 
 export type RunComponentStats = Record<CostComponentKey, CostComponentTotals>;
 

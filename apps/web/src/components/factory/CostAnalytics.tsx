@@ -1,9 +1,16 @@
 'use client';
 
-import { useMemo, useRef, useEffect, useLayoutEffect, useState } from 'react';
+import { useMemo, useRef, useState } from 'react';
 import * as d3 from 'd3';
 import { cn } from '@/lib/utils';
 import { useCostAnalytics } from '@/hooks/use-cost-analytics';
+import {
+  fmtCost,
+  fmtPct,
+  fmtTokens,
+  linearRegression,
+  useContainerWidth,
+} from './chart-utils';
 import type {
   CostAnalyticsResponse,
   CostAnalyticsStory,
@@ -25,64 +32,8 @@ import {
   CheckCircle2,
 } from 'lucide-react';
 
-// =============================================================================
-// Formatters
-// =============================================================================
-
-function fmtCost(v: number): string {
-  return `$${v.toFixed(2)}`;
-}
-
-function fmtTokens(v: number): string {
-  if (v >= 1_000_000) return `${(v / 1_000_000).toFixed(1)}M`;
-  if (v >= 1_000) return `${(v / 1_000).toFixed(1)}K`;
-  return v.toString();
-}
-
-function fmtPct(v: number): string {
-  return `${(v * 100).toFixed(0)}%`;
-}
-
-// =============================================================================
-// Shared Utilities
-// =============================================================================
-
-function linearRegression(points: { x: number; y: number }[]) {
-  const n = points.length;
-  if (n < 2) return { slope: 0, intercept: points[0]?.y ?? 0, rSquared: 0 };
-  const sumX = points.reduce((s, p) => s + p.x, 0);
-  const sumY = points.reduce((s, p) => s + p.y, 0);
-  const sumXY = points.reduce((s, p) => s + p.x * p.y, 0);
-  const sumX2 = points.reduce((s, p) => s + p.x * p.x, 0);
-  const denom = n * sumX2 - sumX * sumX;
-  if (denom === 0) return { slope: 0, intercept: sumY / n, rSquared: 0 };
-  const slope = (n * sumXY - sumX * sumY) / denom;
-  const intercept = (sumY - slope * sumX) / n;
-  const ssRes = points.reduce((s, p) => s + (p.y - (slope * p.x + intercept)) ** 2, 0);
-  const ssTot = points.reduce((s, p) => s + (p.y - sumY / n) ** 2, 0);
-  const rSquared = ssTot > 0 ? 1 - ssRes / ssTot : 0;
-  return { slope, intercept, rSquared };
-}
-
-// useLayoutEffect en el browser para medir ANTES del primer paint — sin esto
-// el primer frame pinta con el default 600px y los SVG desbordan en
-// contenedores angostos (qa-reviewer 2026-06-11). useEffect en SSR, donde
-// useLayoutEffect emite warning y no hay layout que medir.
-const useIsomorphicLayoutEffect =
-  typeof window !== 'undefined' ? useLayoutEffect : useEffect;
-
-function useContainerWidth(ref: React.RefObject<HTMLDivElement | null>) {
-  const [width, setWidth] = useState(600);
-  useIsomorphicLayoutEffect(() => {
-    if (!ref.current) return;
-    // Medición síncrona pre-paint del mount; el observer cubre los resizes.
-    setWidth(ref.current.getBoundingClientRect().width);
-    const obs = new ResizeObserver(([e]) => setWidth(e.contentRect.width));
-    obs.observe(ref.current);
-    return () => obs.disconnect();
-  }, [ref]);
-  return width;
-}
+// Formatters (fmtCost, fmtTokens, fmtPct), linearRegression y
+// useContainerWidth viven en ./chart-utils — compartidos con VelocityTracker.
 
 // =============================================================================
 // Color Constants

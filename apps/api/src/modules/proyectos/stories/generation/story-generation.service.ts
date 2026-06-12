@@ -31,6 +31,7 @@ import {
   type EpicRef,
 } from '../../vault-paths';
 import { CodeRepoCloneService } from '../../../code-repositories/code-repo-clone.service';
+import { VelocityCalibrationService } from '../../../factory/velocity/velocity-calibration.service';
 import type { AgentTool, AgentToolContext, ToolAttachment } from '../../../factory/agent-tools/agent-tool.interface';
 import { PROJECT_AGENT_MODELS } from '@cenzontle/shared';
 import type {
@@ -577,6 +578,7 @@ export class StoryGenerationService {
     private readonly vaultRead: VaultReadTool,
     private readonly codeRepoClones: CodeRepoCloneService,
     private readonly tokenSettings: AgentTokenSettingsService,
+    private readonly velocityCalibration: VelocityCalibrationService,
     @InjectPinoLogger(StoryGenerationService.name) private readonly logger: PinoLogger,
   ) {
     // La API key se resuelve en runtime (por run) desde OrgAnthropicConfigService,
@@ -1946,12 +1948,19 @@ REGLAS DUROS:
       ? `\n<initiative_documents_available>\n${docs.map((d) => `- ${d.id}: "${d.name}" (${d.format ?? 'unknown'})${d.url ? ` @ ${d.url}` : ''}`).join('\n')}\n\nUsa read_initiative_documents con documentId para leer cualquiera. En relatedDocuments de submit_po_outline usa exactamente estos id/name/url.\n</initiative_documents_available>`
       : '\n<initiative_documents_available>Ninguno</initiative_documents_available>';
 
+    // Evidencia historica de velocity (estimado vs real) para que el PO calibre
+    // los storyPoints con datos del propio equipo en lugar de solo heuristicas.
+    // El service devuelve el bloque <calibracion_historica> ya formateado, o
+    // null si no hay muestras suficientes — en ese caso no se inyecta nada.
+    const calibrationBlock = await this.velocityCalibration.getCalibrationPromptBlock();
+
     const userContent = [
       'Eres el Agente Product Owner.',
       '',
       'Tu mision: redactar los outlines (metadata + seccion PO de negocio) de las historias que entregan el valor de la epica descrita en el contexto.',
       '',
       docsList,
+      ...(calibrationBlock ? ['', calibrationBlock] : []),
       '',
       userPrompt ? `<user_instructions>\n${userPrompt}\n</user_instructions>` : '',
       '',
@@ -4982,7 +4991,7 @@ ${storyCountDirective}
 
 1. **title**: corto, accionable, especifico al contexto real de la epica.
 2. **description**: 1-2 lineas.
-3. **storyPoints**: Fibonacci {1, 2, 3, 5, 8, 13}. 13 solo si es realmente grande (prefiere dividir).
+3. **storyPoints**: Fibonacci {1, 2, 3, 5, 8, 13}. 13 solo si es realmente grande (prefiere dividir). Si el contexto incluye \`<calibracion_historica>\`, úsala como evidencia primaria para calibrar los puntos.
 4. **podId**: UNO de los IDs listados en \`<pods_asignados_a_la_epica>\`. El que mas sentido tenga para el scope de esa historia.
 5. **labels**: etiquetas tecnicas cortas (backend, api, frontend, mobile, data, etc.).
 6. **po.markdown** ⚠️ UN SOLO STRING MARKDOWN con los 5 headings obligatorios. La descripción exacta del contrato vive en el JSON Schema de \`submit_po_outline\` — léelo antes de emitir. Resumen:
