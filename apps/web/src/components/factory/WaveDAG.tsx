@@ -4,7 +4,7 @@ import { useMemo, useRef, useEffect, useState, useCallback } from 'react';
 import { cn } from '@/lib/utils';
 import { useFactory } from '@/context/FactoryContext';
 import type { FactoryStory } from '@cenzontle/shared';
-import { AgentStatus, WaveStatus } from '@cenzontle/shared';
+import { AgentStatus } from '@cenzontle/shared';
 import {
   CheckCircle2,
   Clock,
@@ -337,8 +337,12 @@ function WaveColumn({ wave }: { wave: WaveGroup }) {
 // Main Component
 // ---------------------------------------------------------------------------
 
+// Referencia estable para el default — evita recalcular los useMemo que
+// dependen de `stories` en cada render cuando no se pasa la prop.
+const EMPTY_STORIES: FactoryStory[] = [];
+
 interface WaveDAGProps {
-  /** Override stories (for batch detail). Falls back to state.stories */
+  /** Stories a renderizar (batch detail). Sin prop, el DAG queda vacío. */
   stories?: FactoryStory[];
   /** Batch name to display in header */
   batchName?: string;
@@ -350,7 +354,9 @@ interface WaveDAGProps {
 
 export function WaveDAG({ stories: propStories, batchName, batchBranch, batchWaves: propWaves }: WaveDAGProps = {}) {
   const { state } = useFactory();
-  const stories = propStories ?? state.stories;
+  // `state.stories` se retiró del contexto (slice mock siempre vacío) — el
+  // fallback honesto es un DAG vacío.
+  const stories = propStories ?? EMPTY_STORIES;
   const containerRef = useRef<HTMLDivElement>(null);
 
   const displayName = batchName ?? state.factory.currentBatch?.name;

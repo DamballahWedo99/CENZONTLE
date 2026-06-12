@@ -897,3 +897,99 @@ export interface ForgePrItem {
 export function getForgePrs() {
   return apiFetch<ForgePrsResponse>('/factory/prs');
 }
+
+// ──────────────────────────────────────────────────────────────────────
+// Cost Analytics — agregados de costo del Forge (/factory/cost)
+// ──────────────────────────────────────────────────────────────────────
+
+/**
+ * Componente del run que origina el costo: el planner descompone la story,
+ * el generator (coder) la implementa y el verifier corre el DoD loop.
+ */
+export type CostComponentKey = 'planner' | 'generator' | 'verifier';
+
+/** Totales de un componente: costo + split de tokens new/cached. */
+export interface CostComponentTotals {
+  costUsd: number;
+  /** Tokens "nuevos": input + output + cache_creation (billable a precio
+   *  completo, sin cache_read). */
+  tokensNew: number;
+  /** Tokens cached (cache_read), separados para transparencia. */
+  tokensCached: number;
+}
+
+/**
+ * Agregado de costo de un batch (épica encolada al Forge). El backend suma
+ * across TODOS los runs de las stories del batch — retries incluidos.
+ */
+export interface CostAnalyticsBatch {
+  batchId: string;
+  epicId: string;
+  epicTitle: string;
+  /** ISO timestamp. Los batches vienen ordenados ASC por este campo —
+   *  los charts de tendencia lo consumen tal cual, sin re-ordenar. */
+  enqueuedAt: string;
+  completedAt: string | null;
+  storiesCount: number;
+  storiesDone: number;
+  /** Stories con al menos un run que reportó costo. Denominador honesto
+   *  para cost/story — storiesCount incluye stories aún sin ejecutar. */
+  storiesWithCost: number;
+  costUsd: number;
+  tokensNew: number;
+  tokensCached: number;
+  byComponent: Record<CostComponentKey, CostComponentTotals>;
+  runsCount: number;
+  /** Runs con attempts > 1 — el DoD verifier forzó al menos un retry. */
+  retriedRuns: number;
+}
+
+/** Costo agregado de una story individual del Forge. */
+export interface CostAnalyticsStory {
+  storyId: string;
+  storyTitle: string;
+  batchId: string;
+  epicTitle: string;
+  status: string;
+  /** Suma across TODOS los runs de la story (retries incluidos). */
+  costUsd: number;
+  tokensNew: number;
+  /** Attempts del DoD loop. NULL si el run nunca llegó al verifier. */
+  attempts: number | null;
+}
+
+/** Totales globales del dashboard de costos. */
+export interface CostAnalyticsTotals {
+  costUsd: number;
+  tokensNew: number;
+  tokensCached: number;
+  batchesCount: number;
+  storiesWithCost: number;
+  /** Run-rate mensual real: costo de los runs de los últimos 30 días. */
+  last30DaysCostUsd: number;
+  byComponent: Record<CostComponentKey, CostComponentTotals>;
+}
+
+/**
+ * Respuesta de `GET /factory/cost` — todo lo que el dashboard /factory/cost
+ * renderiza. Cero derivaciones inventadas en el frontend: lo que no viene
+ * aquí, no se muestra.
+ */
+export interface CostAnalyticsResponse {
+  generatedAt: string;
+  totals: CostAnalyticsTotals;
+  /** ASC por enqueuedAt. */
+  batches: CostAnalyticsBatch[];
+  /** DESC por costUsd, solo stories con costo > 0. */
+  stories: CostAnalyticsStory[];
+}
+
+/**
+ * Agregados de costo del Forge para el dashboard /factory/cost. Polling
+ * sugerido: 30s — el backend agrega usage across todos los AgentRuns,
+ * mismo orden de costo que `/factory/metrics/timeseries` (no es un SELECT
+ * barato como `/factory/nodes`).
+ */
+export function getCostAnalytics() {
+  return apiFetch<CostAnalyticsResponse>('/factory/cost');
+}

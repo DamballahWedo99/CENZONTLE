@@ -1929,7 +1929,7 @@ interface BatchDetailProps {
 }
 
 export function BatchDetail({ batchId, realBatchData, onRefetchRequested }: BatchDetailProps) {
-  const { state, dispatch, computed } = useFactory();
+  const { state, dispatch } = useFactory();
   // Use mock data directly — factory pages are outside ProyectosProvider
   const proyectosEpics = mockEpics;
   const proyectosInitiatives = mockInitiatives;
@@ -1991,31 +1991,12 @@ export function BatchDetail({ batchId, realBatchData, onRefetchRequested }: Batc
     return batch;
   }, [realBatchData, state.factory.currentBatch, batch, batchId]);
 
-  // Collect all story IDs from the batch's waves
-  const batchStoryIds = useMemo<Set<string>>(() => {
-    if (!fullBatch) return new Set();
-    const ids = new Set<string>();
-    for (const wave of fullBatch.waves) {
-      for (const sid of wave.storyIds) {
-        ids.add(sid);
-      }
-    }
-    // Also include stories directly on the batch
-    for (const story of fullBatch.stories) {
-      ids.add(story.id);
-    }
-    return ids;
-  }, [fullBatch]);
-
-  // Filter stories belonging to this batch
+  // Stories del batch — en el flow real vienen embebidas en el SprintBatch
+  // sintético. Sin realBatchData no hay fuente: `state.stories` se retiró
+  // del contexto (slice mock permanentemente vacío).
   const batchStories = useMemo<FactoryStory[]>(() => {
-    if (realBatchData) {
-      // Stories ya vienen embebidas en el SprintBatch sintético
-      return fullBatch?.stories ?? [];
-    }
-    if (batchStoryIds.size === 0) return state.stories;
-    return state.stories.filter((s) => batchStoryIds.has(s.id));
-  }, [realBatchData, fullBatch, state.stories, batchStoryIds]);
+    return realBatchData ? fullBatch?.stories ?? [] : [];
+  }, [realBatchData, fullBatch]);
 
   // Filter agents that are working on stories in this batch
   const batchAgents = useMemo<FactoryAgent[]>(() => {
@@ -2023,9 +2004,9 @@ export function BatchDetail({ batchId, realBatchData, onRefetchRequested }: Batc
       // Derivamos agents sintéticos desde latestRun de cada story
       return mapBatchDetailToAgents(realBatchData);
     }
-    const storyIdSet = new Set(batchStories.map((s) => s.id));
-    return state.agents.filter((a) => a.storyId !== null && storyIdSet.has(a.storyId));
-  }, [realBatchData, state.agents, batchStories]);
+    // `state.agents` se retiró del contexto (slice mock siempre vacío).
+    return [];
+  }, [realBatchData]);
 
   // RunDrawerDetail por storyId — datos reales del run para el
   // AgentDetailDrawer que abre AgentList. Vacío en mock mode (sin

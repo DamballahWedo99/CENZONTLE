@@ -7,6 +7,8 @@ import { FactoryQueueController } from "./queue/factory-queue.controller";
 import { FactoryQueueService } from "./queue/factory-queue.service";
 import { ForgePrsController } from "./prs/forge-prs.controller";
 import { ForgePrsService } from "./prs/forge-prs.service";
+import { ForgeCostController } from "./cost/forge-cost.controller";
+import { ForgeCostService } from "./cost/forge-cost.service";
 import { FleetModule } from "./fleet/fleet.module";
 import { ExecutionModule } from "./execution/execution.module";
 import { BranchStrategyModule } from "./branch-strategy/branch-strategy.module";
@@ -19,8 +21,8 @@ import { AuthModule } from "../auth/auth.module";
 
 @Module({
   imports: [ProyectosModule, FleetModule, ExecutionModule, BranchStrategyModule, GitHubModule, DodModule, PreviewModule, FactoryMetricsModule, AuthModule],
-  controllers: [FactoryController, TerminalController, FactoryQueueController, ForgePrsController],
-  providers: [FactoryService, TerminalService, FactoryQueueService, ForgePrsService],
+  controllers: [FactoryController, TerminalController, FactoryQueueController, ForgePrsController, ForgeCostController],
+  providers: [FactoryService, TerminalService, FactoryQueueService, ForgePrsService, ForgeCostService],
   exports: [FactoryService, TerminalService, FactoryQueueService],
 })
 export class FactoryModule {}

@@ -695,7 +695,7 @@ interface AgentGridProps {
 }
 
 export function AgentGrid({ initialAgentId }: AgentGridProps = {}) {
-  const { state, dispatch, computed, getStoryById } = useFactory();
+  const { state, dispatch } = useFactory();
   const [viewMode, setViewMode] = useState<ViewMode>('machine');
   const filter: StatusFilter = 'all';
   const [drawerAgentId, setDrawerAgentId] = useState<string | null>(null);
@@ -724,10 +724,6 @@ export function AgentGrid({ initialAgentId }: AgentGridProps = {}) {
   // runId, epicId, epicTitle del backend; el resto (tokens, cost,
   // currentFile, etc.) vendrá en Sprint 5+ cuando el worker reporte
   // métricas reales en el progress endpoint.
-  //
-  // Los agents reales tienen prioridad sobre el mock: si el array tiene
-  // runs activos del backend, ignoramos `state.agents` para evitar mezcla
-  // confusa entre runs vivos y mocks históricos.
   const machines = effectivePool.nodes;
   const effectiveAgents = useMemo<FactoryAgent[]>(() => {
     const fromRuns: FactoryAgent[] = [];
@@ -753,26 +749,25 @@ export function AgentGrid({ initialAgentId }: AgentGridProps = {}) {
         });
       }
     }
-    // Si hay agents reales del backend, prefer those. Si no hay (forge
-    // pausado o sin actividad), fallback al mock para mantener la UX
-    // visual de referencia.
-    return fromRuns.length > 0 ? fromRuns : state.agents;
-  }, [machines, state.agents]);
+    // Sin fallback: `state.agents` se retiró del contexto (slice mock
+    // siempre vacío). Sin runs activos, el grid muestra su empty state.
+    return fromRuns;
+  }, [machines]);
 
   const agents = effectiveAgents;
   const selectedAgentId = state.selectedAgentId;
-  const activeCount = computed.activeAgentCount;
+  // Derivado de los agents reales (antes computed.activeAgentCount del
+  // contexto, que con el slice mock vacío era siempre 0). Usa el MISMO
+  // predicado que el filtro 'active' — si divergen, el badge "N of M
+  // active" puede contar agents que el tab 'active' oculta (qa-reviewer
+  // 2026-06-11).
+  const activeCount = agents.filter((a) => isActive(a.status)).length;
   const totalSlots = effectivePool.totalSlots || agents.length;
   const usedSlots = effectivePool.usedSlots || activeCount;
 
   const filteredAgents = useMemo(
     () => agents.filter((a) => matchesFilter(a.status, filter)),
     [agents, filter],
-  );
-
-  const selectedAgent = useMemo(
-    () => (selectedAgentId ? agents.find((a) => a.id === selectedAgentId) : null),
-    [agents, selectedAgentId],
   );
 
   // Group agents by batch
@@ -938,7 +933,9 @@ export function AgentGrid({ initialAgentId }: AgentGridProps = {}) {
       {(() => {
         const drawerAgent = drawerAgentId ? agents.find((a) => a.id === drawerAgentId) : null;
         if (!drawerAgent) return null;
-        const drawerStory = drawerAgent.storyId ? getStoryById(drawerAgent.storyId) ?? null : null;
+        // getStoryById se retiró del contexto — devolvía siempre undefined
+        // (slice mock vacío); el drawer deriva los datos del run real.
+        const drawerStory = null;
         return (
           <AgentDetailDrawer
             agent={drawerAgent}
