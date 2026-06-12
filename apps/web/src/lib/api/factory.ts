@@ -993,3 +993,56 @@ export interface CostAnalyticsResponse {
 export function getCostAnalytics() {
   return apiFetch<CostAnalyticsResponse>('/factory/cost');
 }
+
+// ──────────────────────────────────────────────────────────────────────
+// Forge Logs — stream de eventos derivado del estado persistido (/factory/logs)
+// ──────────────────────────────────────────────────────────────────────
+
+/**
+ * Fuente del evento:
+ *  - `forge`: lifecycle del batch en la cola (enqueue, integration branch,
+ *    PR consolidado, staging gate).
+ *  - `agent`: lifecycle del AgentRun (iniciado, en curso, completado,
+ *    fallido, abandonado).
+ *  - `worker`: milestones técnicos del runner (clone, commit, push, PR).
+ *  - `dod`: veredictos del DoD verifier por criterio/attempt.
+ */
+export type ForgeLogSource = 'forge' | 'agent' | 'worker' | 'dod';
+export type ForgeLogLevel = 'info' | 'warn' | 'error';
+
+/**
+ * Espejo del contrato de `GET /factory/logs` — canónico en
+ * `apps/api/src/modules/factory/logs/log-events.ts` (mismo patrón que
+ * /factory/cost y /factory/prs).
+ */
+export interface ForgeLogEntry {
+  /** Determinista y estable entre polls (ej. `run-X:dod:2:tests-passing`) —
+   *  usable como React key y para conservar la fila expandida al refrescar. */
+  id: string;
+  /** ISO 8601. */
+  timestamp: string;
+  source: ForgeLogSource;
+  /** batchId para eventos `forge`; runId para el resto. */
+  sourceId: string;
+  level: ForgeLogLevel;
+  message: string;
+  batchId: string;
+  epicTitle: string;
+  /** Null para eventos batch-level (source `forge`). */
+  storyTitle: string | null;
+}
+
+export interface ForgeLogsResponse {
+  /** Eventos ordenados por timestamp DESC, capeados a 1000 en el backend. */
+  logs: ForgeLogEntry[];
+}
+
+/**
+ * Stream de logs del Forge derivado 100% de Prisma (sin log shipping):
+ * lifecycle de batches + AgentRuns + milestones del worker + veredictos DoD.
+ * Polling sugerido: 15s — los eventos nuevos llegan al ritmo de los POST
+ * /progress de los workers (cada 30s), mismo criterio que /factory/prs.
+ */
+export function getForgeLogs() {
+  return apiFetch<ForgeLogsResponse>('/factory/logs');
+}
