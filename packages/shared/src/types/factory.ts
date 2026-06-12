@@ -1,12 +1,5 @@
 // === ENUMS ===
 
-export enum FactoryStatus {
-  Online = 'online',
-  Degraded = 'degraded',
-  Offline = 'offline',
-  Maintenance = 'maintenance',
-}
-
 export enum PipelineLayer {
   Requirements = 'requirements',
   Linear = 'linear',
@@ -14,14 +7,6 @@ export enum PipelineLayer {
   Staging = 'staging',
   ReleaseBoard = 'release-board',
   QAGate = 'qa-gate',
-}
-
-export enum LayerStatus {
-  Idle = 'idle',
-  Active = 'active',
-  Waiting = 'waiting',
-  Completed = 'completed',
-  Failed = 'failed',
 }
 
 export enum AgentStatus {
@@ -66,16 +51,15 @@ export enum WaveStatus {
 
 // === CORE TYPES ===
 
+// Recortado a los campos con lectores reales (2026-06-11, ciclo 3 de
+// limpieza): status/activeLayers/totalCost/uptime no tenían ningún
+// consumidor en web ni api — eran inicialización vacía permanente.
 export interface FactoryState {
-  status: FactoryStatus;
   currentBatch: SprintBatch | null;
   activeBatches: SprintBatch[];
   queuedBatches: QueuedBatch[];
   resourcePool: ResourcePool;
-  activeLayers: PipelineLayer[];
-  totalCost: number;
   totalTokens: number;
-  uptime: number; // seconds
 }
 
 export interface TrackerReference {
@@ -189,16 +173,6 @@ export interface ComputeNode {
 
 /** @deprecated Use ComputeNode instead */
 export type MacMini = ComputeNode;
-
-export interface PipelineLayerState {
-  layer: PipelineLayer;
-  status: LayerStatus;
-  label: string;
-  icon: string;
-  itemCount: number;
-  startedAt: string | null;
-  completedAt: string | null;
-}
 
 export interface SprintBatch {
   id: string;
@@ -340,53 +314,6 @@ export interface LogAnalysis {
   summary: string;
 }
 
-export interface EvolutionMetrics {
-  currentPromptVersion: string;
-  previousVersions: PromptVersion[];
-  batchHistory: BatchMetrics[];
-}
-
-export interface PromptVersion {
-  version: string;
-  createdAt: string;
-  changes: string;
-  rejectionRate: number;
-  avgRetries: number;
-  avgCostPerStory: number;
-}
-
-export interface BatchMetrics {
-  batchId: string;
-  batchName: string;
-  promptVersion: string;
-  stories: number;
-  completedAt: string;
-  totalCost: number;
-  totalTokens: number;
-  rejectionRate: number;
-  avgRetries: number;
-  avgDuration: number; // minutes per story
-  testPassRate: number;
-}
-
-export interface CostBreakdown {
-  agentCosts: { agentId: string; agentName: string; cost: number; tokens: number }[];
-  storyCosts: { storyId: string; storyKey: string; cost: number; tokens: number }[];
-  totalCost: number;
-  totalTokens: number;
-  projectedMonthlyCost: number;
-  temporalActionsCost: number;
-}
-
-export interface LogEntry {
-  id: string;
-  timestamp: string;
-  source: 'agent' | 'review' | 'ci' | 'temporal' | 'qa';
-  sourceId: string;
-  level: 'info' | 'warn' | 'error';
-  message: string;
-}
-
 // === RELEASE BOARD ===
 
 export enum ReleaseTriggerMode {
@@ -419,18 +346,6 @@ export interface ReleaseBoardState {
   lastReleasedAt: string | null;
   nextScheduledRelease: string | null;
 }
-
-// === EVENT TYPES (for SSE/realtime) ===
-
-export type FactoryEvent =
-  | { type: 'factory:status'; data: FactoryState }
-  | { type: 'agent:update'; data: FactoryAgent }
-  | { type: 'story:update'; data: FactoryStory }
-  | { type: 'test:update'; data: TestSuite }
-  | { type: 'gate:update'; data: HumanGate }
-  | { type: 'log:entry'; data: LogEntry }
-  | { type: 'cost:update'; data: CostBreakdown }
-  | { type: 'pipeline:update'; data: PipelineLayerState[] };
 
 // === TERMINAL / PTY TYPES ===
 

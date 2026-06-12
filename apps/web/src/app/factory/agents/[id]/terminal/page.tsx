@@ -9,7 +9,6 @@ import type {
   FactoryAgent,
 } from '@cenzontle/shared';
 import { AgentStatus } from '@cenzontle/shared';
-import { useFactory } from '@/context/FactoryContext';
 import { AgentTerminal } from '@/components/factory/AgentTerminal';
 import { ApiError } from '@/lib/api/client';
 import {
@@ -227,34 +226,26 @@ function deriveMilestonesFromRun(
 }
 
 /**
- * Página `/factory/agents/:id/terminal`. El `id` puede venir de dos fuentes:
- *  1. **Mock**: agents legacy del FactoryContext
- *  2. **Backend**: AgentRun.id (uuid) creado por el flujo Forge real
+ * Página `/factory/agents/:id/terminal`. El `id` es un AgentRun.id (uuid)
+ * del flujo Forge real. El camino "mock" legacy (lookup en los agents del
+ * FactoryContext) se retiró junto con el slice `state.agents` (2026-06-11):
+ * el slice estaba permanentemente vacío, así que toda visita real ya
+ * entraba por este flujo.
  *
- * En ambos casos renderea el MISMO componente `<AgentTerminal>` — para
- * runs reales hace polling del backend, sintetiza un FactoryAgent
- * compatible y pasa runOverride. El componente decide internamente qué
- * lógica aplicar según si runOverride está presente o no.
+ * Hace polling del backend, sintetiza un FactoryAgent compatible y pasa
+ * runOverride a `<AgentTerminal>`.
  */
 export default function AgentTerminalPage() {
   const params = useParams();
   const agentId = params.id as string;
-  const { state } = useFactory();
   // Title con el ID truncado del run — permite al operador identificar la
   // pestaña sin abrirla cuando hay varios terminales abiertos. El storyTitle
   // real podría inyectarse después que el run cargue (via state), pero hoy
   // el ID es suficiente para distinguir.
   useDocumentTitle(`Terminal · ${agentId.slice(0, 8)}`);
 
-  const mockAgent = useMemo(
-    () => state.agents.find((a) => a.id === agentId) ?? null,
-    [state.agents, agentId],
-  );
-
-  // Si NO es mock, asumimos runId del backend y hacemos polling 5s.
-  const isRunMode = !mockAgent;
   const [run, setRun] = useState<RunDetailResponse | null>(null);
-  const [loading, setLoading] = useState(isRunMode);
+  const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   // Catálogo de criterios DoD configurado en `/factory/settings`. Se carga
   // una vez al mount; cambia rara vez (operador edita manualmente). Si el
@@ -263,7 +254,6 @@ export default function AgentTerminalPage() {
   const [dodConfig, setDodConfig] = useState<DodCriterion[]>([]);
 
   useEffect(() => {
-    if (!isRunMode) return;
     let cancelled = false;
     void (async () => {
       try {
@@ -279,10 +269,9 @@ export default function AgentTerminalPage() {
     return () => {
       cancelled = true;
     };
-  }, [isRunMode]);
+  }, []);
 
   const fetchRun = useCallback(async () => {
-    if (!isRunMode) return;
     try {
       const result = await getRunDetail(agentId);
       setRun(result);
@@ -298,23 +287,13 @@ export default function AgentTerminalPage() {
     } finally {
       setLoading(false);
     }
-  }, [agentId, isRunMode]);
+  }, [agentId]);
 
   useEffect(() => {
-    if (!isRunMode) return;
     void fetchRun();
     const interval = setInterval(() => void fetchRun(), POLL_INTERVAL_MS);
     return () => clearInterval(interval);
-  }, [fetchRun, isRunMode]);
-
-  // Render mock — comportamiento legacy
-  if (mockAgent) {
-    return (
-      <div className="terminal-page h-full w-full bg-background dark">
-        <AgentTerminal agent={mockAgent} onClose={() => window.close()} />
-      </div>
-    );
-  }
+  }, [fetchRun]);
 
   // Render run real — sintetiza FactoryAgent + pasa runOverride
   // mientras se carga el run, sintetizamos un placeholder con status Idle

@@ -194,10 +194,12 @@ export function AgentTerminal({ agent, onClose, runOverride }: AgentTerminalProp
   const canUploadImage = isRunMode
     ? runFailed && !!runWorkspace.ttydUrl
     : !!ttydUrl;
-  const { state, getStoryById } = useFactory();
+  const { state } = useFactory();
 
-  // Lookup related data for the detail drawer
-  const story = agent.storyId ? getStoryById(agent.storyId) ?? null : null;
+  // `state.stories` se retiró del contexto (slice mock siempre vacío): el
+  // lookup por storyId devolvía siempre undefined. Los milestones y el
+  // drawer derivan del agent/run real.
+  const story = null;
   const batch = state.factory.currentBatch;
 
   const [detailOpen, setDetailOpen] = useState(false);

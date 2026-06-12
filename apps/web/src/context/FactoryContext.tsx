@@ -1,60 +1,22 @@
 'use client';
 
-import React, { createContext, useContext, useReducer, useMemo, useCallback, useEffect, ReactNode } from 'react';
+import React, { createContext, useContext, useReducer, useMemo, useEffect, ReactNode } from 'react';
 import { getForgeQueue, type ForgeQueueItem } from '@/lib/api/factory';
 import type {
-  FactoryAgent,
   FactoryState,
-  FactoryStory,
-  LogEntry,
-  CostBreakdown,
-  PipelineLayerState,
-  TestSuite,
   HumanGate,
-  EvolutionMetrics,
   ReleaseBoardState,
   QueuedBatch,
-  Wave,
 } from '@cenzontle/shared';
-import {
-  FactoryStatus,
-  AgentStatus,
-  GateDecision,
-  WaveStatus,
-  ReleaseTriggerMode,
-} from '@cenzontle/shared';
-
-// === VIEW TYPES ===
-export type FactoryView =
-  | 'pipeline'
-  | 'agents'
-  | 'pull-requests'
-  | 'prs'
-  | 'tests'
-  | 'cost'
-  | 'logs'
-  | 'evolution'
-  | 'gates'
-  | 'wave-dag';
+import { ReleaseTriggerMode } from '@cenzontle/shared';
 
 // === STATE ===
 interface FactoryContextState {
   factory: FactoryState;
-  pipeline: PipelineLayerState[];
-  agents: FactoryAgent[];
-  stories: FactoryStory[];
-  tests: TestSuite[];
   gates: HumanGate[];
-  logs: LogEntry[];
-  cost: CostBreakdown;
-  evolution: EvolutionMetrics;
   releaseBoard: ReleaseBoardState;
   // UI state
   selectedAgentId: string | null;
-  selectedStoryId: string | null;
-  inspectorOpen: boolean;
-  terminalOpen: boolean;
-  activeView: FactoryView;
   /** true mientras la primera hidratación de `factory.queuedBatches` desde el
    *  backend está en vuelo — el Pipeline Board muestra skeletons hasta que
    *  resuelve. Solo cubre la PRIMERA carga; los polls de 5s no la re-activan. */
@@ -77,10 +39,29 @@ interface FactoryContextState {
 // El slice `prs` se retiró por completo: el dashboard /factory/prs ahora hace
 // fetch propio a GET /factory/prs (ver PRPipeline.tsx) y no depende del
 // contexto. Quedó sin consumidores tras esa migración.
+//
+// Los slices `cost` y `evolution` se retiraron igual (2026-06-11): la vista
+// /factory/cost hace fetch propio a GET /factory/cost (useCostAnalytics), y
+// el tracking de evolución de prompts nunca tuvo fuente real en el backend —
+// EvolutionView muestra un empty state honesto hasta que exista el endpoint.
+//
+// Segundo ciclo (2026-06-11): se retiraron `pipeline` (PipelineFlow era un
+// componente órfano, nunca importado), `tests`/`logs` (sin endpoint real —
+// TestResults/LogViewer muestran empty state honesto), `stories`/`agents`
+// (los consumidores derivan agents/stories de los endpoints reales) y los
+// selectors/computed sin consumidores. El contexto queda enfocado en lo
+// vivo: factory (queuedBatches hidratado + currentBatch), gates,
+// releaseBoard y UI state.
+//
+// Tercer ciclo (2026-06-11): se retiró el UI state sin lectores ni
+// dispatchers (selectedStoryId, inspectorOpen, terminalOpen, activeView +
+// el type FactoryView) y los campos muertos de FactoryState en shared
+// (status, activeLayers, totalCost, uptime — cero consumidores). Se
+// conservan selectedAgentId/SELECT_AGENT (AgentGrid) y factory.totalTokens
+// (AgentGrid lo lee, pendiente de hidratación real).
 
 const initialState: FactoryContextState = {
   factory: {
-    status: FactoryStatus.Online,
     currentBatch: null,
     activeBatches: [],
     // Hidratado desde GET /factory/queue (ver el useEffect del provider).
@@ -88,30 +69,9 @@ const initialState: FactoryContextState = {
     // Hidratado en los componentes vía useEffectiveResourcePool
     // (GET /factory/nodes + GET /factory/runs).
     resourcePool: { nodes: [], totalSlots: 0, usedSlots: 0 },
-    activeLayers: [],
-    totalCost: 0,
     totalTokens: 0,
-    uptime: 0,
   },
-  pipeline: [],
-  agents: [],
-  stories: [],
-  tests: [],
   gates: [],
-  logs: [],
-  cost: {
-    agentCosts: [],
-    storyCosts: [],
-    totalCost: 0,
-    totalTokens: 0,
-    projectedMonthlyCost: 0,
-    temporalActionsCost: 0,
-  },
-  evolution: {
-    currentPromptVersion: '',
-    previousVersions: [],
-    batchHistory: [],
-  },
   releaseBoard: {
     epics: [],
     triggerMode: ReleaseTriggerMode.Manual,
@@ -122,10 +82,6 @@ const initialState: FactoryContextState = {
   },
   // UI defaults
   selectedAgentId: null,
-  selectedStoryId: null,
-  inspectorOpen: false,
-  terminalOpen: false,
-  activeView: 'pipeline',
   // Arranca en true: el Pipeline Board muestra skeletons hasta que la primera
   // hidratación de la queue resuelve (ver el useEffect del FactoryProvider).
   queueLoading: true,
@@ -133,16 +89,20 @@ const initialState: FactoryContextState = {
 
 // === ACTIONS ===
 //
-// Solo dejamos los action types que algún consumer activamente dispatchea.
+// Solo quedan los action types con dispatchers reales — ACTIVOS:
+// `UPDATE_FACTORY` (hidratación de queuedBatches en el provider +
+// currentBatch/activeBatches desde BatchDetail), `SET_QUEUE_LOADING`
+// (skeletons del Pipeline Board), `UPDATE_GATE` (HumanGates/BatchDetail) y
+// `SELECT_AGENT` (AgentGrid).
+//
 // Los antiguos `SET_FACTORY_DATA`, `UPDATE_AGENT`, `UPDATE_STORY`, `UPDATE_PR`,
 // `UPDATE_PIPELINE`, `UPDATE_TESTS`, `ADD_LOG`, `UPDATE_COST`,
 // `UPDATE_EVOLUTION`, `SET_BATCH`, `SET_AGENTS`, `SET_FACTORY_STATUS`,
 // `SET_VIEW`, `SELECT_STORY`, `TOGGLE_INSPECTOR`, `TOGGLE_TERMINAL` se
-// retiraron del reducer (post-eliminación de mocks): el state shape los
-// mantiene como arrays/objetos iniciales vacíos para no romper a los
-// consumers que leen los slices, pero ya no existe un evento que los
-// mute. Si una feature futura los necesita, re-añadir el action type
-// explícitamente — convención YAGNI: no mantener superficie zombi.
+// retiraron del reducer JUNTO con los slices que mutaban (ciclos de
+// limpieza 2026-06-11). Si una feature futura los necesita, re-añadir el
+// action type explícitamente — convención YAGNI: no mantener superficie
+// zombi.
 type FactoryAction =
   | { type: 'UPDATE_FACTORY'; payload: Partial<FactoryState> }
   | { type: 'SET_QUEUE_LOADING'; payload: boolean }
@@ -176,24 +136,6 @@ function factoryReducer(state: FactoryContextState, action: FactoryAction): Fact
 interface FactoryContextValue {
   state: FactoryContextState;
   dispatch: React.Dispatch<FactoryAction>;
-  // Backward-compatible computed object (used by FactoryTopBar, AgentGrid, etc.)
-  computed: {
-    activeAgentCount: number;
-    testPassRate: number;
-    currentWave: number;
-    totalWaves: number;
-  };
-  // Helper selectors
-  getActiveAgents: () => FactoryAgent[];
-  getCurrentWave: () => Wave | null;
-  getStoryById: (id: string) => FactoryStory | undefined;
-  getAgentForStory: (storyId: string) => FactoryAgent | undefined;
-  getTotalCost: () => number;
-  getAgentCount: () => number;
-  // Computed scalars
-  pendingGatesCount: number;
-  activeStoriesCount: number;
-  completionPercent: number;
 }
 
 const FactoryContext = createContext<FactoryContextValue | null>(null);
@@ -288,118 +230,15 @@ export function FactoryProvider({ children }: { children: ReactNode }) {
     };
   }, []);
 
-  // --- Helper selectors (stable callbacks) ---
-
-  const getActiveAgents = useCallback((): FactoryAgent[] => {
-    return state.agents.filter((a) => a.status !== AgentStatus.Idle);
-  }, [state.agents]);
-
-  const getCurrentWave = useCallback((): Wave | null => {
-    const batch = state.factory.currentBatch;
-    if (!batch) return null;
-    const running = batch.waves.find(
-      (w) => w.status === WaveStatus.Running || String(w.status) === 'running'
-    );
-    if (running) return running;
-    const completed = batch.waves.filter(
-      (w) => w.status === WaveStatus.Completed || String(w.status) === 'completed'
-    );
-    return completed.length > 0 ? completed[completed.length - 1] : batch.waves[0] ?? null;
-  }, [state.factory.currentBatch]);
-
-  const getStoryById = useCallback((id: string): FactoryStory | undefined => {
-    return state.stories.find((s) => s.id === id);
-  }, [state.stories]);
-
-  const getAgentForStory = useCallback((storyId: string): FactoryAgent | undefined => {
-    return state.agents.find((a) => a.storyId === storyId);
-  }, [state.agents]);
-
-  const getTotalCost = useCallback((): number => {
-    return state.agents.reduce((sum, a) => sum + a.cost, 0);
-  }, [state.agents]);
-
-  const getAgentCount = useCallback((): number => {
-    return state.agents.filter((a) => a.status !== AgentStatus.Idle).length;
-  }, [state.agents]);
-
-  // --- Computed scalars ---
-
-  const pendingGatesCount = useMemo(() => {
-    return state.gates.filter((g) => g.decision === GateDecision.Pending).length;
-  }, [state.gates]);
-
-  const activeStoriesCount = useMemo(() => {
-    return state.stories.filter(
-      (s) => s.status !== AgentStatus.Idle && s.status !== AgentStatus.Done
-    ).length;
-  }, [state.stories]);
-
-  const completionPercent = useMemo(() => {
-    const total = state.stories.length;
-    if (total === 0) return 0;
-    const done = state.stories.filter((s) => s.status === AgentStatus.Done).length;
-    return Math.round((done / total) * 100);
-  }, [state.stories]);
-
-  // --- Backward-compatible computed object ---
-
-  const computed = useMemo(() => {
-    const activeAgentCount = state.agents.filter(
-      (a) => a.status !== AgentStatus.Idle && a.status !== AgentStatus.Done
-    ).length;
-
-    const totalTestCases = state.tests.reduce((sum, t) => sum + t.total, 0);
-    const passedTestCases = state.tests.reduce((sum, t) => sum + t.passed, 0);
-    const testPassRate = totalTestCases > 0
-      ? Math.round((passedTestCases / totalTestCases) * 100)
-      : 0;
-
-    const batch = state.factory.currentBatch;
-    const runningWave = batch?.waves.find(
-      (w) => w.status === WaveStatus.Running || String(w.status) === 'running'
-    );
-    const completedWaves = batch?.waves.filter(
-      (w) => w.status === WaveStatus.Completed || String(w.status) === 'completed'
-    ).length ?? 0;
-    const currentWave = runningWave ? runningWave.number : completedWaves;
-    const totalWaves = batch?.waves.length ?? 0;
-
-    return { activeAgentCount, testPassRate, currentWave, totalWaves };
-  }, [state.agents, state.tests, state.factory.currentBatch]);
-
   // --- Context value ---
+  //
+  // Los helper selectors (getStoryById, getActiveAgents, etc.) y el objeto
+  // `computed` se retiraron junto con los slices mock que leían: con los
+  // arrays permanentemente vacíos devolvían siempre undefined/0, y sus dos
+  // únicos consumidores (AgentGrid, AgentTerminal) derivan ahora esos datos
+  // de los endpoints reales.
 
-  const value = useMemo(
-    () => ({
-      state,
-      dispatch,
-      computed,
-      getActiveAgents,
-      getCurrentWave,
-      getStoryById,
-      getAgentForStory,
-      getTotalCost,
-      getAgentCount,
-      pendingGatesCount,
-      activeStoriesCount,
-      completionPercent,
-    }),
-    [
-      state,
-      dispatch,
-      computed,
-      getActiveAgents,
-      getCurrentWave,
-      getStoryById,
-      getAgentForStory,
-      getTotalCost,
-      getAgentCount,
-      pendingGatesCount,
-      activeStoriesCount,
-      completionPercent,
-    ]
-  );
+  const value = useMemo(() => ({ state, dispatch }), [state, dispatch]);
 
   return (
     <FactoryContext.Provider value={value}>
