@@ -186,6 +186,14 @@ function mapForgeQueueItemToQueuedBatch(item: ForgeQueueItem): QueuedBatch {
     // para derivar `currentLayer = Staging` y mover el batch a la columna
     // STAGED sin esperar al próximo poll del detail endpoint.
     stagingApprovedAt: item.stagingApprovedAt ?? null,
+    // QA/Release propagado del backend — el FactoryOverview deriva las
+    // columnas QA TESTING y RELEASED de estos campos.
+    qaStartedAt: item.qaStartedAt ?? null,
+    qaCompletedAt: item.qaCompletedAt ?? null,
+    qaStatus: (item.qaStatus as QueuedBatch['qaStatus']) ?? null,
+    qaRecommendation: (item.qaRecommendation as QueuedBatch['qaRecommendation']) ?? null,
+    qaConfidence: item.qaConfidence ?? null,
+    releaseApprovedAt: item.releaseApprovedAt ?? null,
   };
 }
 
