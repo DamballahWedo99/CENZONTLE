@@ -984,7 +984,12 @@ export function FactoryOverview() {
       // a la columna STAGED — independiente de los flags de Forge. Esto se
       // evalúa primero porque un batch aprobado ya NO debe verse en Forge,
       // aunque las stories sigan reportando estado done/in_review.
-      const isStaged = Boolean(q.stagingApprovedAt);
+      // Precedencia de etapa (de más avanzado a menos): released > qa-testing
+      // > staged > forge. Una vez que un batch avanza, ya no debe verse en
+      // columnas anteriores aunque las stories sigan reportando done/in_review.
+      const isReleased = Boolean(q.releaseApprovedAt);
+      const isQa = !isReleased && Boolean(q.qaStartedAt);
+      const isStaged = !isReleased && !isQa && Boolean(q.stagingApprovedAt);
       // Epic se considera "activa en Forge" en 4 escenarios:
       //  (a) Tiene agentes corriendo (slots ocupados).
       //  (b) awaitingHumanGate (todas las stories están done O in_review).
@@ -995,13 +1000,13 @@ export function FactoryOverview() {
       //      el slot — confuso porque hay trabajo del Forge ya hecho.
       //  (d) Tiene stories done parcialmente (mismo razonamiento).
       const isActive =
-        !isStaged && (
+        !isReleased && !isQa && !isStaged && (
           hasActiveAgents ||
           q.awaitingHumanGate === true ||
           storiesInReview > 0 ||
           (q.storiesDone ?? 0) > 0
         );
-      if (isStaged || isActive) {
+      if (isReleased || isQa || isStaged || isActive) {
         const total = q.stories;
         const done = q.storiesDone ?? 0;
         // Construye un array de stories placeholder. Los primeros `done` son
@@ -1031,7 +1036,22 @@ export function FactoryOverview() {
           tokens: 0,
           cost: 0,
         }));
-        const targetLayer = isStaged ? PipelineLayer.Staging : PipelineLayer.Forge;
+        // columnId = la columna del kanban (la de Released usa el id string
+        // 'released'); currentLayer = el PipelineLayer para el config del card.
+        const columnId: string = isReleased
+          ? 'released'
+          : isQa
+            ? PipelineLayer.QAGate
+            : isStaged
+              ? PipelineLayer.Staging
+              : PipelineLayer.Forge;
+        const targetLayer: PipelineLayer = isReleased
+          ? PipelineLayer.ReleaseBoard
+          : isQa
+            ? PipelineLayer.QAGate
+            : isStaged
+              ? PipelineLayer.Staging
+              : PipelineLayer.Forge;
         const syntheticBatch: SprintBatch = {
           id: q.id,
           name: q.epicTitle,
@@ -1058,7 +1078,7 @@ export function FactoryOverview() {
           totalTokensNew: q.totalTokensNew,
           totalTokensCached: q.totalTokensCached,
         };
-        columns.get(targetLayer)!.active.push(syntheticBatch);
+        columns.get(columnId)!.active.push(syntheticBatch);
       } else {
         columns.get('queue')!.queued.push(q);
       }

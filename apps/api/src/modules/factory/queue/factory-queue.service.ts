@@ -200,6 +200,20 @@ export interface EnqueuedBatch {
    *  el batch en la columna Forge incluso después del approval persistido,
    *  porque el synthetic batch hardcoded `currentLayer: Forge`. */
   stagingApprovedAt: string | null;
+  /** ISO timestamp del arranque de la campaña QA — el frontend mueve el batch
+   *  a la columna QA TESTING cuando está set (precedencia sobre Staged). */
+  qaStartedAt: string | null;
+  /** ISO timestamp del fin de la campaña QA (QAReport listo). */
+  qaCompletedAt: string | null;
+  /** Estado de la campaña QA más reciente (para el card en QA Testing). */
+  qaStatus: string | null;
+  /** Recomendación del QAReport (rollout/rollback). */
+  qaRecommendation: string | null;
+  /** Confianza 0-100 del QAReport. */
+  qaConfidence: number | null;
+  /** ISO timestamp del approval del release gate — el frontend mueve el batch
+   *  a la columna RELEASED cuando está set (precedencia sobre QA Testing). */
+  releaseApprovedAt: string | null;
 }
 
 /**
@@ -420,6 +434,13 @@ export class FactoryQueueService {
       totalTokensCached: 0,
       // Staging gate aún no aprobado al enqueue — siempre null inicial.
       stagingApprovedAt: null,
+      // QA/Release aún no arrancados al enqueue — siempre null inicial.
+      qaStartedAt: null,
+      qaCompletedAt: null,
+      qaStatus: null,
+      qaRecommendation: null,
+      qaConfidence: null,
+      releaseApprovedAt: null,
       enqueuedBy: user.sub,
       enqueuedByName: userName,
     };
@@ -468,6 +489,13 @@ export class FactoryQueueService {
               orderBy: { startedAt: 'desc' },
             },
           },
+        },
+        // Última campaña QA — el frontend muestra su estado/recomendación en el
+        // card de la columna QA TESTING.
+        qaRuns: {
+          orderBy: { startedAt: 'desc' },
+          take: 1,
+          select: { status: true, recommendation: true, confidence: true },
         },
       },
       orderBy: { enqueuedAt: 'asc' },
@@ -609,6 +637,14 @@ export class FactoryQueueService {
           // synthetic batch quedaba siempre en Forge incluso después del
           // approval persistido.
           stagingApprovedAt: e.stagingApprovedAt?.toISOString() ?? null,
+          // QA/Release state — el frontend deriva las columnas QA TESTING y
+          // RELEASED de estos timestamps (precedencia: released > qa > staged).
+          qaStartedAt: e.qaStartedAt?.toISOString() ?? null,
+          qaCompletedAt: e.qaCompletedAt?.toISOString() ?? null,
+          qaStatus: e.qaRuns[0]?.status ?? null,
+          qaRecommendation: e.qaRuns[0]?.recommendation ?? null,
+          qaConfidence: e.qaRuns[0]?.confidence ?? null,
+          releaseApprovedAt: e.releaseApprovedAt?.toISOString() ?? null,
         };
       });
   }

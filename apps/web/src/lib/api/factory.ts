@@ -2,6 +2,8 @@ import type {
   CostAnalyticsResponse,
   CriterionEvent,
   DodVerificationEntry,
+  ForgeTestsResponse,
+  ReleaseGateApprovalResponse,
   VelocityAnalyticsResponse,
 } from '@cenzontle/shared';
 import { apiFetch } from './client';
@@ -189,6 +191,18 @@ export interface ForgeQueueItem {
    *  mueve el batch de la columna Forge a Staged del Pipeline Board sin
    *  esperar el próximo poll del detail endpoint. */
   stagingApprovedAt?: string | null;
+  /** ISO timestamp del arranque de la campaña QA → columna QA TESTING. */
+  qaStartedAt?: string | null;
+  /** ISO timestamp del fin de la campaña QA (QAReport listo). */
+  qaCompletedAt?: string | null;
+  /** Estado de la campaña QA más reciente. */
+  qaStatus?: string | null;
+  /** Recomendación del QAReport (rollout/rollback). */
+  qaRecommendation?: string | null;
+  /** Confianza 0-100 del QAReport. */
+  qaConfidence?: number | null;
+  /** ISO timestamp del approval del release gate → columna RELEASED. */
+  releaseApprovedAt?: string | null;
 }
 
 /**
@@ -1009,4 +1023,51 @@ export type {
  */
 export function getVelocityAnalytics() {
   return apiFetch<VelocityAnalyticsResponse>('/factory/velocity');
+}
+
+// ──────────────────────────────────────────────────────────────────────
+// QA Automático — pipeline QA Testing (/factory/tests)
+// ──────────────────────────────────────────────────────────────────────
+
+// Contrato canónico en @cenzontle/shared (sección QA AUTOMÁTICO) — re-exportado
+// aquí para que hooks y componentes consuman todo desde '@/lib/api/factory',
+// igual que el resto de los dashboards del Forge.
+export type {
+  ForgeTestsResponse,
+  QaBatchTests,
+  QaFinding,
+  QaFindingCategory,
+  QaFindingSeverity,
+  QaLensKindValue,
+  QaLensStatusValue,
+  QaLensSummary,
+  QaRunStatusValue,
+  QaStage,
+  QaVerdictValue,
+  QaVerificationVotes,
+  ReleaseGateApprovalResponse,
+} from '@cenzontle/shared';
+
+/**
+ * Resultados de QA automático por batch para el dashboard /factory/tests.
+ * Derivado de Prisma (qa_runs + qa_lens_runs). Polling sugerido: 15s — los
+ * lentes progresan al ritmo de build/serve/test, mismo criterio que /logs.
+ */
+export function getTestResults() {
+  return apiFetch<ForgeTestsResponse>('/factory/tests');
+}
+
+/** Re-corre la campaña QA de un batch (manual). Requiere TechLead/AltaGerencia. */
+export function rerunQa(batchId: string) {
+  return apiFetch<{ qaRunId: string | null }>(`/factory/tests/${batchId}/rerun`, {
+    method: 'POST',
+  });
+}
+
+/** Release gate — aprueba el rollout del batch tras revisar el QAReport. */
+export function approveReleaseGate(batchId: string, input: { password: string; notes?: string }) {
+  return apiFetch<ReleaseGateApprovalResponse>(`/factory/tests/${batchId}/approve`, {
+    method: 'POST',
+    body: JSON.stringify(input),
+  });
 }

@@ -149,6 +149,27 @@ model Epic {
   stagingApprovedBy         String?
   stagingApprovedByName     String?
 
+  // QA Testing gate — el batch entra a la etapa QA TESTING cuando el QA
+  // sweep arranca una campaña automática tras el merge a DEV
+  // (consolidatedPrMergedAt). `qaStartedAt` set → getBatchDetail/listQueue
+  // derivan `currentLayer: QAGate` y el batch se mueve a la columna QA
+  // Testing del Pipeline Board. `qaCompletedAt` set → el QAReport ya está
+  // sintetizado y el release gate se puede aprobar. Espejo escalar/terminal
+  // de los campos de staging: la etapa se DERIVA de estos timestamps igual
+  // que Staging deriva de stagingApprovedAt (sin enum de stage en DB).
+  qaStartedAt               DateTime?
+  qaCompletedAt             DateTime?
+
+  // Release gate approval — set cuando un TechLead/AltaGerencia aprueba el
+  // rollout tras revisar el QAReport del batch. Step-up auth requerida
+  // (mismo patrón que stagingApprovedAt). Cuando está set, getBatchDetail/
+  // listQueue derivan `currentLayer: ReleaseBoard` y el batch pasa a la
+  // columna Released. ApprovedByName es snapshot del nombre al momento de
+  // aprobar para que el changelog persista aunque el user se renombre.
+  releaseApprovedAt         DateTime?
+  releaseApprovedBy         String?
+  releaseApprovedByName     String?
+
   // Path to the markdown file in the vault (GitHub repo)
   vaultPath                 String?
 
@@ -156,6 +177,7 @@ model Epic {
   initiative                Initiative @relation(fields: [initiativeId], references: [id], onDelete: Cascade)
   pods                      EpicPod[]
   stories                   Story[]
+  qaRuns                    QaRun[]
 
   createdAt                 DateTime   @default(now())
   updatedAt                 DateTime   @updatedAt
@@ -977,4 +999,181 @@ model DodCriterion {
   updatedAt DateTime @updatedAt
 
   @@map("dod_criteria")
+}
+
+/// Estado de una campaña de QA automático sobre un batch (épica encolada que
+/// ya mergeó a DEV). El orquestador fan-outea N lentes en paralelo, verifica
+/// adversarialmente los fallos, y sintetiza un QAReport para el release gate.
+///
+///   pending      → creada por el sweep/trigger, lentes aún sin ejecutar.
+///   running      → ≥1 lente en ejecución.
+///   synthesizing → todos los lentes terminales, armando el QAReport.
+///   completed    → QAReport persistido, release gate habilitado.
+///   failed       → fallo de infra (clone/serve nunca levantó, todos abandoned).
+///   superseded   → una re-ejecución manual reemplazó esta campaña.
+enum QaRunStatus {
+  pending
+  running
+  synthesizing
+  completed
+  failed
+  superseded
+}
+
+/// Lente de QA. Cada uno prueba una dimensión distinta del batch y corre en
+/// paralelo con los demás:
+///   test_suite    → corre la suite del repo (jest/vitest), parsea pass/fail/cobertura.
+///   e2e           → levanta el app (PreviewService) y lo prueba contra la URL viva.
+///   security_diff → escaneo diferencial sobre el diff mergeado (secrets + review IA).
+///   perf_a11y     → latencia + accesibilidad (axe) contra la URL viva.
+enum QaLensKind {
+  test_suite
+  e2e
+  security_diff
+  perf_a11y
+}
+
+/// Lifecycle de un lente individual. Espejo de AgentRun.status.
+///   pending   → fila creada por el orquestador, aún sin arrancar.
+///   running   → el lente está ejecutando.
+///   completed → terminó y reportó resultados estructurados.
+///   failed    → error de ejecución (build/serve/run falló).
+///   abandoned → el sweeper lo marcó stale (sin progreso > threshold).
+enum QaLensStatus {
+  pending
+  running
+  completed
+  failed
+  abandoned
+}
+
+/// Recomendación final del QAReport.
+enum QaVerdict {
+  rollout
+  rollback
+}
+
+/// Una campaña de QA por batch/intento. Datos genuinamente nuevos (NO
+/// derivables como los logs): N lentes con lifecycle propio + votos
+/// adversariales + el QAReport sintetizado.
+///
+/// `@@unique` parcial (SQL raw en la migración) garantiza UNA sola campaña
+/// no-terminal por épica a la vez — evita que el sweep cron y el trigger
+/// manual dupliquen una campaña para el mismo batch:
+///   CREATE UNIQUE INDEX qa_runs_epic_active_unique
+///     ON qa_runs ("epicId")
+///     WHERE status IN ('pending', 'running', 'synthesizing');
+model QaRun {
+  id                  String      @id @default(uuid())
+  epicId              String
+  epic                Epic        @relation(fields: [epicId], references: [id], onDelete: Cascade)
+  // Snapshot del enqueuedBatchId al momento de spawn — ancla de auditoría
+  // estable aunque la épica se re-encole después.
+  enqueuedBatchId     String
+
+  status              QaRunStatus @default(pending)
+  // 'sweep' (auto al mergear a DEV) | 'manual' (re-run desde la UI).
+  trigger             String      @default("sweep")
+  // user.sub para re-runs manuales; null para el cron.
+  triggeredBy         String?
+  // SHA del merge a DEV que se probó — qué código exacto pasó por QA.
+  stagingSha          String?
+
+  // QAReport sintetizado (shape = QAReport de @cenzontle/shared). Null hasta
+  // que el synthesizer completa. Es el payload que el HumanGate muestra.
+  qaReport            Json?
+  // Denormalizados del qaReport para WHERE/sort baratos sin parsear el JSON.
+  recommendation      QaVerdict?
+  confidence          Int?
+  // Red de seguridad: true cuando hay ≥1 fallo crítico verificado como real.
+  autoRollbackAdvised Boolean     @default(false)
+
+  startedAt           DateTime    @default(now())
+  completedAt         DateTime?
+
+  lensRuns            QaLensRun[]
+
+  @@index([epicId, status])
+  @@index([status, startedAt])
+  @@map("qa_runs")
+}
+
+/// Ejecución de UN lente. Análogo de AgentRun para QA. Hoy el orquestador
+/// los ejecuta in-process concurrentemente; el modelo soporta distribución
+/// futura a la flota (de ahí `nodeId` nullable, igual que el patrón de
+/// AgentRun.claimedByTokenId — String? sin FK para no acoplar al ComputeNode).
+///
+/// `@@unique` parcial (SQL raw en la migración) — un solo lente activo por
+/// (qaRunId, lens):
+///   CREATE UNIQUE INDEX qa_lens_runs_active_unique
+///     ON qa_lens_runs ("qaRunId", lens)
+///     WHERE status IN ('pending', 'running');
+model QaLensRun {
+  id               String       @id @default(uuid())
+  qaRunId          String
+  qaRun            QaRun        @relation(fields: [qaRunId], references: [id], onDelete: Cascade)
+  // Nodo de cómputo si el lente se distribuye a la flota; null si corre
+  // in-process en el host del API (modo actual). Sin FK — self-reported,
+  // mismo contrato que AgentRun.claimedByTokenId.
+  nodeId           String?
+
+  lens             QaLensKind
+  status           QaLensStatus @default(pending)
+  // Heartbeat del lente — el sweeper marca abandoned si > threshold sin update.
+  lastProgressAt   DateTime     @default(now())
+  // Branch probada (el devBranch @ stagingSha tras el merge).
+  branch           String       @default("")
+
+  // URL RFC1918 del entorno efímero servido (PreviewService) durante el lente.
+  // Validada con isInternalUrl antes de persistir. Null para lentes que no
+  // levantan app (test_suite, security_diff).
+  envUrl           String?
+
+  // Resultado estructurado del lente. Para e2e/test_suite/perf se normaliza a
+  // un TestSuite (@cenzontle/shared); security_diff lleva findings[]. (Json)
+  rawResults       Json?
+  // Fallos que el lente reporta — cada uno recibe verificadores adversariales.
+  // Shape: [{ id, category, title, evidence, severity, claimedReal }].
+  reportedFindings Json?        @default("[]")
+
+  // Cost/usage de las llamadas IA del lente (si las hubo), para el roll-up
+  // de /factory/cost. Shape libre con totalCostUsd.
+  lensUsage        Json?
+
+  exitCode         Int?
+  errorMessage     String?
+  startedAt        DateTime     @default(now())
+  completedAt      DateTime?
+
+  verifications    QaFindingVerification[]
+
+  @@index([qaRunId, status])
+  @@index([status, lastProgressAt])
+  @@map("qa_lens_runs")
+}
+
+/// Voto de verificación adversarial. Una fila por (finding, refutador). El
+/// escéptico intenta REFUTAR el fallo (¿flaky? ¿entorno? ¿falso positivo?).
+/// Un fallo cuenta como REAL solo si sobrevive a la mayoría de refutadores.
+/// Análogo de la Capa B (juez LLM) del ConflictResolver, pero por voto.
+model QaFindingVerification {
+  id            String    @id @default(uuid())
+  qaLensRunId   String
+  qaLensRun     QaLensRun @relation(fields: [qaLensRunId], references: [id], onDelete: Cascade)
+  // Coincide con reportedFindings[].id dentro del lens run.
+  findingId     String
+
+  refuterIndex  Int
+  model         String
+  // 'refuted' = el escéptico cree que el fallo NO es real (flaky/entorno).
+  // 'upheld'  = no pudo refutarlo — el fallo se sostiene.
+  // 'uncertain' = abstención (no cuenta para ninguna mayoría).
+  vote          String
+  reasoning     String    @default("")
+  usage         Json?
+
+  createdAt     DateTime  @default(now())
+
+  @@index([qaLensRunId, findingId])
+  @@map("qa_finding_verifications")
 }

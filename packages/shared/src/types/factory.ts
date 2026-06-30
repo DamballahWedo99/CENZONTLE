@@ -149,6 +149,24 @@ export interface QueuedBatch {
    *  batch. NULL mientras el batch esté pre-approval (Forge work-in-progress
    *  o awaiting humano). */
   stagingApprovedAt?: string | null;
+  /** ISO timestamp del arranque de la campaña de QA automático. Set → el
+   *  `FactoryOverview` mueve el batch a la columna QA TESTING (precedencia
+   *  sobre Staged). NULL mientras el batch no haya entrado a QA. */
+  qaStartedAt?: string | null;
+  /** ISO timestamp del fin de la campaña QA (QAReport sintetizado y listo
+   *  para el release gate). NULL mientras la campaña esté en curso. */
+  qaCompletedAt?: string | null;
+  /** Estado de la campaña QA más reciente — el card en QA TESTING muestra el
+   *  progreso (pending/running/synthesizing/completed/failed). */
+  qaStatus?: QaRunStatusValue | null;
+  /** Recomendación del QAReport sintetizado (rollout/rollback). NULL hasta
+   *  que la campaña completa. */
+  qaRecommendation?: QaVerdictValue | null;
+  /** Confianza 0-100 del QAReport. NULL hasta que la campaña completa. */
+  qaConfidence?: number | null;
+  /** ISO timestamp del approval del release gate. Set → el `FactoryOverview`
+   *  mueve el batch a la columna RELEASED (precedencia sobre QA Testing). */
+  releaseApprovedAt?: string | null;
 }
 
 export interface ResourcePool {
@@ -1055,5 +1073,134 @@ export interface VelocityAnalyticsResponse {
   stories: VelocityStoryBreakdown[];
   /** Solo buckets con samples > 0. */
   calibration: VelocityCalibrationRow[];
+}
+
+// === QA AUTOMÁTICO (Pipeline QA Testing) ===
+//
+// Contrato del pipeline de QA automático multi-agente. Una campaña (QaRun)
+// corre cuando un batch mergea a DEV: fan-out de N lentes en paralelo →
+// verificación adversarial de fallos → síntesis del QAReport → release gate
+// humano. Las enums espejean los enums Prisma (QaRunStatus, QaLensKind, etc.)
+// como string unions para no acoplar el frontend a @prisma/client.
+
+/** Espejo de Prisma `QaRunStatus`. */
+export type QaRunStatusValue =
+  | 'pending'
+  | 'running'
+  | 'synthesizing'
+  | 'completed'
+  | 'failed'
+  | 'superseded';
+
+/** Espejo de Prisma `QaLensKind`. Cada lente prueba una dimensión distinta. */
+export type QaLensKindValue = 'test_suite' | 'e2e' | 'security_diff' | 'perf_a11y';
+
+/** Espejo de Prisma `QaLensStatus`. */
+export type QaLensStatusValue =
+  | 'pending'
+  | 'running'
+  | 'completed'
+  | 'failed'
+  | 'abandoned';
+
+/** Espejo de Prisma `QaVerdict` — la recomendación del QAReport. */
+export type QaVerdictValue = 'rollout' | 'rollback';
+
+/** Categoría de un fallo de QA — más amplia que TestCategory porque cubre
+ *  seguridad, performance y accesibilidad además de los tipos de test. */
+export type QaFindingCategory =
+  | 'functional'
+  | 'unit'
+  | 'integration'
+  | 'e2e'
+  | 'security'
+  | 'performance'
+  | 'accessibility';
+
+export type QaFindingSeverity = 'critical' | 'high' | 'medium' | 'low';
+
+/** Conteo de votos de la verificación adversarial de un fallo. Política
+ *  conservadora: el fallo es REAL salvo que la MAYORÍA lo refute
+ *  (`refuted <= upheld`); empate o all-uncertain → real (no se descarta en
+ *  silencio). Ver decideClaimedReal en el backend. */
+export interface QaVerificationVotes {
+  upheld: number;
+  refuted: number;
+  uncertain: number;
+}
+
+/** Un fallo reportado por un lente, con su veredicto adversarial. */
+export interface QaFinding {
+  id: string;
+  category: QaFindingCategory;
+  title: string;
+  /** Evidencia: stack trace, salida del test, hunk del diff, etc. (truncada). */
+  evidence: string;
+  severity: QaFindingSeverity;
+  /** true si la verificación adversarial confirmó que el fallo es real
+   *  (sobrevivió a la mayoría de refutadores). false = refutado/sin verificar. */
+  claimedReal: boolean;
+  /** Votos de los refutadores. Null si el fallo aún no se verificó. */
+  verification: QaVerificationVotes | null;
+}
+
+/** Resumen de la ejecución de un lente para el dashboard. */
+export interface QaLensSummary {
+  lens: QaLensKindValue;
+  status: QaLensStatusValue;
+  /** TestSuite normalizado (test_suite/e2e/perf_a11y). Null para security_diff
+   *  que reporta solo findings. */
+  suite: TestSuite | null;
+  findings: QaFinding[];
+  /** URL RFC1918 del entorno efímero servido durante el lente (e2e/perf). */
+  envUrl: string | null;
+  errorMessage: string | null;
+  costUsd: number;
+  startedAt: string | null;
+  completedAt: string | null;
+}
+
+/** Etapa derivada del batch en el pipeline post-Forge. */
+export type QaStage = 'staged' | 'qa-testing' | 'qa-gate-ready' | 'released';
+
+/** Datos de QA de un batch para el dashboard `/factory/tests`. */
+export interface QaBatchTests {
+  batchId: string;
+  epicId: string;
+  epicTitle: string;
+  priority: 'critical' | 'high' | 'medium' | 'low';
+  stage: QaStage;
+  qaRunId: string | null;
+  qaStatus: QaRunStatusValue | null;
+  recommendation: QaVerdictValue | null;
+  confidence: number | null;
+  autoRollbackAdvised: boolean;
+  /** QAReport completo sintetizado (shape canónico arriba). Null hasta que la
+   *  campaña completa. Es el payload que el release gate humano revisa. */
+  qaReport: QAReport | null;
+  lenses: QaLensSummary[];
+  /** Estado del release gate. */
+  releaseApprovedAt: string | null;
+  releaseApprovedByName: string | null;
+  startedAt: string | null;
+  completedAt: string | null;
+}
+
+/** Respuesta de `GET /factory/tests` — derivada 100% de Prisma (qa_runs +
+ *  qa_lens_runs + qa_finding_verifications), mismo patrón que /factory/logs. */
+export interface ForgeTestsResponse {
+  generatedAt: string;
+  batches: QaBatchTests[];
+  /** 'insufficient_data' cuando no hay ningún batch mergeado a DEV todavía. */
+  status: 'ok' | 'insufficient_data';
+}
+
+/** Respuesta del release gate (`POST /factory/tests/:batchId/approve`). */
+export interface ReleaseGateApprovalResponse {
+  batchId: string;
+  epicId: string;
+  approvedAt: string;
+  approvedBy: string;
+  approvedByName: string;
 }
 

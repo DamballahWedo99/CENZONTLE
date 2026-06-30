@@ -20,11 +20,12 @@ import { GitHubModule } from "./github/github.module";
 import { DodModule } from "./dod/dod.module";
 import { PreviewModule } from "./preview/preview.module";
 import { FactoryMetricsModule } from "./metrics/metrics.module";
+import { QaModule } from "./qa/qa.module";
 import { ProyectosModule } from "../proyectos/proyectos.module";
 import { AuthModule } from "../auth/auth.module";
 
 @Module({
-  imports: [ProyectosModule, FleetModule, ExecutionModule, BranchStrategyModule, GitHubModule, DodModule, PreviewModule, FactoryMetricsModule, AuthModule],
+  imports: [ProyectosModule, FleetModule, ExecutionModule, BranchStrategyModule, GitHubModule, DodModule, PreviewModule, FactoryMetricsModule, QaModule, AuthModule],
   controllers: [FactoryController, TerminalController, FactoryQueueController, ForgePrsController, ForgeCostController, ForgeLogsController, ForgeVelocityController],
   providers: [FactoryService, TerminalService, FactoryQueueService, ForgePrsService, ForgeCostService, ForgeLogsService, ForgeVelocityService],
   exports: [FactoryService, TerminalService, FactoryQueueService],
