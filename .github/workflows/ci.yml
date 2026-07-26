@@ -44,7 +44,7 @@ jobs:
       #     máquina de quien desarrolla no se separen sin que nadie lo note.
       #   - `cache: pnpm` resuelve el store llamando al binario de pnpm, así que
       #     este paso tiene que ir DESPUÉS de action-setup, no antes.
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
           node-version-file: .nvmrc
           cache: pnpm
@@ -81,7 +81,7 @@ jobs:
         with:
           version: 9.15.0
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
           node-version-file: .nvmrc
           cache: pnpm
@@ -103,7 +103,7 @@ jobs:
         with:
           version: 9.15.0
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
           node-version-file: .nvmrc
           cache: pnpm
