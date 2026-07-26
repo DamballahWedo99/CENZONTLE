@@ -14,14 +14,15 @@ paso. Sigue el orden tal cual — cada paso asume el anterior. Tiempo estimado:
 
 | Herramienta | Versión | Cómo |
 |---|---|---|
-| **Node.js** | 20.x (o 22.x) | https://nodejs.org — recomendado vía `nvm` |
+| **Node.js** | **22.19+** | https://nodejs.org — recomendado vía `nvm` |
 | **pnpm** | 9.15+ | `corepack enable` (viene con Node) o `npm i -g pnpm@9.15.0` |
 | **Docker** | reciente | https://docs.docker.com/get-docker/ (para Postgres/Redis/MinIO) |
 | **Cuenta Auth0** | — | https://auth0.com (gratis) — **el login es obligatorio** |
 | `openssl` | cualquiera | ya viene en macOS/Linux — para generar secretos |
 
-> El repo trae un `.nvmrc` con Node 20: `nvm use` lo toma solo, y el CI arranca de
-> ese mismo archivo (el worker tolera 22). pnpm es obligatorio (`packageManager` lo
+> El repo trae un `.nvmrc` con Node 22: `nvm use` lo toma solo, y el CI arranca de
+> ese mismo archivo. Node 22.19 es un piso REAL, no una recomendación: `undici@8`
+> (dependencia del cliente HTTP del API) lo exige. pnpm es obligatorio (`packageManager` lo
 > fija); no uses npm/yarn para instalar el monorepo.
 
 ---

@@ -40,7 +40,7 @@ jobs:
           version: 9.15.0
 
       # Dos cosas no evidentes aquí:
-      #   - La versión de Node sale de `.nvmrc` (Node 20) para que el CI y la
+      #   - La versión de Node sale de `.nvmrc` (Node 22) para que el CI y la
       #     máquina de quien desarrolla no se separen sin que nadie lo note.
       #   - `cache: pnpm` resuelve el store llamando al binario de pnpm, así que
       #     este paso tiene que ir DESPUÉS de action-setup, no antes.

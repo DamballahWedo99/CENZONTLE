@@ -10,7 +10,7 @@ Monorepo Turborepo + pnpm · Next.js 16 · NestJS 11 · Prisma 7 · PostgreSQL
 
 [![Licencia: Apache-2.0](https://img.shields.io/badge/licencia-Apache--2.0-blue.svg)](./LICENSE)
 [![CI](https://img.shields.io/github/actions/workflow/status/DamballahWedo99/CENZONTLE/ci.yml?branch=main&label=CI)](https://github.com/DamballahWedo99/CENZONTLE/actions/workflows/ci.yml)
-[![Node](https://img.shields.io/badge/node-%E2%89%A520-brightgreen.svg)](https://nodejs.org)
+[![Node](https://img.shields.io/badge/node-%E2%89%A522.19-brightgreen.svg)](https://nodejs.org)
 [![pnpm](https://img.shields.io/badge/pnpm-9.15%2B-f69220.svg)](https://pnpm.io/installation)
 
 </div>
@@ -98,7 +98,7 @@ completo en **[docs/architecture.md](docs/architecture.md)**.
 > con explicaciones y troubleshooting está en
 > **[docs/getting-started.md](docs/getting-started.md)**.
 
-**Prerrequisitos:** [Node.js 20+](https://nodejs.org), [pnpm 9.15+](https://pnpm.io/installation)
+**Prerrequisitos:** [Node.js 22.19+](https://nodejs.org), [pnpm 9.15+](https://pnpm.io/installation)
 (`corepack enable`), [Docker](https://docs.docker.com/get-docker/) y una cuenta
 [Auth0](https://auth0.com) (el login es obligatorio — ver [docs/auth0-setup.md](docs/auth0-setup.md)).
 
