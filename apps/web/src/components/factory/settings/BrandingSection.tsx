@@ -138,7 +138,7 @@ export function BrandingSection() {
               data-testid="branding-company-name-input"
               value={companyName}
               onChange={(e) => setCompanyName(e.target.value)}
-              placeholder="Aeroméxico"
+              placeholder="Acme Corp"
               maxLength={80}
               disabled={loading || savingName}
               className="bg-muted border-border text-foreground placeholder:text-muted-foreground/70 text-sm h-9"

@@ -127,8 +127,8 @@ export function CreateInitiativeDialog({ open, onOpenChange }: CreateInitiativeD
       toast.success('Iniciativa creada correctamente');
       resetForm();
       onOpenChange(false);
-    } catch (err: any) {
-      toast.error(err.message || 'Error al crear la iniciativa');
+    } catch (err) {
+      toast.error(err instanceof Error && err.message ? err.message : 'Error al crear la iniciativa');
     } finally {
       setSaving(false);
     }

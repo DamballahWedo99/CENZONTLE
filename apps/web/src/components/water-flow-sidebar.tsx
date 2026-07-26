@@ -54,7 +54,7 @@ export function WaterFlowSidebar({ onOpenChatbot, ...props }: WaterFlowSidebarPr
   // Prepare user data
   const userData = {
     name: user?.name || user?.email?.split('@')[0] || 'Usuario',
-    email: user?.email || 'user@pinnacledatahub.com',
+    email: user?.email || 'user@cenzontle.com',
     avatar: '/avatars/user.jpg',
   }
 

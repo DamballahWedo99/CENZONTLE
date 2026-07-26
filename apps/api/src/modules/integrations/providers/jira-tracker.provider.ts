@@ -3,10 +3,6 @@ import type {
   TrackerProvider,
   TestConnectionResult,
   PublishEpicResult,
-  EpicPayload,
-  InitiativePayload,
-  StoryPayload,
-  StoryHardEdge,
   PublishStoryRelationsResult,
 } from './tracker-provider.interface';
 import type { TrackerReference } from '@cenzontle/shared';
@@ -14,6 +10,12 @@ import type { TrackerReference } from '@cenzontle/shared';
 const NOT_IMPL_MSG =
   'La integración Jira aún no está implementada. Solo Linear está disponible.';
 
+/**
+ * Stub: cada método lanza de inmediato, así que ninguno declara parámetros.
+ * El contrato de entrada lo sigue imponiendo `implements TrackerProvider` —
+ * TypeScript permite implementar con aridad menor, y omitirlos evita
+ * parámetros muertos. Al implementar Jira de verdad, se re-declaran aquí.
+ */
 export class JiraTrackerProvider implements TrackerProvider {
   readonly providerName = 'jira' as const;
 
@@ -21,27 +23,19 @@ export class JiraTrackerProvider implements TrackerProvider {
     throw new NotImplementedException(NOT_IMPL_MSG);
   }
 
-  async publishInitiative(_initiative: InitiativePayload): Promise<TrackerReference> {
+  async publishInitiative(): Promise<TrackerReference> {
     throw new NotImplementedException(NOT_IMPL_MSG);
   }
 
-  async publishEpic(
-    _epic: EpicPayload,
-    _opts?: { initiativeExternalId?: string },
-  ): Promise<PublishEpicResult> {
+  async publishEpic(): Promise<PublishEpicResult> {
     throw new NotImplementedException(NOT_IMPL_MSG);
   }
 
-  async publishStory(
-    _story: StoryPayload,
-    _opts: { projectExternalId: string },
-  ): Promise<TrackerReference> {
+  async publishStory(): Promise<TrackerReference> {
     throw new NotImplementedException(NOT_IMPL_MSG);
   }
 
-  async publishStoryRelations(
-    _edges: StoryHardEdge[],
-  ): Promise<PublishStoryRelationsResult> {
+  async publishStoryRelations(): Promise<PublishStoryRelationsResult> {
     throw new NotImplementedException(NOT_IMPL_MSG);
   }
 }

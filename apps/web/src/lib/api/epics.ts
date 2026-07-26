@@ -1,4 +1,13 @@
-import type { DiscoveredDependency, EpicDesign } from '@cenzontle/shared';
+import type {
+  DiscoveredDependency,
+  EpicDependency,
+  EpicDesign,
+  EpicDiagram,
+  EpicDocument,
+  EpicQAMatrix,
+  QAMatrix,
+  TrackerReference,
+} from '@cenzontle/shared';
 import { apiFetch } from './client';
 
 /**
@@ -42,17 +51,18 @@ export interface EpicResponse {
   initiative: { id: string; name: string; status: string };
   podIds: string[];
   pods: { id: string; name: string; color: string }[];
-  documents: any[];
-  diagrams: any[];
-  dependencies: any[];
+  documents: EpicDocument[];
+  diagrams: EpicDiagram[];
+  /** @deprecated Inerte — las dependencias técnicas viven a nivel historia. */
+  dependencies: EpicDependency[];
   designs: EpicDesign[];
   designSkipped: boolean;
   poApproval: ApprovalRecord | null;
   tlApproval: ApprovalRecord | null;
   qaApproval: ApprovalRecord | null;
-  qaMatrix: any;
-  epicQAMatrix: any;
-  tracker: any;
+  qaMatrix: QAMatrix | null;
+  epicQAMatrix: EpicQAMatrix | null;
+  tracker: TrackerReference | null;
   /** ISO timestamp de cuándo la épica fue enviada al Forge. Null si nunca. */
   enqueuedAt: string | null;
   /** UUID del batch en la cola del Forge. Null si nunca encolada. */
@@ -92,7 +102,13 @@ export function createEpic(data: CreateEpicInput) {
   return apiFetch<EpicResponse>('/proyectos/epicas', { method: 'POST', body: JSON.stringify(data) });
 }
 
-export function updateEpic(id: string, data: Record<string, any>) {
+/**
+ * PATCH parcial de la épica. El body es un patch JSON abierto (los callers
+ * arman sólo los campos que cambiaron), por eso el tipo es un mapa de valores
+ * `unknown` y no un DTO cerrado: el backend (`UpdateEpicDto = PartialType(
+ * CreateEpicDto)`) es quien valida campo por campo con class-validator.
+ */
+export function updateEpic(id: string, data: Record<string, unknown>) {
   return apiFetch<EpicResponse>(`/proyectos/epicas/${id}`, { method: 'PATCH', body: JSON.stringify(data) });
 }
 

@@ -59,7 +59,6 @@ export function AccessPanel({ node, parentNode }: AccessPanelProps) {
 
   const roleEntries = directEntries.filter(e => e.principalType === 'role');
   const userEntries = directEntries.filter(e => e.principalType === 'user');
-  const existingUserIds = userEntries.map(e => e.principalId);
 
   const parentMaxLevel: AccessLevel = isRoot ? 'owner' : (
     currentUser
@@ -81,14 +80,22 @@ export function AccessPanel({ node, parentNode }: AccessPanelProps) {
       .sort((a, b) => ACCESS_LEVEL_HIERARCHY[b.level] - ACCESS_LEVEL_HIERARCHY[a.level]);
   }, [showPreview, members, node.id, state.tree, state.accessConfig]);
 
+  // Los ids ya asignados se derivan DENTRO del memo: como array creado en
+  // render, `existingUserIds` cambiaba de identidad en cada pasada y como
+  // dependencia impedía preservar la memoización.
   const availableUsers = useMemo(() => {
+    const existingUserIds = new Set(
+      (accessConfig[node.id]?.entries ?? [])
+        .filter(e => e.principalType === 'user')
+        .map(e => e.principalId),
+    );
     const base = members.filter(
-      m => m.status === 'active' && !existingUserIds.includes(m.id) && m.id !== currentUser?.id,
+      m => m.status === 'active' && !existingUserIds.has(m.id) && m.id !== currentUser?.id,
     );
     if (!userSearch.trim()) return base;
     const q = userSearch.toLowerCase();
     return base.filter(m => m.name.toLowerCase().includes(q) || m.email.toLowerCase().includes(q));
-  }, [members, existingUserIds, currentUser?.id, userSearch]);
+  }, [members, accessConfig, node.id, currentUser?.id, userSearch]);
 
   // === Handlers ===
 

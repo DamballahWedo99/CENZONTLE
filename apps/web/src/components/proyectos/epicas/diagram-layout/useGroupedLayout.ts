@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import ELK from 'elkjs/lib/elk.bundled.js';
 import type { Edge, Node } from '@xyflow/react';
 import type {
@@ -417,6 +417,126 @@ const DEFAULT_RESULT: GroupedLayoutResult = {
 };
 
 /**
+ * Fast-path: si el diagrama tiene layout manual COMPLETO (un entry en
+ * `manualPositions` por cada node, con coords finitas), el layout se resuelve
+ * sin ELK — sería un desperdicio de ~300ms de CPU que luego sobrescribimos
+ * posición por posición. Devuelve `null` cuando el fast-path NO aplica, o sea
+ * "hay que correr ELK".
+ *
+ * Es una función PURA y síncrona de sus argumentos, así que el hook la evalúa
+ * durante el render (`useMemo`) en vez de dentro del effect: el resultado ya
+ * está disponible en el primer render, sin el render extra (ni el frame con
+ * el canvas vacío) que provocaba el `setState` dentro del efecto.
+ */
+function computeManualLayout(
+  diagram: EpicDiagram,
+  {
+    measuredDimensions,
+    directionOverride,
+    editing,
+  }: {
+    measuredDimensions?: Map<string, { width: number; height: number }>;
+    directionOverride?: LayoutDirection;
+    editing: boolean;
+  },
+): GroupedLayoutResult | null {
+  const manualPositions = diagram.hasManualLayout
+    ? diagram.manualPositions ?? {}
+    : null;
+  if (manualPositions === null) return null;
+
+  const allManual =
+    Object.keys(manualPositions).length >= diagram.nodes.length &&
+    diagram.nodes.every((n) => {
+      const p = manualPositions[n.id];
+      return p !== undefined && Number.isFinite(p.x) && Number.isFinite(p.y);
+    });
+  if (!allManual) return null;
+
+  // Aplicamos smart handles directo sobre rfNodes construidos con las
+  // manual positions.
+  const direction =
+    directionOverride ?? inferLayoutDirection(diagram.nodes, diagram.edges);
+  const rfNodes: Node[] = diagram.nodes.map((n) => {
+    const shape = nodeTypeToShape[n.type] ?? 'serviceNode';
+    const manualPos = manualPositions[n.id];
+    return {
+      id: n.id,
+      type: shape,
+      position: { x: manualPos.x, y: manualPos.y },
+      data: {
+        label: n.label,
+        description: n.description,
+        nodeType: n.type,
+        group: n.group,
+        editing,
+      },
+      draggable: editing,
+    };
+  });
+  const edgeDrafts = diagram.edges.map((e) => ({
+    id: e.id,
+    source: e.source,
+    target: e.target,
+    label: e.label,
+    animated: e.animated,
+  }));
+  const edgesWithHandles = applySmartHandles(rfNodes, edgeDrafts, diagram.nodes);
+
+  // Jump connectors en el fast-path también. El user puede tener un
+  // diagrama con manualPositions que siga teniendo edges semánticamente
+  // largos — la técnica de partir en pares circulares no depende de ELK,
+  // solo de la profundidad topológica.
+  const depthById = computeNodeDepths(diagram.nodes, diagram.edges);
+  const { nodes: nodesWithRefs, edges: edgesWithRefs } = insertJumpConnectors({
+    rfNodes,
+    edges: edgesWithHandles,
+    depthById,
+    direction,
+    measuredDimensions,
+    editing,
+  });
+
+  // Cluster bounds derivados de las manualPositions. Construimos
+  // `positions` como Map con coords de CENTRO (convención interna).
+  const fastPositions = new Map<string, AbsolutePosition>();
+  for (const n of diagram.nodes) {
+    const shape = nodeTypeToShape[n.type] ?? 'serviceNode';
+    const dim =
+      measuredDimensions?.get(n.id) ??
+      nodeDimensions[shape] ??
+      nodeDimensions.serviceNode;
+    const manualPos = manualPositions[n.id];
+    fastPositions.set(n.id, {
+      x: manualPos.x + dim.width / 2,
+      y: manualPos.y + dim.height / 2,
+      width: dim.width,
+      height: dim.height,
+    });
+  }
+  const fastClusters = computeClusterBounds(diagram.nodes, fastPositions);
+
+  // Fast-path: snap-to-grid + collision resolution. El snap corrige
+  // micro-desalineaciones de drags del user; el resolver fix overlaps
+  // post-snap. Mismo approach que el ELK-path.
+  const nodesSnappedFast = snapToGrid(nodesWithRefs, SNAP_GRID_SIZE);
+  const fastCollision = resolveCollisions(nodesSnappedFast, {
+    maxIterations: 50,
+    overlapThreshold: 0.5,
+    margin: 50,
+  });
+
+  return {
+    nodes: fastCollision.nodes,
+    edges: edgesWithRefs,
+    direction,
+    clusters: fastClusters,
+    loading: false,
+    error: null,
+  };
+}
+
+/**
  * Hook orquestador del pipeline de layout con ELK.js.
  *
  * Por qué ELK y no Dagre: ELK's `layered` algorithm con
@@ -426,14 +546,25 @@ const DEFAULT_RESULT: GroupedLayoutResult = {
  * por un resultado significativamente más limpio — el user explícitamente
  * priorizó calidad sobre costo.
  *
- * Async boundary: ELK retorna Promise, así que usamos useEffect+useState en
- * vez del useMemo sync del código anterior. El resultado inicial `{ loading:
- * true, nodes: [], ... }` permite al viewer mostrar un overlay mientras ELK
- * computa. Típicamente <500 ms para 20 nodos.
+ * Dos caminos, y cuál gana lo decide `computeManualLayout`:
  *
- * Fallback: si ELK tira (SSR, input malformado, cycle edge-case), caemos a
- * un grid lineal idx-based. Nunca devolvemos un canvas roto — la degradación
- * es graceful.
+ *   1. Fast-path (síncrono): el diagrama trae layout manual completo. Es una
+ *      función pura de las props, así que se resuelve con `useMemo` durante
+ *      el render y el resultado ya está disponible en el primer frame.
+ *   2. ELK (asíncrono): `elk.layout()` retorna Promise, así que ese camino sí
+ *      necesita useEffect+useState. Mientras computa, el estado vale
+ *      `{ loading: true, nodes: [], ... }` y el viewer muestra un overlay.
+ *      Típicamente <500 ms para 20 nodos.
+ *
+ * Consecuencia de tener dos fuentes: al pasar de fast-path a ELK (p. ej. el
+ * botón "Recalcular layout", que descarta las posiciones manuales) el canvas
+ * queda vacío bajo el overlay hasta que ELK responde, en vez de conservar el
+ * layout anterior. Es intencional: mostrar el layout viejo sin indicador de
+ * carga hacía pasar por bueno un diagrama que ya no correspondía.
+ *
+ * Fallback: si ELK tira (input malformado, cycle edge-case), caemos a un grid
+ * lineal idx-based. Nunca devolvemos un canvas roto — la degradación es
+ * graceful.
  */
 export function useGroupedLayout(
   diagram: EpicDiagram,
@@ -446,30 +577,33 @@ export function useGroupedLayout(
   } = opts;
 
   // Instancia de ELK reusada a través de renders. Lazy init dentro del
-  // useEffect de layout (ver abajo) — NO la creamos en el render body
-  // porque interactúa mal con el cleanup: si el ref queda nulo entre ciclos,
-  // el effect dispara el fallback "ELK no inicializado" aunque estemos en
-  // cliente.
+  // useEffect de layout (ver abajo) — NO la creamos en el render body: elkjs
+  // requiere `window`, y el render body también corre en el servidor. Dentro
+  // del effect estamos garantizados en cliente, y además solo pagamos la
+  // construcción cuando el fast-path no aplicó.
   //
   // Nota de tipo: el default export de elkjs es un constructor (value),
   // no un tipo — usamos InstanceType<typeof ELK> para la instancia.
   const elkRef = useRef<InstanceType<typeof ELK> | null>(null);
 
-  const [result, setResult] = useState<GroupedLayoutResult>(DEFAULT_RESULT);
+  // Layout manual completo → resultado síncrono, sin ELK. Se computa durante
+  // el render porque es una función pura de las mismas deps que el effect.
+  const manualLayout = useMemo(
+    () =>
+      computeManualLayout(diagram, {
+        measuredDimensions,
+        directionOverride,
+        editing,
+      }),
+    [diagram, measuredDimensions, directionOverride, editing],
+  );
+
+  const [elkResult, setElkResult] = useState<GroupedLayoutResult>(DEFAULT_RESULT);
 
   useEffect(() => {
-    // SSR guard — elkjs requiere window. El render inicial del componente
-    // puede correr en SSR (Next.js hydrates después). En ese caso el effect
-    // no corre (useEffect solo se ejecuta en cliente), así que este check
-    // es defensivo — en un entorno no-browser nunca debería entrar aquí.
-    if (typeof window === 'undefined') {
-      setResult({
-        ...DEFAULT_RESULT,
-        loading: false,
-        error: 'ELK no inicializado (SSR / window undefined)',
-      });
-      return;
-    }
+    // El fast-path ya resolvió el layout durante el render: ELK no aporta
+    // nada y correrlo sería quemar CPU para un resultado que descartamos.
+    if (manualLayout) return;
 
     // Lazy init de ELK — creamos la instancia SOLO si no existe ya. Así
     // sobrevivimos StrictMode double-invocation sin race conditions y sin
@@ -483,108 +617,6 @@ export function useGroupedLayout(
     }
 
     let cancelled = false;
-
-    // Fast-path: si el diagrama tiene layout manual COMPLETO (un entry en
-    // manualPositions por cada node), saltamos ELK por completo — sería un
-    // desperdicio de ~300ms de CPU que luego sobrescribimos posición por
-    // posición. Aplicamos smart handles directo sobre rfNodes construidos
-    // con las manual positions.
-    const manualPositionsFast = diagram.hasManualLayout
-      ? diagram.manualPositions ?? {}
-      : null;
-    const manualCount = manualPositionsFast ? Object.keys(manualPositionsFast).length : 0;
-    const allManual =
-      manualPositionsFast !== null &&
-      manualCount >= diagram.nodes.length &&
-      diagram.nodes.every((n) => {
-        const p = manualPositionsFast[n.id];
-        return p !== undefined && Number.isFinite(p.x) && Number.isFinite(p.y);
-      });
-
-    if (allManual) {
-      const direction =
-        directionOverride ?? inferLayoutDirection(diagram.nodes, diagram.edges);
-      const rfNodes: Node[] = diagram.nodes.map((n) => {
-        const shape = nodeTypeToShape[n.type] ?? 'serviceNode';
-        const manualPos = manualPositionsFast![n.id];
-        return {
-          id: n.id,
-          type: shape,
-          position: { x: manualPos.x, y: manualPos.y },
-          data: {
-            label: n.label,
-            description: n.description,
-            nodeType: n.type,
-            group: n.group,
-            editing,
-          },
-          draggable: editing,
-        };
-      });
-      const edgeDrafts = diagram.edges.map((e) => ({
-        id: e.id,
-        source: e.source,
-        target: e.target,
-        label: e.label,
-        animated: e.animated,
-      }));
-      const edgesWithHandles = applySmartHandles(rfNodes, edgeDrafts, diagram.nodes);
-
-      // Jump connectors en el fast-path también. El user puede tener un
-      // diagrama con manualPositions que siga teniendo edges semánticamente
-      // largos — la técnica de partir en pares circulares no depende de ELK,
-      // solo de la profundidad topológica.
-      const depthById = computeNodeDepths(diagram.nodes, diagram.edges);
-      const { nodes: nodesWithRefs, edges: edgesWithRefs } = insertJumpConnectors({
-        rfNodes,
-        edges: edgesWithHandles,
-        depthById,
-        direction,
-        measuredDimensions,
-        editing,
-      });
-
-      // Cluster bounds derivados de las manualPositions. Construimos
-      // `positions` como Map con coords de CENTRO (convención interna).
-      const fastPositions = new Map<string, AbsolutePosition>();
-      for (const n of diagram.nodes) {
-        const shape = nodeTypeToShape[n.type] ?? 'serviceNode';
-        const dim =
-          measuredDimensions?.get(n.id) ??
-          nodeDimensions[shape] ??
-          nodeDimensions.serviceNode;
-        const manualPos = manualPositionsFast![n.id];
-        fastPositions.set(n.id, {
-          x: manualPos.x + dim.width / 2,
-          y: manualPos.y + dim.height / 2,
-          width: dim.width,
-          height: dim.height,
-        });
-      }
-      const fastClusters = computeClusterBounds(diagram.nodes, fastPositions);
-
-      // Fast-path: snap-to-grid + collision resolution. El snap corrige
-      // micro-desalineaciones de drags del user; el resolver fix overlaps
-      // post-snap. Mismo approach que el ELK-path.
-      const nodesSnappedFast = snapToGrid(nodesWithRefs, SNAP_GRID_SIZE);
-      const fastCollision = resolveCollisions(nodesSnappedFast, {
-        maxIterations: 50,
-        overlapThreshold: 0.5,
-        margin: 50,
-      });
-
-      setResult({
-        nodes: fastCollision.nodes,
-        edges: edgesWithRefs,
-        direction,
-        clusters: fastClusters,
-        loading: false,
-        error: null,
-      });
-      return () => {
-        cancelled = true;
-      };
-    }
 
     const run = async (): Promise<void> => {
       try {
@@ -846,7 +878,7 @@ export function useGroupedLayout(
 
         if (cancelled) return;
 
-        setResult({
+        setElkResult({
           nodes: nodesNoCollisions,
           edges: edgesWithRefs,
           direction,
@@ -898,7 +930,7 @@ export function useGroupedLayout(
           // recomputa desde las posiciones manuales/stub del fallback.
           type: 'avoidNodes',
         }));
-        setResult({
+        setElkResult({
           nodes: rfNodes,
           edges: rfEdges,
           direction: directionOverride ?? 'LR',
@@ -914,7 +946,9 @@ export function useGroupedLayout(
     return () => {
       cancelled = true;
     };
-  }, [diagram, measuredDimensions, directionOverride, editing]);
+  }, [manualLayout, diagram, measuredDimensions, directionOverride, editing]);
 
-  return result;
+  // El fast-path manda cuando aplica; si no, el resultado de ELK (que arranca
+  // en `loading: true` y conserva el layout previo mientras recomputa).
+  return manualLayout ?? elkResult;
 }

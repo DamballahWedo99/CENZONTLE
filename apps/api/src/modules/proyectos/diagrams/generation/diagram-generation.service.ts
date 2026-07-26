@@ -2,7 +2,6 @@ import {
   BadRequestException,
   Injectable,
 } from '@nestjs/common';
-import { Prisma } from '@prisma/client';
 import Anthropic from '@anthropic-ai/sdk';
 import { anthropicFetch } from '../../../../lib/anthropic-fetch';
 import { Subject } from 'rxjs';
@@ -3343,7 +3342,8 @@ Básate en vault_grep (Vault de definiciones y conocimiento de negocio) y en los
       const group: DiagramNodeGroup = rawGroup && VALID_GROUPS.includes(rawGroup as DiagramNodeGroup)
         ? (rawGroup as DiagramNodeGroup)
         : inferGroupFromType(pn.type, hasOutgoing);
-      const { rawGroup: _, ...rest } = pn;
+      const { rawGroup: rawGroupField, ...rest } = pn;
+      void rawGroupField; // se extrae SOLO para excluirlo de `rest`; nunca se usa.
       return { ...rest, group };
     });
 
@@ -3606,6 +3606,10 @@ Básate en vault_grep (Vault de definiciones y conocimiento de negocio) y en los
    */
   private sanitizeCommitText(text: string, maxLength = 60): string {
     return text
+      // Los caracteres de control SON el objetivo del match: es el saneo que
+      // impide el spoofing de trailers en el commit message. Sin el rango C0
+      // la defensa desaparece.
+      // eslint-disable-next-line no-control-regex -- rango C0 intencional (saneo)
       .replace(/[\r\n\t\x00-\x1f]/g, ' ')
       .replace(/\s+/g, ' ')
       .trim()
@@ -3657,7 +3661,7 @@ ANTES de emitir el diagrama final sigues un flujo de TRES fases con auto-revisi�
 1. **Lee la épica y su iniciativa** (ya tienes el contexto completo en el system prompt: título, descripción, alcance, criterios, impactos, dependencias, sistemas afectados).
 2. **Lee documentos adjuntos**: usa \`read_initiative_documents\` para ver PDFs/imágenes/markdowns de la iniciativa. Los PDFs e imágenes vienen como adjuntos multimodales — los ves directamente.
 3. **Explora código REAL**: usa \`code_glob\`, \`code_grep\`, \`code_read\` para inspeccionar los repos conectados. Confirma que los componentes EXISTEN o DEBEN EXISTIR según la épica.
-4. **Consulta el Vault**: usa \`vault_glob\`, \`vault_grep\`, \`vault_read\` para leer definiciones de negocio, terminología (ej: "PNR", "antifraude", "Sabre DC") con precisión.
+4. **Consulta el Vault**: usa \`vault_glob\`, \`vault_grep\`, \`vault_read\` para leer definiciones de negocio, terminología (ej: "SKU", "antifraude", "conciliación") con precisión.
 
 ### Fase B — DRAFT + AUTO-REVISIÓN (obligatorio)
 5. **Llama \`draft_diagram\`** con tu propuesta inicial. Mismos campos que \`submit_diagram\`, pero NO finaliza — recibirás un **checklist automático** con hallazgos objetivos (edges sin label, integraciones sin protocolo, orphans, dupes, tamaño, etc.). Marcadores:
@@ -3729,7 +3733,7 @@ Usa EXCLUSIVAMENTE estos 9 tipos:
 - \`database\` — base de datos, data store, cache persistente (PostgreSQL, Redis, Elasticsearch, DynamoDB).
 - \`queue\` — cola, topic, event bus, stream (Kafka, RabbitMQ, SQS, EventBridge).
 - \`gateway\` — API gateway, reverse proxy, load balancer, CDN edge (Kong, CloudFront, Nginx).
-- \`external\` — sistema de terceros fuera del control del equipo (Sabre, Stripe, DEUNA, Adyen, SkyTeam, SAP, PagerDuty, Slack).
+- \`external\` — sistema de terceros fuera del control del equipo (Stripe, Salesforce, SAP, Twilio, Auth0, SendGrid, PagerDuty, Slack).
 - \`process\` — paso de proceso genérico, transformación, cálculo (ej: "Sigue flujo del método de pago seleccionado", "Retry con backoff").
 - \`decision\` — punto de ramificación condicional, rombo de decisión. Su label termina en "?" y tiene 2+ aristas de salida con labels distintos (SI/NO, ACCEPT/REJECT, etc.).
 
@@ -3743,7 +3747,7 @@ Cada nodo DEBE incluir \`group\`. El viewer usa este campo para clustering (swim
 - \`backend\`  — microservicios internos del equipo
 - \`data\`     — bases de datos, colas, caches, data stores
 - \`infra\`    — gateways, load balancers, CDNs, proxies
-- \`external\` — terceros (Sabre, Stripe, SkyTeam, SAP, DEUNA, Adyen, PagerDuty)
+- \`external\` — terceros (Stripe, Salesforce, SAP, Twilio, Auth0, SendGrid, PagerDuty)
 
 Reglas de consistencia (aplicar SIEMPRE):
 - \`type=external\`           → \`group=external\`
@@ -3900,7 +3904,7 @@ Hacer esta revisión MENTAL es gratis (extended thinking ya está activado). Hac
 
 ## Rúbrica de calidad
 
-- **Tecnologías REALES**: si la épica menciona Kafka, el diagrama tiene \`queue\` con label Kafka. Si menciona Sabre GDS, aparece \`external\` "Sabre GDS". No agregues tech que la épica no pidió.
+- **Tecnologías REALES**: si la épica menciona Kafka, el diagrama tiene \`queue\` con label Kafka. Si menciona Stripe, aparece \`external\` "Stripe". No agregues tech que la épica no pidió.
 - **Decisiones relevantes**: agrega nodos \`decision\` para bifurcaciones explícitas ("si requiere antifraude…", "si status es rejected…").
 
 ## Anti-patrones prohibidos

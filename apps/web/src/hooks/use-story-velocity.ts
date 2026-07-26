@@ -22,6 +22,13 @@ interface UseStoryVelocityResult {
   loading: boolean;
 }
 
+interface FetchState {
+  /** Valor de `enabled` con el que arrancó este ciclo de fetch. */
+  enabled: boolean;
+  loading: boolean;
+  data: VelocityAnalyticsResponse | null;
+}
+
 /**
  * Hook de lookup contra `GET /factory/velocity` para los indicadores
  * secundarios (badge de desviación estimado-vs-real en historia y épica).
@@ -46,21 +53,34 @@ export function useStoryVelocity({
   epicId,
 }: UseStoryVelocityParams): UseStoryVelocityResult {
   const enabled = Boolean(storyId || epicId);
-  const [data, setData] = useState<VelocityAnalyticsResponse | null>(null);
-  const [loading, setLoading] = useState(enabled);
+
+  // `loading` y `data` viven en un solo state junto al valor de `enabled` que
+  // arrancó el ciclo. Cuando el hook se activa o se apaga, el ciclo se reinicia
+  // DURANTE el render (no desde el effect): así el primer render con el hook
+  // recién activado ya reporta `loading: true` en vez de pintar un frame con el
+  // `loading` del ciclo anterior. El fetch solo escribe desde sus callbacks
+  // asíncronos, que además preservan `data` en el reinicio (un apagado/encendido
+  // no borra el dato ya traído).
+  const [fetchState, setFetchState] = useState<FetchState>(() => ({
+    enabled,
+    loading: enabled,
+    data: null,
+  }));
+
+  if (fetchState.enabled !== enabled) {
+    setFetchState((prev) => ({ enabled, loading: enabled, data: prev.data }));
+  }
+
+  const { loading, data } = fetchState;
 
   useEffect(() => {
-    if (!enabled) {
-      setLoading(false);
-      return;
-    }
+    if (!enabled) return;
 
     let cancelled = false;
-    setLoading(true);
 
     getVelocityAnalytics()
       .then((fresh) => {
-        if (!cancelled) setData(fresh);
+        if (!cancelled) setFetchState((prev) => ({ ...prev, data: fresh }));
       })
       .catch((err) => {
         if (!(err instanceof ApiError) || err.status !== 401) {
@@ -68,7 +88,7 @@ export function useStoryVelocity({
         }
       })
       .finally(() => {
-        if (!cancelled) setLoading(false);
+        if (!cancelled) setFetchState((prev) => ({ ...prev, loading: false }));
       });
 
     return () => {

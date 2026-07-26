@@ -31,6 +31,10 @@ const YAML_SPECIAL_CHARS = /[:#[\]{}&*!,|>'"`?@]/;
 // plain scalars. Incluimos todos los bytes C0 (incluido LF `\x0a`, aunque
 // `hasNewline` también lo cubre) y DEL `\x7f`. JSON.stringify los convierte
 // a secuencias `\uXXXX` válidas dentro de un double-quoted scalar.
+// Detectar caracteres de control ES el propósito de esta constante: YAML
+// prohíbe bytes C0 en plain scalars, y este test decide si hay que emitir el
+// valor entre comillas dobles.
+// eslint-disable-next-line no-control-regex -- rango C0 intencional (detección)
 const CONTROL_CHARS = /[\x00-\x1f\x7f]/;
 // Valores que YAML 1.2 parsea como algo distinto a string si van sin comillas:
 //  - `~` y `null`/`Null`/`NULL` → null

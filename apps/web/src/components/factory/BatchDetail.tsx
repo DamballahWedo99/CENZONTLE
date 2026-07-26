@@ -4,9 +4,8 @@ import { useCallback, useEffect, useMemo, useState } from 'react';
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 import { cn } from '@/lib/utils';
+import { getShortId } from '@/lib/short-id';
 import { useFactory } from '@/context/FactoryContext';
-import { mockEpics } from '@/data/mock/proyectos/epics';
-import { mockInitiatives } from '@/data/mock/proyectos/initiatives';
 import { WaveDAG } from '@/components/factory/WaveDAG';
 import { AgentCard } from '@/components/factory/AgentCard';
 import { AgentDetailDrawer } from '@/components/factory/AgentDetailDrawer';
@@ -14,7 +13,7 @@ import { StagingGateApprovalDialog } from '@/components/factory/StagingGateAppro
 import { RoundCheckbox } from '@/components/ui/round-checkbox';
 import { BatchPreviewButton } from '@/components/factory/BatchPreviewButton';
 import { AgentStatus, GateDecision, PipelineLayer, WaveStatus } from '@cenzontle/shared';
-import type { Epic, Initiative, FactoryAgent, FactoryStory, HumanGate, SprintBatch, Wave } from '@cenzontle/shared';
+import type { FactoryAgent, FactoryStory, HumanGate, SprintBatch, Wave } from '@cenzontle/shared';
 import type {
   BatchDetailResponse,
   BatchStoryDetail,
@@ -50,7 +49,6 @@ import {
   Info,
   X,
   Bookmark,
-  Target,
   Calendar,
   AlertTriangle,
   RotateCw,
@@ -494,12 +492,15 @@ function WaveList({ waves, stories, agents }: WaveDisplayProps) {
                       story.status === AgentStatus.Coding ||
                       story.status === AgentStatus.Testing ||
                       story.status === AgentStatus.CreatingPR;
+                    // Las stories del batch detail no traen tracker externo (el
+                    // mapper rellena un TrackerReference vacío): short id.
+                    const storyKey = story.tracker.externalKey || getShortId(story.id);
 
                     return (
                       <div
                         key={story.id}
                         role="listitem"
-                        aria-label={`${story.tracker.externalKey}: ${story.title}, ${cfg.label}`}
+                        aria-label={`${storyKey}: ${story.title}, ${cfg.label}`}
                         className={cn(
                           'flex items-center gap-3 rounded-md border px-3 py-2 transition-colors',
                           cfg.bg,
@@ -517,7 +518,7 @@ function WaveList({ waves, stories, agents }: WaveDisplayProps) {
                         <div className="flex-1 min-w-0">
                           <div className="flex items-center gap-2">
                             <span className="font-mono text-xs font-semibold text-foreground">
-                              {story.tracker.externalKey}
+                              {storyKey}
                             </span>
                             <span className="text-xs text-muted-foreground truncate">{story.title}</span>
                           </div>
@@ -716,29 +717,40 @@ function MetricsCards({ batch, stories, agents }: MetricsCardsProps) {
   const doneStories = stories.filter((s) => s.status === AgentStatus.Done).length;
   const totalStories = stories.length;
 
-  // Tick state que fuerza re-render cada 1s MIENTRAS el batch está corriendo
-  // (completedAt === null). Sin esto, Date.now() se evalúa una sola vez en el
-  // primer render y el card queda congelado en "0m" — el operador piensa que
-  // está atascado y aborta innecesariamente. Cuando el batch termina, el
-  // interval se limpia y el cálculo queda fijo en completedAt.
-  const [, setLiveTick] = useState(0);
+  // Reloj vivo del batch en curso. El instante actual NO se puede leer
+  // durante el render (`Date.now()` es impuro: dos renders con las mismas
+  // props darían valores distintos, y el HTML del server no coincidiría con
+  // el del cliente al hidratar). Lo guardamos en estado y lo refrescamos cada
+  // segundo desde el efecto, que sí puede leer el reloj. El tick MIENTRAS el
+  // batch corre (completedAt === null) es necesario: sin él el card quedaría
+  // congelado en "0m" y el operador creería que está atascado. Cuando el
+  // batch termina, el interval se limpia y el cálculo queda fijo en
+  // completedAt.
+  const [nowMs, setNowMs] = useState<number | null>(null);
   useEffect(() => {
     if (batch.completedAt) return; // batch terminado → no tickear
-    const intervalId = setInterval(() => setLiveTick((n) => n + 1), 1000);
-    return () => clearInterval(intervalId);
+    let timerId: ReturnType<typeof setTimeout>;
+    const tick = () => {
+      setNowMs(Date.now());
+      timerId = setTimeout(tick, 1000);
+    };
+    // El primer tick se agenda con delay 0 (no se ejecuta dentro del cuerpo
+    // del efecto) para que el card muestre el elapsed real desde el primer
+    // frame tras el montaje en vez de esperar un segundo entero en "0s".
+    timerId = setTimeout(tick, 0);
+    return () => clearTimeout(timerId);
   }, [batch.completedAt]);
 
   // Elapsed: si el batch ya terminó (completedAt set), congelar el cálculo en
-  // ese timestamp. Mientras corre, usamos Date.now() y el tick anterior fuerza
-  // que se re-evalúe cada segundo. Antes usábamos Date.now() siempre, lo que
-  // hacía que un batch de 2 minutos terminado hace 11h mostrara "11h 34m"
-  // creciendo monotónicamente con el reloj.
-  const endMs = batch.completedAt
-    ? new Date(batch.completedAt).getTime()
-    : Date.now();
-  const elapsedSeconds = batch.startedAt
-    ? Math.max(0, Math.floor((endMs - new Date(batch.startedAt).getTime()) / 1000))
-    : 0;
+  // ese timestamp. Mientras corre, usamos el reloj que el efecto refresca cada
+  // segundo. Antes usábamos Date.now() siempre, lo que hacía que un batch de
+  // 2 minutos terminado hace 11h mostrara "11h 34m" creciendo monotónicamente
+  // con el reloj.
+  const endMs = batch.completedAt ? new Date(batch.completedAt).getTime() : nowMs;
+  const elapsedSeconds =
+    batch.startedAt && endMs !== null
+      ? Math.max(0, Math.floor((endMs - new Date(batch.startedAt).getTime()) / 1000))
+      : 0;
 
   // Token sub-text del card Cost. Si el backend mandó el split (totalTokensNew
   // + totalTokensCached), mostramos ambos en una sola línea con el cached en
@@ -1703,10 +1715,13 @@ function ApprovalSection({
 // EpicInfoDrawer: side panel with epic details related to the batch
 // ---------------------------------------------------------------------------
 
-function EpicInfoDrawer({ batch, epic, initiative, open, onClose }: {
+// Todo lo que pinta el drawer sale del `SprintBatch` que ya tiene el caller
+// (mapeado desde `/factory/queue/:batchId/detail`). El endpoint no devuelve la
+// entidad Epic ni su Initiative — solo `epicId` y `epicTitle` — así que el
+// panel se queda en lo que el Forge sí conoce del batch y linkea a la ficha de
+// la épica para el resto.
+function EpicInfoDrawer({ batch, open, onClose }: {
   batch: SprintBatch;
-  epic: Epic | null;
-  initiative: Initiative | null;
   open: boolean;
   onClose: () => void;
 }) {
@@ -1716,7 +1731,9 @@ function EpicInfoDrawer({ batch, epic, initiative, open, onClose }: {
     return () => document.removeEventListener('keydown', handleKey);
   }, [open, onClose]);
 
-  const epicName = epic?.title ?? batch.epicTitle;
+  const epicName = batch.epicTitle;
+  const epicId = batch.epicId;
+  const batchKey = batch.tracker.externalKey;
   const storiesTotal = batch.stories.length;
   const storiesDone = batch.stories.filter((s) => s.status === AgentStatus.Done).length;
   const totalSP = batch.stories.reduce((s, st) => s + st.storyPoints, 0);
@@ -1755,14 +1772,16 @@ function EpicInfoDrawer({ batch, epic, initiative, open, onClose }: {
                 <h2 className="text-sm font-semibold text-foreground truncate">Epic Details</h2>
               </div>
               <div className="mt-1">
-                {epic ? (
+                {epicId ? (
                   <Link
-                    href={`/proyectos/epicas/${epic.id}`}
+                    href={`/proyectos/epicas/${epicId}`}
                     className="text-xs text-blue-400 hover:text-blue-300 hover:underline transition-colors truncate block"
                   >
                     {epicName}
                   </Link>
                 ) : (
+                  // `epicId` es opcional en SprintBatch (mocks y clients
+                  // legacy): sin id no hay a dónde linkear, texto plano.
                   <p className="text-xs text-muted-foreground truncate">{epicName}</p>
                 )}
               </div>
@@ -1781,14 +1800,28 @@ function EpicInfoDrawer({ batch, epic, initiative, open, onClose }: {
         <div className="flex-1 overflow-y-auto px-5 py-4 space-y-5">
           {/* Identity */}
           <div className="rounded-lg border border-border bg-[#0d1117] p-4 space-y-3">
-            <div className="flex items-center justify-between">
-              <span className="text-xs text-muted-foreground/60">Tracker Key</span>
-              <span className="font-mono text-xs text-foreground/90">{batch.tracker.externalKey}</span>
-            </div>
-            <div className="flex items-center justify-between">
-              <span className="text-xs text-muted-foreground/60">Provider</span>
-              <span className="text-xs text-foreground/90 capitalize">{batch.tracker.provider}</span>
-            </div>
+            {/* Identificador de la épica. El batch detail del backend NO trae
+                tracker externo (el mapper rellena un TrackerReference vacío
+                porque `SprintBatch.tracker` es requerido), así que sin key real
+                no se puede anunciar un provider: caemos al short id, que es la
+                representación canónica del Forge interno. */}
+            {batchKey ? (
+              <>
+                <div className="flex items-center justify-between">
+                  <span className="text-xs text-muted-foreground/60">Tracker Key</span>
+                  <span className="font-mono text-xs text-foreground/90">{batchKey}</span>
+                </div>
+                <div className="flex items-center justify-between">
+                  <span className="text-xs text-muted-foreground/60">Provider</span>
+                  <span className="text-xs text-foreground/90 capitalize">{batch.tracker.provider}</span>
+                </div>
+              </>
+            ) : (
+              <div className="flex items-center justify-between">
+                <span className="text-xs text-muted-foreground/60">Epic ID</span>
+                <span className="font-mono text-xs text-foreground/90">{getShortId(epicId ?? batch.id)}</span>
+              </div>
+            )}
             <div className="flex items-center justify-between">
               <span className="text-xs text-muted-foreground/60">Branch</span>
               {batch.branchUrl ? (
@@ -1816,47 +1849,7 @@ function EpicInfoDrawer({ batch, epic, initiative, open, onClose }: {
               </span>
               <span className="text-xs text-foreground/90">{startDate}</span>
             </div>
-            <div className="flex items-center justify-between">
-              <span className="text-xs text-muted-foreground/60">Initiative</span>
-              <span className="text-xs text-foreground/90 text-right max-w-[60%] truncate">{initiative?.name ?? '—'}</span>
-            </div>
           </div>
-
-          {/* Epic details (from proyectos data) */}
-          {epic && (
-            <div>
-              <h3 className="mb-2.5 text-[11px] font-semibold uppercase tracking-widest text-muted-foreground/70">
-                Epic Info
-              </h3>
-              <div className="rounded-lg border border-border bg-[#0d1117] p-4 space-y-3">
-                {epic.markdown && epic.markdown.trim().length > 0 && (
-                  <div>
-                    <span className="text-[10px] text-muted-foreground/60 uppercase block mb-1">Definición</span>
-                    <p className="text-xs text-foreground/90 leading-relaxed line-clamp-6 whitespace-pre-line">{epic.markdown}</p>
-                  </div>
-                )}
-                <div className="flex items-center justify-between">
-                  <span className="text-xs text-muted-foreground/60">Status</span>
-                  <span className="text-xs text-foreground/90 capitalize">{epic.status}</span>
-                </div>
-                <div className="flex items-center justify-between">
-                  <span className="text-xs text-muted-foreground/60">Priority</span>
-                  <span className="text-xs text-foreground/90 capitalize">{epic.priority}</span>
-                </div>
-                {epic.targetDate && (
-                  <div className="flex items-center justify-between">
-                    <span className="flex items-center gap-1.5 text-xs text-muted-foreground/60">
-                      <Target className="h-3 w-3" />
-                      Target Date
-                    </span>
-                    <span className="text-xs text-foreground/90">
-                      {new Date(epic.targetDate).toLocaleDateString('es-MX', { day: 'numeric', month: 'short', year: 'numeric' })}
-                    </span>
-                  </div>
-                )}
-              </div>
-            </div>
-          )}
 
           {/* Metrics */}
           <div>
@@ -1891,7 +1884,9 @@ function EpicInfoDrawer({ batch, epic, initiative, open, onClose }: {
             <div className="rounded-lg border border-border divide-y divide-border">
               {batch.stories.length > 0 ? batch.stories.map((story) => (
                 <div key={story.id} className="grid grid-cols-[56px_1fr_40px] items-center gap-2 px-3 py-2">
-                  <span className="font-mono text-[10px] text-muted-foreground/70 truncate">{story.tracker.externalKey}</span>
+                  <span className="font-mono text-[10px] text-muted-foreground/70 truncate">
+                    {story.tracker.externalKey || getShortId(story.id)}
+                  </span>
                   <span className="text-xs text-foreground truncate">{story.title}</span>
                   <span className="text-[10px] text-muted-foreground text-right shrink-0">{story.storyPoints}pt</span>
                 </div>
@@ -1930,9 +1925,12 @@ interface BatchDetailProps {
 
 export function BatchDetail({ batchId, realBatchData, onRefetchRequested }: BatchDetailProps) {
   const { state, dispatch } = useFactory();
-  // Use mock data directly — factory pages are outside ProyectosProvider
-  const proyectosEpics = mockEpics;
-  const proyectosInitiatives = mockInitiatives;
+  // Drawer de la épica. Vive acá arriba —no junto a su uso, después del early
+  // return de "Batch not found"— porque React identifica los hooks por orden
+  // de llamada: si se declara después de un return condicional, el índice de
+  // este useState cambia cuando el batch aparece o desaparece y el estado se
+  // desalinea con el de los demás hooks.
+  const [epicDrawerOpen, setEpicDrawerOpen] = useState(false);
 
   const handleGateDecision = useCallback((gateId: string, decision: GateDecision, notes: string) => {
     // Para el flow REAL (realBatchData), el backend ya persistió el approval
@@ -2063,7 +2061,6 @@ export function BatchDetail({ batchId, realBatchData, onRefetchRequested }: Batc
   }
 
   const priorityStyle = PRIORITY_STYLES[fullBatch.priority] ?? PRIORITY_STYLES.medium;
-  const [epicDrawerOpen, setEpicDrawerOpen] = useState(false);
 
   return (
     <div className="space-y-6">
@@ -2095,7 +2092,11 @@ export function BatchDetail({ batchId, realBatchData, onRefetchRequested }: Batc
                   </button>
                 </div>
                 <div className="flex flex-wrap items-center gap-2 mt-1">
-                  <span className="font-mono text-xs text-muted-foreground">{fullBatch.tracker.externalKey}</span>
+                  {/* Sin tracker externo el mapper deja el key vacío: caemos al
+                      short id del epic para no pintar un hueco antes del pipe. */}
+                  <span className="font-mono text-xs text-muted-foreground">
+                    {fullBatch.tracker.externalKey || getShortId(fullBatch.epicId ?? fullBatch.id)}
+                  </span>
                   <span className="text-border" aria-hidden="true">|</span>
                   <span
                     className={cn(
@@ -2218,11 +2219,6 @@ export function BatchDetail({ batchId, realBatchData, onRefetchRequested }: Batc
       {/* ---- Epic Info Drawer ---- */}
       <EpicInfoDrawer
         batch={fullBatch}
-        epic={proyectosEpics.find(e => e.id === fullBatch.epicId) ?? null}
-        initiative={(() => {
-          const ep = proyectosEpics.find(e => e.id === fullBatch.epicId);
-          return ep ? proyectosInitiatives.find(i => i.id === ep.initiativeId) ?? null : null;
-        })()}
         open={epicDrawerOpen}
         onClose={() => setEpicDrawerOpen(false)}
       />

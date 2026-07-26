@@ -31,7 +31,7 @@ function resolveBin(name: string): string {
 
   // Validate path — must be absolute, no shell metacharacters.
   // Prevents env var injection into bash -c strings (e.g. CLAUDE_BIN="'; rm -rf / #")
-  if (!/^\/[a-zA-Z0-9/_.\-]+$/.test(binPath)) {
+  if (!/^\/[a-zA-Z0-9/_.-]+$/.test(binPath)) {
     throw new Error(`Unsafe binary path for '${name}': "${binPath}"`);
   }
 

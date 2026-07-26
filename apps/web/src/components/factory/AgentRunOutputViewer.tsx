@@ -83,6 +83,27 @@ export function AgentRunOutputViewer({ runId, onClose }: Props) {
     outputRef.current.scrollTop = outputRef.current.scrollHeight;
   }, [run?.lastOutput]);
 
+  // SEC (security-reviewer 2026-05-22, Finding 2 — defensa-en-profundidad
+  // profiláctica para dead-code path): defensa contra una `ttydUrl` con
+  // scheme no-http(s) que pudiera quedar en DB de algún run viejo previo al
+  // fix server-side. Solo http/https pasan al `<iframe src>`; el sandbox
+  // de más abajo es la otra capa.
+  //
+  // El hook vive ARRIBA de los early returns (loading / error) para que el
+  // orden de hooks sea idéntico en todos los renders — la guarda de `run`
+  // va adentro del `useMemo`, no afuera.
+  const safeTtydUrl = useMemo(() => {
+    if (!run?.ttydUrl) return null;
+    try {
+      const u = new URL(run.ttydUrl);
+      return u.protocol === 'http:' || u.protocol === 'https:'
+        ? run.ttydUrl
+        : null;
+    } catch {
+      return null;
+    }
+  }, [run?.ttydUrl]);
+
   const handleScroll = (e: React.UIEvent<HTMLDivElement>) => {
     const el = e.currentTarget;
     // Tolerancia 50px — si está cerca del fondo, considera "auto-scroll on".
@@ -139,23 +160,6 @@ export function AgentRunOutputViewer({ runId, onClose }: Props) {
       : run.status === 'running' || run.status === 'claimed'
         ? 'bg-blue-500 animate-pulse'
         : 'bg-red-500';
-
-  // SEC (security-reviewer 2026-05-22, Finding 2 — defensa-en-profundidad
-  // profiláctica para dead-code path): defensa contra una `ttydUrl` con
-  // scheme no-http(s) que pudiera quedar en DB de algún run viejo previo al
-  // fix server-side. Solo http/https pasan al `<iframe src>`; el sandbox
-  // de abajo es la otra capa.
-  const safeTtydUrl = useMemo(() => {
-    if (!run.ttydUrl) return null;
-    try {
-      const u = new URL(run.ttydUrl);
-      return u.protocol === 'http:' || u.protocol === 'https:'
-        ? run.ttydUrl
-        : null;
-    } catch {
-      return null;
-    }
-  }, [run.ttydUrl]);
 
   return (
     <div className="flex h-screen flex-col bg-background dark">

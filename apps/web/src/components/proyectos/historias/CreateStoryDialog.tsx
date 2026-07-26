@@ -130,8 +130,8 @@ export function CreateStoryDialog({ open, onOpenChange, defaultEpicId }: CreateS
       toast.success('Historia creada correctamente', { id: toastId });
       resetForm();
       onOpenChange(false);
-    } catch (err: any) {
-      toast.error(err.message || 'Error al crear la historia', { id: toastId });
+    } catch (err) {
+      toast.error(err instanceof Error && err.message ? err.message : 'Error al crear la historia', { id: toastId });
     } finally {
       setSaving(false);
     }
@@ -235,8 +235,10 @@ export function CreateStoryDialog({ open, onOpenChange, defaultEpicId }: CreateS
             <div>
               <label className="text-sm font-medium mb-1.5 block">Sprint</label>
               <Select value={sprintId} onValueChange={setSprintId}>
-                <SelectTrigger className="w-full">
-                  <SelectValue placeholder="Opcional" />
+                {/* Sin sprints no hay nada que elegir: sin `disabled` el trigger
+                    abre un popover vacío. El campo es opcional en el submit. */}
+                <SelectTrigger className="w-full" disabled={availableSprints.length === 0}>
+                  <SelectValue placeholder={availableSprints.length === 0 ? 'Sin sprints' : 'Opcional'} />
                 </SelectTrigger>
                 <SelectContent>
                   {availableSprints.map((s) => (

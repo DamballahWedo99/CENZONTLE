@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useEffect } from 'react';
+import { useCallback, useRef, useState, useSyncExternalStore } from 'react';
 import { ChevronDown } from 'lucide-react';
 import type { ThinkingState } from '@/hooks/useAgentThinkingState';
 
@@ -49,16 +49,37 @@ export function ThinkingHeader({
   // fallback en processEvents) reseteen el interval. Sin esta separación,
   // el interval se cancelaba y recreaba con cada event SSE, haciendo que
   // el contador "salte" en lugar de tickear suavemente.
-  const [now, setNow] = useState<number>(() => Date.now());
+  //
+  // El reloj es un sistema externo a React: se lee con `useSyncExternalStore`
+  // suscribiéndose al interval, en vez de copiarlo a state desde un effect. La
+  // suscripción depende SOLO de isStreaming + runStartedAt, NO de
+  // totalDurationMs, y tickea cada 500ms para que el contador se vea fluido.
+  // Mientras el agente no está streameando nadie escribe el snapshot: `now`
+  // queda congelado en el último tick (o en el montaje si nunca streameó),
+  // igual que cuando el interval estaba parado.
+  const { runStartedAt } = state;
+  const [mountedAt] = useState<number>(() => Date.now());
+  const nowRef = useRef<number | null>(null);
 
-  useEffect(() => {
-    // El interval depende SOLO de isStreaming + runStartedAt, NO de
-    // totalDurationMs. Updates cada 500ms para que el ticking se vea fluido.
-    if (!isStreaming || !state.runStartedAt) return;
-    setNow(Date.now()); // refresh inmediato al activarse
-    const interval = setInterval(() => setNow(Date.now()), 500);
-    return () => clearInterval(interval);
-  }, [isStreaming, state.runStartedAt]);
+  const subscribeToClock = useCallback(
+    (onStoreChange: () => void) => {
+      if (!isStreaming || !runStartedAt) return () => {};
+      const tick = () => {
+        nowRef.current = Date.now();
+        onStoreChange();
+      };
+      tick(); // refresh inmediato al activarse
+      const interval = setInterval(tick, 500);
+      return () => clearInterval(interval);
+    },
+    [isStreaming, runStartedAt],
+  );
+
+  const now = useSyncExternalStore(
+    subscribeToClock,
+    () => nowRef.current ?? mountedAt,
+    () => mountedAt,
+  );
 
   // Elapsed derivado:
   //  - Si está activo: tiempo desde runStartedAt hasta now (tick cada 500ms).

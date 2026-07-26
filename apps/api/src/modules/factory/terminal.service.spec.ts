@@ -570,9 +570,11 @@ describe('TerminalService', () => {
       service.stopSession('agent-1');
 
       expect(proc.kill).toHaveBeenCalledWith('SIGTERM');
+      // Each agent has its own isolated tmux server (-L <socket>); stop
+      // uses `kill-server` (not `kill-session`) against that socket.
       expect(mockSpawn).toHaveBeenCalledWith(
         '/usr/local/bin/tmux',
-        ['kill-session', '-t', 'forge-agent-1'],
+        ['-L', 'forge-agent-1', 'kill-server'],
         { stdio: 'ignore' },
       );
     });
@@ -629,11 +631,11 @@ describe('TerminalService', () => {
       service.stopSession('agent-1');
 
       const killCall = mockSpawn.mock.calls.find(
-        (call: any[]) => Array.isArray(call[1]) && call[1][0] === 'kill-session',
+        (call: any[]) => Array.isArray(call[1]) && call[1].includes('kill-server'),
       );
       expect(killCall).toBeDefined();
-      // The tmux session name should come from session.agentId, not the raw param
-      expect(killCall![1]).toEqual(['kill-session', '-t', 'forge-agent-1']);
+      // The tmux socket (-L) should come from session.agentId, not the raw param
+      expect(killCall![1]).toEqual(['-L', 'forge-agent-1', 'kill-server']);
     });
   });
 
@@ -839,9 +841,12 @@ describe('TerminalService', () => {
 
       service.sendKeys('agent-1', 'q');
 
+      // Isolated tmux server (-L <socket>); the pane inside it is always
+      // "main" — isolation comes from the per-agent socket, not the tmux
+      // session name.
       expect(mockSpawn).toHaveBeenCalledWith(
         '/usr/local/bin/tmux',
-        ['send-keys', '-l', '-t', 'forge-agent-1', 'q'],
+        ['-L', 'forge-agent-1', 'send-keys', '-l', '-t', 'main', 'q'],
         expect.objectContaining({ stdio: 'ignore' }),
       );
     });
@@ -855,7 +860,7 @@ describe('TerminalService', () => {
 
       expect(mockSpawn).toHaveBeenCalledWith(
         '/usr/local/bin/tmux',
-        ['send-keys', '-l', '-t', 'forge-agent-1', longPath],
+        ['-L', 'forge-agent-1', 'send-keys', '-l', '-t', 'main', longPath],
         expect.anything(),
       );
     });
@@ -867,7 +872,7 @@ describe('TerminalService', () => {
       service.sendKeys('safe-agent', 'test');
 
       const sendCall = mockSpawn.mock.calls.find(
-        (call: any[]) => Array.isArray(call[1]) && call[1][0] === 'send-keys',
+        (call: any[]) => Array.isArray(call[1]) && call[1].includes('send-keys'),
       );
       expect(sendCall![1]).toContain('forge-safe-agent');
     });
@@ -1001,32 +1006,32 @@ describe('TerminalService', () => {
     it('all methods use session.agentId consistently (not raw param)', async () => {
       await service.startSession('agent-1', '/tmp/project');
 
-      // stopSession → tmux kill-session uses session.agentId
+      // stopSession → tmux kill-server (isolated per-agent socket) uses session.agentId
       mockSpawn.mockClear();
       service.stopSession('agent-1');
       const killCall = mockSpawn.mock.calls.find(
-        (call: any[]) => Array.isArray(call[1]) && call[1][0] === 'kill-session',
+        (call: any[]) => Array.isArray(call[1]) && call[1].includes('kill-server'),
       );
-      expect(killCall![1][2]).toBe('forge-agent-1');
+      expect(killCall![1][1]).toBe('forge-agent-1');
 
       // Start a new session for sendKeys + isInCopyMode tests
       await service.startSession('agent-2', '/tmp/project');
 
-      // sendKeys → tmux send-keys uses session.agentId
+      // sendKeys → tmux send-keys uses session.agentId (as the -L socket)
       mockSpawn.mockClear();
       service.sendKeys('agent-2', 'x');
       const sendCall = mockSpawn.mock.calls.find(
-        (call: any[]) => Array.isArray(call[1]) && call[1][0] === 'send-keys',
+        (call: any[]) => Array.isArray(call[1]) && call[1].includes('send-keys'),
       );
-      expect(sendCall![1][3]).toBe('forge-agent-2');
+      expect(sendCall![1][1]).toBe('forge-agent-2');
 
-      // isInCopyMode → tmux display-message uses session.agentId
+      // isInCopyMode → tmux display-message uses session.agentId (as the -L socket)
       mockExecFileSync.mockClear();
       service.isInCopyMode('agent-2');
       const displayCall = mockExecFileSync.mock.calls.find(
         (call: any[]) => Array.isArray(call[1]) && call[1].includes('display-message'),
       );
-      expect(displayCall![1][2]).toBe('forge-agent-2');
+      expect(displayCall![1][1]).toBe('forge-agent-2');
     });
   });
 
@@ -1067,7 +1072,7 @@ describe('TerminalService', () => {
 
       // eslint-disable-next-line @typescript-eslint/no-require-imports
       const { TerminalService: RestrictedSvc } = require('./terminal.service');
-      const restricted = new RestrictedSvc();
+      const restricted = new RestrictedSvc(createMockPinoLogger());
 
       await expect(
         restricted.startSession('a1', '/tmp/outside'),
@@ -1108,7 +1113,7 @@ describe('TerminalService', () => {
 
       // eslint-disable-next-line @typescript-eslint/no-require-imports
       const { TerminalService: RestrictedSvc } = require('./terminal.service');
-      const restricted = new RestrictedSvc();
+      const restricted = new RestrictedSvc(createMockPinoLogger());
 
       // /allowed/subdir is inside /allowed → should pass
       const result = await restricted.startSession('a1', '/allowed/subdir');

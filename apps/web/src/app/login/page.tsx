@@ -12,7 +12,7 @@ import { fetchBrandingSettingsSSR } from '@/lib/api/branding';
  * con el del layout, así que sigue siendo UN solo round-trip al backend.
  *
  * Metadata: title estático "Iniciar sesión" — el template del layout raíz
- * añade el companyName ("Iniciar sesión | Aeroméxico"). Si el branding no
+ * añade el companyName ("Iniciar sesión | Acme Corp"). Si el branding no
  * carga, layout cae a "Iniciar sesión | CENZONTLE".
  */
 export const metadata: Metadata = {

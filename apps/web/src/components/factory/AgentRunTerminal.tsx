@@ -99,6 +99,26 @@ export function AgentRunTerminal({ runId, onClose }: Props) {
     return () => clearInterval(interval);
   }, [fetchRun]);
 
+  // SEC (security-reviewer 2026-05-22, Finding 2): defensa-en-profundidad
+  // contra una ttydUrl maliciosa que haya pasado la validación del backend
+  // (bug futuro, race, valor legacy en DB pre-fix). Solo schemes http/https
+  // pueden cargar en el <iframe src>. Si falla, queda null → fallback.
+  //
+  // El hook vive ARRIBA de los early returns (loading / error) para que el
+  // orden de hooks sea idéntico en todos los renders — la guarda de `run`
+  // va adentro del `useMemo`, no afuera.
+  const safeTtydUrl = useMemo(() => {
+    if (!run?.ttydUrl) return null;
+    try {
+      const u = new URL(run.ttydUrl);
+      return u.protocol === 'http:' || u.protocol === 'https:'
+        ? run.ttydUrl
+        : null;
+    } catch {
+      return null;
+    }
+  }, [run?.ttydUrl]);
+
   function toggleBar(bar: 'dod' | 'milestones') {
     setActiveBar((prev) => (prev === bar ? null : bar));
   }
@@ -135,22 +155,6 @@ export function AgentRunTerminal({ runId, onClose }: Props) {
   const dodDone = dod.filter((c) => c.done).length;
   const milestones = deriveMilestonesFromRun(run);
   const msDone = milestones.filter((c) => c.done).length;
-
-  // SEC (security-reviewer 2026-05-22, Finding 2): defensa-en-profundidad
-  // contra una ttydUrl maliciosa que haya pasado la validación del backend
-  // (bug futuro, race, valor legacy en DB pre-fix). Solo schemes http/https
-  // pueden cargar en el <iframe src>. Si falla, queda null → fallback.
-  const safeTtydUrl = useMemo(() => {
-    if (!run.ttydUrl) return null;
-    try {
-      const u = new URL(run.ttydUrl);
-      return u.protocol === 'http:' || u.protocol === 'https:'
-        ? run.ttydUrl
-        : null;
-    } catch {
-      return null;
-    }
-  }, [run.ttydUrl]);
 
   return (
     <div className="relative overflow-hidden flex flex-col h-full bg-card">
@@ -224,15 +228,18 @@ export function AgentRunTerminal({ runId, onClose }: Props) {
 
           <div className="flex items-center gap-1 shrink-0 ml-3">
             {run.prNumber !== null && (
-              <a
-                href={`https://github.com/DamballahWedo99/AeroDemo-App/pull/${run.prNumber}`}
-                target="_blank"
-                rel="noopener noreferrer"
-                className="text-[11px] font-mono text-muted-foreground hover:text-foreground transition-colors px-2 shrink-0"
-                title="Abrir PR en GitHub"
+              // El número del PR se muestra como texto plano: `RunDetailResponse`
+              // (GET /factory/nodes/runs/:runId) no expone `repoUrl`, y el repo
+              // del Forge es configurable por instalación. Construir el href
+              // adivinando owner/repo mandaría a un 404 en cualquier deploy que
+              // no sea el original — mismo criterio que `ForgePrItem.url === null`
+              // en PRPipeline: sin URL confirmada por el backend, no hay link.
+              <span
+                className="text-[11px] font-mono text-muted-foreground px-2 shrink-0"
+                title="Pull request de la historia — sin link: el detalle del run no incluye la URL del repositorio."
               >
                 PR #{run.prNumber}
-              </a>
+              </span>
             )}
             <Button
               size="sm"

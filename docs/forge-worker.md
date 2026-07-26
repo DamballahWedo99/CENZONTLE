@@ -18,6 +18,14 @@ con agentes de IA.
   backend en cada claim.
 - En la máquina del worker: **Claude Code CLI** (`claude`) instalado y en PATH.
   Opcional para terminal en vivo: `tmux` y `ttyd`.
+- Una **herramienta de sandbox** para aislar la ejecución del código generado:
+  - **macOS** — `sandbox-exec` ya viene con el sistema, no instalas nada.
+  - **Linux** — instala **firejail**: `sudo apt install firejail`
+    (Debian/Ubuntu), `sudo dnf install firejail` (Fedora),
+    `sudo pacman -S firejail` (Arch).
+
+  Sin una de las dos, el worker **no puede correr historias** (detalle abajo en
+  [Sandbox](#sandbox-ejecución-de-código-generado)).
 
 ---
 
@@ -91,17 +99,65 @@ No es necesario para desarrollar — `node apps/worker/dist/cli.js ...` funciona
 
 ## Sandbox (ejecución de código generado)
 
-El worker corre **código generado por IA**, así que aísla la ejecución:
+El worker spawnea `claude` con `--dangerously-skip-permissions`, así que el agente
+tiene tools sin gate en la máquina. El sandbox es el **único control de aislamiento
+a nivel de SO** del proyecto: envuelve cada spawn para denegar lectura y escritura
+de los directorios donde viven credenciales del host (`~/.ssh`, `~/.aws`,
+`~/.config/gh`, `~/.config/gcloud`, `~/.kube`, `~/.gnupg`, `~/.netrc`, `~/.docker`,
+`~/.npmrc`, `~/.cargo/credentials`, `~/.pypirc`, `~/.terraformrc`).
 
-| Modo | Plataforma |
-|---|---|
-| `sandbox-exec` | macOS (default ahí) |
-| `nix` | Linux |
-| `none` | sin aislamiento — requiere opt-in `FACTORY_WORKER_ALLOW_NO_SANDBOX=1` |
+Modos válidos (`apps/worker/src/lib/sandbox.ts`):
 
-Override con `FACTORY_WORKER_SANDBOX_MODE`. El env del proceso es un **whitelist**
-(no hereda `DATABASE_URL`, `VAULT_ENCRYPTION_KEY`, etc.). No quites el sandbox en
-máquinas compartidas.
+| Modo | Plataforma | Cómo se implementa |
+|---|---|---|
+| `sandbox-exec` | macOS | Perfil SBPL inline (`allow default` + `deny file-read*`/`file-write*` sobre los paths de arriba) |
+| `firejail` | Linux | `firejail --quiet --private-tmp --blacklist=<path>… -- claude …` |
+| `none` | cualquiera | **Sin aislamiento.** Requiere doble opt-in (abajo) |
+
+### Detección automática
+
+1. Si `FACTORY_WORKER_SANDBOX_MODE` vale exactamente `sandbox-exec`, `firejail` o
+   `none`, se usa ese valor. **Cualquier otro valor se ignora en silencio** y cae al
+   auto-detect.
+2. macOS con `sandbox-exec` en PATH → `sandbox-exec`.
+3. Linux con `firejail` en PATH → `firejail`.
+4. En cualquier otro caso → `none`.
+
+Es decir: **en Linux sin firejail instalado el modo detectado es `none`**, aunque no
+hayas configurado nada.
+
+### Qué pasa en modo `none`
+
+El worker se niega a ejecutar salvo que hayas puesto **`FACTORY_WORKER_ALLOW_NO_SANDBOX=1`**.
+Correr sin sandbox exige por tanto **dos** cosas a la vez: que el modo resuelva a
+`none` (porque no tienes la herramienta instalada, o porque forzaste
+`FACTORY_WORKER_SANDBOX_MODE=none`) **y** esa segunda variable con el valor exacto
+`1`. Con una sola de las dos, no se ejecuta nada.
+
+Ojo con **dónde** falla: la verificación ocurre al spawnear `claude`, no al arrancar
+el daemon. Entonces `factory-worker start` levanta bien y el nodo aparece **online**
+en Fleet, pero **cada historia que reclame aborta antes del spawn** con el evento
+`run.sandbox.unavailable` y un error del tipo:
+
+```
+No sandbox available on linux and FACTORY_WORKER_ALLOW_NO_SANDBOX is not '1'.
+```
+
+La cura correcta es instalar firejail, no poner la variable de bypass.
+
+### Límites del sandbox
+
+No es hermético, y no pretende serlo: `claude` necesita red (API de Anthropic),
+exec (git, pnpm, node) y un filesystem amplio (workdir + libs del sistema). El
+objetivo acotado es el ataque más probable — *prompt injection* en el markdown de
+la épica que intente leer credenciales del host.
+
+Como defensa complementaria, el `env` del proceso hijo se construye con un
+**whitelist** explícito (`HOME`, `PATH`, `USER`, `LANG`, la credencial de Anthropic
+y los secretos que el backend scopeó para ese claim): no hereda `DATABASE_URL`,
+`VAULT_ENCRYPTION_KEY`, `AWS_*` ni nada más del host.
+
+No quites el sandbox en máquinas compartidas ni en producción.
 
 Todas las flags del worker: [configuration.md › Worker](configuration.md#worker-flags-de-runtime).
 
@@ -121,4 +177,7 @@ Todas las flags del worker: [configuration.md › Worker](configuration.md#worke
 - **401 al start** → token revocado o incorrecto; **404** → nodo retirado (re-registra).
 - **`claude` no encontrado** → instala Claude Code CLI o setea `CLAUDE_BIN`.
 - **http rechazado** → `FACTORY_WORKER_ALLOW_INSECURE=1` solo en dev local.
+- **El nodo está online pero toda historia falla con `Sandbox unavailable`** → falta
+  la herramienta de sandbox. En Linux, `sudo apt install firejail`. Ver
+  [Sandbox](#sandbox-ejecución-de-código-generado).
 - El worker es independiente del `pnpm dev`; corre en su propia terminal/máquina.

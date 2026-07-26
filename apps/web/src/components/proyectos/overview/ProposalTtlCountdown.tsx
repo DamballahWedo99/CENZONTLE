@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useEffect, useRef, useCallback } from 'react';
+import { useState, useEffect, useCallback } from 'react';
 import { Clock } from 'lucide-react';
 
 interface ProposalTtlCountdownProps {
@@ -44,14 +44,17 @@ export function ProposalTtlCountdown({ fetchTtl, onExpired }: ProposalTtlCountdo
   // Captura el TTL inicial como referencia del 100%. Sin esto la barra
   // nunca se vería llena (dividiríamos por un valor arbitrario). Se actualiza
   // si vemos un valor mayor (ej: tras una regeneración que reinicia el TTL).
-  const maxTtlRef = useRef<number | null>(null);
+  // Vive en state, no en un ref, porque alimenta el ancho de la barra durante
+  // el render: un ref no garantiza el re-render al cambiar.
+  const [maxTtl, setMaxTtl] = useState<number | null>(null);
 
   const syncTtl = useCallback(async () => {
     const ttl = await fetchTtl();
     if (ttl > 0) {
-      if (maxTtlRef.current === null || ttl > maxTtlRef.current) {
-        maxTtlRef.current = ttl;
-      }
+      // Updater funcional: conserva la semántica "solo crece" sin meter
+      // `maxTtl` en las deps, que recrearía `syncTtl` y reiniciaría el
+      // intervalo de re-sync de 60s.
+      setMaxTtl((prev) => (prev === null || ttl > prev ? ttl : prev));
       setRemaining(ttl);
     } else if (ttl <= 0) {
       setRemaining((prev) => (prev !== null ? 0 : prev));
@@ -62,9 +65,16 @@ export function ProposalTtlCountdown({ fetchTtl, onExpired }: ProposalTtlCountdo
   // Initial fetch + periodic re-sync every 60s (corrige drift entre el tick
   // local y el TTL real del Redis cuando ambos son mayores a un minuto).
   useEffect(() => {
-    syncTtl();
+    // El primer sync se agenda con un timer de 0 ms en lugar de invocarse en
+    // el cuerpo del efecto: el setState llega por un callback del timer (no
+    // en cascada con el commit) y el cleanup puede cancelarlo si el
+    // componente se desmonta antes de que arranque el fetch.
+    const initialSync = setTimeout(syncTtl, 0);
     const syncInterval = setInterval(syncTtl, 60_000);
-    return () => clearInterval(syncInterval);
+    return () => {
+      clearTimeout(initialSync);
+      clearInterval(syncInterval);
+    };
   }, [syncTtl]);
 
   // Local countdown tick. Solo arranca cuando `remaining` tiene valor inicial.
@@ -84,8 +94,8 @@ export function ProposalTtlCountdown({ fetchTtl, onExpired }: ProposalTtlCountdo
 
   if (remaining === null || remaining <= 0) return null;
 
-  const maxTtl = maxTtlRef.current ?? remaining;
-  const pct = maxTtl > 0 ? (remaining / maxTtl) * 100 : 0;
+  const effectiveMaxTtl = maxTtl ?? remaining;
+  const pct = effectiveMaxTtl > 0 ? (remaining / effectiveMaxTtl) * 100 : 0;
   const barColor = pct > 50 ? 'bg-green-500' : pct > 20 ? 'bg-amber-500' : 'bg-destructive';
   const label = formatRemaining(remaining);
 

@@ -10,7 +10,7 @@ export class CreateCodeRepositoryDto {
   @Matches(NAME_REGEX, { message: 'Name solo puede contener alfanuméricos, espacios, guiones y underscores' })
   name!: string;
 
-  @ApiProperty({ description: 'GitHub owner (usuario u organización)', example: 'AeromexicoTech' })
+  @ApiProperty({ description: 'GitHub owner (usuario u organización)', example: 'mi-organizacion' })
   @IsString() @IsNotEmpty() @MaxLength(100) @Matches(/^[a-zA-Z0-9-]+$/, { message: 'Owner solo puede tener alfanuméricos y guiones' })
   owner!: string;
 

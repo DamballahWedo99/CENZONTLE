@@ -77,7 +77,7 @@ export class CryptoService {
         decipher.final(),
       ]);
       return plaintext.toString('utf8');
-    } catch (err) {
+    } catch {
       this.logger.error('[decrypt] failed to decrypt — key mismatch or tampered data');
       throw new InternalServerErrorException('Error desencriptando secret');
     }
@@ -87,7 +87,10 @@ export class CryptoService {
    * Genera una "máscara" segura para mostrar en UI: primeros 4 + últimos 4 caracteres
    * del token, con `•` en medio. Nunca expone el token completo.
    *
-   * Ejemplo: `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` → `ghp_••••••••••••••••••••••anfH`
+   * El token del ejemplo es sintético: su checksum CRC32 no valida, así que los
+   * escáneres de secretos no lo confunden con una credencial emitida.
+   *
+   * Ejemplo: `ghp_EJEMPLO0000000000000000000000000FAKE` → `ghp_••••••••••••••••••••••••FAKE`
    */
   static mask(token: string): string {
     if (token.length <= 8) return '••••••••';

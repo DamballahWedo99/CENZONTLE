@@ -87,31 +87,36 @@ export function DiagramThemePanel({
   textColors,
   onTextColorChange,
 }: DiagramThemePanelProps) {
-  const [open, setOpen] = useState(false);
   /*
-    `mounted` desacopla DOM presence de la animación. Cuando `open` pasa de
-    true → false, `mounted` permanece true durante `ANIM_MS` para que la
-    animación-out se reproduzca; tras ese delay, `mounted` pasa a false y
-    el elemento se desmonta. Patrón equivalente al que usa Radix Popover
+    Máquina de 3 estados que desacopla DOM presence de la animación:
+
+      closed  → nada montado.
+      open    → montado y visible (`data-state="open"`, animación-in).
+      closing → todavía montado pero ya con `data-state="closed"`, para que
+                la animación-out se reproduzca durante `ANIM_MS`; al vencer
+                el timer pasa a `closed` y el elemento se desmonta.
+
+    Antes eran dos estados (`open` + `mounted`) sincronizados con un effect;
+    con uno solo, `open`/`mounted` son valores derivados y no hace falta
+    `setState` síncrono dentro del effect (el único que queda vive en el
+    callback del timer). Patrón equivalente al que usa Radix Popover
     internamente sin necesidad de añadir la dependencia.
   */
-  const [mounted, setMounted] = useState(false);
+  const [panelState, setPanelState] = useState<'closed' | 'open' | 'closing'>('closed');
+  const open = panelState === 'open';
+  const mounted = panelState !== 'closed';
   const ANIM_MS = 180;
   useEffect(() => {
-    if (open) {
-      setMounted(true);
-      return;
-    }
-    if (!mounted) return;
-    const timer = window.setTimeout(() => setMounted(false), ANIM_MS);
+    if (panelState !== 'closing') return;
+    const timer = window.setTimeout(() => setPanelState('closed'), ANIM_MS);
     return () => window.clearTimeout(timer);
-  }, [open, mounted]);
+  }, [panelState]);
 
   return (
     <>
       <button
         type="button"
-        onClick={() => setOpen((o) => !o)}
+        onClick={() => setPanelState((s) => (s === 'open' ? 'closing' : 'open'))}
         className="absolute top-3 left-3 z-10 flex items-center gap-1.5 rounded-md bg-zinc-900/80 hover:bg-zinc-800 border border-zinc-700 px-2.5 py-1.5 text-xs text-zinc-200 backdrop-blur-sm transition-colors shadow"
         aria-expanded={open}
         aria-label="Configurar colores del diagrama"
@@ -137,7 +142,7 @@ export function DiagramThemePanel({
             <span className="text-sm font-semibold text-zinc-200">Tema del diagrama</span>
             <button
               type="button"
-              onClick={() => setOpen(false)}
+              onClick={() => setPanelState('closing')}
               className="text-zinc-400 hover:text-zinc-200 transition-colors"
               aria-label="Cerrar panel de colores"
             >

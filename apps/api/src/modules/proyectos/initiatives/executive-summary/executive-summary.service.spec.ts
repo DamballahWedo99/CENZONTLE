@@ -518,10 +518,10 @@ describe('ExecutiveSummaryService.sanitizeNarrative', () => {
 // presupuesto global de chars.
 // ---------------------------------------------------------------------------
 describe('ExecutiveSummaryService.buildContextBlock', () => {
-  // Constantes del service (no exportadas) — mantener en sync:
-  // EPIC_EXCERPT_CHARS / EPIC_CONTEXT_CAP_CHARS.
+  // Constante del service (no exportada) — mantener en sync con
+  // EPIC_EXCERPT_CHARS. El cap global (EPIC_CONTEXT_CAP_CHARS = 40_000) se
+  // ejercita indirectamente en el test de truncado, sin espejarlo acá.
   const EPIC_EXCERPT_CHARS = 1_500;
-  const EPIC_CONTEXT_CAP_CHARS = 40_000;
 
   beforeEach(() => {
     jest.useFakeTimers({ now: NOW });

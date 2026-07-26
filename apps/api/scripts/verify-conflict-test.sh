@@ -9,17 +9,20 @@
 # el ConflictResolverService produjo el outcome esperado.
 #
 # Usage:
-#   bash apps/api/scripts/verify-conflict-test.sh <BATCH_EPIC_ID_PREFIX>
+#   REPO=<owner>/<repo> bash apps/api/scripts/verify-conflict-test.sh <BATCH_EPIC_ID_PREFIX>
+#
+#   REPO es OBLIGATORIO: el repositorio contra el que corrió el seed, en
+#   formato `owner/repo`. No hay default — el script falla si no lo pasas.
 #
 #   El argumento es el prefix (primeros 8 chars) del epic.id que el seed
 #   imprime al final: `epic.id.slice(0, 8)`. Ese prefix es el sufijo de
 #   la branch del sprint-batch: `forge/sprint-batch-<PREFIX>`.
 #
 # Ejemplo:
-#   bash apps/api/scripts/verify-conflict-test.sh f66d7389
+#   REPO=mi-org/mi-app bash apps/api/scripts/verify-conflict-test.sh f66d7389
 #
 # Requiere:
-#   - gh CLI autenticado al repo target (DamballahWedo99/AeroDemo-App)
+#   - gh CLI autenticado al repo target indicado en REPO
 #   - Los 4 PRs del seed minimal deben estar mergueados en el sprint-batch
 #
 # Exit codes:
@@ -34,8 +37,25 @@ set -u  # error si var no seteada; NO usamos `set -e` porque queremos seguir
         # ejecutando todas las checks aunque alguna falle.
 
 # ─── Config ────────────────────────────────────────────────────────────────
-REPO="${REPO:-DamballahWedo99/AeroDemo-App}"
+REPO="${REPO:-}"
 PREFIX="${1:-}"
+
+if [[ -z "$REPO" ]]; then
+  echo "❌ Falta la variable de entorno REPO (obligatoria, sin default)."
+  echo "   Indica el repositorio target en formato owner/repo:"
+  echo "   REPO=mi-org/mi-app $0 <BATCH_EPIC_ID_PREFIX>"
+  echo ""
+  echo "   Ejemplo: REPO=mi-org/mi-app $0 f66d7389"
+  exit 4
+fi
+
+# Validar formato de REPO. Sin esto, un typo (p. ej. `mi-app` sin owner) llega
+# hasta `gh api` y aborta con "Branch no encontrada", mandando a depurar el
+# seed en vez del valor mal escrito.
+if [[ ! "$REPO" =~ ^[A-Za-z0-9._-]+/[A-Za-z0-9._-]+$ ]]; then
+  echo "❌ REPO inválido: '$REPO'. Esperado formato owner/repo (e.g. mi-org/mi-app)."
+  exit 4
+fi
 
 if [[ -z "$PREFIX" ]]; then
   echo "❌ Uso: $0 <BATCH_EPIC_ID_PREFIX>"
@@ -62,7 +82,7 @@ echo ""
 
 # ─── Pre-flight: gh CLI disponible ────────────────────────────────────────
 if ! command -v gh &>/dev/null; then
-  echo "❌ gh CLI no encontrado en PATH. Instalá: brew install gh"
+  echo "❌ gh CLI no encontrado en PATH. Instala: brew install gh"
   exit 4
 fi
 
@@ -76,7 +96,7 @@ if ! gh api "repos/${REPO}/branches/${BRANCH}" --silent 2>/dev/null; then
   echo "   - Ningún PR mergueó al sprint-batch (el primer merge crea la branch)."
   echo "   - El prefix está mal."
   echo ""
-  echo "   Inspeccioná PRs abiertos del epic:"
+  echo "   Inspecciona PRs abiertos del epic:"
   echo "   gh pr list --repo ${REPO} --search '${PREFIX}' --state all"
   exit 4
 fi

@@ -1,5 +1,5 @@
 import { apiFetch } from './client';
-import type { Initiative } from '@cenzontle/shared';
+import type { EpicDocument, TrackerReference } from '@cenzontle/shared';
 
 export interface InitiativeResponse {
   id: string;
@@ -11,8 +11,8 @@ export interface InitiativeResponse {
   /** ISO date. Null si la iniciativa está en planning sin fechas comprometidas. */
   targetDate: string | null;
   owner: string;
-  documents: any[];
-  tracker: any;
+  documents: EpicDocument[];
+  tracker: TrackerReference | null;
   epics: {
     id: string;
     title: string;

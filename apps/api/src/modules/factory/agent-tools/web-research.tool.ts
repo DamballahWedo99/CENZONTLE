@@ -12,7 +12,7 @@ import type { AgentTool } from './agent-tool.interface';
 export class WebResearchTool implements AgentTool {
   readonly name = 'web_research';
   readonly description =
-    'Research a topic on the web. Use ONLY when the initiative mentions specific external providers (e.g., DEUNA, Stripe, Signifyd), third-party APIs, or technologies you need technical details about to write informed epics. Do NOT use for general concepts you already understand.';
+    'Research a topic on the web. Use ONLY when the initiative mentions specific external providers (e.g., Stripe, Twilio, Auth0), third-party APIs, or technologies you need technical details about to write informed epics. Do NOT use for general concepts you already understand.';
   readonly schema = {
     type: 'object' as const,
     properties: {

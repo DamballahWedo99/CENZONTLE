@@ -21,6 +21,7 @@ jest.mock('@anthropic-ai/sdk', () => ({
   default: jest.fn(),
 }));
 
+import { Subject } from 'rxjs';
 import { StoryGenerationService, type EpicVaultFileKind } from './story-generation.service';
 
 type AnyObj = Record<string, unknown>;
@@ -333,8 +334,9 @@ describe('Integración — handoff llega al request HTTP de Anthropic', () => {
       streamCalls.push(JSON.parse(JSON.stringify(args)));
       return {
         // Mock de stream.on() — defensa por si el service vuelve a usar
-        // el helper en el futuro.
-        on: (_event: string, _handler: (delta: string) => void) => {},
+        // el helper en el futuro. No declara parámetros: es un no-op y los
+        // argumentos que reciba se descartan igual.
+        on: () => {},
         // Async-iterable: el service ahora itera el stream con
         // `for await (const evt of stream)` para capturar text_delta y
         // thinking_delta en vivo. En tests no emitimos deltas — el
@@ -408,7 +410,6 @@ describe('Integración — handoff llega al request HTTP de Anthropic', () => {
   });
 
   it('el handoff del diseño aparece textualmente en system[0].text del request a Anthropic', async () => {
-    const { Subject } = require('rxjs');
     const subject = new Subject();
 
     const handoffText =
@@ -480,7 +481,6 @@ describe('Integración — handoff llega al request HTTP de Anthropic', () => {
     // usaba startsWith('claude-sonnet'|'claude-opus'), que excluía a fable-5
     // (whitelisted como seleccionable) → thinking se desactivaba en silencio.
     // Ahora deriva de PROJECT_AGENT_MODELS.includes(model).
-    const { Subject } = require('rxjs');
     const subject = new Subject();
 
     const svc = service as any;
@@ -504,7 +504,6 @@ describe('Integración — handoff llega al request HTTP de Anthropic', () => {
   });
 
   it('cuando designSkipped=true, el system[0].text contiene la directiva de skip y NO el handoff', async () => {
-    const { Subject } = require('rxjs');
     const subject = new Subject();
 
     const handoffText = 'https://api.anthropic.com/v1/design/h/should-not-leak';

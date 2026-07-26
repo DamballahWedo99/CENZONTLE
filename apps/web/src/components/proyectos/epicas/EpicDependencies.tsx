@@ -110,6 +110,13 @@ const SEVERITY_BADGE: Record<StoryTechnicalDependencySeverity, string> = {
   low: 'bg-green-100 text-green-700 dark:bg-green-900/30 dark:text-green-300',
 };
 
+/**
+ * Rollup vacío compartido. Referencia estable para que el render de la
+ * ventana de carga no cree un array nuevo por render (y no invalide los
+ * `useMemo` que dependan de él).
+ */
+const EMPTY_ROLLUP: StoryTechnicalDependency[] = [];
+
 const STORY_ORDER_REASON_LABELS: Record<string, string> = {
   api_contract: 'API contract',
   migration_order: 'Migration order',
@@ -148,8 +155,19 @@ export function EpicDependencies({
   onRollupCountChange,
 }: EpicDependenciesProps) {
   const { state } = useProyectos();
-  const [rollup, setRollup] = useState<StoryTechnicalDependency[]>([]);
-  const [loading, setLoading] = useState(true);
+  /*
+    El rollup se guarda JUNTO con la clave del fetch que lo produjo
+    (`epicId` + tick de refresh). Así `loading` es un valor derivado —
+    "todavía no llegó el rollup de la clave actual"— en vez de un segundo
+    state que había que poner en true desde el effect. Beneficio real, no
+    solo lint: al cambiar de épica ya no existe el render intermedio en el
+    que `loading` seguía en false mientras `rollup` era el de la épica
+    anterior.
+  */
+  const [fetched, setFetched] = useState<{
+    key: string;
+    deps: StoryTechnicalDependency[];
+  } | null>(null);
   // Cuando el usuario hace click en "Resolver con secret" sobre una dep que
   // requiere credencial, abrimos el dialog compartido con el contexto pre-
   // llenado de esa dep (name derivado del title, vendor/description, sourceDependencyId).
@@ -169,29 +187,32 @@ export function EpicDependencies({
     });
   };
 
+  // Identidad del fetch en vuelo. Cambia con la épica y con cada refresh
+  // forzado — exactamente los dos disparadores que antes eran deps del effect.
+  const fetchKey = `${epicId}#${refreshTick}`;
+  const current = fetched !== null && fetched.key === fetchKey ? fetched : null;
+  const loading = current === null;
+  const rollup = current?.deps ?? EMPTY_ROLLUP;
+
   useEffect(() => {
     let cancelled = false;
-    setLoading(true);
     getEpicDependenciesRollup(epicId)
       .then((deps) => {
         if (!cancelled) {
-          setRollup(deps);
+          setFetched({ key: fetchKey, deps });
           onRollupCountChange?.(deps.length);
         }
       })
       .catch(() => {
         if (!cancelled) {
-          setRollup([]);
+          setFetched({ key: fetchKey, deps: [] });
           onRollupCountChange?.(0);
         }
-      })
-      .finally(() => {
-        if (!cancelled) setLoading(false);
       });
     return () => {
       cancelled = true;
     };
-  }, [epicId, onRollupCountChange, refreshTick]);
+  }, [epicId, fetchKey, onRollupCountChange]);
 
   // Map storyId → story title para mostrar de qué historia viene cada dep.
   const storyTitleById = useMemo(() => {

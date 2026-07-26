@@ -144,23 +144,26 @@ export function DiagramContextMenu({
   onClose,
 }: DiagramContextMenuProps) {
   const menuRef = useRef<HTMLDivElement>(null);
-  const [adjustedPosition, setAdjustedPosition] = useState<{
-    x: number;
-    y: number;
-  } | null>(null);
 
   // ─── Auto-ajuste de posición post-mount ─────────────────────────────────
   //
   // Se ejecuta síncrono antes del paint (useLayoutEffect) para evitar el
   // flash del menú apareciendo y moviéndose un frame después. Mide el rect
   // real después del primer render — más confiable que hardcodear el tamaño.
+  //
+  // El ajuste se escribe DIRECTO al style del nodo en vez de guardarse en
+  // state: es una corrección puramente geométrica derivada del DOM, y el
+  // efecto está justo para eso (empujar al sistema externo el resultado del
+  // render). Evita el render extra que traía el `setState`. React ya escribió
+  // `left/top` con la posición cruda en la fase de mutación de este mismo
+  // commit, así que sobreescribirla acá sigue ocurriendo antes del paint; y
+  // cuando `screenPosition` cambia, React vuelve a escribir la cruda y este
+  // effect la vuelve a corregir.
   useLayoutEffect(() => {
-    if (!screenPosition || !menuRef.current) {
-      setAdjustedPosition(null);
-      return;
-    }
+    const menu = menuRef.current;
+    if (!screenPosition || !menu) return;
 
-    const rect = menuRef.current.getBoundingClientRect();
+    const rect = menu.getBoundingClientRect();
     const vw = window.innerWidth;
     const vh = window.innerHeight;
     const MARGIN = 8; // holgura con el borde del viewport
@@ -177,7 +180,8 @@ export function DiagramContextMenu({
       y = Math.max(MARGIN, y - rect.height);
     }
 
-    setAdjustedPosition({ x, y });
+    menu.style.left = `${x}px`;
+    menu.style.top = `${y}px`;
   }, [screenPosition, target]);
 
   // ─── Click fuera para cerrar ─────────────────────────────────────────────
@@ -213,9 +217,9 @@ export function DiagramContextMenu({
 
   if (!screenPosition || !target) return null;
 
-  // Hasta que el layout effect corra (primer paint) usamos la posición raw;
-  // el reflow del ajuste no es visible porque useLayoutEffect bloquea el paint.
-  const pos = adjustedPosition ?? screenPosition;
+  // Posición raw; el layout effect la corrige sobre el DOM antes del paint
+  // si el menú se sale del viewport.
+  const pos = screenPosition;
 
   // Detecta macOS para mostrar el símbolo correcto del modifier.
   const isMac =

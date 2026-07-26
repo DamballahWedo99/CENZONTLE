@@ -16,7 +16,7 @@ import { ApiPropertyOptional } from '@nestjs/swagger';
 export class UpdateBrandingSettingsDto {
   @ApiPropertyOptional({
     description: 'Nombre legible de la organización (1-80 caracteres, trim aplicado)',
-    example: 'Aeroméxico',
+    example: 'Acme Corp',
     minLength: 1,
     maxLength: 80,
   })

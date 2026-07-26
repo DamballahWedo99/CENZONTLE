@@ -259,7 +259,7 @@ export class BrandingSettingsService {
     }
     const s3LatencyMs = Date.now() - s3StartedAt;
 
-    let previousKey: string | null = null;
+    let previousKey: string | null;
     const dbStartedAt = Date.now();
     try {
       previousKey = await this.prisma.$transaction(
@@ -362,7 +362,7 @@ export class BrandingSettingsService {
   ): Promise<BrandingSettingsPublic> {
     const keyField = ASSET_KEY_FIELDS[assetType];
 
-    let keyToDelete: string | null = null;
+    let keyToDelete: string | null;
     try {
       keyToDelete = await this.prisma.$transaction(
         async (tx) => {

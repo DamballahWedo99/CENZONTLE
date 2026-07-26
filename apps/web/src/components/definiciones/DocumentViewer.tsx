@@ -20,6 +20,7 @@ import {
   Highlighter, Code2, Eye, ChevronRight,
 } from 'lucide-react';
 import { useDefiniciones } from '@/context/DefinicionesContext';
+import { resolveEditBufferReset, type EditBufferResetTracker } from './document-viewer-buffer';
 import { DefinicionNode } from '@/types/definiciones';
 import { formatDisplayName } from '@/lib/definiciones-display';
 import { Button } from '@/components/ui/button';
@@ -166,9 +167,15 @@ function TagEditor({ tags, onChange }: { tags: string[]; onChange: (tags: string
     }
   }, [isAdding]);
 
-  useEffect(() => {
+  // Cada vez que cambia el largo de la lista de sugerencias, el highlight
+  // vuelve a la primera. Se ajusta durante el render (no en un effect) para
+  // que no exista un frame intermedio con el índice de la lista anterior,
+  // que podía apuntar a una sugerencia distinta o fuera de rango.
+  const [suggestionCount, setSuggestionCount] = useState(suggestions.length);
+  if (suggestionCount !== suggestions.length) {
+    setSuggestionCount(suggestions.length);
     setSelectedSuggestion(0);
-  }, [suggestions.length]);
+  }
 
   const addTag = (tag: string) => {
     const trimmed = tag.trim().toLowerCase();
@@ -648,12 +655,24 @@ function ReadOnlyViewer({ content, onContentChange }: { content: string; onConte
 
 export function DocumentViewer() {
   const { selectedNode, state, toggleEditing, updateContent, selectNode, updateTags, getEffectiveAccessForNode } = useDefiniciones();
-  const [editBuffer, setEditBuffer] = useState('');
+  // Buffer del modo código. Se resetea en fase de render (ver `resetTracker`
+  // más abajo) cada vez que cambia el nodo seleccionado o el modo edición, y
+  // de ahí en más lo mantienen al día el evento `update` del editor (markdown
+  // re-serializado) o el textarea del modo código. El reset NO depende de que
+  // TipTap emita `update`: TipTap corta ese evento cuando el doc resultante
+  // es igual al actual (`prevState.doc.eq(state.doc)`), así que recargar el
+  // mismo nodo (o solo cambiar de modo edición sobre el mismo contenido) no
+  // lo dispara, y el buffer debe quedar correcto de todas formas.
+  const [editBuffer, setEditBuffer] = useState<string>(() => selectedNode?.content ?? '');
   const [showSource, setShowSource] = useState(false);
   const [, setEditorTick] = useState(0);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const contentOnEditStart = useRef<string>('');
   const userHasEdited = useRef(false);
+  // Marca las cargas programáticas de contenido: el editor emite su evento
+  // `update` igual que con una edición del usuario, y este flag es lo que
+  // distingue "el documento cambió porque lo cargamos" de "el usuario escribió".
+  const isLoadingContent = useRef(false);
 
   const editor = useEditor({
     extensions: TIPTAP_EXTENSIONS,
@@ -668,7 +687,7 @@ export function DocumentViewer() {
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       const md = (e.storage as any).markdown.getMarkdown();
       setEditBuffer(md);
-      userHasEdited.current = true;
+      if (!isLoadingContent.current) userHasEdited.current = true;
       setEditorTick(t => t + 1);
     },
     onSelectionUpdate: () => {
@@ -676,19 +695,59 @@ export function DocumentViewer() {
     },
   });
 
+  // Reset determinista de `editBuffer` cuando cambia el nodo seleccionado o
+  // el modo edición. Se hace EN FASE DE RENDER ("adjusting state when a prop
+  // changes": https://react.dev/learn/you-might-not-need-an-effect#adjusting-some-state-when-a-prop-changes)
+  // en lugar de en un useEffect, por dos razones:
+  //   1. `react-hooks/set-state-in-effect` prohíbe llamar a un setState de
+  //      forma síncrona dentro de un efecto (salvo que derive de un ref), así
+  //      que un `setEditBuffer(...)` dentro del useEffect de abajo vuelve a
+  //      disparar la regla.
+  //   2. Es la única forma de garantizar que el buffer refleje el documento
+  //      recién cargado SIN depender de que TipTap emita `update`: TipTap NO
+  //      emite ese evento cuando el doc resultante es igual al actual
+  //      (`prevState.doc.eq(state.doc)` en @tiptap/core), y el textarea del
+  //      modo código escribe el buffer directo (`onChange`) sin pasar nunca
+  //      por el editor — con lo cual "esperar el evento del editor" para
+  //      limpiar el buffer podía dejar basura de una sesión anterior de modo
+  //      código atascada indefinidamente.
+  // Se usa el markdown CRUDO del vault (no el re-serializado por TipTap)
+  // porque calcular la versión re-serializada exige mutar el editor
+  // (`setContent` + leer `storage.markdown`), un side-effect sobre un objeto
+  // externo que no es seguro ejecutar en fase de render. El efecto de abajo
+  // sigue haciendo esa mutación y refresca `contentOnEditStart` (un ref, no
+  // dispara la regla) con el baseline re-serializado para el diff de guardado.
+  const [resetTracker, setResetTracker] = useState<EditBufferResetTracker>(() => ({
+    nodeId: selectedNode?.id,
+    isEditing: state.isEditing,
+  }));
+  const pendingBufferReset = resolveEditBufferReset(
+    resetTracker,
+    { nodeId: selectedNode?.id, isEditing: state.isEditing },
+    selectedNode?.content ?? '',
+  );
+  if (pendingBufferReset) {
+    setResetTracker(pendingBufferReset.tracker);
+    setEditBuffer(pendingBufferReset.buffer);
+  }
+
   // Sync content when selecting a new node or entering edit mode
   useEffect(() => {
     const content = selectedNode?.content ?? '';
-    setEditBuffer(content);
     userHasEdited.current = false;
     if (editor) {
-      // Load without triggering onUpdate to avoid marking as "edited"
+      // Reset del buffer ya ocurrió en fase de render (ver arriba). Este
+      // efecto solo sincroniza el estado interno del editor TipTap (un
+      // sistema externo) y recalcula el baseline re-serializado para el
+      // diff de guardado — `emitUpdate: false` evita depender del recorte
+      // de `update` de TipTap para docs idénticos, e `isLoadingContent` es
+      // una segunda barrera por si algo dispara `onUpdate` de todos modos.
+      isLoadingContent.current = true;
       editor.commands.setContent(content, { emitUpdate: false });
+      isLoadingContent.current = false;
       // Capture the re-serialized baseline for accurate diff
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      const baseline = (editor.storage as any).markdown.getMarkdown();
-      contentOnEditStart.current = baseline;
-      setEditBuffer(baseline);
+      contentOnEditStart.current = (editor.storage as any).markdown.getMarkdown();
     }
   }, [selectedNode?.id, state.isEditing]);
 

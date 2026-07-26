@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useMemo, useCallback, useEffect, useRef } from 'react';
+import { useState, useMemo, useCallback, useEffect, useRef, useSyncExternalStore } from 'react';
 import * as d3 from 'd3';
 import { Monitor, Cpu, Layers, ChevronRight } from 'lucide-react';
 import { cn } from '@/lib/utils';
@@ -97,16 +97,42 @@ const BAND_COLORS = {
 
 const AREA_GRADIENT_ID = 'capacity-area-gradient';
 
+const DEFAULT_CONTAINER_WIDTH = 600;
+
+/**
+ * El tamaño del contenedor es estado del DOM, no de React: se lee con
+ * `useSyncExternalStore` suscribiéndose al ResizeObserver. El snapshot lo
+ * escribe solo la suscripción (medida inicial + cada resize), nunca el
+ * render, así que no hay sincronización de estado dentro de un effect.
+ */
 function useContainerWidth(ref: React.RefObject<HTMLDivElement | null>) {
-  const [width, setWidth] = useState(600);
-  useEffect(() => {
-    if (!ref.current) return;
-    const obs = new ResizeObserver(([e]) => setWidth(e.contentRect.width));
-    obs.observe(ref.current);
-    setWidth(ref.current.clientWidth || 600);
-    return () => obs.disconnect();
-  }, [ref]);
-  return width;
+  const widthRef = useRef(DEFAULT_CONTAINER_WIDTH);
+
+  const subscribe = useCallback(
+    (onStoreChange: () => void) => {
+      const el = ref.current;
+      if (!el) return () => {};
+
+      const emit = (next: number) => {
+        if (next !== widthRef.current) {
+          widthRef.current = next;
+          onStoreChange();
+        }
+      };
+
+      const obs = new ResizeObserver(([e]) => emit(e.contentRect.width));
+      obs.observe(el);
+      emit(el.clientWidth || DEFAULT_CONTAINER_WIDTH);
+      return () => obs.disconnect();
+    },
+    [ref],
+  );
+
+  return useSyncExternalStore(
+    subscribe,
+    () => widthRef.current,
+    () => DEFAULT_CONTAINER_WIDTH,
+  );
 }
 
 function CapacityChart({

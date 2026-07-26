@@ -720,7 +720,8 @@ const VERIFIERS: Partial<Record<DodCanonicalKind, VerifierSpec>> = {
   /**
    * docs-updated: DETERMINÍSTICO (ya no juez Haiku semántico — ver
    * `runDocsUpdatedCheck`). Si el diff tocó código de app, exige que también
-   * tocó un doc (README/docs/**​/*.md/ADR). Predecible, nunca flaky.
+   * tocó un doc (README, cualquier `.md` bajo `docs/`, o un ADR). Predecible,
+   * nunca flaky.
    */
   'docs-updated': {
     customVerify: (ctx) => runDocsUpdatedCheck(ctx),

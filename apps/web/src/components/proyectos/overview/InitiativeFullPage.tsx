@@ -57,7 +57,7 @@ import { EpicAgentPromptBar } from './EpicAgentPromptBar';
 import { AgentThinkingDisplay } from './agent-thinking';
 import { EpicProposalList } from './EpicProposalList';
 import { ExecutiveSummaryPanel } from './executive-summary/ExecutiveSummaryPanel';
-import type { ProposedEpic, EpicGenerationEvent, Epic, AssistantProposal } from '@cenzontle/shared';
+import type { ProposedEpic, EpicGenerationEvent, Epic, EpicDocument, AssistantProposal } from '@cenzontle/shared';
 import { AssistantChatSidebar } from '../assistant/AssistantChatSidebar';
 import { createEpic as apiCreateEpic } from '@/lib/api/epics';
 import { getCachedSession, invalidateCache, removeCachedProposal, cancelEpicGeneration } from '@/lib/api/epic-generation';
@@ -113,6 +113,27 @@ const priorityLabels: Record<Priority, string> = {
   [Priority.Medium]: 'Media',
   [Priority.Low]: 'Baja',
 };
+
+/**
+ * Body aceptado por `updateInitiative`. La firma en `@/lib/api/initiatives`
+ * solo enumera los campos escalares, pero el endpoint PATCH también acepta
+ * `documents` (UpdateInitiativeDto extiende CreateInitiativeDto, que lo
+ * declara) y el service lo usa para sincronizar el vault.
+ *
+ * La intersección declara ese campo extra en lugar de silenciarlo con una
+ * aserción: así `documents` queda verificado de verdad (nombre y tipo), y el
+ * body sigue siendo asignable al parámetro real de `updateInitiative`. Cuando
+ * la firma de `@/lib/api/initiatives` incorpore `documents`, este alias se
+ * puede reemplazar por `Parameters<typeof apiUpdateInitiative>[1]` a secas.
+ */
+type UpdateInitiativeBody = Parameters<typeof apiUpdateInitiative>[1] & {
+  documents?: EpicDocument[];
+};
+
+function saveInitiativeDocuments(initiativeId: string, documents: EpicDocument[]) {
+  const body: UpdateInitiativeBody = { documents };
+  return apiUpdateInitiative(initiativeId, body);
+}
 
 interface InitiativeFullPageProps {
   initiativeId: string;
@@ -470,8 +491,8 @@ function InitiativeFullPageInner({ initiativeId }: InitiativeFullPageProps) {
       await apiDeleteEpic(deleteEpicId);
       dispatch({ type: 'DELETE_EPIC', payload: { id: deleteEpicId } });
       toast.success('Épica eliminada');
-    } catch (err: any) {
-      toast.error(err.message || 'Error al eliminar épica');
+    } catch (err) {
+      toast.error(err instanceof Error && err.message ? err.message : 'Error al eliminar épica');
       throw err;
     }
   }, [dispatch, deleteEpicId]);
@@ -556,8 +577,8 @@ function InitiativeFullPageInner({ initiativeId }: InitiativeFullPageProps) {
       dispatch({ type: 'DELETE_INITIATIVE', payload: { id: initiative.id } });
       toast.success('Iniciativa eliminada');
       router.push('/proyectos');
-    } catch (err: any) {
-      toast.error(err.message || 'Error al eliminar iniciativa');
+    } catch (err) {
+      toast.error(err instanceof Error && err.message ? err.message : 'Error al eliminar iniciativa');
       throw err; // re-throw para que el dialog se quede abierto
     }
   };
@@ -584,8 +605,8 @@ function InitiativeFullPageInner({ initiativeId }: InitiativeFullPageProps) {
       dispatch({ type: 'UPDATE_INITIATIVE', payload: { id: initiative.id, changes } });
       toast.success('Iniciativa actualizada');
       setIsEditing(false);
-    } catch (err: any) {
-      toast.error(err.message || 'Error al actualizar');
+    } catch (err) {
+      toast.error(err instanceof Error && err.message ? err.message : 'Error al actualizar');
     } finally {
       setIsSaving(false);
     }
@@ -639,9 +660,9 @@ function InitiativeFullPageInner({ initiativeId }: InitiativeFullPageProps) {
       }
       // Stream ended naturally
       setAgentMode((m) => m === 'streaming' ? 'staging' : m);
-    } catch (err: any) {
-      if (err.name !== 'AbortError') {
-        toast.error(err.message || 'Error generando épicas');
+    } catch (err) {
+      if (!(err instanceof Error) || err.name !== 'AbortError') {
+        toast.error(err instanceof Error && err.message ? err.message : 'Error generando épicas');
         setAgentMode('idle');
       }
     } finally {
@@ -682,8 +703,8 @@ function InitiativeFullPageInner({ initiativeId }: InitiativeFullPageProps) {
       setProposals((prev) => prev.filter((p) => p.clientId !== proposal.clientId));
       removeCachedProposal(initiative.id, proposal.clientId).catch(() => {});
       toast.success('Épica creada');
-    } catch (err: any) {
-      toast.error(err.message || 'Error creando épica');
+    } catch (err) {
+      toast.error(err instanceof Error && err.message ? err.message : 'Error creando épica');
     } finally {
       setAcceptingId(null);
     }
@@ -1386,22 +1407,22 @@ function InitiativeFullPageInner({ initiativeId }: InitiativeFullPageProps) {
                 documents={initiative.documents ?? []}
                 onDocumentGenerated={async (doc) => {
                   const newDocs = [...(initiative.documents ?? []), doc];
-                  await apiUpdateInitiative(initiative.id, { documents: newDocs } as any).catch(() => {});
+                  await saveInitiativeDocuments(initiative.id, newDocs).catch(() => {});
                   dispatch({ type: 'ADD_INITIATIVE_DOCUMENT', payload: { initiativeId: initiative.id, document: doc } });
                 }}
                 onDocumentUpdated={async (doc) => {
                   const newDocs = (initiative.documents ?? []).map((d) => d.id === doc.id ? doc : d);
-                  await apiUpdateInitiative(initiative.id, { documents: newDocs } as any).catch(() => {});
+                  await saveInitiativeDocuments(initiative.id, newDocs).catch(() => {});
                   dispatch({ type: 'UPDATE_INITIATIVE_DOCUMENT', payload: { initiativeId: initiative.id, document: doc } });
                 }}
                 onDocumentDeleted={async (docId) => {
                   const newDocs = (initiative.documents ?? []).filter((d) => d.id !== docId);
-                  await apiUpdateInitiative(initiative.id, { documents: newDocs } as any).catch(() => {});
+                  await saveInitiativeDocuments(initiative.id, newDocs).catch(() => {});
                   dispatch({ type: 'DELETE_INITIATIVE_DOCUMENT', payload: { initiativeId: initiative.id, documentId: docId } });
                 }}
                 onDocumentAdded={async (doc) => {
                   const newDocs = [...(initiative.documents ?? []), doc];
-                  await apiUpdateInitiative(initiative.id, { documents: newDocs } as any).catch(() => {});
+                  await saveInitiativeDocuments(initiative.id, newDocs).catch(() => {});
                   dispatch({ type: 'ADD_INITIATIVE_DOCUMENT', payload: { initiativeId: initiative.id, document: doc } });
                 }}
               />

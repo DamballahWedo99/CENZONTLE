@@ -1,6 +1,6 @@
 'use client';
 
-import { useCallback, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import type { Node, Edge } from '@xyflow/react';
 
 // ────────────────────────────────────────────────────────────────────────────
@@ -206,13 +206,19 @@ export const __internal = { sanitizeForClone, cloneSnapshot };
  * conoce mejor cuándo capturar snapshots (antes de cada mutación atómica).
  *
  * Implementación:
- *   - El stack vive en `useRef` para no disparar re-renders en `push`
- *     (las mutaciones son frecuentes; un re-render por push es ruido).
- *   - `canUndo`/`canRedo` SÍ necesitan re-render — usamos un contador
- *     en `useState` que se incrementa en cada mutación del stack.
+ *   - El stack vive en `useRef` para no disparar re-renders en cada lectura
+ *     (las mutaciones son frecuentes; el ref es la fuente de verdad que las
+ *     callbacks leen y escriben de forma síncrona).
+ *   - `canUndo`/`canRedo` SÍ necesitan re-render — viven en `useState` y se
+ *     recalculan desde el ref dentro de cada callback, justo después de
+ *     mutarlo. No se puede leer el ref durante el render (rompe la pureza:
+ *     React no garantiza que un cambio del ref produzca un re-render).
  *   - `nodes`/`edges` se leen via ref (para que las callbacks estables
  *     siempre vean el estado actual sin re-crearse por cambio de ese
- *     estado, lo que invalidaría referencias en efectos del caller).
+ *     estado, lo que invalidaría referencias en efectos del caller). El ref
+ *     se sincroniza en un efecto — es decir, en el commit — no durante el
+ *     render: las callbacks solo corren desde handlers/efectos posteriores
+ *     al commit, así que siempre ven el mismo valor que antes.
  */
 export function useDiagramHistory({
   nodes,
@@ -228,13 +234,29 @@ export function useDiagramHistory({
   // handlers de teclado del caller (Ctrl+Z) que los memorizan.
   const nodesRef = useRef(nodes);
   const edgesRef = useRef(edges);
-  nodesRef.current = nodes;
-  edgesRef.current = edges;
+  // Sincronización en el commit (no en el render): push/undo/redo se invocan
+  // desde handlers y efectos, que corren SIEMPRE después del commit, así que
+  // leen exactamente el mismo `nodes`/`edges` que con la asignación en render.
+  useEffect(() => {
+    nodesRef.current = nodes;
+    edgesRef.current = edges;
+  }, [nodes, edges]);
 
-  // Contador de versión: incrementa en cada mutación del stack. Su único
-  // propósito es forzar re-render para actualizar canUndo/canRedo.
-  const [version, setVersion] = useState(0);
-  const bumpVersion = useCallback(() => setVersion((v) => v + 1), []);
+  // Flags derivadas del stack. Se recalculan desde el ref en cada mutación
+  // (dentro de las callbacks) y viajan por state, que es lo único que React
+  // garantiza que produce re-render. Se emite SIEMPRE un objeto nuevo para
+  // que ninguna mutación haga bail-out: se conserva el re-render por mutación
+  // que antes forzaba el contador de versión.
+  const [flags, setFlags] = useState<{ canUndo: boolean; canRedo: boolean }>({
+    canUndo: false,
+    canRedo: false,
+  });
+  const syncFlags = useCallback(() => {
+    setFlags({
+      canUndo: historyRef.current.past.length > 0,
+      canRedo: historyRef.current.future.length > 0,
+    });
+  }, []);
 
   const push = useCallback(() => {
     const snapshot = cloneSnapshot({
@@ -242,8 +264,8 @@ export function useDiagramHistory({
       edges: edgesRef.current,
     });
     historyRef.current = pushSnapshot(historyRef.current, snapshot);
-    bumpVersion();
-  }, [bumpVersion]);
+    syncFlags();
+  }, [syncFlags]);
 
   /*
    * MODELO DE UNDO/REDO (fix del QA review):
@@ -275,8 +297,8 @@ export function useDiagramHistory({
     const applied = cloneSnapshot(prevSnapshot);
     setNodes(applied.nodes);
     setEdges(applied.edges);
-    bumpVersion();
-  }, [setNodes, setEdges, bumpVersion]);
+    syncFlags();
+  }, [setNodes, setEdges, syncFlags]);
 
   const redo = useCallback(() => {
     if (historyRef.current.future.length === 0) return;
@@ -293,26 +315,20 @@ export function useDiagramHistory({
     const applied = cloneSnapshot(nextSnapshot);
     setNodes(applied.nodes);
     setEdges(applied.edges);
-    bumpVersion();
-  }, [setNodes, setEdges, bumpVersion]);
+    syncFlags();
+  }, [setNodes, setEdges, syncFlags]);
 
   const clear = useCallback(() => {
     historyRef.current = clearHistory(historyRef.current);
-    bumpVersion();
-  }, [bumpVersion]);
-
-  // `version` se usa únicamente para que el snapshot de React vea el
-  // cambio; canUndo/canRedo se leen del ref (fuente de verdad).
-  void version;
-  const canUndo = historyRef.current.past.length > 0;
-  const canRedo = historyRef.current.future.length > 0;
+    syncFlags();
+  }, [syncFlags]);
 
   return {
     push,
     undo,
     redo,
-    canUndo,
-    canRedo,
+    canUndo: flags.canUndo,
+    canRedo: flags.canRedo,
     clear,
   };
 }

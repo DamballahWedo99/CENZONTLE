@@ -3,6 +3,7 @@
   "version": "0.1.0",
   "private": true,
   "description": "CENZONTLE Factory Worker — connects a compute node to the dashboard, processes stories with Claude Code in headless mode.",
+  "license": "Apache-2.0",
   "bin": {
     "factory-worker": "./dist/cli.js"
   },

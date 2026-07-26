@@ -1,0 +1,110 @@
+name: CI
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+# Un solo run vivo por rama: los pushes seguidos al mismo PR cancelan el run
+# anterior en lugar de encolarse. En un PR `github.ref` es `refs/pull/<n>/merge`,
+# así que dos PRs distintos nunca se cancelan entre sí.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  NEXT_TELEMETRY_DISABLED: "1"
+  TURBO_TELEMETRY_DISABLED: "1"
+
+jobs:
+  verify:
+    name: Tipos y tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 9.15.0
+
+      # Dos cosas no evidentes aquí:
+      #   - La versión de Node sale de `.nvmrc` (Node 20) para que el CI y la
+      #     máquina de quien desarrolla no se separen sin que nadie lo note.
+      #   - `cache: pnpm` resuelve el store llamando al binario de pnpm, así que
+      #     este paso tiene que ir DESPUÉS de action-setup, no antes.
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+          cache: pnpm
+
+      - name: Instalar dependencias
+        run: pnpm install --frozen-lockfile
+
+      # Las tres tareas de turbo declaran `dependsOn: ["^build"]`, así que
+      # packages/shared se compila solo antes de cada una. No hace falta un paso
+      # previo que lo construya a mano.
+      - name: Type-check
+        run: pnpm type-check
+
+      # Jest en apps/api + Vitest en apps/web y apps/worker. Los e2e de Playwright
+      # cuelgan de otro script (`test:e2e`) y deliberadamente no corren aquí:
+      # necesitan la app levantada y un navegador.
+      - name: Tests
+        run: pnpm test
+
+  # Lint va en su propio job a propósito: turbo aborta la corrida en la primera
+  # tarea que falla, así que un lint roto dentro de `verify` taparía la señal de
+  # los tests. Separado, cada señal se lee por su cuenta y ambos jobs corren en
+  # paralelo. (Ese mismo efecto de cascada mantuvo oculta durante meses la deuda
+  # de lint del repo: 2 errores en `worker` escondían 53 en `api`, que a su vez
+  # escondían 101 en `web`.)
+  lint:
+    name: Lint
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 9.15.0
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+          cache: pnpm
+
+      - name: Instalar dependencias
+        run: pnpm install --frozen-lockfile
+
+      - name: Lint
+        run: pnpm lint
+
+  build:
+    name: Build de producción
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 9.15.0
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+          cache: pnpm
+
+      - name: Instalar dependencias
+        run: pnpm install --frozen-lockfile
+
+      # Job aparte de `verify` y sin `needs:`: corre en paralelo, así un error de
+      # compilación no espera a que terminen los tests para aparecer.
+      - name: Build
+        run: pnpm build

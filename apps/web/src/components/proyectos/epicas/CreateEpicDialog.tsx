@@ -122,8 +122,8 @@ export function CreateEpicDialog({ open, onOpenChange }: CreateEpicDialogProps) 
       toast.success('Épica creada');
       resetForm();
       onOpenChange(false);
-    } catch (err: any) {
-      toast.error(err?.message || 'Error al crear la épica');
+    } catch (err) {
+      toast.error(err instanceof Error && err.message ? err.message : 'Error al crear la épica');
     } finally {
       setIsSubmitting(false);
     }

@@ -364,8 +364,8 @@ function StoryFullPageInner({ storyId }: StoryFullPageProps) {
       dispatch({ type: 'DELETE_STORY', payload: { id: story.id } });
       toast.success('Historia eliminada');
       router.push(`/proyectos/epicas/${story.epicId}`);
-    } catch (err: any) {
-      toast.error(err.message || 'Error al eliminar historia');
+    } catch (err) {
+      toast.error(err instanceof Error && err.message ? err.message : 'Error al eliminar historia');
       throw err;
     }
   };
@@ -552,8 +552,8 @@ function StoryFullPageInner({ storyId }: StoryFullPageProps) {
 
       toast.success('Historia actualizada');
       setIsEditing(false);
-    } catch (err: any) {
-      toast.error(err.message || 'Error al actualizar historia');
+    } catch (err) {
+      toast.error(err instanceof Error && err.message ? err.message : 'Error al actualizar historia');
     } finally {
       setIsSaving(false);
     }

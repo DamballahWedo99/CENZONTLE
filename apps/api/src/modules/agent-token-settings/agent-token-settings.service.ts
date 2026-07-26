@@ -27,8 +27,6 @@ const SINGLETON_ID = 'singleton';
  */
 const CACHE_TTL_MS = 30_000;
 
-type Mutable<T> = { -readonly [K in keyof T]: T[K] };
-
 @Injectable()
 export class AgentTokenSettingsService {
   private cached: { value: AgentTokenSettingsPublic; expiresAt: number } | null = null;

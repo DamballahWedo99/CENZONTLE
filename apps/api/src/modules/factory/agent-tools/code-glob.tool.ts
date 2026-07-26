@@ -51,7 +51,9 @@ export class CodeGlobTool implements AgentTool {
           error: `Repositorio "${repoName}" no existe, no está habilitado, o su clone no está listo. Repos disponibles: ${(await this.clones.getEnabled()).map((r) => r.name).join(', ') || '(ninguno)'}.`,
         });
       }
-      try { await this.clones.ensureFresh(target.id, maxAge); } catch {}
+      // Best-effort: si el refresh falla, se busca sobre el clone existente
+      // (posiblemente stale) en vez de abortar la búsqueda del agente.
+      try { await this.clones.ensureFresh(target.id, maxAge); } catch { /* intencional */ }
       const result = await this.search.glob(target.absolutePath, String(input.pattern), {
         subDir: input.path ? String(input.path) : undefined,
       });
