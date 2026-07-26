@@ -29,7 +29,7 @@ import { useBranding } from '@/context/BrandingContext';
  *     return <FactoryDashboard />;
  *   }
  *
- * Para títulos dinámicos basados en data (e.g. "Épica: Pagos QR | Aero"),
+ * Para títulos dinámicos basados en data (e.g. "Épica: Pagos QR | Acme Corp"),
  * usa el parámetro como expresión:
  *   useDocumentTitle(epic?.title ? `Épica: ${epic.title}` : 'Épica');
  */

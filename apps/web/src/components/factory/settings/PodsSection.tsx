@@ -94,8 +94,8 @@ export function PodsSection() {
       }
       setShowDialog(false);
       fetchData();
-    } catch (err: any) {
-      toast.error(err.message || 'Error guardando célula');
+    } catch (err) {
+      toast.error((err instanceof Error && err.message) || 'Error guardando célula');
     } finally {
       setSaving(false);
     }
@@ -109,8 +109,8 @@ export function PodsSection() {
       toast.success('Célula eliminada');
       setDeleteTarget(null);
       fetchData();
-    } catch (err: any) {
-      toast.error(err.message || 'Error eliminando célula');
+    } catch (err) {
+      toast.error((err instanceof Error && err.message) || 'Error eliminando célula');
     } finally {
       setSaving(false);
     }

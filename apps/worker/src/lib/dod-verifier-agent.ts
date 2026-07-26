@@ -1982,7 +1982,7 @@ export async function runCodeSecurityReview(input: {
       ],
       input.workdir,
     );
-  } catch (err) {
+  } catch {
     return {
       status: 'skipped',
       highCount: 0,

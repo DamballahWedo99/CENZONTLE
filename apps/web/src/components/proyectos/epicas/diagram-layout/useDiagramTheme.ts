@@ -1,6 +1,6 @@
 'use client';
 
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useSyncExternalStore } from 'react';
 
 export interface DiagramTheme {
   /** Color del fondo del canvas (cualquier valor CSS válido, típicamente hex). */
@@ -34,46 +34,83 @@ function loadTheme(): DiagramTheme {
   }
 }
 
+/*
+ * ── Store del tema ────────────────────────────────────────────────────────
+ *
+ * El tema NO es estado de React: vive en localStorage, un sistema externo al
+ * árbol. Lo modelamos como un store con `subscribe`/`getSnapshot` y lo leemos
+ * con `useSyncExternalStore` — la API que React expone justo para esto. Así
+ * el valor de localStorage entra en el render sin pasar por un `useEffect`
+ * que haga `setState` (render extra + frame con el default).
+ *
+ * `memoryTheme` es el espejo en memoria y la fuente de verdad de la sesión:
+ *   - Se carga perezosamente en la primera lectura del cliente.
+ *   - `getSnapshot` DEBE devolver la misma referencia mientras nada cambie
+ *     (si no, React entra en loop de renders) — por eso cacheamos el objeto
+ *     y solo lo reemplazamos en `writeTheme`.
+ *   - Si localStorage falla (quota / deshabilitado), el espejo igual se
+ *     actualiza: el tema sigue funcionando en memoria por esta sesión.
+ */
+let memoryTheme: DiagramTheme | null = null;
+const listeners = new Set<() => void>();
+
+function getThemeSnapshot(): DiagramTheme {
+  memoryTheme ??= loadTheme();
+  return memoryTheme;
+}
+
+/**
+ * Snapshot de servidor: siempre el default. Garantiza que el HTML de SSR y
+ * el primer render de hidratación coincidan; React re-renderiza con el
+ * snapshot de cliente inmediatamente después de hidratar (mismo instante en
+ * que antes corría el `useEffect`).
+ */
+function getServerThemeSnapshot(): DiagramTheme {
+  return DEFAULT_DIAGRAM_THEME;
+}
+
+function subscribeToTheme(onStoreChange: () => void): () => void {
+  listeners.add(onStoreChange);
+  return () => {
+    listeners.delete(onStoreChange);
+  };
+}
+
+function writeTheme(next: DiagramTheme): void {
+  memoryTheme = next;
+  try {
+    window.localStorage.setItem(STORAGE_KEY, JSON.stringify(next));
+  } catch {
+    // Quota excedida / localStorage deshabilitado → ignorar; el theme
+    // sigue funcionando en memoria solo por esta sesión.
+  }
+  for (const listener of listeners) listener();
+}
+
 /**
  * State + persistencia del tema del diagrama. El tema sobrevive a refreshes
  * y se propaga vía CSS variables en el contenedor del viewer, para que los
  * custom nodes lo consuman sin re-renders individuales.
  *
- * SSR-safe: arranca con DEFAULT_DIAGRAM_THEME y se hidrata desde localStorage
- * en un `useEffect` tras mount. Durante ese primer flicker (ms) el diagrama
- * se ve con los defaults; el salto al theme personalizado es imperceptible.
+ * SSR-safe: durante SSR e hidratación devuelve DEFAULT_DIAGRAM_THEME y salta
+ * al valor de localStorage apenas termina de hidratar. Durante ese primer
+ * flicker (ms) el diagrama se ve con los defaults; el salto al theme
+ * personalizado es imperceptible.
  */
 export function useDiagramTheme() {
-  const [theme, setTheme] = useState<DiagramTheme>(DEFAULT_DIAGRAM_THEME);
-
-  useEffect(() => {
-    setTheme(loadTheme());
-  }, []);
-
-  const persist = useCallback((next: DiagramTheme) => {
-    try {
-      window.localStorage.setItem(STORAGE_KEY, JSON.stringify(next));
-    } catch {
-      // Quota excedida / localStorage deshabilitado → ignorar; el theme
-      // sigue funcionando en memoria solo por esta sesión.
-    }
-  }, []);
-
-  const setBackground = useCallback(
-    (color: string) => {
-      setTheme((prev) => {
-        const next = { ...prev, background: color };
-        persist(next);
-        return next;
-      });
-    },
-    [persist],
+  const theme = useSyncExternalStore(
+    subscribeToTheme,
+    getThemeSnapshot,
+    getServerThemeSnapshot,
   );
 
+  const setBackground = useCallback((color: string) => {
+    writeTheme({ ...getThemeSnapshot(), background: color });
+  }, []);
+
   const reset = useCallback(() => {
-    setTheme(DEFAULT_DIAGRAM_THEME);
-    persist(DEFAULT_DIAGRAM_THEME);
-  }, [persist]);
+    writeTheme(DEFAULT_DIAGRAM_THEME);
+  }, []);
 
   return { theme, setBackground, reset };
 }

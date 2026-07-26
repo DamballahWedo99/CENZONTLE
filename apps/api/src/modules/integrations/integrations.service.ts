@@ -239,7 +239,8 @@ export class IntegrationsService {
 
   /** Garantiza que el campo `apiKey` nunca llegue al JSONB persistido. */
   private stripSensitive(metadata: LinearConfig): object {
-    const { apiKey: _ignored, ...safe } = metadata;
+    const { apiKey, ...safe } = metadata;
+    void apiKey; // se extrae SOLO para excluirlo de `safe`; nunca se usa.
     return safe;
   }
 }

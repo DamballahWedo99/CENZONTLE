@@ -14,27 +14,32 @@ paso. Sigue el orden tal cual — cada paso asume el anterior. Tiempo estimado:
 
 | Herramienta | Versión | Cómo |
 |---|---|---|
-| **Node.js** | 20.x (o 22.x) | https://nodejs.org — recomendado vía `nvm` |
+| **Node.js** | **22.19+** | https://nodejs.org — recomendado vía `nvm` |
 | **pnpm** | 9.15+ | `corepack enable` (viene con Node) o `npm i -g pnpm@9.15.0` |
 | **Docker** | reciente | https://docs.docker.com/get-docker/ (para Postgres/Redis/MinIO) |
 | **Cuenta Auth0** | — | https://auth0.com (gratis) — **el login es obligatorio** |
 | `openssl` | cualquiera | ya viene en macOS/Linux — para generar secretos |
 
-> No hay `.nvmrc`; usa Node 20 (el worker tolera 22). pnpm es obligatorio
-> (`packageManager` lo fija); no uses npm/yarn para instalar el monorepo.
+> El repo trae un `.nvmrc` con Node 22: `nvm use` lo toma solo, y el CI arranca de
+> ese mismo archivo. Node 22.19 es un piso REAL, no una recomendación: `undici@8`
+> (dependencia del cliente HTTP del API) lo exige. pnpm es obligatorio (`packageManager` lo
+> fija); no uses npm/yarn para instalar el monorepo.
 
 ---
 
-## 1. Clonar e instalar
+## 1. Clonar
 
 ```bash
-git clone <repo-url>
+git clone https://github.com/DamballahWedo99/CENZONTLE.git
 cd CENZONTLE
-pnpm install
 ```
 
-`pnpm install` corre automáticamente `prisma generate` (postinstall del API),
-así que el cliente de Prisma queda listo.
+> **No corras `pnpm install` todavía.** El `postinstall` del API ejecuta
+> `prisma generate`, que carga `apps/api/prisma.config.ts`; ese archivo exige
+> `DATABASE_URL` y aborta la instalación si no existe. Por eso el paso de
+> variables de entorno va **antes** que la instalación. Si te saltas el orden,
+> verás `PrismaConfigEnvError: Cannot resolve environment variable: DATABASE_URL`
+> — no está roto el repo, solo falta el `.env`.
 
 ---
 
@@ -55,12 +60,21 @@ Esto levanta:
 | **Redis 7** | 6379 | — (rate-limit + caché; degrada elegante si falta) |
 | **MinIO** (S3) | 9000 (API), 9001 (consola) | `cenzontle` / `cenzontle_dev` |
 
-El servicio `minio-init` crea automáticamente el bucket `cenzontle-documents`.
 Verifica que todo esté arriba:
 
 ```bash
-docker compose ps        # las 3 deben estar "running"/"healthy"
+docker compose ps -a
 ```
+
+Los tres servicios de arriba deben aparecer con **STATUS `Up`** (o `running`, según
+tu versión de Docker Compose). **No esperes ver `healthy`**: el `docker-compose.yml`
+no define `healthcheck` en ningún servicio, así que Docker nunca reporta ese estado.
+
+En esa lista aparece además un **cuarto** servicio, `minio-init`, en `Exited (0)`.
+Es correcto: es un job de un solo uso que crea el bucket `cenzontle-documents` y
+termina. Un `Exited (0)` ahí **no es un fallo** — es el trabajo hecho. Ojo con el
+flag: `docker compose ps` **sin `-a`** lista solo los contenedores vivos, así que
+`minio-init` no sale ahí y su ausencia tampoco es un problema.
 
 > **¿Ya tienes Postgres nativo en :5432?** Cuidado con la "trampa dual" — lee
 > [database.md › Postgres dual](database.md#postgres-dual-nativo-vs-docker).
@@ -96,6 +110,16 @@ Edita los dos archivos:
 >
 > La lista completa de variables (qué es requerido, opcional, su default y para
 > qué sirve) está en [configuration.md](configuration.md).
+
+Ya con `apps/api/.env` en su lugar, instala las dependencias:
+
+```bash
+pnpm install
+```
+
+El `postinstall` del API corre `prisma generate` y deja el cliente listo. Necesita
+leer `DATABASE_URL` del `.env` que acabas de crear — por eso este paso va aquí y no
+al principio.
 
 ---
 
@@ -163,7 +187,11 @@ Como `AltaGerencia` puedes ahora, desde la UI:
 ## 8. (Opcional) Levantar un worker del Forge
 
 El Forge es opcional — la app de proyectos funciona sin él. Para procesar
-historias con agentes de IA, levanta un worker:
+historias con agentes de IA, levanta un worker.
+
+> **En Linux, instala `firejail` antes** (`sudo apt install firejail`). Es la
+> herramienta de sandbox del worker; sin ella el daemon arranca pero toda historia
+> aborta. En macOS no instalas nada (`sandbox-exec` viene con el sistema).
 
 ```bash
 # build del worker
@@ -185,7 +213,7 @@ Guía completa (sandbox, tmux/ttyd, gotchas): [forge-worker.md](forge-worker.md)
 
 ## Checklist de verificación
 
-- [ ] `docker compose ps` muestra postgres + redis + minio corriendo
+- [ ] `docker compose ps -a` muestra postgres + redis + minio en `Up` (y `minio-init` en `Exited (0)`)
 - [ ] `apps/api/.env` y `apps/web/.env.local` existen y tienen los secretos
 - [ ] `INTERNAL_API_KEY` es idéntico en ambos
 - [ ] `prisma migrate deploy` corrió sin error

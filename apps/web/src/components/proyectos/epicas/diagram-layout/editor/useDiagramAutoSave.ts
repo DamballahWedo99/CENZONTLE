@@ -191,61 +191,68 @@ export function useDiagramAutoSave({
    * encolado (no del actual). Esto es importante para `forceSave` — el
    * caller quiere saber si sus cambios se persistieron, no un save
    * previo.
+   *
+   * El drain del `pending` se expresa como loop (`continue`) en vez de
+   * llamada recursiva: la recursión obligaba a referenciar `runSave` dentro
+   * de su propio inicializador, y es equivalente porque la re-entrada
+   * ocurría siempre en posición de cola y con `inFlightRef` ya liberado.
    */
   const runSave = useCallback(async (): Promise<boolean> => {
-    if (!enabledRef.current) return false;
+    for (;;) {
+      if (!enabledRef.current) return false;
 
-    const current = diagramRef.current;
-    if (current === null) return false;
+      const current = diagramRef.current;
+      if (current === null) return false;
 
-    // Si hay uno en vuelo, encolamos y esperamos al drain vía polling ligero.
-    // Alternativa considerada: una cola de resolvers en array. Descartada
-    // porque el contrato es "solo importa el último cambio" — no hay valor
-    // en mantener múltiples promises esperando saves intermedios.
-    if (inFlightRef.current) {
-      pendingRef.current = true;
-      return await waitForDrain(inFlightRef, pendingRef);
-    }
-
-    inFlightRef.current = true;
-    safeSetState(saveStarted);
-
-    try {
-      const diagramToSave = diagramRef.current;
-      if (diagramToSave === null) {
-        inFlightRef.current = false;
-        return false;
+      // Si hay uno en vuelo, encolamos y esperamos al drain vía polling ligero.
+      // Alternativa considerada: una cola de resolvers en array. Descartada
+      // porque el contrato es "solo importa el último cambio" — no hay valor
+      // en mantener múltiples promises esperando saves intermedios.
+      if (inFlightRef.current) {
+        pendingRef.current = true;
+        return await waitForDrain(inFlightRef, pendingRef);
       }
 
-      const result = await saveEditedDiagram(epicIdRef.current, typeRef.current, diagramToSave);
+      inFlightRef.current = true;
+      safeSetState(saveStarted);
 
-      if (result === null) {
-        safeSetState((s) => saveFailed(s, 'No se pudo guardar el diagrama. Verifica tu conexión.'));
+      try {
+        const diagramToSave = diagramRef.current;
+        if (diagramToSave === null) {
+          inFlightRef.current = false;
+          return false;
+        }
+
+        const result = await saveEditedDiagram(epicIdRef.current, typeRef.current, diagramToSave);
+
+        if (result === null) {
+          safeSetState((s) => saveFailed(s, 'No se pudo guardar el diagrama. Verifica tu conexión.'));
+          inFlightRef.current = false;
+          // Fix QA H8: en error NO reintentamos recursivamente. Descartamos el
+          // pending — el próximo debounce natural (o `retry()` del user) lo
+          // reintentará. Evita cascadas error → retry → error indefinidas.
+          pendingRef.current = false;
+          return false;
+        }
+
+        safeSetState((s) => saveSucceeded(s, Date.now()));
         inFlightRef.current = false;
-        // Fix QA H8: en error NO reintentamos recursivamente. Descartamos el
-        // pending — el próximo debounce natural (o `retry()` del user) lo
-        // reintentará. Evita cascadas error → retry → error indefinidas.
+
+        // En éxito sí procesamos pending (el user quiere persistir lo más
+        // reciente si siguió editando durante el save).
+        if (pendingRef.current) {
+          pendingRef.current = false;
+          continue;
+        }
+        return true;
+      } catch (err) {
+        const message = err instanceof Error ? err.message : 'Error desconocido al guardar.';
+        safeSetState((s) => saveFailed(s, message));
+        inFlightRef.current = false;
+        // Fix QA H8: igual que el path de `result === null`, no recursamos.
         pendingRef.current = false;
         return false;
       }
-
-      safeSetState((s) => saveSucceeded(s, Date.now()));
-      inFlightRef.current = false;
-
-      // En éxito sí procesamos pending (el user quiere persistir lo más
-      // reciente si siguió editando durante el save).
-      if (pendingRef.current) {
-        pendingRef.current = false;
-        return await runSave();
-      }
-      return true;
-    } catch (err) {
-      const message = err instanceof Error ? err.message : 'Error desconocido al guardar.';
-      safeSetState((s) => saveFailed(s, message));
-      inFlightRef.current = false;
-      // Fix QA H8: igual que el path de `result === null`, no recursamos.
-      pendingRef.current = false;
-      return false;
     }
   }, [safeSetState]);
 

@@ -329,7 +329,7 @@ Lista numerada de criterios verificables (Gherkin o bullets con métricas concre
 Mejoras infra/arquitectura que esta épica habilita: refactor, deuda técnica, nueva capacidad de plataforma.
 
 ## Canales y flujos impactados
-Lista markdown de canales (web, mobile, kiosko, partner API, contact center) y flujos (checkout, signup, recovery, billing) afectados. Si aplica, incluir nivel de impacto en sistemas externos (Sabre, ERP, etc.).
+Lista markdown de canales (web, mobile, kiosko, partner API, contact center) y flujos (checkout, signup, recovery, billing) afectados. Si aplica, incluir nivel de impacto en sistemas externos (ERP, CRM, WMS, etc.).
 
 ## Dependencias de terceros
 Lista markdown de proveedores externos involucrados (Stripe, Twilio, Auth0, etc.) y por qué cada uno es relevante para la épica.
@@ -948,24 +948,24 @@ Cada epica que propongas DEBE pasar este checklist mental:
 - Listas de tecnologias sin contexto — no digas "Kubernetes, Istio, Datadog" solo por sonar tecnico. Solo menciona tech que la iniciativa REALMENTE necesita.
 - Beneficios inventados con porcentajes falsos — si no tienes datos reales, describe el impacto cualitativamente sin inventar numeros.
 
-## Ejemplo de \`markdown\` bien escrito (1 sola épica)
+## Ejemplo de \`markdown\` bien escrito (1 sola épica; dominio ficticio — referencia de formato y nivel de detalle, no de contenido)
 
 \`\`\`markdown
 ## Objetivo
 
-Implementar un router inteligente que distribuya transacciones entre DEUNA, Adyen y Stripe según tasa de aprobación histórica por BIN y monto. Incluye failover automático cuando un PSP reporta degradación (circuit breaker con threshold de 3 fallos en 30s). Motivación: hoy el 100% del volumen va a DEUNA y una caída de 20 min el 15-mar costó $180K en ventas perdidas.
+Implementar un router inteligente que distribuya las transacciones del checkout del marketplace entre Stripe, Adyen y Mercado Pago según tasa de aprobación histórica por BIN y monto. Incluye failover automático cuando un PSP reporta degradación (circuit breaker con threshold de 3 fallos en 30s). Motivación: hoy el 100% del volumen va a Stripe y una caída de 23 minutos el 8-nov costó $215K en ventas perdidas.
 
 ## Beneficios cualitativos
 
 - Elimina el single point of failure en procesamiento de pagos.
-- El equipo de ops deja de ser pager-duty humano durante caídas de DEUNA.
+- El equipo de ops deja de ser pager-duty humano durante caídas de Stripe.
 - Habilita negociación con PSPs alternos al diversificar volumen.
 
 ## Beneficios cuantitativos
 
-- Tasa de aprobación global sube de 89% a ≥93% en los primeros 30 días → +$420K mensuales recuperados.
-- Tiempo de mitigación de outage cae de ~20 min (humano) a <5s (automático).
-- Costo por transacción baja ~8% al rutear por PSP más barato cuando aprobación es comparable.
+- Tasa de aprobación global sube de 87% a ≥92% en los primeros 30 días → +$390K mensuales recuperados.
+- Tiempo de mitigación de outage cae de ~23 min (humano) a <5s (automático).
+- Costo por transacción baja ~7% al rutear por PSP más barato cuando aprobación es comparable.
 
 ## Medición de beneficios
 
@@ -988,7 +988,7 @@ NO en alcance:
 ## Criterios de aceptación
 
 1. Failover ejecuta en <5s end-to-end (medido p95).
-2. Tasa de aprobación global sube de 89% a ≥93% en los primeros 30 días post-launch.
+2. Tasa de aprobación global sube de 87% a ≥92% en los primeros 30 días post-launch.
 3. Panel muestra routing decisions en tiempo real con latencia <2s.
 4. Cada PSP tiene shadow-mode flag para A/B testing antes de habilitar producción.
 
@@ -1002,19 +1002,19 @@ NO en alcance:
 
 - Web checkout, app móvil, contact center (charge-on-call).
 - Flujos: charge, refund, void, partial-capture.
-- Sin impacto en sistemas externos Sabre/ERP — el routing es transparente downstream.
+- Sin impacto en el ERP de facturación ni en el WMS de fulfillment — el routing es transparente downstream.
 
 ## Dependencias de terceros
 
-- **DEUNA** (provider actual): API key + merchant ID (existente).
+- **Stripe** (integración existente): API key + merchant ID ya provisionados.
 - **Adyen** (nuevo): credenciales de sandbox + producción, contrato firmado.
-- **Stripe** (nuevo): API keys live + webhook signing secret.
+- **Mercado Pago** (nuevo): API keys live + webhook signing secret.
 \`\`\`
 
 Nota cómo el ejemplo:
-- Nombra proveedores REALES del contexto (no genéricos).
-- Cuantifica el problema ($180K) y los beneficios ($420K).
-- Los criterios son medibles (<5s, ≥93%).
+- Nombra proveedores REALES por su nombre (Stripe, Adyen, Mercado Pago) — nunca "el proveedor de pagos" ni etiquetas anónimas tipo "PSP-A". En TU épica usa los de la iniciativa, no los de este ejemplo.
+- Cuantifica el problema ($215K) y los beneficios (+$390K) con cifras precisas, no redondeadas a ojo.
+- Los criterios son medibles (<5s, ≥92%).
 - El alcance es explícito con inclusiones Y exclusiones.
 - NO incluye "Prioridad de negocio" ni "Equipos involucrados" — esos viven en \`priority\` y \`podIds\`.
 

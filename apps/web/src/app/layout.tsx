@@ -34,10 +34,11 @@ const geistMono = Geist_Mono({
  *
  * Patrón `metadata.title = { default, template }`:
  *  - `default`: usado cuando la página no define su propio title (e.g.
- *    redirect en `/`). Resultado: `"Aeroméxico"` (solo el nombre).
+ *    redirect en `/`). Resultado: `"Acme Corp"` (solo el nombre de la
+ *    organización).
  *  - `template`: usado cuando una página exporta `metadata = { title: 'X' }`.
  *    El `%s` se reemplaza por el title de la página. Resultado:
- *    `"Factory | Aeroméxico"`, `"Settings | Aeroméxico"`, etc.
+ *    `"Factory | Acme Corp"`, `"Settings | Acme Corp"`, etc.
  *
  * Para client components (que no pueden exportar metadata), existe el hook
  * `useDocumentTitle('X')` que aplica el mismo formato dinámicamente y

@@ -44,6 +44,27 @@ cliente Prisma recargado vea las tablas. Ver [database.md](database.md).
 
 ---
 
+## `pnpm install` falla con `PrismaConfigEnvError: Cannot resolve environment variable: DATABASE_URL`
+
+**Causa:** corriste `pnpm install` antes de crear `apps/api/.env`. El `postinstall`
+del API ejecuta `prisma generate`, que carga `apps/api/prisma.config.ts`; ese archivo
+resuelve `DATABASE_URL` de forma estricta y aborta si no existe. No es que la
+instalación esté rota: es el orden.
+
+**Solución:** crea los `.env` y vuelve a instalar.
+
+```bash
+cp apps/api/.env.example apps/api/.env
+cp apps/web/.env.example apps/web/.env.local
+pnpm install
+```
+
+`prisma generate` no abre ninguna conexión, así que basta con que `DATABASE_URL`
+exista y sea una URL de postgres válida — no hace falta que la base esté arriba
+todavía.
+
+---
+
 ## `Environment variable not found: DATABASE_URL`
 
 **Causa:** falta `apps/api/.env` o no tiene `DATABASE_URL`.
@@ -127,6 +148,71 @@ dev server (un proceso Node vivo cachea el cliente viejo en memoria).
 - **http rechazado** → en dev local añade `FACTORY_WORKER_ALLOW_INSECURE=1`.
 
 Ver [forge-worker.md](forge-worker.md).
+
+---
+
+## El worker está online pero ninguna historia avanza (`Sandbox unavailable`)
+
+**Síntoma:** `factory-worker start` arranca sin errores y el nodo aparece **online**
+en Fleet, pero toda historia que reclama muere de inmediato. En los logs del worker:
+
+```
+Sandbox unavailable — aborting run before spawn
+No sandbox available on linux and FACTORY_WORKER_ALLOW_NO_SANDBOX is not '1'.
+```
+
+**Causa:** falta la herramienta de sandbox. El worker envuelve cada spawn de
+`claude` con `sandbox-exec` (macOS) o `firejail` (Linux); si no encuentra ninguna,
+el modo resuelve a `none` y **se niega a ejecutar**. Es deliberado: `claude` corre
+con `--dangerously-skip-permissions`, y sin aislamiento un prompt injection en el
+markdown de la épica puede leer `~/.ssh`, `~/.aws` o `~/.config/gh` del host.
+
+Confunde porque el chequeo pasa **al spawnear cada run**, no al arrancar el daemon
+— por eso el nodo se ve sano.
+
+**Solución (Linux):** instala firejail y reinicia el worker.
+
+```bash
+sudo apt install firejail     # Debian/Ubuntu
+sudo dnf install firejail     # Fedora
+sudo pacman -S firejail       # Arch
+```
+
+En macOS `sandbox-exec` viene con el sistema; si igual ves el error, revisa que
+`FACTORY_WORKER_SANDBOX_MODE` no esté forzado a `none`.
+
+> **No lo "arregles" con `FACTORY_WORKER_ALLOW_NO_SANDBOX=1`.** Esa variable existe
+> para dev desechable y desactiva el único control de aislamiento del proyecto.
+> Detalle: [forge-worker.md › Sandbox](forge-worker.md#sandbox-ejecución-de-código-generado).
+
+---
+
+## `FACTORY_WORKER_SANDBOX_MODE` no parece tener efecto
+
+**Causa:** el valor no es uno de los tres aceptados. El worker sólo reconoce
+`sandbox-exec`, `firejail` y `none` **exactos**; cualquier otra cosa (un typo, o un
+valor que no existe como `nix`) se **ignora en silencio** y cae al auto-detect.
+
+**Solución:** corrige el valor. Al arrancar un run, el log dice qué modo quedó
+activo y de dónde salió (`source: env_override` vs `auto_detect`).
+
+---
+
+## El proxy del frontend devuelve 401 o 502
+
+Los devuelve el BFF de Next (`/api/proxy/...`), no el backend:
+
+- **401 `No access token in session`** → la sesión de Auth0 no trae access token.
+  Casi siempre es el `AUTH0_AUDIENCE`: debe ser **idéntico** en `apps/web/.env.local`
+  y `apps/api/.env`, y coincidir con el Identifier de la API en Auth0. Cierra sesión
+  y vuelve a entrar tras corregirlo.
+- **401 `Not authenticated — session expired`** → la sesión caducó; vuelve a loguearte.
+- **503 `Authentication service not configured`** → faltan los `AUTH0_*` en el web
+  (mismo caso que el 503 de arriba).
+- **502 `Proxy error: backend unreachable`** → la API no está arriba o
+  `API_INTERNAL_URL` apunta al lugar equivocado. Revisa que `pnpm dev:api` esté
+  corriendo en el puerto que dice esa variable; la consola del web imprime la causa
+  real (`ECONNREFUSED`, `ENOTFOUND`, …) con el prefijo `[proxy] fetch error`.
 
 ---
 

@@ -498,8 +498,8 @@ function EpicFullPageInner({ epicId }: { epicId: string }) {
       dispatch({ type: 'DELETE_EPIC', payload: { id: rawEpic.id } });
       toast.success('Épica eliminada');
       router.push(`/proyectos/iniciativas/${rawEpic.initiativeId}`);
-    } catch (err: any) {
-      toast.error(err.message || 'Error al eliminar épica');
+    } catch (err) {
+      toast.error(err instanceof Error && err.message ? err.message : 'Error al eliminar épica');
       throw err;
     }
   };
@@ -950,9 +950,9 @@ function EpicFullPageInner({ epicId }: { epicId: string }) {
         }
       }
       setStoryAgentMode((prev) => (prev === 'streaming' ? 'staging' : prev));
-    } catch (err: any) {
-      if (err?.name !== 'AbortError') {
-        toast.error(err?.message || 'Error generando historias');
+    } catch (err) {
+      if (!(err instanceof Error) || err.name !== 'AbortError') {
+        toast.error(err instanceof Error && err.message ? err.message : 'Error generando historias');
       }
       setStoryAgentMode('idle');
     } finally {
@@ -1022,13 +1022,13 @@ function EpicFullPageInner({ epicId }: { epicId: string }) {
       if (!silent) {
         toast.success(`Historia "${proposal.title}" creada`, { id: toastId });
       }
-    } catch (err: any) {
+    } catch (err) {
       // Errors también se suprimen en silent — el toast resumen al final
       // dice "X fallaron". Si todas fallan, el resumen sigue siendo
       // informativo (`successCount=0, failureCount=N`) sin spam de toasts
       // individuales.
       if (!silent) {
-        toast.error(err?.message || 'Error al crear la historia', { id: toastId });
+        toast.error(err instanceof Error && err.message ? err.message : 'Error al crear la historia', { id: toastId });
       }
       // Re-throw para que `Promise.allSettled` / `runSequentiallySettled`
       // detecten el rejection en el batch caller. Sin esto, fallidas se
@@ -1283,8 +1283,8 @@ function EpicFullPageInner({ epicId }: { epicId: string }) {
       dispatch({ type: 'UPDATE_EPIC', payload: { id: epic.id, changes } });
       toast.success('Épica actualizada');
       setIsEditing(false);
-    } catch (err: any) {
-      toast.error(err?.message || 'Error al guardar la épica');
+    } catch (err) {
+      toast.error(err instanceof Error && err.message ? err.message : 'Error al guardar la épica');
     } finally {
       setIsSaving(false);
     }
@@ -2010,8 +2010,8 @@ function EpicFullPageInner({ epicId }: { epicId: string }) {
                       });
                       dispatch({ type: 'CREATE_STORY', payload: { ...story, id: created.id } });
                       toast.success('Historia creada', { id: toastId });
-                    } catch (err: any) {
-                      toast.error(err.message || 'Error al crear historia', { id: toastId });
+                    } catch (err) {
+                      toast.error(err instanceof Error && err.message ? err.message : 'Error al crear historia', { id: toastId });
                     }
                   }}
                   onUpdateStory={async (id, changes) => {
@@ -2033,8 +2033,8 @@ function EpicFullPageInner({ epicId }: { epicId: string }) {
                       });
                       dispatch({ type: 'UPDATE_STORY', payload: { id, changes } });
                       toast.success('Historia actualizada', { id: toastId });
-                    } catch (err: any) {
-                      toast.error(err.message || 'Error al actualizar historia', { id: toastId });
+                    } catch (err) {
+                      toast.error(err instanceof Error && err.message ? err.message : 'Error al actualizar historia', { id: toastId });
                     }
                   }}
                   onDeleteStory={async (id) => {
@@ -2042,8 +2042,8 @@ function EpicFullPageInner({ epicId }: { epicId: string }) {
                       await apiDeleteStory(id);
                       dispatch({ type: 'DELETE_STORY', payload: { id } });
                       toast.success('Historia eliminada');
-                    } catch (err: any) {
-                      toast.error(err.message || 'Error al eliminar historia');
+                    } catch (err) {
+                      toast.error(err instanceof Error && err.message ? err.message : 'Error al eliminar historia');
                     }
                   }}
                   onBulkDeleteStories={async (ids) => {

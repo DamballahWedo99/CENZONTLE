@@ -347,9 +347,10 @@ export class PreviewService {
     branch: string,
     epic: { id: string; consolidatedMergeSha: string | null; consolidatedPrNumber: number | null },
   ): Promise<PreviewSource> {
-    // Nivel 1: branch viva en GitHub
-    let branchHeadExists = false;
-    let branchHeadSha: string | null = null;
+    // Nivel 1: branch viva en GitHub. Sin inicializador: el catch de abajo
+    // siempre lanza, así que ambas quedan asignadas en todo camino que siga.
+    let branchHeadExists: boolean;
+    let branchHeadSha: string | null;
     try {
       const branchHead = await this.github.getBranchHead(branch);
       branchHeadExists = branchHead.exists;
@@ -647,7 +648,8 @@ export class PreviewService {
     const packageJsonPath = join(instance.workdir, 'package.json');
     let hasDevScript = false;
     let pkgName: string | null = null;
-    let detectReason = 'no package.json (HTML estático)';
+    // Sin inicializador: tanto el try como el catch le asignan siempre.
+    let detectReason: string;
     let devScript = '';
     try {
       const pkgRaw = await fs.readFile(packageJsonPath, 'utf-8');

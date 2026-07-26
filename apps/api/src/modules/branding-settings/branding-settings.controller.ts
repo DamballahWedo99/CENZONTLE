@@ -60,6 +60,7 @@ export class BrandingSettingsController {
     // filtra a anónimos. Excluimos del response público (los admins ven
     // metadata completa al loguearse en la UI de settings, donde el GET
     // sigue siendo el mismo endpoint pero el frontend ya tiene la sesión).
+    // eslint-disable-next-line @typescript-eslint/no-unused-vars -- el binding existe solo para excluir el campo del rest
     const { updatedBy: _updatedBy, ...publicShape } = full;
     return publicShape;
   }

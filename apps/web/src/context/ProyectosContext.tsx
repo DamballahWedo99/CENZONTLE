@@ -7,9 +7,6 @@ import {
   ProyectosFilters, DEFAULT_FILTERS, EpicWithRelations, MatrizRow, MatrizCell,
   StoryStatus, EpicStatus, ChangelogAction, ChangelogEntityType, QAMatrix, EpicQAMatrix,
 } from '@cenzontle/shared';
-import {
-  mockSprints, mockCeremonies,
-} from '@/data/mock/proyectos';
 import { getInitiatives, createInitiative as apiCreateInitiative, updateInitiative as apiUpdateInitiative } from '@/lib/api/initiatives';
 import { getEpics, createEpic as apiCreateEpic, updateEpic as apiUpdateEpic } from '@/lib/api/epics';
 import { getStories, type StoryResponse } from '@/lib/api/stories';
@@ -81,7 +78,7 @@ function mapStory(r: StoryResponse): UserStory {
     podId: r.podId,
     sprintId: r.sprintId,
     labels: r.labels ?? [],
-    tracker: r.tracker ?? null,
+    tracker: r.tracker ?? undefined,
     createdAt: r.createdAt,
     updatedAt: r.updatedAt,
   };
@@ -125,8 +122,11 @@ const initialState: ProyectosState = {
   epics: [],
   stories: [],
   pods: [],
-  sprints: mockSprints,
-  ceremonies: mockCeremonies,
+  // Sprints y ceremonias no tienen endpoint en la API: `reload` no los carga y
+  // ninguna acción del reducer los escribe, así que se quedan vacíos hasta que
+  // exista ese endpoint. La UI que los consume degrada a estado vacío.
+  sprints: [],
+  ceremonies: [],
   changelog: [],
   filters: DEFAULT_FILTERS,
   activeTab: 'overview',
@@ -828,8 +828,15 @@ export function ProyectosProvider({ children }: { children: ReactNode }) {
   const [state, dispatch] = useReducer(proyectosReducer, initialState);
   const { currentUser } = useAuthContext();
 
-  // Keep module-level user name in sync for the changelog helper
-  _currentUserName = currentUser?.name || 'Sistema';
+  const currentUserName = currentUser?.name || 'Sistema';
+
+  // Keep module-level user name in sync for the changelog helper.
+  // Se sincroniza en un efecto (no durante el render): el reducer solo corre
+  // vía dispatch desde handlers y callbacks async, que siempre ocurren
+  // después del commit, así que el helper ve el mismo nombre que antes.
+  useEffect(() => {
+    _currentUserName = currentUserName;
+  }, [currentUserName]);
 
   // Fetch all data from API. Exposed as `reload` so consumers (e.g. vault switch) can trigger it.
   const reload = useCallback(async () => {
@@ -850,13 +857,13 @@ export function ProyectosProvider({ children }: { children: ReactNode }) {
           stories: storiesRaw.map(mapStory),
           pods: podsRaw.map(mapPod),
           changelog: changelogRaw.map(mapChangelog),
-          currentUserName: currentUser?.name || 'Sistema',
+          currentUserName,
         },
       });
     } catch (err) {
       dispatch({ type: 'SET_ERROR', payload: err instanceof Error ? err.message : 'Error cargando datos' });
     }
-  }, [currentUser?.name]);
+  }, [currentUserName]);
 
   // Fetch on mount
   useEffect(() => {

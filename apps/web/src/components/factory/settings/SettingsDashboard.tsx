@@ -313,7 +313,7 @@ function RepositorySection() {
           <Input
             value={owner}
             onChange={(e) => setOwner(e.target.value)}
-            placeholder="DamballahWedo99"
+            placeholder="mi-organizacion"
             className={inputClasses}
           />
         </LabeledInput>
@@ -322,7 +322,7 @@ function RepositorySection() {
           <Input
             value={repo}
             onChange={(e) => setRepo(e.target.value)}
-            placeholder="CENZONTLE"
+            placeholder="mi-repositorio"
             className={inputClasses}
           />
         </LabeledInput>
@@ -1059,8 +1059,8 @@ function VaultSection() {
     try {
       const data = await getVaultConfigs();
       setVaults(data);
-    } catch (err: any) {
-      toast.error(`Error cargando vaults: ${err?.message ?? 'error desconocido'}`);
+    } catch (err) {
+      toast.error(`Error cargando vaults: ${err instanceof Error ? err.message : 'error desconocido'}`);
     } finally {
       setLoading(false);
     }
@@ -1073,8 +1073,8 @@ function VaultSection() {
       await activateVaultConfig(id);
       toast.success(`"${name}" es ahora el vault activo`);
       await loadVaults();
-    } catch (err: any) {
-      toast.error(err?.message ?? 'Error activando vault');
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : 'Error activando vault');
     } finally {
       setBusyId(null);
     }
@@ -1105,8 +1105,8 @@ function VaultSection() {
         toast.error(result.message ?? 'Error sincronizando vault');
       }
       await loadVaults();
-    } catch (err: any) {
-      toast.error(err?.message ?? 'Error sincronizando vault');
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : 'Error sincronizando vault');
     } finally {
       setSyncing(null);
     }
@@ -1180,8 +1180,8 @@ function VaultSection() {
       }
       cancelEdit();
       await loadVaults();
-    } catch (err: any) {
-      toast.error(err?.message ?? 'Error guardando el vault');
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : 'Error guardando el vault');
     }
   };
 
@@ -1194,9 +1194,10 @@ function VaultSection() {
       setTestResults((prev) => ({ ...prev, [id]: result }));
       if (result.ok) toast.success(result.message);
       else toast.error(result.message);
-    } catch (err: any) {
-      setTestResults((prev) => ({ ...prev, [id]: { ok: false, message: err?.message ?? 'Error' } }));
-      toast.error(err?.message ?? 'Error probando conexión');
+    } catch (err) {
+      const message = err instanceof Error ? err.message : 'Error';
+      setTestResults((prev) => ({ ...prev, [id]: { ok: false, message } }));
+      toast.error(err instanceof Error ? err.message : 'Error probando conexión');
     } finally {
       setBusyId(null);
       setTimeout(() => setTestResults((prev) => {
@@ -1221,8 +1222,8 @@ function VaultSection() {
       toast.success(`Vault "${name}" eliminado`);
       await loadVaults();
       setDeleteTarget(null);
-    } catch (err: any) {
-      toast.error(err?.message ?? 'Error eliminando vault');
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : 'Error eliminando vault');
       throw err; // Re-throw para que ConfirmDialog no cierre el modal
     } finally {
       setBusyId(null);
@@ -1524,7 +1525,7 @@ function VaultConfigForm({
           <Input
             value={form.owner}
             onChange={(e) => setForm({ ...form, owner: e.target.value })}
-            placeholder="mi-org"
+            placeholder="mi-organizacion"
             className={inputClasses}
           />
         </LabeledInput>
@@ -1711,8 +1712,8 @@ function CodigoSection() {
     try {
       const { getCodeRepositories } = await import('@/lib/api/code-repositories');
       setRepos(await getCodeRepositories());
-    } catch (err: any) {
-      toast.error(`Error cargando repositorios: ${err?.message ?? 'error desconocido'}`);
+    } catch (err) {
+      toast.error(`Error cargando repositorios: ${err instanceof Error ? err.message : 'error desconocido'}`);
     } finally {
       setLoading(false);
     }
@@ -1741,8 +1742,8 @@ function CodigoSection() {
         toast.success(`"${name}" habilitado`);
       }
       await loadRepos();
-    } catch (err: any) {
-      toast.error(err?.message ?? 'Error cambiando estado del repositorio');
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : 'Error cambiando estado del repositorio');
     }
   };
 
@@ -1764,8 +1765,8 @@ function CodigoSection() {
         );
       }
       await loadRepos();
-    } catch (err: any) {
-      toast.error(err?.message ?? 'Error cambiando permiso de escritura');
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : 'Error cambiando permiso de escritura');
     }
   };
 
@@ -1775,8 +1776,9 @@ function CodigoSection() {
       const { testCodeRepository } = await import('@/lib/api/code-repositories');
       const result = await testCodeRepository(id);
       setTestResults((prev) => ({ ...prev, [id]: result }));
-    } catch (err: any) {
-      setTestResults((prev) => ({ ...prev, [id]: { ok: false, message: err?.message ?? 'Error' } }));
+    } catch (err) {
+      const message = err instanceof Error ? err.message : 'Error';
+      setTestResults((prev) => ({ ...prev, [id]: { ok: false, message } }));
     } finally {
       setTesting(null);
     }
@@ -1790,8 +1792,8 @@ function CodigoSection() {
       if (result.ok) toast.success(`Sincronizado: ${result.sha?.slice(0, 7) ?? ''}`);
       else toast.error(`Error al sincronizar: ${result.message ?? 'desconocido'}`);
       await loadRepos();
-    } catch (err: any) {
-      toast.error(err?.message ?? 'Error al sincronizar');
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : 'Error al sincronizar');
     } finally {
       setSyncing(null);
     }
@@ -1805,8 +1807,8 @@ function CodigoSection() {
       toast.success(`Repositorio "${deleteTarget.name}" eliminado`);
       setDeleteTarget(null);
       await loadRepos();
-    } catch (err: any) {
-      toast.error(err?.message ?? 'Error eliminando repositorio');
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : 'Error eliminando repositorio');
     }
   };
 
@@ -2010,8 +2012,8 @@ function CodeRepositoryForm({
         toast.success('Repositorio creado — el clone inicial se está ejecutando en background');
       }
       await onSaved();
-    } catch (err: any) {
-      toast.error(err?.message ?? 'Error guardando el repositorio');
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : 'Error guardando el repositorio');
     } finally {
       setSaving(false);
     }
@@ -2029,7 +2031,7 @@ function CodeRepositoryForm({
       </div>
       <div className="grid grid-cols-2 gap-3">
         <LabeledInput label="Owner">
-          <Input value={owner} onChange={(e) => setOwner(e.target.value)} placeholder="AeromexicoTech" />
+          <Input value={owner} onChange={(e) => setOwner(e.target.value)} placeholder="mi-organizacion" />
         </LabeledInput>
         <LabeledInput label="Repositorio">
           <Input value={repo} onChange={(e) => setRepo(e.target.value)} placeholder="booking-service" />

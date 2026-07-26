@@ -1,0 +1,59 @@
+name: ✨ Propuesta de funcionalidad
+description: Sugiere una mejora o una capacidad nueva
+labels: ["enhancement", "triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Las propuestas que describen **el problema** antes que la solución tienen mucha
+        mejor recepción. Si ya tienes una implementación en mente, mejor aún — dilo.
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: ¿Qué problema resuelve?
+      description: Describe la situación concreta que hoy es incómoda, lenta o imposible.
+      placeholder: |
+        Cuando un worker pierde conexión a media historia, no hay forma de saber en qué
+        quedó sin entrar por SSH a la máquina...
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Solución propuesta
+      description: Qué te gustaría que pasara. Si tienes varias opciones, menciónalas.
+    validations:
+      required: true
+
+  - type: dropdown
+    id: area
+    attributes:
+      label: Área afectada
+      multiple: true
+      options:
+        - "apps/web (frontend)"
+        - "apps/api (backend)"
+        - "apps/worker (Forge)"
+        - "packages/shared"
+        - "Documentación"
+        - "Tooling / CI"
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternativas que consideraste
+      description: Incluye "no hacer nada" si aplica — a veces es la respuesta correcta.
+    validations:
+      required: false
+
+  - type: checkboxes
+    id: contribute
+    attributes:
+      label: ¿Te gustaría implementarlo?
+      options:
+        - label: Estoy dispuesto a abrir un PR con esto
+          required: false

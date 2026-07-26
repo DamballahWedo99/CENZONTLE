@@ -1,6 +1,6 @@
 'use client';
 
-import { useMemo, useRef, useEffect, useState, useCallback } from 'react';
+import { useMemo, useRef, useCallback, useSyncExternalStore } from 'react';
 import { cn } from '@/lib/utils';
 import { useFactory } from '@/context/FactoryContext';
 import type { FactoryStory } from '@cenzontle/shared';
@@ -116,6 +116,19 @@ interface DependencyEdge {
 // SVG Dependency Lines
 // ---------------------------------------------------------------------------
 
+interface ArrowPath {
+  d: string;
+  active: boolean;
+}
+
+/** Snapshot vacío estable: sirve de valor inicial y de snapshot de servidor. */
+const NO_ARROW_PATHS: ArrowPath[] = [];
+
+function sameArrowPaths(a: ArrowPath[], b: ArrowPath[]): boolean {
+  if (a.length !== b.length) return false;
+  return a.every((p, i) => p.d === b[i].d && p.active === b[i].active);
+}
+
 function DependencyArrows({
   edges,
   containerRef,
@@ -123,17 +136,19 @@ function DependencyArrows({
   edges: DependencyEdge[];
   containerRef: React.RefObject<HTMLDivElement | null>;
 }) {
-  const [paths, setPaths] = useState<{ d: string; active: boolean }[]>([]);
+  // Las curvas se derivan de medir el DOM (getBoundingClientRect), o sea de un
+  // sistema externo a React: se leen con `useSyncExternalStore` suscrito al
+  // ResizeObserver en vez de sincronizarlas a state desde un effect.
+  const pathsRef = useRef<ArrowPath[]>(NO_ARROW_PATHS);
 
-  const computePaths = useCallback(() => {
+  const computePaths = useCallback((): ArrowPath[] => {
     const container = containerRef.current;
     if (!container || edges.length === 0) {
-      setPaths([]);
-      return;
+      return NO_ARROW_PATHS;
     }
 
     const containerRect = container.getBoundingClientRect();
-    const newPaths: { d: string; active: boolean }[] = [];
+    const newPaths: ArrowPath[] = [];
 
     for (const edge of edges) {
       const fromEl = container.querySelector(`[data-story-id="${edge.fromId}"]`);
@@ -174,17 +189,34 @@ function DependencyArrows({
       });
     }
 
-    setPaths(newPaths);
+    return newPaths;
   }, [edges, containerRef]);
 
-  useEffect(() => {
-    computePaths();
-    const observer = new ResizeObserver(computePaths);
-    if (containerRef.current) {
-      observer.observe(containerRef.current);
-    }
-    return () => observer.disconnect();
-  }, [computePaths, containerRef]);
+  const subscribe = useCallback(
+    (onStoreChange: () => void) => {
+      const sync = () => {
+        const next = computePaths();
+        if (!sameArrowPaths(next, pathsRef.current)) {
+          pathsRef.current = next;
+          onStoreChange();
+        }
+      };
+
+      sync();
+      const observer = new ResizeObserver(sync);
+      if (containerRef.current) {
+        observer.observe(containerRef.current);
+      }
+      return () => observer.disconnect();
+    },
+    [computePaths, containerRef],
+  );
+
+  const paths = useSyncExternalStore(
+    subscribe,
+    () => pathsRef.current,
+    () => NO_ARROW_PATHS,
+  );
 
   if (paths.length === 0) return null;
 

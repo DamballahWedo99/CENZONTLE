@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useCallback, useRef, useSyncExternalStore } from "react";
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
 import { Button } from "@/components/ui/button";
@@ -20,19 +20,7 @@ export default function NotFound() {
   const pathname = usePathname();
 
   // Timestamp en vivo para el reporte
-  const [now, setNow] = useState<string>("——:——:——");
-  useEffect(() => {
-    const fmt = () =>
-      new Date().toLocaleTimeString("es-MX", {
-        hour: "2-digit",
-        minute: "2-digit",
-        second: "2-digit",
-        hour12: false,
-      });
-    setNow(fmt());
-    const id = setInterval(() => setNow(fmt()), 1000);
-    return () => clearInterval(id);
-  }, []);
+  const now = useClock();
 
   // Hash determinista a partir del pathname para el "ID de reporte"
   const reportId = pathname
@@ -320,6 +308,50 @@ export default function NotFound() {
         <span>v.404</span>
       </footer>
     </div>
+  );
+}
+
+/* ─────────────── Reloj ─────────────── */
+
+/** Placeholder del timestamp: es lo que se pinta en SSR y durante la
+ *  hidratación (el reloj del servidor no coincidiría con el del cliente). */
+const CLOCK_PLACEHOLDER = "——:——:——";
+
+function formatClock(): string {
+  return new Date().toLocaleTimeString("es-MX", {
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+    hour12: false,
+  });
+}
+
+/**
+ * El reloj es un sistema externo a React, así que se lee con
+ * `useSyncExternalStore` en vez de sincronizarlo a state desde un effect:
+ * el snapshot lo escribe únicamente el tick del interval (y la suscripción
+ * inicial, para no esperar un segundo al primer valor).
+ */
+function useClock(): string {
+  const clockRef = useRef(CLOCK_PLACEHOLDER);
+
+  const subscribe = useCallback((onStoreChange: () => void) => {
+    const tick = () => {
+      const next = formatClock();
+      if (next !== clockRef.current) {
+        clockRef.current = next;
+        onStoreChange();
+      }
+    };
+    tick(); // primer valor apenas monta, igual que antes
+    const id = setInterval(tick, 1000);
+    return () => clearInterval(id);
+  }, []);
+
+  return useSyncExternalStore(
+    subscribe,
+    () => clockRef.current,
+    () => CLOCK_PLACEHOLDER,
   );
 }
 

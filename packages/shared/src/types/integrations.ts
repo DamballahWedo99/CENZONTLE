@@ -97,8 +97,8 @@ export interface IntegrationConfigResponse {
 // === GITHUB / REPOSITORY CONFIGURATION ===
 
 export interface GitHubConfig {
-  owner: string;           // GitHub org or user, e.g. "DamballahWedo99"
-  repo: string;            // Repository name, e.g. "CENZONTLE"
+  owner: string;           // GitHub org or user, e.g. "mi-organizacion"
+  repo: string;            // Repository name, e.g. "mi-repositorio"
   personalAccessToken: string; // GitHub PAT with repo scope
 }
 

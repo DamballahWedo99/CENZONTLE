@@ -1,0 +1,42 @@
+MIT License — No Redistribution on Package Registries
+
+Copyright (c) 2024-2026 Awais Shah (awaisshah228)
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, and distribute copies of the Software,
+and to permit persons to whom the Software is furnished to do so, subject to
+the following conditions:
+
+1. The above copyright notice and this permission notice shall be included in
+   all copies or substantial portions of the Software.
+
+2. REDISTRIBUTION RESTRICTION: You may NOT republish, redistribute, or
+   re-upload the Software (in whole or in part, whether modified or
+   unmodified) as a package on any public or private package registry
+   (including but not limited to npm, yarn, pnpm, GitHub Packages, or any
+   other package distribution platform) without explicit prior written
+   permission from the copyright holder.
+
+   This restriction applies to forks, copies, derivative works, and any
+   substantially similar software derived from this codebase.
+
+   For the avoidance of doubt:
+   - You MAY use this package in your own projects by installing it from the
+     official npm package "avoid-nodes-edge" published by the copyright holder.
+   - You MAY fork the repository for personal use, contributions, or internal
+     (non-published) modifications.
+   - You may NOT publish a fork or copy of this package to any registry under
+     any name.
+
+3. Violations of Clause 2 constitute copyright infringement and may be subject
+   to DMCA takedown requests, npm dispute resolution, and/or legal action.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.

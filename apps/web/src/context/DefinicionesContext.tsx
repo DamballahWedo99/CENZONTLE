@@ -116,6 +116,28 @@ type DefinicionesAction =
   | { type: 'REMOVE_ACCESS'; entryId: string; nodeId: string }
   | { type: 'SET_ROLE_DEFAULT'; role: UserRole; level: AccessLevel };
 
+// === Error helpers ===
+
+/**
+ * Extrae el `message` de un valor lanzado, que en un `catch` es `unknown`.
+ *
+ * Los rechazos que llegan a los catch de este archivo vienen de `apiFetch`,
+ * que lanza `ApiError extends Error` para respuestas no-2xx y re-lanza el
+ * `TypeError` nativo de `fetch` en fallos de red. La rama de objeto duck-typed
+ * cubre el resto de valores para que el resultado sea idéntico al de un
+ * acceso opcional `err?.message`.
+ *
+ * Devuelve `undefined` cuando no hay mensaje, para que cada call site elija
+ * su propio fallback con `??` o `||` según corresponda.
+ */
+function errorMessageOf(err: unknown): string | undefined {
+  if (err instanceof Error) return err.message;
+  if (typeof err === 'object' && err !== null && 'message' in err && typeof err.message === 'string') {
+    return err.message;
+  }
+  return undefined;
+}
+
 // === Tree helpers ===
 
 function collectAllNodeIds(nodes: DefinicionNode[]): string[] {
@@ -1041,8 +1063,8 @@ export function DefinicionesProvider({ children }: { children: ReactNode }) {
       ]);
       const mapped = applyVaultTags(vaultTreeToDefinicionNodes(vaultTree), allTags);
       dispatch({ type: 'LOAD_TREE_SUCCESS', tree: mapped });
-    } catch (err: any) {
-      const msg = err?.message || 'Error cargando el vault';
+    } catch (err: unknown) {
+      const msg = errorMessageOf(err) || 'Error cargando el vault';
       dispatch({ type: 'LOAD_TREE_ERROR', error: msg });
       toast.error(`No se pudo cargar el vault: ${msg}`);
     }
@@ -1380,11 +1402,11 @@ export function DefinicionesProvider({ children }: { children: ReactNode }) {
       const frontmatter = frontmatterCache.current.get(id) ?? null;
       const fullContent = joinFrontmatter(frontmatter, content);
       await writeVaultFile(id, fullContent, `docs(vault): update ${id}`, browseVaultIdRef.current);
-    } catch (err: any) {
+    } catch (err: unknown) {
       if (previousContent !== undefined) {
         dispatch({ type: 'UPDATE_CONTENT', id, content: previousContent });
       }
-      toast.error(`Error guardando: ${err?.message ?? 'error desconocido'}`);
+      toast.error(`Error guardando: ${errorMessageOf(err) ?? 'error desconocido'}`);
     }
   }, [requireEditor]);
 
@@ -1414,9 +1436,9 @@ export function DefinicionesProvider({ children }: { children: ReactNode }) {
       // Git no trackea folders vacíos — creamos un .gitkeep como marcador
       await writeVaultFile(gitkeepPath, '', `feat(vault): create folder ${folderPath}`, browseVaultIdRef.current);
       toast.success(`Folder "${name}" creado`);
-    } catch (err: any) {
+    } catch (err: unknown) {
       dispatch({ type: 'DELETE_NODE', id: folderPath });
-      toast.error(`Error creando folder: ${err?.message ?? 'error desconocido'}`);
+      toast.error(`Error creando folder: ${errorMessageOf(err) ?? 'error desconocido'}`);
     }
   }, [requireEditor]);
 
@@ -1445,9 +1467,9 @@ export function DefinicionesProvider({ children }: { children: ReactNode }) {
     dispatch({ type: 'ADD_DOCUMENT', parentId, name, node: newNode });
     try {
       await writeVaultFile(docPath, initialContent, `feat(vault): create ${docPath}`, browseVaultIdRef.current);
-    } catch (err: any) {
+    } catch (err: unknown) {
       dispatch({ type: 'DELETE_NODE', id: docPath });
-      toast.error(`Error creando documento: ${err?.message ?? 'error desconocido'}`);
+      toast.error(`Error creando documento: ${errorMessageOf(err) ?? 'error desconocido'}`);
     }
   }, [requireEditor]);
 
@@ -1473,8 +1495,8 @@ export function DefinicionesProvider({ children }: { children: ReactNode }) {
         await deleteVaultFile(`${id}/.gitkeep`, `chore(vault): delete folder marker ${id}`, browseId).catch(() => {});
       }
       toast.success(`Eliminado "${node.name}"`);
-    } catch (err: any) {
-      toast.error(`Error eliminando: ${err?.message ?? 'error desconocido'}`);
+    } catch (err: unknown) {
+      toast.error(`Error eliminando: ${errorMessageOf(err) ?? 'error desconocido'}`);
       // Reload completo para re-sincronizar con GitHub
       void reloadTree();
     }
@@ -1521,9 +1543,9 @@ export function DefinicionesProvider({ children }: { children: ReactNode }) {
 
         await reloadTree();
         toast.success(`Carpeta renombrada a "${name}"`);
-      } catch (err: any) {
+      } catch (err: unknown) {
         dispatch({ type: 'RENAME_NODE', id, name: oldName });
-        toast.error(`Error renombrando carpeta: ${err?.message ?? 'error desconocido'}`);
+        toast.error(`Error renombrando carpeta: ${errorMessageOf(err) ?? 'error desconocido'}`);
         await reloadTree();
       }
       return;
@@ -1563,10 +1585,10 @@ export function DefinicionesProvider({ children }: { children: ReactNode }) {
       // Recargar el tree para reflejar el nuevo path como ID
       await reloadTree();
       toast.success(`Renombrado a "${name}"`);
-    } catch (err: any) {
+    } catch (err: unknown) {
       // Rollback
       dispatch({ type: 'RENAME_NODE', id, name: oldName });
-      toast.error(`Error renombrando: ${err?.message ?? 'error desconocido'}`);
+      toast.error(`Error renombrando: ${errorMessageOf(err) ?? 'error desconocido'}`);
     }
   }, [requireEditor, state.tree, reloadTree]);
 
@@ -1597,10 +1619,10 @@ export function DefinicionesProvider({ children }: { children: ReactNode }) {
         ? `${newFrontmatter}\n\n${body}`
         : body;
       await writeVaultFile(id, fullContent, `docs(vault): update tags for ${id}`);
-    } catch (err: any) {
+    } catch (err: unknown) {
       // Rollback: restaurar tags previos en el state
       dispatch({ type: 'UPDATE_TAGS', id, tags: oldTags });
-      toast.error(`Error guardando tags: ${err?.message ?? 'error desconocido'}`);
+      toast.error(`Error guardando tags: ${errorMessageOf(err) ?? 'error desconocido'}`);
     }
   }, [requireEditor, state.tree]);
 

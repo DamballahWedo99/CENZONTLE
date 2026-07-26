@@ -122,6 +122,7 @@ Todo configurable también desde la UI de Integraciones; el env auto-siembra un 
 | `CORS_ORIGIN` | **REQ** | `http://localhost:3000` | Origen permitido (URL del frontend) |
 | `NODE_ENV` | OPT | — | `development` / `production` (afecta logs y toggles) |
 | `LOG_LEVEL` | OPT | `debug` (dev) / `info` (prod) | Nivel de pino |
+| `PUBLIC_API_URL` | OPT (REQ en prod) | `http://localhost:3001` | URL **canónica del API** que la UI de Fleet le entrega al worker para registrarse. El worker no pasa por el BFF, necesita el host de NestJS directo. En dev el default sirve; en producción debe ser tu URL pública **con https** (si es http, el worker rechaza la conexión salvo `FACTORY_WORKER_ALLOW_INSECURE=1`) |
 
 ## Factory runtime — `apps/api` (opcional, defaults sanos)
 
@@ -134,6 +135,8 @@ Todo configurable también desde la UI de Integraciones; el env auto-siembra un 
 | `QA_BIND_HOST` | `127.0.0.1` | Bind del runner de QA |
 | `DESIGN_BUNDLES_DIR` | `~/.cenzontle/design-bundles` | Cache de bundles de diseño |
 | `DOCUMENTS_DIR` | `~/.cenzontle/documents` | Storage de documentos |
+| `VAULT_REPOS_DIR` | `~/.cenzontle/vault-repos` | Clones locales de los repos de vault (un subdirectorio por vault). En prod conviene apuntarlo a un volumen persistente |
+| `STORY_AGENT_CONCURRENCY` | `5` | Cuántos agentes de generación de historias corren en paralelo. Se **clampa a [1, 10]**; fuera de rango o sin parsear, se usa el default. Bájalo si la API de Anthropic te devuelve rate limits |
 
 ## Feature flags / kill-switches — `apps/api`
 
@@ -142,6 +145,7 @@ Todo configurable también desde la UI de Integraciones; el env auto-siembra un 
 | `FORGE_PAUSED` | — (activo) | Cualquier valor pausa el claim de nuevas historias |
 | `FORGE_EXECUTION_MODE` | auto | Fuerza `local-tmux` o `remote-worker` |
 | `DIAGRAM_LAYOUT_PASS_ENABLED` | `true` | Pase de layout de diagramas |
+| `FORGE_ALLOW_FORCE_COMPLETION` | false | Gate server-side del `forceCompletion` del worker, que dispara un squash-merge **irreversible** del PR saltándose el review humano. Solo se abre con el valor exacto `1` **y** `NODE_ENV !== production`: en producción está denegado siempre, la variable se ignora. Úsalo solo para flujos MOCK end-to-end en dev |
 
 ## DoD Verifier / Code Security — `apps/api` o worker (opcional)
 
@@ -157,8 +161,8 @@ Tienen defaults; normalmente se ajustan desde la UI de Tokens IA. Variables:
 | Variable | Default | Propósito |
 |---|---|---|
 | `FACTORY_WORKER_ALLOW_INSECURE` | false | Permite dashboard URL con http (solo dev) |
-| `FACTORY_WORKER_SANDBOX_MODE` | auto | `none` / `nix` / `sandbox-exec` |
-| `FACTORY_WORKER_ALLOW_NO_SANDBOX` | false | Opt-in para correr sin sandbox |
+| `FACTORY_WORKER_SANDBOX_MODE` | auto | Exactamente `sandbox-exec` (macOS) / `firejail` (Linux, requiere `apt install firejail`) / `none`. Otro valor se ignora y cae al auto-detect |
+| `FACTORY_WORKER_ALLOW_NO_SANDBOX` | false | Segundo opt-in para correr sin sandbox. Si el modo resuelve a `none` y esta no vale `1`, cada run aborta antes de spawnear `claude`. Ver [forge-worker.md › Sandbox](forge-worker.md#sandbox-ejecución-de-código-generado) |
 | `FACTORY_WORKER_USE_USER_SESSION` | false | Usa sesión OAuth de Claude Code |
 | `FACTORY_WORKER_PUBLIC_HOST` | auto | Host/IP mostrado en la UI |
 | `CLAUDE_BIN` / `CLAUDE_MODEL` / `CLAUDE_EFFORT` | `claude` / backend / backend | CLI de Claude Code |

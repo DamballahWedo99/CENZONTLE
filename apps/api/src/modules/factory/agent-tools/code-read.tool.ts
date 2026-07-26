@@ -53,7 +53,9 @@ export class CodeReadTool implements AgentTool {
     }
 
     const maxAge = Number(this.config.get('CODE_REPOS_AUTO_SYNC_AGE_MS')) || 300_000;
-    try { await this.clones.ensureFresh(target.id, maxAge); } catch {}
+    // Best-effort: si el refresh falla, se lee del clone existente
+    // (posiblemente stale) en vez de abortar la lectura del agente.
+    try { await this.clones.ensureFresh(target.id, maxAge); } catch { /* intencional */ }
 
     try {
       const result = await this.search.read(target.absolutePath, String(input.file_path), {

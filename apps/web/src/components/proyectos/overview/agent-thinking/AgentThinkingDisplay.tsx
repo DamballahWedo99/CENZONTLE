@@ -45,19 +45,29 @@ export function AgentThinkingDisplay({
   const state = useAgentThinkingState(events);
   const [open, setOpen] = useState(defaultOpen);
 
+  // Auto-open durante streaming SOLO si el caller pidió default abierto.
+  // Cuando `defaultOpen=false`, el user manda — no se re-abre solo aunque
+  // esté streameando.
+  //
+  // El re-open se hace DURANTE el render, no en un effect: el disparador es el
+  // mismo trío (isStreaming / defaultOpen / fase actual) que antes formaba las
+  // deps, así que se re-abre exactamente en los mismos momentos — cada vez que
+  // el agente cambia de fase — pero sin el frame intermedio colapsado. Entre
+  // cambios de fase el user sigue pudiendo colapsar el panel a mano.
+  const autoOpenTrigger = `${isStreaming}|${defaultOpen}|${state.currentPhase}`;
+  const [lastAutoOpenTrigger, setLastAutoOpenTrigger] = useState(autoOpenTrigger);
+  if (lastAutoOpenTrigger !== autoOpenTrigger) {
+    setLastAutoOpenTrigger(autoOpenTrigger);
+    if (isStreaming && defaultOpen) setOpen(true);
+  }
+
   useEffect(() => {
-    // Auto-open durante streaming SOLO si el caller pidió default abierto.
-    // Cuando `defaultOpen=false`, el user manda — no se re-abre solo aunque
-    // esté streameando. Se mantiene el auto-collapse al 'done' en ambos modos
-    // porque refuerza la regla de "default colapsado al terminar".
-    if (isStreaming && defaultOpen) {
-      setOpen(true);
-      return;
-    }
-    if (state.currentPhase === 'done') {
-      const timer = setTimeout(() => setOpen(false), 600);
-      return () => clearTimeout(timer);
-    }
+    // Auto-collapse al 'done' en ambos modos porque refuerza la regla de
+    // "default colapsado al terminar". No aplica mientras el auto-open manda.
+    if (isStreaming && defaultOpen) return;
+    if (state.currentPhase !== 'done') return;
+    const timer = setTimeout(() => setOpen(false), 600);
+    return () => clearTimeout(timer);
   }, [isStreaming, state.currentPhase, defaultOpen]);
 
   const showCancel = isStreaming && state.currentPhase !== 'done' && !!onCancel;

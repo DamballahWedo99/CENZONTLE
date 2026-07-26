@@ -85,7 +85,9 @@ export class VaultGrepTool implements AgentTool {
           error: `Vault "${vaultName}" no existe, no está habilitado, o su clone no está listo. Vaults disponibles: ${(await this.clones.getEnabled()).map((v) => v.name).join(', ') || '(ninguno)'}.`,
         });
       }
-      try { await this.clones.ensureFresh(target.id, maxAge); } catch {}
+      // Best-effort: si el refresh falla, se busca sobre el clone existente
+      // (posiblemente stale) en vez de abortar la búsqueda del agente.
+      try { await this.clones.ensureFresh(target.id, maxAge); } catch { /* intencional */ }
       const result = await this.search.grep(target.absolutePath, String(input.pattern), {
         ...commonOpts,
         path: input.path ? String(input.path) : undefined,

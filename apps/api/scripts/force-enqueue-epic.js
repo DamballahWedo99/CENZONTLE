@@ -88,7 +88,7 @@ const REQUIRED_HEADINGS = [
         type: 'business',
         nodes: [
           { id: 'n1', type: 'actor', label: 'Operador del Forge' },
-          { id: 'n2', type: 'service', label: 'AeroDemo-App repo' },
+          { id: 'n2', type: 'service', label: 'Repositorio de la app' },
         ],
         edges: [{ id: 'e1', source: 'n1', target: 'n2', label: 'commits' }],
         generatedAt: new Date().toISOString(),

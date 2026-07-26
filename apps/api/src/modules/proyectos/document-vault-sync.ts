@@ -338,13 +338,15 @@ const UNTRUSTED_BODY_BANNER =
 /**
  * Neutraliza líneas que empiecen con `---` (delimitador de frontmatter YAML):
  * un doc malicioso podría cerrar el frontmatter de la nota y abrir uno propio,
- * inyectando metadata falsa. Las prefijamos con un escape de blockquote para
- * que dejen de ser un delimitador a nivel de documento.
+ * inyectando metadata falsa. Las prefijamos con un ZERO WIDTH SPACE (U+200B)
+ * para que dejen de ser un delimitador a nivel de documento sin alterar el
+ * render. Se escribe en el source como escape unicode (no como carácter
+ * literal) para que sea visible y no dispare `no-irregular-whitespace`.
  */
 function neutralizeFrontmatterDelimiters(body: string): string {
   return body
     .split('\n')
-    .map((line) => (/^---/.test(line) ? `​${line}` : line))
+    .map((line) => (/^---/.test(line) ? `\u200B${line}` : line))
     .join('\n');
 }
 

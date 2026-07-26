@@ -60,6 +60,7 @@ import {
   USER_ROLE_COLORS,
   TeamMember,
   Permission,
+  ROLE_PERMISSIONS,
 } from '@cenzontle/shared';
 
 interface TeamManagementDialogProps {
@@ -545,7 +546,6 @@ function getRolePermissionLabels(role: UserRole): string[] {
     'view:all': 'Ver Todo',
   };
 
-  const { ROLE_PERMISSIONS } = require('@cenzontle/shared');
   const permissions: string[] = ROLE_PERMISSIONS[role] ?? [];
   return permissions.map((p: string) => labelMap[p] ?? p);
 }

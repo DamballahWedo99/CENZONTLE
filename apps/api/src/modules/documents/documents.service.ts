@@ -1,7 +1,7 @@
 import 'dotenv/config';
 import { Injectable, NotFoundException } from '@nestjs/common';
 import { randomUUID } from 'crypto';
-import { existsSync, mkdirSync, writeFileSync, unlinkSync, readFileSync } from 'fs';
+import { existsSync, mkdirSync, writeFileSync, unlinkSync } from 'fs';
 import { join, resolve, sep } from 'path';
 import { homedir } from 'os';
 

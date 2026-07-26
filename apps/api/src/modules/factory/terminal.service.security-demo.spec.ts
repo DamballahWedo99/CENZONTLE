@@ -34,7 +34,8 @@ const mockServerInstance = {
 jest.mock('net', () => ({ createServer: jest.fn(() => mockServerInstance) }));
 jest.mock('fs', () => ({ existsSync: jest.fn().mockReturnValue(false) }));
 
-const { EventEmitter } = require('events');
+import { EventEmitter } from 'events';
+
 global.fetch = jest.fn().mockResolvedValue({ ok: true });
 
 mockExecSync.mockImplementation((cmd: string) => {

@@ -67,6 +67,9 @@ export function DefinicionesExplorer() {
   const effectiveVault = vaults.find((v) => v.id === effectiveVaultId);
   const isBrowseMode = !!viewingVaultId && viewingVaultId !== activeVaultId;
 
+  const [viewMode, setViewMode] = useState<ViewMode>('tree');
+  const [showForceControls, setShowForceControls] = useState(false);
+
   const navigateToNode = useCallback((nodeId: string) => {
     // Find and expand all ancestor folders so the node is visible in the tree
     function findAncestors(nodes: DefinicionNode[], targetId: string, path: string[] = []): string[] | null {
@@ -84,10 +87,18 @@ export function DefinicionesExplorer() {
       expandFolder(folderId);
     }
     selectNode(nodeId);
-    setViewMode('tree');
   }, [state.tree, selectNode, expandFolder]);
-  const [viewMode, setViewMode] = useState<ViewMode>('tree');
-  const [showForceControls, setShowForceControls] = useState(false);
+
+  // Volver al explorador es responsabilidad del caller que NO está ya en él:
+  // el grafo y el changelog navegan desde otra vista, así que la cambian.
+  // El deep-link usa `navigateToNode` pelado y NO fuerza la vista: monta en
+  // 'tree', y si para cuando carga el vault el usuario ya se cambió de pestaña,
+  // se respeta esa elección en vez de arrancarlo de vuelta. Así el efecto que lo
+  // consume tampoco dispara un setState sincrónico (cascading render).
+  const navigateToNodeAndShowTree = useCallback((nodeId: string) => {
+    navigateToNode(nodeId);
+    setViewMode('tree');
+  }, [navigateToNode]);
 
   // === Agente de conexiones IA ===
   // El backend corre un solo job a la vez (fire-and-forget); aquí solo se
@@ -499,13 +510,13 @@ export function DefinicionesExplorer() {
         <div className="flex-1 border border-border/50 rounded-lg overflow-hidden bg-background min-h-0 shadow-sm">
           <GraphView
             showForceControls={showForceControls}
-            onNavigateToNode={navigateToNode}
+            onNavigateToNode={navigateToNodeAndShowTree}
           />
         </div>
       )}
       {vaults.length > 0 && viewMode === 'changelog' && (
         <div className="flex-1 flex border border-border/50 rounded-lg overflow-hidden bg-background min-h-0 shadow-sm">
-          <ChangelogView onNavigateToNode={navigateToNode} />
+          <ChangelogView onNavigateToNode={navigateToNodeAndShowTree} />
         </div>
       )}
       {vaults.length > 0 && viewMode === 'access' && (

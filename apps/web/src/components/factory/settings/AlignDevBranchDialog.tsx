@@ -135,7 +135,7 @@ export function AlignDevBranchDialog({
           <div className="rounded-md border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-xs text-amber-200">
             <p className="font-medium">¿Cuándo usar este botón?</p>
             <p className="mt-1 text-amber-200/80">
-              Cuando el banner de validación muestra "No common ancestor" entre
+              Cuando el banner de validación muestra &quot;No common ancestor&quot; entre
               dev y main — típicamente tras setup inicial donde dev fue creada
               como branch huérfana. Sin alineamiento, el consolidated PR del
               Forge fallará al mergear.

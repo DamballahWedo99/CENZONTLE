@@ -37,8 +37,8 @@ export function vaultLinkTarget(vaultPath: string | null | undefined): string | 
  * - `vaultPath` nulo → devuelve `null`.
  *
  * @param vaultPath  - Path almacenado en PG (puede ser null).
- * @param owner      - Owner del repo de GitHub (ej. "DamballahWedo99").
- * @param repo       - Nombre del repo vault (ej. "CENZONTLE-Vault").
+ * @param owner      - Owner del repo de GitHub (ej. "mi-organizacion").
+ * @param repo       - Nombre del repo vault (ej. "mi-vault").
  * @param branch     - Branch del vault (ej. "main").
  */
 export function buildVaultGitHubUrl(

@@ -15,16 +15,25 @@ sirve una necesidad distinta (aprender, hacer una tarea, consultar, entender).
 - **[forge-worker.md](forge-worker.md)** — Levantar y registrar un worker de la flota.
 - **[troubleshooting.md](troubleshooting.md)** — Errores comunes y sus soluciones.
 - **[../CONTRIBUTING.md](../CONTRIBUTING.md)** — Flujo de git, convenciones, review, tests.
+- **[../SECURITY.md](../SECURITY.md)** — Modelo de amenazas y cómo reportar una vulnerabilidad.
 
 ## Referencia (datos para consultar)
 
 - **[configuration.md](configuration.md)** — Todas las variables de entorno y servicios.
 - **[../CLAUDE.md](../CLAUDE.md)** — Convenciones del repo (humanos + Claude Code).
+- **[../CHANGELOG.md](../CHANGELOG.md)** — Qué cambió en cada versión.
+- **[../LICENSE](../LICENSE)** — Apache-2.0.
+- **[../NOTICES.md](../NOTICES.md)** — Atribuciones de terceros (LGPL y similares).
 
 ## Explicación (entender el porqué)
 
 - **[architecture.md](architecture.md)** — Monorepo, las 3 apps, servicios, el Forge,
   decisiones de diseño.
+
+## Comunidad
+
+- **[../CODE_OF_CONDUCT.md](../CODE_OF_CONDUCT.md)** — Cómo nos tratamos en issues,
+  PRs y discusiones.
 
 ---
 

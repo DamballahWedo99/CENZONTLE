@@ -388,6 +388,14 @@ export function AgentDetailDrawer({
     ? runDetail.branch
     : (batch?.branch ?? `forge/${agent.id}`);
 
+  // URL clickeable a la branch en GitHub. Reusa `SprintBatch.branchUrl`, que
+  // BatchDetail construye como `${repoUrl}/tree/${forgeBranch}` SOLO cuando el
+  // backend confirmó repo writable + branch en remote; null en sandbox. En run
+  // mode el branch es el de la historia y `RunDrawerDetail` no trae `repoUrl`,
+  // así que no hay link posible. En ambos casos de null el drawer renderiza el
+  // nombre como texto plano en lugar de un href a un 404.
+  const branchUrl = isRunMode ? null : (batch?.branchUrl ?? null);
+
   // Dependencies: get tracker keys from dependsOn story IDs when possible
   const dependencyLabels: string[] = story?.dependsOn ?? [];
 
@@ -490,15 +498,24 @@ export function AgentDetailDrawer({
                     <GitBranch className="h-3 w-3" aria-hidden="true" />
                     Branch
                   </span>
-                  <a
-                    href={`https://github.com/DamballahWedo99/AeroDemo-App/tree/${branchName}`}
-                    target="_blank"
-                    rel="noopener noreferrer"
-                    className="font-mono text-[11px] text-blue-400 hover:text-blue-300 hover:underline text-right break-all transition-colors"
-                    onClick={(e) => e.stopPropagation()}
-                  >
-                    {branchName}
-                  </a>
+                  {branchUrl ? (
+                    <a
+                      href={branchUrl}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="font-mono text-[11px] text-blue-400 hover:text-blue-300 hover:underline text-right break-all transition-colors"
+                      onClick={(e) => e.stopPropagation()}
+                    >
+                      {branchName}
+                    </a>
+                  ) : (
+                    <span
+                      className="font-mono text-[11px] text-muted-foreground/70 text-right break-all"
+                      title="Sin link a GitHub — no hay repositorio del Forge confirmado para esta branch."
+                    >
+                      {branchName}
+                    </span>
+                  )}
                 </div>
 
                 {/* Worktree */}

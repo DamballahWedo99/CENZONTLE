@@ -227,8 +227,8 @@ export function InlineEpicCreator({
 
       toast.success('Épica creada correctamente');
       onCreateEpic(newEpic);
-    } catch (err: any) {
-      toast.error(err.message || 'Error al crear la épica');
+    } catch (err) {
+      toast.error(err instanceof Error && err.message ? err.message : 'Error al crear la épica');
     } finally {
       setSaving(false);
     }

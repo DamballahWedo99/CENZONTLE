@@ -237,6 +237,9 @@ export class CodeRepoCloneService implements OnModuleInit {
       data: { cloneStatus: 'cloning', lastSyncError: null },
     });
 
+    // Se declara acá y se lanza DESPUÉS del try/catch a propósito: ver la nota
+    // sobre redacción de secretos en el catch de abajo.
+    let cloneError: Error;
     try {
       // Validez del clone: el detector anterior solo chequeaba `fs.access('.git')`
       // — eso es falsa confianza. Si `.git` existe pero está corrupto/incompleto
@@ -369,7 +372,16 @@ export class CodeRepoCloneService implements OnModuleInit {
         },
       });
       this.logger.error({ repoId, scrubbed }, `[doCloneOrPull] FAILED repo=${repoId} error="${scrubbed}"`);
-      throw new Error(scrubbed);
+      // El error se CONSTRUYE acá pero se lanza fuera del catch a propósito.
+      // Adjuntarle el original como `cause` (lo que pediría la regla
+      // `preserve-caught-error`) reintroduciría el mensaje SIN redactar: `err`
+      // viene de simple-git, que incluye en el texto la clone URL autenticada
+      // (`x-access-token:<PAT>@github.com`). pino aplana la cadena de causas al
+      // serializar (`messageWithCauses` / `stackWithCauses`), así que el PAT
+      // volvería a los logs justo después de que `scrubSecrets` lo quitó.
+      // Este borde propaga SOLO el mensaje ya saneado.
+      cloneError = new Error(scrubbed);
     }
+    throw cloneError;
   }
 }

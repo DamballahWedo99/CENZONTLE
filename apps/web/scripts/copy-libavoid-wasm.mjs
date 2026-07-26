@@ -14,10 +14,22 @@
  *
  * Si el WASM no existe (p. ej. install parcial o removido), sale con
  * warning pero exit 0 — NO rompe el install del resto del monorepo.
+ *
+ * ESM (`.mjs`): el workspace no declara `"type": "module"`, así que la
+ * extensión es lo que le dice a Node que lo cargue como módulo ES.
  */
 
-const fs = require('fs');
-const path = require('path');
+import fs from 'node:fs';
+import path from 'node:path';
+import { createRequire } from 'node:module';
+import { fileURLToPath } from 'node:url';
+
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+
+// Resolver CJS para localizar el asset dentro del grafo de node_modules.
+// `import.meta.resolve` no acepta un origen distinto al de este módulo, y
+// necesitamos resolver *desde el package `web`* (ver `paths` abajo).
+const nodeRequire = createRequire(import.meta.url);
 
 /**
  * Estrategia de resolución (en orden):
@@ -32,7 +44,7 @@ function resolveWasmSource() {
   // Intento 1: require.resolve sigue los symlinks de pnpm
   try {
     const webPackageDir = path.join(__dirname, '..');
-    return require.resolve('libavoid-js/dist/libavoid.wasm', {
+    return nodeRequire.resolve('libavoid-js/dist/libavoid.wasm', {
       paths: [webPackageDir],
     });
   } catch {

@@ -1,3 +1,5 @@
+import type { TrackerReference } from '@cenzontle/shared';
+
 import { apiFetch } from './client';
 
 /**
@@ -26,7 +28,7 @@ export interface StoryResponse {
   podId: string;
   sprintId: string | null;
   labels: string[];
-  tracker: any;
+  tracker: TrackerReference | null;
   vaultPath: string | null;
   createdAt: string;
   updatedAt: string;

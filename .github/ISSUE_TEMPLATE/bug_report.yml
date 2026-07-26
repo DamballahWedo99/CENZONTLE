@@ -1,0 +1,94 @@
+name: 🐛 Reporte de bug
+description: Algo no funciona como debería
+labels: ["bug", "triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Gracias por reportar. Antes de continuar:
+
+        - Si el problema es una **vulnerabilidad de seguridad**, **no abras un issue público** —
+          sigue [SECURITY.md](../blob/main/SECURITY.md).
+        - Si es un error de arranque, revisa primero
+          [docs/troubleshooting.md](../blob/main/docs/troubleshooting.md): cubre los fallos
+          más comunes de setup.
+
+  - type: checkboxes
+    id: preflight
+    attributes:
+      label: Antes de reportar
+      options:
+        - label: Busqué en los issues existentes y no encontré este problema
+          required: true
+        - label: Revisé `docs/troubleshooting.md`
+          required: true
+        - label: Esto **no** es una vulnerabilidad de seguridad
+          required: true
+
+  - type: dropdown
+    id: area
+    attributes:
+      label: ¿Dónde ocurre?
+      options:
+        - "apps/web (frontend Next.js)"
+        - "apps/api (backend NestJS)"
+        - "apps/worker (flota del Forge)"
+        - "packages/shared (tipos compartidos)"
+        - "Setup / instalación / Docker"
+        - "Documentación"
+        - "No estoy seguro"
+    validations:
+      required: true
+
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: Qué pasó
+      description: Describe el comportamiento observado. Incluye el mensaje de error completo si lo hay.
+      placeholder: |
+        Al correr `pnpm dev`, la API arranca pero el frontend devuelve 503 en /proyectos...
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: Qué esperabas que pasara
+    validations:
+      required: true
+
+  - type: textarea
+    id: repro
+    attributes:
+      label: Pasos para reproducir
+      description: Lo más específico posible. Un repro que podamos correr vale más que una descripción larga.
+      value: |
+        1.
+        2.
+        3.
+    validations:
+      required: true
+
+  - type: textarea
+    id: environment
+    attributes:
+      label: Entorno
+      description: |
+        Pega la salida de:
+        ```
+        node --version && pnpm --version && docker --version && git rev-parse --short HEAD
+        ```
+      render: shell
+    validations:
+      required: true
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs relevantes
+      description: |
+        **Revisa que no contengan secretos** antes de pegarlos — tokens, `INTERNAL_API_KEY`,
+        `VAULT_ENCRYPTION_KEY`, claves de Anthropic o de Auth0. Redáctalos.
+      render: shell
+    validations:
+      required: false

@@ -120,7 +120,9 @@ export class LinearTrackerProvider implements TrackerProvider {
     // markdown estructural para que Linear muestre prosa limpia en la vista
     // resumida del Project.
     const summary = this.buildShortSummary(this.extractEpicSummary(epic));
-    let project: { id: string; url: string; name: string } | null = null;
+    // Sin inicializador: el catch de abajo siempre lanza, así que `project`
+    // está asignado en todo camino que llegue a usarlo.
+    let project: { id: string; url: string; name: string };
     try {
       const result = await this.client.createProject({
         name: epic.title,

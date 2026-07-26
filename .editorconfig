@@ -1,0 +1,25 @@
+# EditorConfig — https://editorconfig.org
+# Refleja el estilo que ya tiene el repo; no lo cambia.
+
+root = true
+
+[*]
+charset = utf-8
+end_of_line = lf
+indent_style = space
+indent_size = 2
+insert_final_newline = true
+trim_trailing_whitespace = true
+
+# `quote_type` no es parte del core de EditorConfig y solo algunos editores lo
+# respetan, pero deja escrita la convención dominante del repo: ~93% de los
+# imports de TS/JS usan comillas simples.
+[*.{ts,tsx,js,jsx,mjs,cjs}]
+quote_type = single
+
+[*.md]
+# En Markdown, dos espacios al final de línea son un salto de línea duro:
+# recortarlos cambiaría el render. La prosa va envuelta a ojo (~80 columnas),
+# pero tablas y enlaces largos se pasan, así que nada de reflow automático.
+trim_trailing_whitespace = false
+max_line_length = off

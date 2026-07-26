@@ -10,6 +10,11 @@ const eslintConfig = defineConfig([
     "out/**",
     "build/**",
     "next-env.d.ts",
+    // Assets estáticos, no código fuente. Aquí viven binarios de terceros que
+    // se sirven tal cual (pdf.worker.min.mjs de Mozilla, libavoid.wasm):
+    // lintear un bundle minificado no dice nada y su licencia prohíbe
+    // modificarlo sin reflejarlo en NOTICES.md.
+    "public/**",
   ]),
 ]);
 

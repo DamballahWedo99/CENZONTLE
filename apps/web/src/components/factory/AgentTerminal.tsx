@@ -86,6 +86,16 @@ interface AgentTerminalProps {
   };
 }
 
+/** Glifo de branch (octicon de GitHub) — compartido por las dos variantes del
+ *  indicador de branch del header (con link y sin link). */
+function BranchGlyph() {
+  return (
+    <svg className="h-3 w-3" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true">
+      <path d="M5 5.372v.878c0 .414.336.75.75.75h4.5a.75.75 0 0 0 .75-.75v-.878a2.25 2.25 0 1 1 1.5 0v.878a2.25 2.25 0 0 1-2.25 2.25h-1.5v2.128a2.251 2.251 0 1 1-1.5 0V8.5h-1.5A2.25 2.25 0 0 1 3.5 6.25v-.878a2.25 2.25 0 1 1 1.5 0ZM5 3.25a.75.75 0 1 0-1.5 0 .75.75 0 0 0 1.5 0Zm6.75.75a.75.75 0 1 0 0-1.5.75.75 0 0 0 0 1.5Zm-3 8.75a.75.75 0 1 0-1.5 0 .75.75 0 0 0 1.5 0Z" />
+    </svg>
+  );
+}
+
 const statusColors: Record<AgentStatus, string> = {
   [AgentStatus.Idle]: 'text-muted-foreground/70',
   [AgentStatus.Coding]: 'text-blue-400',
@@ -369,17 +379,32 @@ export function AgentTerminal({ agent, onClose, runOverride }: AgentTerminalProp
                 {agent.storyKey}
               </span>
             )}
+            {/* Branch del batch — clickeable solo cuando el backend confirmó
+                repo writable + branch en remote (`SprintBatch.branchUrl`, que
+                BatchDetail arma como `${repoUrl}/tree/${forgeBranch}`). En
+                sandbox `branchUrl` es null y mostramos el nombre en texto plano
+                en vez de un href a un repo que no es el de esta instalación. */}
             {batch?.branch && (
-              <a
-                href={`https://github.com/DamballahWedo99/AeroDemo-App/tree/${batch.branch}`}
-                target="_blank"
-                rel="noopener noreferrer"
-                className="flex items-center gap-1 text-[11px] font-mono text-muted-foreground hover:text-foreground transition-colors shrink-0"
-                title={`Open branch ${batch.branch} on GitHub`}
-              >
-                <svg className="h-3 w-3" viewBox="0 0 16 16" fill="currentColor"><path d="M5 5.372v.878c0 .414.336.75.75.75h4.5a.75.75 0 0 0 .75-.75v-.878a2.25 2.25 0 1 1 1.5 0v.878a2.25 2.25 0 0 1-2.25 2.25h-1.5v2.128a2.251 2.251 0 1 1-1.5 0V8.5h-1.5A2.25 2.25 0 0 1 3.5 6.25v-.878a2.25 2.25 0 1 1 1.5 0ZM5 3.25a.75.75 0 1 0-1.5 0 .75.75 0 0 0 1.5 0Zm6.75.75a.75.75 0 1 0 0-1.5.75.75 0 0 0 0 1.5Zm-3 8.75a.75.75 0 1 0-1.5 0 .75.75 0 0 0 1.5 0Z"/></svg>
-                {batch.branch}
-              </a>
+              batch.branchUrl ? (
+                <a
+                  href={batch.branchUrl}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="flex items-center gap-1 text-[11px] font-mono text-muted-foreground hover:text-foreground transition-colors shrink-0"
+                  title={`Abrir la branch ${batch.branch} en GitHub`}
+                >
+                  <BranchGlyph />
+                  {batch.branch}
+                </a>
+              ) : (
+                <span
+                  className="flex items-center gap-1 text-[11px] font-mono text-muted-foreground/70 shrink-0"
+                  title="Sin link a GitHub — no hay repositorio del Forge confirmado para esta branch."
+                >
+                  <BranchGlyph />
+                  {batch.branch}
+                </span>
+              )
             )}
             {/* DoD pill */}
             {(() => {

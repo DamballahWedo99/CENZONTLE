@@ -548,11 +548,16 @@ export class StoriesService {
     // que Prisma acepta directo en el update.
     const {
       po, technical, qa,
-      relatedDocuments: _rd,
-      discoveredDependencies: _dd,
-      blockedBy: _bb,
+      relatedDocuments,
+      discoveredDependencies,
+      blockedBy,
       ...structuralData
     } = dto;
+    // Los tres se extraen SOLO para excluirlos de `structuralData`; el update
+    // de esta ruta no los persiste (van al vault / a `story_dependencies`).
+    void relatedDocuments;
+    void discoveredDependencies;
+    void blockedBy;
     const isLegacy = existing.vaultPath ? !existing.vaultPath.endsWith('/index.md') : false;
     this.logger.info({ vaultPath: existing.vaultPath }, `[StoryVault:update] format=${isLegacy ? 'LEGACY' : 'NEW'} vaultPath=${existing.vaultPath}`);
 

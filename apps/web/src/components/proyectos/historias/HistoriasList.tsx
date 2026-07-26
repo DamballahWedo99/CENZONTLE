@@ -229,8 +229,8 @@ export function HistoriasList() {
 
       toast.success('Historia actualizada');
       setEditingStoryId(null);
-    } catch (err: any) {
-      toast.error(err.message || 'Error al actualizar historia');
+    } catch (err) {
+      toast.error(err instanceof Error && err.message ? err.message : 'Error al actualizar historia');
     }
   }, [editingStoryId, formData, dispatch]);
 
@@ -577,8 +577,8 @@ export function HistoriasList() {
                                   setDeleteConfirmId(null);
                                   if (editingStoryId === story.id) setEditingStoryId(null);
                                   if (expandedStoryId === story.id) setExpandedStoryId(null);
-                                } catch (err: any) {
-                                  toast.error(err.message || 'Error al eliminar historia');
+                                } catch (err) {
+                                  toast.error(err instanceof Error && err.message ? err.message : 'Error al eliminar historia');
                                 }
                               }}
                               className="h-7 w-7 p-0 text-red-500 hover:text-red-600 hover:bg-red-500/10"

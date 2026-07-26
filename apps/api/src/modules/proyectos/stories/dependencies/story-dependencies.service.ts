@@ -281,6 +281,10 @@ export class StoryDependenciesService {
    * prevenir log injection cuando el sink interpreta esos chars.
    */
   private sanitizeForLog(s: string): string {
+    // Los caracteres de control SON el objetivo del match: neutralizarlos es
+    // justamente lo que previene el log injection (CR/LF y escapes ANSI).
+    // Quitar el rango C0 anula la protección.
+    // eslint-disable-next-line no-control-regex -- rango C0 intencional (saneo)
     return s.replace(/[\r\n\x00-\x1f]/g, ' ');
   }
 }

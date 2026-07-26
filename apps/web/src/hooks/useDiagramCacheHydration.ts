@@ -47,29 +47,35 @@ export function useDiagramCacheHydration(
   const rawEpic = epicId ? state.epics.find((e) => e.id === epicId) : undefined;
   const hasDiagram = rawEpic?.diagrams.some((d) => d.type === type) ?? false;
 
-  const [isHydrating, setIsHydrating] = useState(false);
+  /*
+    `pendingKey` identifica al fetch que corresponde hacer AHORA, o null si
+    no hay nada que hidratar: no hay épica objetivo, ya tenemos el diagrama
+    en memoria, o el Provider todavía no terminó la carga inicial de épicas
+    (rawEpic undefined).
+
+    `resolvedKey` es la última clave cuyo fetch aterrizó. Con las dos,
+    `isHydrating` es un valor derivado — "hay algo que consultar y su
+    respuesta aún no llegó" — en vez de un state que había que encender y
+    apagar desde el effect.
+  */
+  const pendingKey = epicId && rawEpic && !hasDiagram ? `${epicId}#${type}` : null;
+  const [resolvedKey, setResolvedKey] = useState<string | null>(null);
+  const isHydrating = pendingKey !== null && resolvedKey !== pendingKey;
 
   useEffect(() => {
-    // Skip cases: no épica objetivo, ya tenemos diagrama en memoria, o el
-    // Provider aún no terminó la carga inicial de épicas (rawEpic undefined
-    // con state.loading). En todos, aseguramos isHydrating=false.
-    if (!epicId || hasDiagram || !rawEpic) {
-      setIsHydrating(false);
-      return;
-    }
+    if (!pendingKey || !epicId) return;
 
     let cancelled = false;
-    setIsHydrating(true);
     void fetchCachedDiagram(epicId, type).then((diagram) => {
       if (cancelled) return;
-      setIsHydrating(false);
+      setResolvedKey(pendingKey);
       if (!diagram) return;
       dispatch({ type: 'SAVE_EPIC_DIAGRAM', payload: { epicId, diagram } });
     });
     return () => {
       cancelled = true;
     };
-  }, [epicId, type, hasDiagram, rawEpic, dispatch]);
+  }, [pendingKey, epicId, type, dispatch]);
 
   return { isHydrating };
 }

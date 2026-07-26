@@ -29,13 +29,13 @@ import { IsOptional, IsString, Matches, MaxLength, MinLength } from 'class-valid
  * Regex deny-list para `notes`. Construida via `new RegExp(string)` en vez de
  * literal `/.../` porque U+2028 y U+2029 son line terminators del source code
  * JS (incluso dentro de regex literals en TypeScript). Como string literal,
- * los ` `/` ` se interpretan a sus codepoints correctamente.
+ * los escapes `\u2028`/`\u2029` se interpretan a sus codepoints correctamente.
  *
  * Caracteres bloqueados (deny-list, post security review):
  *   \r \n           → CR / LF — injection en commit trailers (Signed-off-by spoof).
- *             → NEL (next-line) — render como salto en algunos parsers.
- *         → Unicode LINE/PARAGRAPH SEPARATOR — bypass del \n bloqueado.
- *       → VT / FF — display garbling en commit/PR.
+ *   U+0085          → NEL (next-line) — render como salto en algunos parsers.
+ *   U+2028 U+2029   → Unicode LINE/PARAGRAPH SEPARATOR — bypass del \n bloqueado.
+ *   U+000B U+000C   → VT / FF — display garbling en commit/PR.
  *   \t              → TAB — corrupción de layout en PR body.
  *   # @ ` < >       → markdown headings / mentions / code / html tags.
  *   [ ]             → markdown links `[texto](url)` — vector de phishing.
@@ -44,6 +44,10 @@ import { IsOptional, IsString, Matches, MaxLength, MinLength } from 'class-valid
  *   `^[\\p{L}\\p{N}\\s.,:;()!?_/-]*$` con flag `u` — más defendible a futuro.
  */
 const NOTES_SAFE_PATTERN = new RegExp(
+  // Los caracteres de control (VT U+000B, FF U+000C) SON la deny-list:
+  // bloquearlos es el propósito del patrón. Quitarlos del rango reabre el
+  // garbling en el commit/PR body.
+  // eslint-disable-next-line no-control-regex -- deny-list intencional
   '^[^\\r\\n\\u0085\\u2028\\u2029\\u000B\\u000C\\t#@`<>\\[\\]]*$',
 );
 

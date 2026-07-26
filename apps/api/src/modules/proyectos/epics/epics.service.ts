@@ -105,10 +105,13 @@ function sanitizeDiagramPaths(diagrams: unknown): unknown {
     const diag = d as { integrationFlowDocPath?: string };
     if (isLegacyVaultPath(diag.integrationFlowDocPath)) {
       const {
-        integrationFlowDocPath: _path,
-        integrationFlowGeneratedAt: _generatedAt,
+        integrationFlowDocPath,
+        integrationFlowGeneratedAt,
         ...rest
       } = d as Record<string, unknown>;
+      // Ambos se extraen SOLO para excluirlos de `rest`; nunca se usan.
+      void integrationFlowDocPath;
+      void integrationFlowGeneratedAt;
       return rest;
     }
     return d;
@@ -2433,6 +2436,10 @@ export class EpicsService {
     epic: EpicReadinessSnapshot,
     role: 'po' | 'tl' | 'qa',
   ): void {
+    // `role` se recibe pero NO se usa: como explica la doc de arriba, el gate
+    // valida solo los prerequisitos COMUNES a los tres VoBo. Se mantiene en la
+    // firma para reintroducir chequeos por rol sin tocar los call sites.
+    void role;
     // Validación shared con frontend — regex exact-match case-insensitive.
     // Reemplaza el viejo `md.includes(h.toLowerCase())` que tenía dos bugs:
     //  (a) substring trap: `## Alcance de negocio` matcheaba `## Alcance`.
