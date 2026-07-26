@@ -44,6 +44,27 @@ cliente Prisma recargado vea las tablas. Ver [database.md](database.md).
 
 ---
 
+## `pnpm install` falla con `PrismaConfigEnvError: Cannot resolve environment variable: DATABASE_URL`
+
+**Causa:** corriste `pnpm install` antes de crear `apps/api/.env`. El `postinstall`
+del API ejecuta `prisma generate`, que carga `apps/api/prisma.config.ts`; ese archivo
+resuelve `DATABASE_URL` de forma estricta y aborta si no existe. No es que la
+instalación esté rota: es el orden.
+
+**Solución:** crea los `.env` y vuelve a instalar.
+
+```bash
+cp apps/api/.env.example apps/api/.env
+cp apps/web/.env.example apps/web/.env.local
+pnpm install
+```
+
+`prisma generate` no abre ninguna conexión, así que basta con que `DATABASE_URL`
+exista y sea una URL de postgres válida — no hace falta que la base esté arriba
+todavía.
+
+---
+
 ## `Environment variable not found: DATABASE_URL`
 
 **Causa:** falta `apps/api/.env` o no tiene `DATABASE_URL`.

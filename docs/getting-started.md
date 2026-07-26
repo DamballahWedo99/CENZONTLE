@@ -26,16 +26,19 @@ paso. Sigue el orden tal cual — cada paso asume el anterior. Tiempo estimado:
 
 ---
 
-## 1. Clonar e instalar
+## 1. Clonar
 
 ```bash
-git clone <repo-url>
+git clone https://github.com/DamballahWedo99/CENZONTLE.git
 cd CENZONTLE
-pnpm install
 ```
 
-`pnpm install` corre automáticamente `prisma generate` (postinstall del API),
-así que el cliente de Prisma queda listo.
+> **No corras `pnpm install` todavía.** El `postinstall` del API ejecuta
+> `prisma generate`, que carga `apps/api/prisma.config.ts`; ese archivo exige
+> `DATABASE_URL` y aborta la instalación si no existe. Por eso el paso de
+> variables de entorno va **antes** que la instalación. Si te saltas el orden,
+> verás `PrismaConfigEnvError: Cannot resolve environment variable: DATABASE_URL`
+> — no está roto el repo, solo falta el `.env`.
 
 ---
 
@@ -106,6 +109,16 @@ Edita los dos archivos:
 >
 > La lista completa de variables (qué es requerido, opcional, su default y para
 > qué sirve) está en [configuration.md](configuration.md).
+
+Ya con `apps/api/.env` en su lugar, instala las dependencias:
+
+```bash
+pnpm install
+```
+
+El `postinstall` del API corre `prisma generate` y deja el cliente listo. Necesita
+leer `DATABASE_URL` del `.env` que acabas de crear — por eso este paso va aquí y no
+al principio.
 
 ---
 

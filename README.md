@@ -103,24 +103,27 @@ completo en **[docs/architecture.md](docs/architecture.md)**.
 [Auth0](https://auth0.com) (el login es obligatorio — ver [docs/auth0-setup.md](docs/auth0-setup.md)).
 
 ```bash
-# 1. Clonar e instalar
+# 1. Clonar
 git clone https://github.com/DamballahWedo99/CENZONTLE.git && cd CENZONTLE
-pnpm install                              # postinstall corre `prisma generate`
 
-# 2. Levantar servicios locales (Postgres + Redis + MinIO) con un comando
-docker compose up -d                      # crea el bucket de MinIO automáticamente
-
-# 3. Configurar variables de entorno
+# 2. Configurar variables de entorno — ANTES de instalar: el postinstall corre
+#    `prisma generate`, que lee DATABASE_URL de apps/api/.env y falla sin él.
 cp apps/api/.env.example   apps/api/.env
 cp apps/web/.env.example   apps/web/.env.local
 #   → edita ambos: pega tus credenciales de Auth0 y genera los secretos:
 #     openssl rand -base64 32   # VAULT_ENCRYPTION_KEY (api)
 #     openssl rand -hex 32      # AUTH0_SECRET (web) e INTERNAL_API_KEY (mismo en api y web)
 
-# 4. Migrar la base de datos
+# 3. Instalar
+pnpm install                              # postinstall corre `prisma generate`
+
+# 4. Levantar servicios locales (Postgres + Redis + MinIO) con un comando
+docker compose up -d                      # crea el bucket de MinIO automáticamente
+
+# 5. Migrar la base de datos
 pnpm --filter @cenzontle/api exec prisma migrate deploy
 
-# 5. Arrancar web + api
+# 6. Arrancar web + api
 pnpm dev
 ```
 

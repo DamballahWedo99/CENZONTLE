@@ -19,6 +19,13 @@ permissions:
 env:
   NEXT_TELEMETRY_DISABLED: "1"
   TURBO_TELEMETRY_DISABLED: "1"
+  # El `postinstall` de apps/api corre `prisma generate`, que carga
+  # `prisma.config.ts`; ese archivo resuelve DATABASE_URL de forma estricta y
+  # aborta si falta, así que sin esta variable falla el `pnpm install` de los
+  # tres jobs. La generación del cliente no abre ninguna conexión y el CI no
+  # levanta base de datos: este valor solo tiene que existir y ser una URL
+  # postgres válida.
+  DATABASE_URL: "postgresql://ci:ci@localhost:5432/ci"
 
 jobs:
   verify:
