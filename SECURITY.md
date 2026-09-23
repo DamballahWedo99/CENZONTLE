@@ -1,132 +1,197 @@
-# Política de seguridad
+# Security policy
 
-## Reportar una vulnerabilidad
+## Reporting a vulnerability
 
-**No abras un issue público.** Usa el reporte privado de GitHub:
+**Do not open a public issue.** Use GitHub's private reporting:
 
-**[→ Reportar una vulnerabilidad](https://github.com/DamballahWedo99/CENZONTLE/security/advisories/new)**
+**[→ Report a vulnerability](https://github.com/DamballahWedo99/CENZONTLE/security/advisories/new)**
 
-Eso abre un canal privado entre tú y quienes mantienen el proyecto. El reporte
-queda oculto hasta que exista un arreglo.
+That opens a private channel between you and the maintainers. The report stays hidden
+until a fix exists.
 
-Incluye, en la medida de lo posible:
+Include as much of this as you can:
 
-- Qué componente afecta (`apps/web`, `apps/api`, `apps/worker`) y en qué versión o commit.
-- Los pasos para reproducirlo. Un repro que podamos correr vale más que una descripción larga.
-- El impacto que ves: qué puede leer, modificar o ejecutar alguien que abuse de esto.
-- Si tienes una idea del arreglo, dila.
+- Which component it affects (`apps/web`, `apps/api`, `apps/worker`) and at which version or commit.
+- The steps to reproduce it. A repro we can run is worth more than a long description.
+- The impact you see: what someone abusing this can read, modify or run.
+- If you have an idea for the fix, say it.
 
-**Qué esperar:** este es un proyecto mantenido por poca gente. Buscamos acusar
-recibo en un plazo de una semana y acordar contigo la ventana de divulgación
-según la gravedad. Si no obtienes respuesta, insiste — no es desinterés.
+**What to expect:** this project is maintained by a small number of people with limited
+time. We aim to acknowledge receipt within a week and to agree a disclosure window with
+you based on severity. If you get no answer, follow up — it's not disinterest.
 
-No hay programa de recompensas.
-
----
-
-## Antes de reportar: lo que ya sabemos
-
-CENZONTLE es una plataforma que **ejecuta código generado por IA**. Varias cosas
-que parecen vulnerabilidades son decisiones de diseño conscientes y documentadas.
-Estas **no** son hallazgos nuevos:
-
-- El worker corre `claude` con `--dangerously-skip-permissions`
-  (`apps/worker/src/lib/runner.ts`, `dod-verifier-agent.ts`). Es intencional: el
-  agente debe trabajar sin pedir confirmación en cada acción. **El aislamiento
-  real lo da el sandbox del sistema operativo, no la CLI.**
-- `FACTORY_WORKER_ALLOW_NO_SANDBOX=1` desactiva ese aislamiento. Es un opt-in
-  doble y deliberado (ver más abajo).
-- `FACTORY_WORKER_ALLOW_INSECURE=1` permite `dashboardUrl` por HTTP plano.
-- `INTERNAL_API_KEY` es un secreto compartido entre el BFF de `apps/web` y la
-  API — un workaround documentado (CWE-306) mientras se completa el relay de
-  tokens de Auth0.
-
-Lo que **sí** queremos que nos reportes: formas de **escapar** del sandbox,
-saltarse los guards de rol o de pod, leer secretos de otro tenant, inyección
-(SQL, comando, prompt) que escale privilegios, o cualquier ruta que exponga los
-secretos cifrados en la base de datos.
+There is no bug bounty program.
 
 ---
 
-## Modelo de seguridad: lo que debes entender antes de correr esto
+## Before you report: what we already know
+
+CENZONTLE is a platform that **runs AI-generated code**. Several things that look like
+vulnerabilities are deliberate, documented design decisions. These are **not** new
+findings:
+
+- The worker runs `claude` with `--dangerously-skip-permissions`
+  (`apps/worker/src/lib/runner.ts`, `apps/worker/src/lib/dod-verifier-agent.ts`). That
+  is intentional: the agent has to work without asking for confirmation on every
+  action. **The real isolation comes from the OS sandbox, not from the CLI.**
+- `FACTORY_WORKER_ALLOW_NO_SANDBOX=1` disables that isolation. It is a deliberate
+  double opt-in (see below).
+- `FACTORY_WORKER_ALLOW_INSECURE=1` allows a plain-HTTP `dashboardUrl`
+  (`apps/worker/src/lib/api-client.ts`).
+- A short list of API routes carries `@Public()` and skips the JWT guard on purpose:
+  the health check, the two read-only branding endpoints the login screen needs before
+  anyone is signed in, and the worker routes, which authenticate with a worker token
+  instead. They are enumerated in
+  [Authentication and authorization](#authentication-and-authorization).
+
+What we **do** want you to report: ways to **escape** the sandbox, bypass the role or
+Pod guards, read another tenant's secrets, injection (SQL, command, prompt) that
+escalates privileges, or any route that exposes the encrypted secrets in the database.
+
+---
+
+## Security model
 
 > [!WARNING]
-> El Forge descarga instrucciones de un servidor, se las pasa a un modelo de
-> lenguaje y **ejecuta el código resultante en tu máquina**, con tus
-> credenciales de Git y acceso a la red. Trátalo con el mismo cuidado que
-> darías a un runner de CI autoalojado. La app de gestión de proyectos
-> (`apps/web` + `apps/api`) funciona perfectamente **sin** levantar ningún
-> worker; si solo quieres explorar la plataforma, no levantes uno.
+> The Forge downloads instructions from a server, hands them to a language model and
+> **runs the resulting code on your machine**, with your Git credentials and network
+> access. Treat it with the same care you'd give a self-hosted CI runner. The project
+> management app (`apps/web` + `apps/api`) works perfectly **without** bringing up any
+> worker; if you only want to explore the platform, don't start one.
 
-### Aislamiento del código generado
+### Isolation of generated code
 
-El worker envuelve cada ejecución con el sandbox nativo del sistema
+The worker wraps every run with the operating system's native sandbox
 (`apps/worker/src/lib/sandbox.ts`):
 
-| Modo | Plataforma | Cuándo se usa |
+| Mode | Platform | When it is used |
 |---|---|---|
-| `sandbox-exec` | macOS | Auto-detectado (perfil SBPL) |
-| `firejail` | Linux | Auto-detectado si está instalado |
-| `none` | cualquiera | Solo con **doble** opt-in explícito |
+| `sandbox-exec` | macOS | Auto-detected (SBPL profile) |
+| `firejail` | Linux | Auto-detected if installed |
+| `none` | any | Only with an explicit **double** opt-in |
 
-Correr sin sandbox exige `FACTORY_WORKER_SANDBOX_MODE=none` **y**
-`FACTORY_WORKER_ALLOW_NO_SANDBOX=1`. Si falta el segundo, el worker **aborta cada
-run justo antes de lanzar `claude`**: el daemon arranca y hace heartbeat con
-normalidad, pero ninguna historia avanza. Esa fricción es intencional: sin
-aislamiento, una prompt injection en el contenido de una historia puede leer las
-credenciales del host (`~/.ssh`, `~/.aws`, `~/.config/gh`).
+Running without a sandbox takes `FACTORY_WORKER_SANDBOX_MODE=none` **and**
+`FACTORY_WORKER_ALLOW_NO_SANDBOX=1`. If the second one is missing, the worker **aborts
+every run right before spawning `claude`**: the daemon starts and heartbeats normally,
+but no story moves. That friction is intentional — without isolation, a prompt
+injection in a story's content can read the host's credentials (`~/.ssh`, `~/.aws`,
+`~/.config/gh`).
 
-En Linux, `firejail` no viene instalado por defecto. Si no lo instalas
-(`apt install firejail`), el worker resuelve el modo a `none` y se detiene en cada
-run en vez de correr sin protección.
+On Linux, `firejail` is not installed by default. If you don't install it
+(`apt install firejail`), the worker resolves the mode to `none` and stops on every run
+instead of running unprotected.
 
-### Secretos
+The full mode table, the detection order and the sandbox's known limits are in
+[forge-worker.md › Sandbox](docs/forge-worker.md#sandbox-running-generated-code).
 
-- Los tokens de GitHub, las API keys de Anthropic y los *external secrets* se
-  guardan **cifrados en la base de datos** con AES-256-GCM, no en `.env`. La
-  llave maestra es `VAULT_ENCRYPTION_KEY`.
-- **Rotar `VAULT_ENCRYPTION_KEY` invalida todo lo ya cifrado.** No es una
-  rotación en caliente: requiere re-cifrar.
-- Genera cada secreto con entropía real (`openssl rand -base64 32` /
-  `openssl rand -hex 32`). No reutilices valores entre entornos.
-- Los valores de `docker-compose.yml` (`cenzontle_dev`) son **solo para
-  desarrollo local**. Nunca los uses en una máquina accesible desde la red.
+### The live terminal
 
-### Autenticación
+`/factory/agents/<id>/terminal` gives an operator an interactive Claude Code session in
+the browser. It is a real shell on the machine running `apps/api`, so treat it as one:
 
-Auth0 es obligatorio; **no hay bypass de desarrollo**. Si no está configurado,
-el middleware falla cerrado (503) en vez de dejar pasar. El control de acceso
-combina roles (`AltaGerencia`, `ProductOwner`, `TechLead`, `QA`, `Viewer`) con
-filtrado por pod, y las acciones sensibles (VoBo de épicas, release gate)
-requieren step-up auth.
+- The API spawns `ttyd` in writable mode wrapping a `tmux` session that runs `claude`
+  (`apps/api/src/modules/factory/terminal.service.ts`). Anything that shell can do, the
+  API process can do.
+- Every `/factory/terminal/*` endpoint requires the `alta_gerencia` role
+  (`apps/api/src/modules/factory/terminal.controller.ts`).
+- **The `ttyd` port itself carries no authentication.** It binds to `127.0.0.1` on a
+  port between 7681 and 7999, and the browser loads that URL straight into an iframe.
+  Anything that can reach loopback on the API host — another local process, an SSH port
+  forward, a misconfigured reverse proxy — gets the shell without ever passing the role
+  check.
+- The working directory is rejected if it contains `..` and is confined to
+  `AGENT_WORKDIR_ROOT`, but that variable defaults to `/`, which disables the
+  containment check.
+- Session start and stop are appended to `~/.cenzontle/terminal-audit.jsonl`
+  (`TERMINAL_AUDIT_DIR` overrides the directory). Each entry records the agent id, the
+  port, the workdir and the branch — **not which user opened the session**.
 
-### Antes de exponer esto a una red
+Keep the API host's loopback interface closed to anything you don't trust.
 
-Este proyecto está pensado y probado para **desarrollo local**. Si vas a
-desplegarlo:
+### Secrets
 
-- [ ] TLS en todo; nunca `FACTORY_WORKER_ALLOW_INSECURE`.
-- [ ] Sandbox activo en todos los workers; nunca `FACTORY_WORKER_ALLOW_NO_SANDBOX`.
-- [ ] `VAULT_ENCRYPTION_KEY` e `INTERNAL_API_KEY` generados con entropía real y fuera del repo.
-- [ ] Con múltiples réplicas de la API, un **Redis compartido**: el rate limiter guarda ahí sus contadores, y sin él los límites son por réplica en vez de globales.
-- [ ] Credenciales de Postgres y del bucket S3 distintas de las de `docker-compose.yml`.
-- [ ] Workers en máquinas desechables, con tokens de Git de alcance mínimo.
+- GitHub tokens, Anthropic API keys and *external secrets* are stored **encrypted in
+  the database** with AES-256-GCM, not in `.env`
+  (`apps/api/src/modules/vault/crypto.service.ts`). The master key is
+  `VAULT_ENCRYPTION_KEY`.
+- **Rotating `VAULT_ENCRYPTION_KEY` invalidates everything already encrypted.** It is
+  not a hot rotation: it requires re-encrypting.
+- Generate every secret with real entropy (`openssl rand -base64 32` /
+  `openssl rand -hex 32`). Don't reuse values across environments.
+- The values in `docker-compose.yml` (`cenzontle_dev`) are **for local development
+  only**. Never use them on a machine reachable from a network.
 
-### Costos
+### Authentication and authorization
 
-Los agentes consumen la API de Anthropic con **tu** API key. Una épica encolada
-lanza varios agentes en paralelo y el verificador de DoD reintenta ante fallos,
-lo que aproximadamente duplica el costo de esa etapa. Empieza con una historia
-pequeña y revisa el dashboard de costos antes de encolar trabajo grande.
+Auth0 is mandatory and there is **no development bypass** for signing in. If it isn't
+configured, the web middleware fails closed with a 503 instead of letting the request
+through (`apps/web/src/middleware.ts`).
+
+Every API route is authenticated by default. `JwtAuthGuard` is registered as a global
+`APP_GUARD`, followed by `RolesGuard` and `PermissionsGuard`
+(`apps/api/src/modules/auth/auth.module.ts`). It verifies the Auth0 access token
+against the tenant's JWKS and rejects everything else with a 401
+(`apps/api/src/modules/auth/guards/jwt-auth.guard.ts`). The browser never talks to the
+API directly: the BFF proxy in `apps/web` takes the user's own Auth0 access token out
+of their session and forwards it as `Authorization: Bearer`
+(`apps/web/src/app/api/proxy/[...path]/route.ts`), so the backend applies that user's
+real role on every request.
+
+Three sets of routes opt out with `@Public()`, and none of them are unauthenticated by
+accident:
+
+| Route | Why it is public |
+|---|---|
+| `GET /health` | Liveness check; returns no data (`apps/api/src/health.controller.ts`) |
+| `GET /branding-settings` and `GET /branding-settings/asset/:type` | The login screen needs the logo and the title before anyone is signed in. The response drops `updatedBy` so an anonymous caller can't harvest an Auth0 `sub` (`apps/api/src/modules/branding-settings/branding-settings.controller.ts`) |
+| `/factory/workers/*` | Workers have no human session. They present a `worker_…` bearer token, which `WorkerAuthGuard` resolves by SHA-256 hash. The guard also demands `@WorkerRoute()` and throws 401 when it is missing, so a `@Public()` route can never end up with no authentication at all (`apps/api/src/modules/factory/fleet/worker-auth.guard.ts`) |
+
+Access control combines the roles (`AltaGerencia`, `ProductOwner`, `TechLead`, `QA`,
+`Viewer`) with Pod filtering, and the high-consequence approvals — the three epic
+sign-offs, both Forge gates and DEV branch alignment — additionally require step-up
+authentication. See [`docs/authorization.md`](docs/authorization.md) for the full
+role × permission matrix and the vault access rules.
+
+> [!WARNING]
+> Step-up authentication is the one control that does **not** fail closed outside
+> production. With `AUTH0_M2M_CLIENT_ID` / `AUTH0_M2M_CLIENT_SECRET` unset and
+> `NODE_ENV` set to anything other than `production`, password verification logs a
+> `[DEV BYPASS]` warning and returns success without ever contacting Auth0
+> (`apps/api/src/modules/auth/auth.service.ts`). Under `NODE_ENV=production` the same
+> path throws a 503 instead. The switch is `NODE_ENV` alone — a staging box that
+> forgets to set it accepts any password. Details:
+> [auth0-setup.md › Step-up authentication](docs/auth0-setup.md#5-optional-step-up-authentication-and-user-management).
+
+### Before exposing this to a network
+
+This project is designed and tested for **local development**. If you are going to
+deploy it:
+
+- [ ] TLS everywhere; never `FACTORY_WORKER_ALLOW_INSECURE`.
+- [ ] Sandbox enabled on every worker; never `FACTORY_WORKER_ALLOW_NO_SANDBOX`.
+- [ ] `VAULT_ENCRYPTION_KEY` generated with real entropy and kept out of the repo.
+- [ ] `NODE_ENV=production` plus real `AUTH0_M2M_CLIENT_ID` / `AUTH0_M2M_CLIENT_SECRET`, or step-up authentication silently accepts any password.
+- [ ] The API host's loopback interface closed to untrusted processes and port forwards — the live terminal's `ttyd` ports listen there without authentication.
+- [ ] With multiple API replicas, a **shared Redis**: the rate limiter keeps its counters there (`REDIS_HOST` / `REDIS_PORT`), and without a shared instance the limits are per replica instead of global.
+- [ ] Postgres and S3 bucket credentials different from the ones in `docker-compose.yml`.
+- [ ] Workers on disposable machines, with minimally scoped Git tokens.
+
+### Costs
+
+The agents consume the Anthropic API with **your** API key. An enqueued epic launches
+several agents in parallel, and the DoD verifier retries on failure, which roughly
+doubles the cost of that story each time. Start with one small story and check the
+**Cost** dashboard in the Factory before you enqueue large work. Those figures are
+client-side SDK estimates, not billing — read them as orders of magnitude.
 
 ---
 
-## Alcance
+## Scope
 
-**Dentro:** el código de este repositorio — `apps/web`, `apps/api`,
-`apps/worker`, `packages/*`.
+**In scope:** the code in this repository — `apps/web`, `apps/api`, `apps/worker`,
+`packages/*`.
 
-**Fuera:** vulnerabilidades en dependencias de terceros (repórtalas upstream; si
-nos afectan directamente, avísanos igual), en Auth0, Anthropic, GitHub o tu
-proveedor de infraestructura, y cualquier problema derivado de correr el proyecto
-con los guardarraíles desactivados a propósito.
+**Out of scope:** vulnerabilities in third-party dependencies (report them upstream; if
+they affect us directly, tell us anyway), in Auth0, Anthropic, GitHub or your
+infrastructure provider, and any problem that follows from running the project with the
+guardrails deliberately disabled.

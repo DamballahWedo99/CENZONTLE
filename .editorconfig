@@ -1,5 +1,5 @@
 # EditorConfig — https://editorconfig.org
-# Refleja el estilo que ya tiene el repo; no lo cambia.
+# Reflects the style the repo already has; it does not change it.
 
 root = true
 
@@ -11,15 +11,15 @@ indent_size = 2
 insert_final_newline = true
 trim_trailing_whitespace = true
 
-# `quote_type` no es parte del core de EditorConfig y solo algunos editores lo
-# respetan, pero deja escrita la convención dominante del repo: ~93% de los
-# imports de TS/JS usan comillas simples.
+# `quote_type` is not part of core EditorConfig and only some editors honor it,
+# but it writes down the repo's dominant convention: ~93% of the TS/JS imports
+# use single quotes.
 [*.{ts,tsx,js,jsx,mjs,cjs}]
 quote_type = single
 
 [*.md]
-# En Markdown, dos espacios al final de línea son un salto de línea duro:
-# recortarlos cambiaría el render. La prosa va envuelta a ojo (~80 columnas),
-# pero tablas y enlaces largos se pasan, así que nada de reflow automático.
+# In Markdown, two trailing spaces are a hard line break: trimming them would
+# change the rendered output. Prose is wrapped by hand (~80 columns), but tables
+# and long links run past it, so no automatic reflow.
 trim_trailing_whitespace = false
 max_line_length = off

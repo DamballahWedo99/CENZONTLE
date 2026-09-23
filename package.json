@@ -11,7 +11,7 @@
     "type-check": "turbo type-check",
     "dev:web": "pnpm --filter @cenzontle/shared build && turbo dev --filter=@cenzontle/web",
     "dev:api": "pnpm --filter @cenzontle/shared build && turbo dev --filter=@cenzontle/api",
-    "clean": "turbo clean"
+    "clean": "turbo run clean && rm -rf .turbo apps/*/.turbo packages/*/.turbo node_modules/.cache/turbo"
   },
   "devDependencies": {
     "turbo": "^2.5.0"

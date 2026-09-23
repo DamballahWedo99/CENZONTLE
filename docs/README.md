@@ -1,41 +1,69 @@
-# Documentación de CENZONTLE
+# CENZONTLE documentation
 
-Organizada según el framework [Diátaxis](https://diataxis.fr): cada documento
-sirve una necesidad distinta (aprender, hacer una tarea, consultar, entender).
+Organized after the [Diátaxis](https://diataxis.fr) framework: every document
+serves one distinct need (learn, do a task, look something up, understand why).
 
-## Empieza aquí
+## Start here
 
-- **[getting-started.md](getting-started.md)** — *Tutorial.* De `git clone` a la
-  app corriendo y con login. El camino feliz, paso a paso.
+- **[getting-started.md](getting-started.md)** — *Tutorial.* From `git clone` to
+  the app running and logged in. The happy path, step by step.
+- **[glossary.md](glossary.md)** — *Reference.* Read this one first if any term
+  below is new to you. It defines the vocabulary the rest of the docs assume —
+  Forge, batch, wave, sign-off, gate, lens — straight from the Prisma schema, the
+  shared types and the `factory` module. It also quotes the literal Spanish UI
+  labels, because the documentation is in English while the application UI is
+  still in Spanish.
 
-## How-to (tareas concretas)
+## How-to guides (specific tasks)
 
-- **[auth0-setup.md](auth0-setup.md)** — Configurar Auth0 y crear el primer admin.
-- **[database.md](database.md)** — Prisma: migraciones, seed, la trampa dual-Postgres.
-- **[forge-worker.md](forge-worker.md)** — Levantar y registrar un worker de la flota.
-- **[troubleshooting.md](troubleshooting.md)** — Errores comunes y sus soluciones.
-- **[../CONTRIBUTING.md](../CONTRIBUTING.md)** — Flujo de git, convenciones, review, tests.
-- **[../SECURITY.md](../SECURITY.md)** — Modelo de amenazas y cómo reportar una vulnerabilidad.
+- **[auth0-setup.md](auth0-setup.md)** — Configure Auth0 and create your first
+  admin user, plus the optional step-up authentication setup.
+- **[database.md](database.md)** — Prisma: migrations, the seed, the dual-Postgres
+  trap.
+- **[forge-worker.md](forge-worker.md)** — Build, register and start a Forge worker
+  on a compute node, and how its sandbox works.
+- **[troubleshooting.md](troubleshooting.md)** — Common errors and how to fix them.
+- **[../apps/web/e2e/README.md](../apps/web/e2e/README.md)** — Run the Playwright
+  end-to-end suite: prerequisites, commands, environment variables, test JWT.
+- **[../CONTRIBUTING.md](../CONTRIBUTING.md)** — Git workflow, code conventions,
+  review, tests.
+- **[../SECURITY.md](../SECURITY.md)** — Security model and how to report a
+  vulnerability.
 
-## Referencia (datos para consultar)
+## Reference (things to look up)
 
-- **[configuration.md](configuration.md)** — Todas las variables de entorno y servicios.
-- **[../CLAUDE.md](../CLAUDE.md)** — Convenciones del repo (humanos + Claude Code).
-- **[../CHANGELOG.md](../CHANGELOG.md)** — Qué cambió en cada versión.
+- **[glossary.md](glossary.md)** — Every domain term, grouped by area.
+- **[configuration.md](configuration.md)** — Every environment variable the code
+  actually reads, and the external services behind them.
+- **[authorization.md](authorization.md)** — The role and permission model: which
+  roles exist, what each one may do, the API guards that enforce it, and how
+  access to the vault is controlled (ReBAC).
+- **[data-model.md](data-model.md)** — The Prisma models, ERD diagrams and the
+  design decisions behind the schema.
+- **[api-reference.md](api-reference.md)** — Versioned reference for the HTTP
+  endpoints and the SSE streams.
+- **[../CLAUDE.md](../CLAUDE.md)** — Repo conventions (for humans and for Claude
+  Code).
+- **[../CHANGELOG.md](../CHANGELOG.md)** — What changed in each version.
 - **[../LICENSE](../LICENSE)** — Apache-2.0.
-- **[../NOTICES.md](../NOTICES.md)** — Atribuciones de terceros (LGPL y similares).
+- **[../NOTICES.md](../NOTICES.md)** — Third-party components that require
+  attribution, carry copyleft obligations, or ship under a non-OSI-approved
+  license. Read it before you fork.
+- **[../LICENSES/README.md](../LICENSES/README.md)** — Why each full license text
+  in `LICENSES/` has to travel with the repository, and which dependency it
+  covers.
 
-## Explicación (entender el porqué)
+## Explanation (understanding the why)
 
-- **[architecture.md](architecture.md)** — Monorepo, las 3 apps, servicios, el Forge,
-  decisiones de diseño.
+- **[architecture.md](architecture.md)** — The monorepo, the three apps, external
+  services, ports, auth, the Forge flow, notable design decisions.
 
-## Comunidad
+## Community
 
-- **[../CODE_OF_CONDUCT.md](../CODE_OF_CONDUCT.md)** — Cómo nos tratamos en issues,
-  PRs y discusiones.
+- **[../CODE_OF_CONDUCT.md](../CODE_OF_CONDUCT.md)** — How we treat each other in
+  issues, pull requests and discussions.
 
 ---
 
-¿Solo quieres arrancarlo? → [getting-started.md](getting-started.md).
-Visión general del proyecto → [../README.md](../README.md).
+Just want to run it? → [getting-started.md](getting-started.md).
+Project overview → [../README.md](../README.md).

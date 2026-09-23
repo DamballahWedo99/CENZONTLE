@@ -2,13 +2,13 @@
 
 # 🐦 CENZONTLE
 
-**Plataforma de Software Factory y gestión de proyectos.**
-Genera iniciativas, épicas e historias con IA, y orquesta una flota de agentes
-(el *Forge*) que las implementan, prueban y liberan de punta a punta.
+**A software factory and project-management platform.**
+Generate initiatives, epics and stories with AI, then let the *Forge* — a fleet of
+workers running headless Claude Code — implement, test and release them end to end.
 
-Monorepo Turborepo + pnpm · Next.js 16 · NestJS 11 · Prisma 7 · PostgreSQL
+Turborepo + pnpm monorepo · Next.js 16 · NestJS 11 · Prisma 7 · PostgreSQL
 
-[![Licencia: Apache-2.0](https://img.shields.io/badge/licencia-Apache--2.0-blue.svg)](./LICENSE)
+[![License: Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](./LICENSE)
 [![CI](https://img.shields.io/github/actions/workflow/status/DamballahWedo99/CENZONTLE/ci.yml?branch=main&label=CI)](https://github.com/DamballahWedo99/CENZONTLE/actions/workflows/ci.yml)
 [![Node](https://img.shields.io/badge/node-%E2%89%A522.19-brightgreen.svg)](https://nodejs.org)
 [![pnpm](https://img.shields.io/badge/pnpm-9.15%2B-f69220.svg)](https://pnpm.io/installation)
@@ -17,243 +17,265 @@ Monorepo Turborepo + pnpm · Next.js 16 · NestJS 11 · Prisma 7 · PostgreSQL
 
 ---
 
-## Tabla de contenidos
+## Table of contents
 
-- [¿Qué es esto?](#qué-es-esto)
-- [Arquitectura en 30 segundos](#arquitectura-en-30-segundos)
-- [Quick Start](#quick-start) — de `git clone` a la app corriendo
-- [Comandos](#comandos)
-- [Documentación](#documentación)
-- [Stack tecnológico](#stack-tecnológico)
-- [Estructura del repo](#estructura-del-repo)
-- [Estado del proyecto](#estado-del-proyecto)
-- [Cómo contribuir](#cómo-contribuir)
-- [Licencia](#licencia)
+- [What is this?](#what-is-this)
+- [Architecture in 30 seconds](#architecture-in-30-seconds)
+- [Quick Start](#quick-start) — from `git clone` to the app running
+- [Commands](#commands)
+- [Documentation](#documentation)
+- [Tech stack](#tech-stack)
+- [Repo structure](#repo-structure)
+- [Project status](#project-status)
+- [Contributing](#contributing)
+- [License](#license)
 
 ---
 
-## ¿Qué es esto?
+## What is this?
 
-CENZONTLE es una plataforma con dos mitades:
+CENZONTLE is a platform with two halves:
 
-1. **Gestión de proyectos** — iniciativas → épicas → historias, generadas y
-   editadas con agentes de IA (Product Owner, Tech Lead, QA), con diagramas,
-   un vault de conocimiento y un asistente de edición.
-2. **El Forge (Software Factory)** — una flota de *workers* que reclaman
-   historias y las implementan con Claude Code en modo headless, abren PRs, las
-   verifican (Definition of Done), las prueban (pipeline de QA automático) y las
-   llevan hasta *Released* — con gates humanos en los puntos críticos.
+1. **Project management** — initiatives → epics → stories, generated and edited
+   by AI agents (Product Owner, Tech Lead, QA), with diagrams, a knowledge vault
+   and an editing assistant.
+2. **The Forge (software factory)** — a fleet of *workers* that claim stories and
+   implement them with headless Claude Code, open pull requests, verify them
+   (Definition of Done), test them (automated QA pipeline) and drive them to
+   *Released* — with human gates at the critical points.
 
-> Si solo quieres **arrancarlo y explorarlo**, ve directo al [Quick Start](#quick-start).
+> If you just want to **run it and poke around**, go straight to the
+> [Quick Start](#quick-start).
 
 > [!WARNING]
-> **Lee esto antes de levantar un worker.**
-> - `apps/worker` ejecuta Claude Code con `--dangerously-skip-permissions`: el
->   agente corre comandos en tu máquina sin pedirte confirmación. El aislamiento
->   real lo da el sandbox del sistema operativo (`sandbox-exec` en macOS,
->   `firejail` en Linux), **no** la CLI.
-> - En Linux, `firejail` **no** viene instalado por defecto — instálalo con el
->   gestor de paquetes de tu distro. Correr sin sandbox exige un doble opt-in
->   explícito (`FACTORY_WORKER_SANDBOX_MODE=none` **y**
->   `FACTORY_WORKER_ALLOW_NO_SANDBOX=1`); si falta el segundo, el daemon arranca
->   pero aborta cada historia antes de lanzar el agente.
-> - Los agentes consumen la API de Anthropic con **tu** API key y **no hay techo
->   de gasto**. El verificador de DoD reintenta cuando una historia falla, lo que
->   aproximadamente duplica su costo. Empieza con una historia pequeña.
-> - La app de gestión de proyectos (`apps/web` + `apps/api`) funciona **sin**
->   levantar ningún worker: si solo quieres explorar la plataforma, no te expones
->   a nada de lo anterior.
+> **Read this before you bring up a worker.**
+> - `apps/worker` runs Claude Code with `--dangerously-skip-permissions`: the agent
+>   runs commands on your machine without asking you to confirm. The real isolation
+>   comes from the OS sandbox (`sandbox-exec` on macOS, `firejail` on Linux),
+>   **not** from the CLI.
+> - On Linux, `firejail` is **not** installed by default — install it with your
+>   distro's package manager. Running without a sandbox takes an explicit double
+>   opt-in (`FACTORY_WORKER_SANDBOX_MODE=none` **and**
+>   `FACTORY_WORKER_ALLOW_NO_SANDBOX=1`); if the second one is missing, the daemon
+>   starts but aborts every story before spawning the agent.
+> - The agents consume the Anthropic API with **your** API key and **there is no
+>   spending cap**. The DoD verifier retries when a story fails, which roughly
+>   doubles its cost. Start with one small story.
+> - The project-management app (`apps/web` + `apps/api`) works **without** bringing
+>   up a single worker: if you only want to explore the platform, none of the above
+>   applies to you.
 >
-> El modelo de seguridad completo está en **[SECURITY.md](SECURITY.md)**.
+> The full security model is in **[SECURITY.md](SECURITY.md)**.
 
 ---
 
-## Arquitectura en 30 segundos
+## Architecture in 30 seconds
 
 ```
 ┌────────────┐      BFF proxy       ┌────────────┐      Prisma      ┌──────────────┐
 │  apps/web  │ ───────────────────▶ │  apps/api  │ ───────────────▶ │  PostgreSQL  │
 │  Next.js   │  (:3000)             │  NestJS    │  (:3001)         │  (:5432)     │
 └────────────┘                      └─────┬──────┘                  └──────────────┘
-      ▲                                   │  ├─ Redis (:6379)  rate-limit + caché
-      │ Auth0 (OIDC)                      │  ├─ MinIO/S3 (:9000)  branding/docs
-      │                                   │  └─ Anthropic API   agentes de IA
+      ▲                                   │  ├─ Redis (:6379)      rate limiting + cache
+      │ Auth0 (OIDC)                      │  ├─ MinIO/S3 (:9000)   branding + documents
+      │                                   │  └─ Anthropic API      AI agents
                                           │
                                           │  claim-story / heartbeat
                                           │
                                    ┌──────┴─────────┐
-                                   │  apps/worker   │  flota del Forge (opcional)
-                                   │ factory-worker │  corre Claude Code headless
+                                   │  apps/worker   │  Forge fleet (optional)
+                                   │ factory-worker │  runs headless Claude Code
                                    └────────────────┘
 ```
 
-`packages/shared` contiene los tipos compartidos (web + api + worker). Detalle
-completo en **[docs/architecture.md](docs/architecture.md)**.
+`packages/shared` holds the types shared by web, api and worker. Full detail in
+**[docs/architecture.md](docs/architecture.md)**.
 
 ---
 
 ## Quick Start
 
-> Camino feliz garantizado para correr todo en local. La versión paso a paso
-> con explicaciones y troubleshooting está en
+> The guaranteed happy path for running everything locally. The step-by-step
+> version, with explanations and troubleshooting, is in
 > **[docs/getting-started.md](docs/getting-started.md)**.
 
-**Prerrequisitos:** [Node.js 22.19+](https://nodejs.org), [pnpm 9.15+](https://pnpm.io/installation)
-(`corepack enable`), [Docker](https://docs.docker.com/get-docker/) y una cuenta
-[Auth0](https://auth0.com) (el login es obligatorio — ver [docs/auth0-setup.md](docs/auth0-setup.md)).
+**Prerequisites:** [Node.js 22.19+](https://nodejs.org), [pnpm 9.15+](https://pnpm.io/installation)
+(`corepack enable`), [Docker](https://docs.docker.com/get-docker/) and an
+[Auth0](https://auth0.com) account (login is mandatory — see
+[docs/auth0-setup.md](docs/auth0-setup.md)).
 
 ```bash
-# 1. Clonar
+# 1. Clone
 git clone https://github.com/DamballahWedo99/CENZONTLE.git && cd CENZONTLE
 
-# 2. Configurar variables de entorno — ANTES de instalar: el postinstall corre
-#    `prisma generate`, que lee DATABASE_URL de apps/api/.env y falla sin él.
+# 2. Set the environment variables — BEFORE installing: the postinstall runs
+#    `prisma generate`, which reads DATABASE_URL from apps/api/.env and fails without it.
 cp apps/api/.env.example   apps/api/.env
 cp apps/web/.env.example   apps/web/.env.local
-#   → edita ambos: pega tus credenciales de Auth0 y genera los secretos:
+#   → edit both: paste your Auth0 credentials and generate the secrets:
 #     openssl rand -base64 32   # VAULT_ENCRYPTION_KEY (api)
-#     openssl rand -hex 32      # AUTH0_SECRET (web) e INTERNAL_API_KEY (mismo en api y web)
+#     openssl rand -hex 32      # AUTH0_SECRET (web)
 
-# 3. Instalar
-pnpm install                              # postinstall corre `prisma generate`
+# 3. Install
+pnpm install                              # postinstall runs `prisma generate`
 
-# 4. Levantar servicios locales (Postgres + Redis + MinIO) con un comando
-docker compose up -d                      # crea el bucket de MinIO automáticamente
+# 4. Bring up the local services (Postgres + Redis + MinIO) with one command
+docker compose up -d                      # creates the MinIO bucket automatically
 
-# 5. Migrar la base de datos
+# 5. Migrate the database
 pnpm --filter @cenzontle/api exec prisma migrate deploy
 
-# 6. Arrancar web + api
+# 6. Start web + api
 pnpm dev
 ```
 
-Abre **http://localhost:3000** → te redirige al login de Auth0 → tras
-autenticarte aterrizas en `/proyectos`. La API expone Swagger en
+Open **http://localhost:3000** → you get redirected to the Auth0 login → after you
+authenticate you land on `/proyectos`. The API exposes Swagger at
 **http://localhost:3001/api/docs**.
 
-> **Tu primer usuario admin** se crea en el dashboard de Auth0 (no hay seed de
-> usuarios). Ponle `app_metadata.role = "alta_gerencia"` y despliega la
-> post-login Action. Pasos exactos: **[docs/auth0-setup.md](docs/auth0-setup.md)**.
+> **Your first admin user** is created in the Auth0 dashboard (there is no user
+> seed). Give it `app_metadata.role = "alta_gerencia"` and deploy the post-login
+> Action. Exact steps: **[docs/auth0-setup.md](docs/auth0-setup.md)**.
 
-¿Algo falla? → **[docs/troubleshooting.md](docs/troubleshooting.md)**.
+Something broken? → **[docs/troubleshooting.md](docs/troubleshooting.md)**.
 
 ---
 
-## Comandos
+## Commands
 
-| Comando | Qué hace |
+| Command | What it does |
 |---|---|
-| `pnpm dev` | Build de `shared` + dev de **web + api** (lo más común) |
-| `pnpm dev:web` | Solo el frontend |
-| `pnpm dev:api` | Solo el backend |
-| `pnpm dev:unsafe` | Turbo dev de **todos** los workspaces (incluye worker) |
-| `pnpm build` | Build de producción de todo |
-| `pnpm lint` | ESLint en todos los workspaces |
-| `pnpm test` | Tests (Jest en api, Vitest en web/worker) |
-| `pnpm type-check` | Verificación de tipos (todos) |
-| `pnpm clean` | Limpia el cache de Turbo |
+| `pnpm dev` | Builds `shared`, then runs dev for **web + api** (the one you'll use most) |
+| `pnpm dev:web` | Frontend only |
+| `pnpm dev:api` | Backend only |
+| `pnpm dev:unsafe` | Turbo `dev` across **every** workspace (adds `shared` in watch mode and the worker CLI) |
+| `pnpm build` | Production build of everything |
+| `pnpm lint` | ESLint across every workspace |
+| `pnpm test` | Tests (Jest in api, Vitest in web and worker) |
+| `pnpm type-check` | Type checking (all workspaces) |
+| `pnpm clean` | Removes every workspace's build artifacts (`.next/`, `dist/`, `coverage/`, Playwright reports, `tsconfig.tsbuildinfo`) **and** the Turbo cache |
 
-Por workspace: `pnpm --filter @cenzontle/<web\|api\|worker\|shared> <script>`.
+`pnpm clean` does **not** remove or reinstall your dependencies, your `.env*` files,
+the generated Prisma client (which lives under `node_modules/`) or the Turbo daemon.
+The only thing it deletes inside `node_modules/` is `node_modules/.cache/turbo`, which
+is part of the Turbo cache.
+
+Per workspace: `pnpm --filter @cenzontle/<web\|api\|worker\|shared> <script>`.
 
 ---
 
-## Documentación
+## Documentation
 
-La documentación sigue el framework **[Diátaxis](https://diataxis.fr)** (tutorial /
-how-to / referencia / explicación):
+The documentation follows the **[Diátaxis](https://diataxis.fr)** framework
+(tutorial / how-to / reference / explanation). Full index:
+**[docs/README.md](docs/README.md)**.
 
-| Doc | Tipo | Para qué |
+| Doc | Type | What it's for |
 |---|---|---|
-| **[docs/getting-started.md](docs/getting-started.md)** | Tutorial | De cero a la app corriendo y con login, paso a paso |
-| **[docs/architecture.md](docs/architecture.md)** | Explicación | Cómo encaja todo: monorepo, apps, el Forge, data flow |
-| **[docs/configuration.md](docs/configuration.md)** | Referencia | TODAS las variables de entorno y servicios externos |
-| **[docs/auth0-setup.md](docs/auth0-setup.md)** | How-to | Configurar Auth0 y crear el primer admin |
-| **[docs/database.md](docs/database.md)** | How-to | Prisma: migraciones, seed, la trampa dual-Postgres |
-| **[docs/forge-worker.md](docs/forge-worker.md)** | How-to | Levantar y registrar un worker de la flota |
-| **[docs/troubleshooting.md](docs/troubleshooting.md)** | How-to | Los errores comunes y sus soluciones |
-| **[SECURITY.md](SECURITY.md)** | Explicación | Modelo de seguridad, sandbox del worker y cómo reportar vulnerabilidades |
-| **[CONTRIBUTING.md](CONTRIBUTING.md)** | How-to | Flujo de git, convenciones, review y tests |
-| **[CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md)** | Referencia | Las reglas de convivencia del proyecto |
-| **[CLAUDE.md](CLAUDE.md)** | Referencia | Convenciones del repo (para humanos y para Claude Code) |
+| **[docs/getting-started.md](docs/getting-started.md)** | Tutorial | From zero to the app running and logged in, step by step |
+| **[docs/glossary.md](docs/glossary.md)** | Reference | The vocabulary the rest of the docs assume — Forge, batch, wave, sign-off, gate, lens — derived from the schema and the shared types |
+| **[docs/architecture.md](docs/architecture.md)** | Explanation | How it all fits together: monorepo, apps, the Forge, data flow |
+| **[docs/data-model.md](docs/data-model.md)** | Reference | The entities behind the product — initiatives, epics, stories, Pods, Forge runs — and how they relate |
+| **[docs/api-reference.md](docs/api-reference.md)** | Reference | The API's HTTP surface: the endpoints, what they expect and what they return |
+| **[docs/authorization.md](docs/authorization.md)** | Reference | Who is allowed to do what: roles, permissions, Pod boundaries and vault access |
+| **[docs/configuration.md](docs/configuration.md)** | Reference | Every environment variable the code reads, and the external services behind them |
+| **[docs/auth0-setup.md](docs/auth0-setup.md)** | How-to | Configure Auth0 and create the first admin user |
+| **[docs/database.md](docs/database.md)** | How-to | Prisma: migrations, the seed, the dual-Postgres trap |
+| **[docs/forge-worker.md](docs/forge-worker.md)** | How-to | Build, register and start a worker of the fleet |
+| **[docs/troubleshooting.md](docs/troubleshooting.md)** | How-to | The common errors and how to fix them |
+| **[SECURITY.md](SECURITY.md)** | How-to | Security model, the worker sandbox, and how to report a vulnerability |
+| **[CONTRIBUTING.md](CONTRIBUTING.md)** | How-to | Git workflow, conventions, review and tests |
+| **[CHANGELOG.md](CHANGELOG.md)** | Reference | What changed in each version, and what you have to do when you upgrade |
+| **[CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md)** | Reference | How we treat each other in issues, pull requests and discussions |
+| **[CLAUDE.md](CLAUDE.md)** | Reference | Repo conventions (for humans and for Claude Code) |
+
+The documentation is in English; the application UI is still in Spanish. Wherever a
+doc names something on screen it quotes the literal Spanish label with an English
+gloss, so you can match what you read against what you see.
 
 ---
 
-## Stack tecnológico
+## Tech stack
 
-| Área | Tecnologías |
+| Area | Technologies |
 |---|---|
 | **Frontend** (`apps/web`) | Next.js 16, React 19, Tailwind 4, Radix UI, Tiptap, XYFlow, D3, Zod |
-| **Backend** (`apps/api`) | NestJS 11, Prisma 7, PostgreSQL, Redis, Socket.IO, Swagger, pino |
-| **Worker** (`apps/worker`) | TypeScript + Commander (CLI `factory-worker`), corre Claude Code headless |
-| **IA** | Anthropic Claude (SDK) — generación de épicas/historias/diagramas, Forge, QA |
-| **Infra dev** | Docker Compose (Postgres 16 · Redis 7 · MinIO), Auth0 (OIDC) |
+| **Backend** (`apps/api`) | NestJS 11, Prisma 7, PostgreSQL, Redis, Swagger, pino — agent output streams over SSE (`socket.io` is still in `package.json`, but no gateway uses it) |
+| **Worker** (`apps/worker`) | TypeScript + Commander (the `factory-worker` CLI), runs headless Claude Code |
+| **AI** | Anthropic Claude (SDK) — epic, story and diagram generation, the Forge, QA |
+| **Dev infrastructure** | Docker Compose (Postgres 16 · Redis 7 · MinIO), Auth0 (OIDC) |
 | **Tooling** | Turborepo, pnpm workspaces, ESLint 9, Jest, Vitest, Playwright |
 
 ---
 
-## Estructura del repo
+## Repo structure
 
 ```
 apps/
-  web/      → Next.js (frontend + BFF proxy a la API)
-  api/      → NestJS (REST + WebSocket + Prisma + agentes de IA)
-  worker/   → CLI `factory-worker` (flota del Forge)
+  web/      → Next.js (frontend + BFF proxy to the API)
+  api/      → NestJS (REST + SSE + Prisma + AI agents)
+  worker/   → the `factory-worker` CLI (the Forge fleet)
 packages/
-  shared/        → tipos compartidos (tsup: CJS + ESM)
-  ts-config/     → configs base de TypeScript
-  eslint-config/ → config compartida de ESLint
-docs/         → documentación (Diátaxis)
-docker-compose.yml  → Postgres + Redis + MinIO para dev local
+  shared/        → shared types (tsup: CJS + ESM)
+  ts-config/     → base TypeScript configs
+  eslint-config/ → shared ESLint config
+docs/         → documentation (Diátaxis)
+docker-compose.yml  → Postgres + Redis + MinIO for local dev
 ```
 
 ---
 
-## Estado del proyecto
+## Project status
 
-**Versión 0.1.0.** CENZONTLE está pensado y probado para **desarrollo local**:
-el [Quick Start](#quick-start) es el camino soportado y no hay todavía una guía
-de despliegue en producción.
+**Version 0.1.0.** CENZONTLE is designed and tested for **local development**: the
+[Quick Start](#quick-start) is the supported path, and there is no production
+deployment guide yet.
 
-- **La API no tiene garantía de estabilidad.** Los endpoints REST, los eventos
-  de WebSocket y los tipos de `packages/shared` pueden cambiar sin aviso entre
-  versiones. No construyas integraciones sobre ellos dando por hecho que van a
-  seguir igual.
-- El esquema de base de datos evoluciona por migraciones de Prisma; para
-  actualizar, corre `prisma migrate deploy` (ver [docs/database.md](docs/database.md)).
-- `pnpm type-check`, `pnpm lint`, `pnpm test` (Jest en `api` + Vitest en `web` y
-  `worker`) y `pnpm build` pasan en verde sobre un checkout limpio. Si alguno te
-  falla recién clonado, es un bug: [ábrenos un issue](https://github.com/DamballahWedo99/CENZONTLE/issues/new/choose).
-- La cobertura de tests es desigual: el backend está bien cubierto (874 casos) y
-  el frontend mucho menos (153, concentrados en el layout de diagramas). Los tests
-  en verde dicen poco sobre los componentes de React; revísalos a mano.
-- El Forge está validado de punta a punta en local (implementación, PR,
-  verificación de DoD y pipeline de QA), pero es la parte más joven y la que más
-  cuidado exige — lee la advertencia de arriba y [SECURITY.md](SECURITY.md).
+- **The API carries no stability guarantee.** The REST endpoints, the SSE event
+  streams and the types in `packages/shared` can change without notice between
+  versions. Do not build integrations on top of them assuming they will stay as
+  they are.
+- The database schema evolves through Prisma migrations; to update, run
+  `prisma migrate deploy` (see [docs/database.md](docs/database.md)).
+- `pnpm type-check`, `pnpm lint`, `pnpm test` (Jest in `api` + Vitest in `web` and
+  `worker`) and `pnpm build` pass on a clean checkout. If one of them fails on a
+  fresh clone, that's a bug:
+  [open an issue](https://github.com/DamballahWedo99/CENZONTLE/issues/new/choose).
+- Test coverage is uneven: the backend is well covered (874 Jest cases across 49
+  suites) and the worker reasonably so (134 Vitest cases across 7 files), the
+  frontend much less (165 Vitest cases, 9 of its 11 test files concentrated in the
+  diagram layout). Green tests say very little about the React components; review
+  those by hand.
+- The Forge is validated end to end locally (implementation, pull request, DoD
+  verification and the QA pipeline), but it is the youngest part and the one that
+  demands the most care — read the warning above and
+  [SECURITY.md](SECURITY.md).
 
 ---
 
-## Cómo contribuir
+## Contributing
 
-Branches por feature, PRs a `main`, commits con prefijo (`Feat:`, `Fix:`,
-`Refactor:`, `Docs:`, `Test:`, `Chore:`). El detalle —convenciones, checks que
-tu cambio debe pasar y cómo se revisa— está en **[CONTRIBUTING.md](CONTRIBUTING.md)**.
-Al participar aceptas el **[Código de conducta](CODE_OF_CONDUCT.md)**.
+Feature branches, pull requests to `main`, commits with a prefix (`Feat:`, `Fix:`,
+`Refactor:`, `Docs:`, `Test:`, `Chore:`). The detail — conventions, the checks your
+change has to pass and how it gets reviewed — is in
+**[CONTRIBUTING.md](CONTRIBUTING.md)**. By taking part you accept the
+**[Code of Conduct](CODE_OF_CONDUCT.md)**.
 
-La documentación de este repo está escrita en **español**. Los issues y los PRs
-son bienvenidos **en español o en inglés**: usa el idioma en el que te expreses
-mejor, nadie va a rechazar un aporte por eso.
+The documentation in this repo is written in **English**. Issues and pull requests
+are welcome **in English or Spanish**: use the language you express yourself best
+in, nobody is going to turn down a contribution over that.
 
-**¿Dónde pedir ayuda?**
+**Where do you ask for help?**
 
-| Quiero… | Ve a |
+| I want to… | Go to |
 |---|---|
-| Reportar un bug o proponer una feature | [Issues](https://github.com/DamballahWedo99/CENZONTLE/issues/new/choose) |
-| Preguntar, discutir ideas o enseñar lo que hiciste | [Discussions](https://github.com/DamballahWedo99/CENZONTLE/discussions) |
-| Reportar una vulnerabilidad (**nunca** en un issue público) | [Reporte privado de seguridad](https://github.com/DamballahWedo99/CENZONTLE/security/advisories/new) · [SECURITY.md](SECURITY.md) |
+| Report a bug or propose a feature | [Issues](https://github.com/DamballahWedo99/CENZONTLE/issues/new/choose) |
+| Ask something, discuss ideas or show what you built | [Discussions](https://github.com/DamballahWedo99/CENZONTLE/discussions) |
+| Report a vulnerability (**never** in a public issue) | [Private security report](https://github.com/DamballahWedo99/CENZONTLE/security/advisories/new) · [SECURITY.md](SECURITY.md) |
 
 ---
 
-## Licencia
+## License
 
-Distribuido bajo la licencia **Apache-2.0** — ver **[LICENSE](./LICENSE)**.
-Las atribuciones y licencias de terceros están en **[NOTICES.md](NOTICES.md)**.
+Distributed under the **Apache-2.0** license — see **[LICENSE](./LICENSE)**.
+Third-party attributions and licenses are in **[NOTICES.md](NOTICES.md)**.

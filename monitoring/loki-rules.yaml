@@ -1,58 +1,58 @@
 # ─────────────────────────────────────────────────────────────────────────────
-# Loki — reglas de alerta de la API CENZONTLE
+# Loki — alerting rules for the CENZONTLE API
 # ─────────────────────────────────────────────────────────────────────────────
 #
-# Formato: reglas de alerta estilo Prometheus para el RULER de Loki. El mismo
-# formato lo aceptan Grafana (alertas gestionadas sobre un datasource Loki),
-# Grafana Cloud y Grafana Mimir — así que esta regla sirve sea cual sea el
-# camino que uses.
+# Format: Prometheus-style alerting rules for Loki's RULER. The same format is
+# accepted by Grafana (managed alerts over a Loki datasource), Grafana Cloud and
+# Grafana Mimir — so this rule works whichever path you take.
 #
-# Cómo cargarla, según tu setup:
-#   • Loki self-hosted con ruler → montá este archivo en el directorio de reglas
-#     del ruler (`ruler.storage` local / `-ruler.rule-path`) y recargá Loki.
-#   • Grafana (UI)               → Alerting → New alert rule → datasource Loki,
-#     y copiá el `expr`, el `for`, los `labels` y las `annotations` de abajo.
+# How to load it, depending on your setup:
+#   • Self-hosted Loki with a ruler → mount this file in the ruler's rule
+#     directory (`ruler.storage` local / `-ruler.rule-path`) and reload Loki.
+#   • Grafana (UI)                  → Alerting → New alert rule → Loki
+#     datasource, then copy the `expr`, `for`, `labels` and `annotations` below.
 #
-# ⚠️  AJUSTAR el selector de stream `{service="cenzontle-api"}` al label real con
-#     que tu pipeline de logs (Promtail / Grafana Alloy / el shipper de tu
-#     plataforma) etiqueta los logs de la API. Puede ser `app`, `container`,
-#     `job`, `namespace`, etc. — este repo no incluye la config del shipper, así
-#     que el selector de abajo es un placeholder razonable, no un valor real.
+# ⚠️  ADJUST the stream selector `{service="cenzontle-api"}` to the label your
+#     log pipeline (Promtail / Grafana Alloy / your platform's shipper) actually
+#     puts on the API's logs. It may be `app`, `container`, `job`, `namespace`,
+#     etc. — this repo ships no shipper config, so the selector below is a
+#     reasonable placeholder, not a real value.
 #
-# Contexto: la API loguea en JSON (pino, ver app.module.ts). El rate limiter
-# usa `ResilientThrottlerStorage`, que emite un `warn` cuando pierde Redis y cae
-# a modo FAIL-OPEN — los caps de rate-limiting quedan DESACTIVADOS (los requests
-# pasan sin throttle) hasta que Redis vuelva. Esta alerta hace esa degradación
-# de un control de seguridad visible y accionable, en vez de un log que nadie
-# mira. El log ya está rate-limitado a 1 línea / 30s del lado de la app.
+# Context: the API logs JSON (pino, see app.module.ts). The rate limiter uses
+# `ResilientThrottlerStorage`, which emits a `warn` when it loses Redis and falls
+# back to FAIL-OPEN mode — the rate-limiting caps are DISABLED (requests pass
+# unthrottled) until Redis comes back. This alert makes that degradation of a
+# security control visible and actionable, instead of a log nobody reads. The log
+# is already rate-limited to 1 line / 30s on the app side.
 
 groups:
   - name: cenzontle-api-rate-limiter
     rules:
       - alert: RateLimiterFailOpen
-        # Cuenta las líneas que contienen "FAIL-OPEN" en los últimos 5m. Ese
-        # string es exclusivo del log de `ResilientThrottlerStorage.noteDegraded()`,
-        # así que el line-filter `|= "FAIL-OPEN"` alcanza sin parsear el JSON.
-        # Variante más precisa (opcional), si tu pipeline conserva el JSON:
+        # Counts the lines containing "FAIL-OPEN" over the last 5m. That string
+        # is unique to the `ResilientThrottlerStorage.noteDegraded()` log, so the
+        # `|= "FAIL-OPEN"` line filter is enough without parsing the JSON.
+        # A more precise variant (optional), if your pipeline keeps the JSON:
         #   {service="cenzontle-api"} | json | context = "ResilientThrottlerStorage"
         expr: |
           sum(count_over_time({service="cenzontle-api"} |= "FAIL-OPEN" [5m])) > 0
-        # `for: 0m` — alertar apenas aparece la primera línea. Un control de
-        # seguridad caído, aunque sea brevemente, vale un aviso; el rate-limit
-        # del log (1/30s) ya evita el spam. Si el equipo lo encuentra ruidoso
-        # ante blips de <30s, subir el umbral a `> 1` exige degradación sostenida.
+        # `for: 0m` — alert as soon as the first line shows up. A security
+        # control that is down, even briefly, is worth a notification; the log's
+        # own rate limit (1/30s) already prevents spam. If the team finds this
+        # noisy for sub-30s blips, raising the threshold to `> 1` requires
+        # sustained degradation.
         for: 0m
         labels:
           severity: warning
           component: rate-limiter
           service: cenzontle-api
         annotations:
-          summary: "Rate limiter de la API CENZONTLE en modo FAIL-OPEN"
+          summary: "CENZONTLE API rate limiter is in FAIL-OPEN mode"
           description: >-
-            ResilientThrottlerStorage no puede alcanzar Redis: el rate limiting
-            está temporalmente DESACTIVADO — los requests pasan sin throttle,
-            incluido el cap anti-brute-force del login. La API sigue sirviendo
-            normalmente (fail-open es por diseño). Acción: revisar la salud de
-            Redis (REDIS_HOST / REDIS_PORT) y la conectividad de la API; al
-            volver Redis los caps se re-activan solos, sin redeploy. La alerta
-            se auto-resuelve ~5m después de la última línea FAIL-OPEN.
+            ResilientThrottlerStorage cannot reach Redis: rate limiting is
+            temporarily DISABLED — requests pass unthrottled, including the
+            anti-brute-force cap on login. The API keeps serving normally
+            (fail-open is by design). Action: check Redis health (REDIS_HOST /
+            REDIS_PORT) and the API's connectivity; once Redis is back the caps
+            re-arm on their own, with no redeploy. The alert auto-resolves ~5m
+            after the last FAIL-OPEN line.

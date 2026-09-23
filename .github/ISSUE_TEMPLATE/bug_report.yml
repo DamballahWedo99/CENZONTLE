@@ -1,67 +1,67 @@
-name: 🐛 Reporte de bug
-description: Algo no funciona como debería
+name: 🐛 Bug report
+description: Something doesn't work the way it should
 labels: ["bug", "triage"]
 body:
   - type: markdown
     attributes:
       value: |
-        Gracias por reportar. Antes de continuar:
+        Thanks for reporting. Before you go on:
 
-        - Si el problema es una **vulnerabilidad de seguridad**, **no abras un issue público** —
-          sigue [SECURITY.md](../blob/main/SECURITY.md).
-        - Si es un error de arranque, revisa primero
-          [docs/troubleshooting.md](../blob/main/docs/troubleshooting.md): cubre los fallos
-          más comunes de setup.
+        - If the problem is a **security vulnerability**, **don't open a public issue** —
+          follow [SECURITY.md](../blob/main/SECURITY.md).
+        - If it's a startup failure, read
+          [docs/troubleshooting.md](../blob/main/docs/troubleshooting.md) first: it covers
+          the most common setup failures.
 
   - type: checkboxes
     id: preflight
     attributes:
-      label: Antes de reportar
+      label: Before you report
       options:
-        - label: Busqué en los issues existentes y no encontré este problema
+        - label: I searched the existing issues and didn't find this problem
           required: true
-        - label: Revisé `docs/troubleshooting.md`
+        - label: I read `docs/troubleshooting.md`
           required: true
-        - label: Esto **no** es una vulnerabilidad de seguridad
+        - label: This is **not** a security vulnerability
           required: true
 
   - type: dropdown
     id: area
     attributes:
-      label: ¿Dónde ocurre?
+      label: Where does it happen?
       options:
-        - "apps/web (frontend Next.js)"
-        - "apps/api (backend NestJS)"
-        - "apps/worker (flota del Forge)"
-        - "packages/shared (tipos compartidos)"
-        - "Setup / instalación / Docker"
-        - "Documentación"
-        - "No estoy seguro"
+        - "apps/web (Next.js frontend)"
+        - "apps/api (NestJS backend)"
+        - "apps/worker (Forge fleet)"
+        - "packages/shared (shared types)"
+        - "Setup / installation / Docker"
+        - "Documentation"
+        - "Not sure"
     validations:
       required: true
 
   - type: textarea
     id: what-happened
     attributes:
-      label: Qué pasó
-      description: Describe el comportamiento observado. Incluye el mensaje de error completo si lo hay.
+      label: What happened
+      description: Describe the behavior you observed. Include the full error message if there is one.
       placeholder: |
-        Al correr `pnpm dev`, la API arranca pero el frontend devuelve 503 en /proyectos...
+        Running `pnpm dev`, the API starts but the frontend returns 503 on /proyectos...
     validations:
       required: true
 
   - type: textarea
     id: expected
     attributes:
-      label: Qué esperabas que pasara
+      label: What you expected to happen
     validations:
       required: true
 
   - type: textarea
     id: repro
     attributes:
-      label: Pasos para reproducir
-      description: Lo más específico posible. Un repro que podamos correr vale más que una descripción larga.
+      label: Steps to reproduce
+      description: As specific as you can make it. A repro we can run beats a long description.
       value: |
         1.
         2.
@@ -72,9 +72,9 @@ body:
   - type: textarea
     id: environment
     attributes:
-      label: Entorno
+      label: Environment
       description: |
-        Pega la salida de:
+        Paste the output of:
         ```
         node --version && pnpm --version && docker --version && git rev-parse --short HEAD
         ```
@@ -85,10 +85,10 @@ body:
   - type: textarea
     id: logs
     attributes:
-      label: Logs relevantes
+      label: Relevant logs
       description: |
-        **Revisa que no contengan secretos** antes de pegarlos — tokens, `INTERNAL_API_KEY`,
-        `VAULT_ENCRYPTION_KEY`, claves de Anthropic o de Auth0. Redáctalos.
+        **Check that they carry no secrets** before you paste them — tokens,
+        `VAULT_ENCRYPTION_KEY`, Anthropic keys, Auth0 keys. Redact them.
       render: shell
     validations:
       required: false

@@ -1,0 +1,9 @@
+{
+  "extends": "@cenzontle/ts-config/nestjs.json",
+  "compilerOptions": {
+    "noEmit": true,
+    "baseUrl": "./"
+  },
+  "include": ["prisma/**/*.ts"],
+  "exclude": ["node_modules", "dist"]
+}

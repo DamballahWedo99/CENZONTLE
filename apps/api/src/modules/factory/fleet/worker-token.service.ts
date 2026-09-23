@@ -44,7 +44,7 @@ export class WorkerTokenService {
   async generate(nodeId: string, createdById: string | null): Promise<GeneratedToken> {
     const plaintext = this.generatePlaintext();
     const tokenHash = this.hashToken(plaintext);
-    // SECURITY (CWE-532): prefix corto (`worker_` + 4 chars = 8 visibles)
+    // SECURITY (CWE-532): prefix corto (`worker_` + 4 chars = 11 visibles)
     // para mostrar en UI. Antes guardábamos 12 chars que leakeaban 25 bits
     // del secret a logs/changelog (security-reviewer #2 MEDIUM 2026-05-06).
     // 4 chars = 20 bits de fixed prefix + ~135 bits del secret restante,

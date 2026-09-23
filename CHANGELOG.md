@@ -1,368 +1,444 @@
 # Changelog
 
-Todos los cambios relevantes de CENZONTLE se documentan en este archivo.
+Every notable change to CENZONTLE is documented in this file.
 
-El formato sigue [Keep a Changelog](https://keepachangelog.com/es-ES/1.1.0/) y el
-proyecto se adhiere al [Versionado Semántico](https://semver.org/lang/es/).
+The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the
+project adheres to [Semantic Versioning](https://semver.org).
 
-## Cómo leer este archivo
+## How to read this file
 
-- Cada versión agrupa sus cambios en **Añadido**, **Cambiado**, **Corregido**,
-  **Obsoleto**, **Eliminado** y **Seguridad**.
-- El bloque **⚠️ Requiere acción** aparece primero en cada versión y lista lo que
-  tienes que hacer tú al actualizar: aplicar migraciones de base de datos, definir
-  variables de entorno nuevas o ajustar tu despliegue. Si solo lees una parte de una
-  versión, que sea esa.
-- Las entradas describen qué cambia para quien **usa** el proyecto, no qué archivos se
-  tocaron.
+- Each version groups its changes into **Added**, **Changed**, **Fixed**,
+  **Deprecated**, **Removed** and **Security**.
+- The **⚠️ Action required** block comes first in every version and lists what *you*
+  have to do when you upgrade: apply database migrations, set new environment
+  variables, or adjust your deployment. If you only read one part of a version, read
+  that one.
+- Entries describe what changes for someone who **uses** the project, not which files
+  were touched.
+- The application UI is in Spanish; this file is in English. Where an entry names a
+  button or a screen, the literal Spanish label is in bold with an English gloss in
+  parentheses, so you can match what you read against what is on screen. Domain terms
+  are defined in [`docs/glossary.md`](docs/glossary.md).
 
 ---
 
 ## [Unreleased]
 
-Sin cambios registrados todavía.
+### Added
+
+- **[`docs/glossary.md`](docs/glossary.md)** — the vocabulary CENZONTLE uses for
+  itself, derived from the Prisma schema, the shared types and the `factory` module.
+  When a document and the glossary disagree, the glossary wins.
+- **`apps/api/tsconfig.seed.json`**, so `pnpm type-check` also type-checks
+  `apps/api/prisma/`. That directory sat outside the type check, which is exactly why
+  the database seed could stay broken without CI noticing.
+
+### Changed
+
+- **The documentation is now in English.** Every guide was translated from Spanish and
+  corrected against the code in the same pass. The application itself is still in
+  Spanish — the docs quote the literal UI labels so you can follow an English
+  instruction against a Spanish screen.
+
+### Fixed
+
+- **`prisma db seed` did not compile.** It referenced two models (`productOwner`,
+  `podProductOwner`) that had been dropped from the schema, so it failed before it
+  ever opened a connection. Rewritten: it now creates a small sample dataset — 2 pods,
+  1 initiative, 1 epic, its 2 epic↔pod rows and 3 stories — and it is **idempotent and
+  additive**. Everything is written with `upsert`, so re-running it is safe: it
+  **never deletes, and never overwrites a row it did not create**. Pods are matched by
+  name and left untouched if they already exist, and the epic `upsert` deliberately
+  leaves every Forge timestamp alone, so it cannot resurrect or overwrite a batch in
+  flight.
+- **`pnpm clean` did nothing.** The root script called `turbo clean`, but no workspace
+  declared a `clean` task and `turbo.json` did not define one. Each workspace now has
+  its own `clean` script and the root command removes every workspace's build
+  artifacts (`.next/`, `dist/`, `coverage/`, Playwright reports,
+  `tsconfig.tsbuildinfo`) **and** the Turbo cache. It does not remove or reinstall your
+  dependencies, your `.env*` files or the generated Prisma client; the only thing it
+  deletes inside `node_modules/` is `node_modules/.cache/turbo`, part of that cache.
+- **The end-to-end suite could not pass in a clean clone.** Playwright started only the
+  Next.js server, while part of the suite fetches the NestJS backend directly. It now
+  starts **two** servers — the API on `:3001` and web on `:3000` — waits on
+  `/api/health` for the API, honors `WEB_PORT` for the real port the front end binds
+  to (not just the URL the tests hit), and shuts the API down with `SIGTERM` so its
+  shutdown hooks run and no preview child processes are orphaned.
+- **Roughly 90 false statements in the documentation.** Screens that do not exist,
+  navigation paths that lead somewhere else, environment-variable contracts that did
+  not match the code, and commands described as doing something they did not do.
+
+### Removed
+
+- **`INTERNAL_API_KEY` is gone** from `apps/api/.env.example`, `apps/web/.env.example`,
+  the bug-report issue template and the documentation. **No code reads it.** The BFF
+  (Backend-for-Frontend) proxy in `apps/web` authenticates to the API by forwarding the
+  user's own Auth0 access token, and the API validates that token in a globally
+  registered `JwtAuthGuard` — one of the three `APP_GUARD` providers declared in
+  `apps/api/src/modules/auth/auth.module.ts`, alongside `RolesGuard` and
+  `PermissionsGuard`. The variable was a placeholder for a shared secret that the token
+  relay made unnecessary, and it never enforced anything. If you run an existing
+  deployment, delete it from both `.env` files — nothing changes.
 
 ---
 
 ## [0.1.0] - 2026-07-26
 
-Primera versión pública del monorepo. CENZONTLE es una plataforma de gestión de
-proyectos con una software factory ("el Forge") integrada: defines iniciativas, épicas
-e historias, agentes de IA te ayudan a redactarlas y diagramarlas, y el Forge despacha
-esas historias a una flota de workers que corren Claude Code para implementarlas,
-verificarlas contra un Definition of Done y llevarlas hasta un release gate humano.
+First public release of the monorepo. CENZONTLE is a project-management platform with
+a software factory built in ("the Forge"): you define initiatives, epics and stories,
+AI agents help you draft and diagram them, and the Forge dispatches those stories to a
+fleet of workers that run Claude Code to implement them, verify them against a
+Definition of Done, and carry them to a human release gate.
 
-### ⚠️ Requiere acción
+### ⚠️ Action required
 
-Esta es la primera versión: si vienes de un clon anterior a la publicación, trátalo como
-una instalación desde cero.
+This is the first release: if you are coming from a clone that predates publication,
+treat it as an installation from scratch.
 
-**Base de datos — 47 migraciones de Prisma que aplicar**
+**Database — 47 Prisma migrations to apply**
 
 ```bash
 pnpm --filter @cenzontle/api exec prisma migrate deploy
 ```
 
-Sin esto, el API arranca pero devuelve `503` con el código `P2021` (`relation "..." does
-not exist`) en cuanto tocas cualquier endpoint. Detalles y resolución de problemas en
-[`docs/database.md`](docs/database.md).
+Without this the API starts, but returns `503` with the code `P2021`
+(`relation "..." does not exist`) as soon as you touch any endpoint. Details and
+troubleshooting in [`docs/database.md`](docs/database.md).
 
-**Variables de entorno obligatorias**
+**Environment variables**
 
-El API (`apps/api/.env`) necesita estas tres, y las tres son nuevas si vienes de un
-estado anterior del proyecto:
+The `.env.example` files of 0.1.0 ask for these three, and all three are new if you
+are coming from an earlier state of the project:
 
-| Variable | Para qué sirve | Cómo generarla |
+| Variable | What it's for | How to generate it |
 | --- | --- | --- |
-| `DATABASE_URL` | Conexión a PostgreSQL | El `docker-compose.yml` incluido usa `postgresql://cenzontle:cenzontle_dev@localhost:5432/cenzontle` |
-| `VAULT_ENCRYPTION_KEY` | Llave maestra AES-256-GCM con la que se cifran **todos** los secretos guardados en la base (tokens de GitHub, API key de Anthropic, external secrets) | `openssl rand -base64 32` |
-| `INTERNAL_API_KEY` | Secreto compartido entre el BFF de `apps/web` y el API | `openssl rand -hex 32` |
+| `DATABASE_URL` | PostgreSQL connection | The bundled `docker-compose.yml` uses `postgresql://cenzontle:cenzontle_dev@localhost:5432/cenzontle` |
+| `VAULT_ENCRYPTION_KEY` | AES-256-GCM master key that encrypts **every** secret stored in the database (GitHub tokens, the Anthropic API key, external secrets) | `openssl rand -base64 32` |
+| `INTERNAL_API_KEY` | Shipped as a shared secret between the `apps/web` BFF and the API — but inert, see the note below | **Do not set it.** It is removed in [Unreleased](#unreleased) |
 
-Sin `VAULT_ENCRYPTION_KEY` el API **no arranca**: el servicio de cifrado falla en el
-arranque (`VAULT_ENCRYPTION_KEY missing or too short`) en lugar de cifrar con una llave
-por defecto insegura. Rotarla invalida todo lo ya cifrado en la base: exige re-cifrado
-manual.
+Without `VAULT_ENCRYPTION_KEY` the API **does not start**: the encryption service
+fails at boot (`VAULT_ENCRYPTION_KEY missing or too short`) instead of falling back to
+an insecure default key. Rotating it invalidates everything already encrypted in the
+database and requires manual re-encryption.
 
-`INTERNAL_API_KEY` va con **exactamente el mismo valor** en `apps/api/.env` y en
-`apps/web/.env.local`, como piden los `.env.example` y
-[`docs/configuration.md`](docs/configuration.md). Ojo: en 0.1.0 ningún componente lo
-verifica todavía —el BFF autentica reenviando el access token de Auth0 del usuario—, así
-que no lo trates como control de acceso.
+`INTERNAL_API_KEY` had to carry **exactly the same value** in `apps/api/.env` and
+`apps/web/.env.local`, as both `.env.example` files asked. **It was never an access
+control**: no component verifies it — the BFF authenticates by forwarding the user's
+Auth0 access token, and the API validates that token in a global guard. The variable
+is removed in [Unreleased](#unreleased); you can delete it from an existing
+deployment without consequences.
 
-Con `NODE_ENV=production` se suman las credenciales de almacenamiento (`S3_ACCESS_KEY`,
-`S3_SECRET_KEY`, `S3_BUCKET`, `S3_REGION`): si faltan, el API aborta el arranque. En
-local solo advierte y las operaciones de archivos fallan hasta que las configures.
+With `NODE_ENV=production` the storage credentials become mandatory too
+(`S3_ACCESS_KEY`, `S3_SECRET_KEY`, `S3_BUCKET`, `S3_REGION`): if they are missing, the
+API aborts at boot. Locally it only warns, and file operations fail until you
+configure them.
 
-**Auth0 es obligatorio y no tiene bypass de desarrollo.** Sin las variables de Auth0
-configuradas en web y API, el middleware falla cerrado con `503` y no puedes entrar ni en
-local. La guía paso a paso está en [`docs/auth0-setup.md`](docs/auth0-setup.md); la
-referencia completa de variables (incluidas `REDIS_*`, `S3_*`, `ANTHROPIC_API_KEY` y las
-opcionales de step-up auth `AUTH0_M2M_*`) está en
+**Auth0 is mandatory and has no development bypass.** Without the Auth0 variables set
+in web and API, the middleware fails closed with `503` and you cannot even get in
+locally. The step-by-step guide is in [`docs/auth0-setup.md`](docs/auth0-setup.md);
+the full variable reference (including `REDIS_*`, `S3_*`, `ANTHROPIC_API_KEY` and the
+optional step-up authentication variables `AUTH0_M2M_*`) is in
 [`docs/configuration.md`](docs/configuration.md).
 
-**Servicios de apoyo.** `docker compose up -d` levanta PostgreSQL 16, Redis 7 y MinIO,
-que son las dependencias de infraestructura del API (base, throttling/caché de sesiones
-y almacenamiento de documentos y assets de branding).
+**Supporting services.** `docker compose up -d` brings up PostgreSQL 16, Redis 7 and
+MinIO, which are the API's infrastructure dependencies (database, throttling and
+session caching, and storage for documents and branding assets).
 
-**Worker del Forge.** El CLI `factory-worker` ejecuta código generado por IA en tu
-máquina. Por defecto corre dentro de un sandbox (`sandbox-exec` en macOS, `firejail` en
-Linux). Desactivarlo exige un **doble opt-in explícito**:
-`FACTORY_WORKER_SANDBOX_MODE=none` **y** `FACTORY_WORKER_ALLOW_NO_SANDBOX=1`; si falta el
-segundo, el daemon arranca pero aborta cada historia antes de lanzar el agente. Ver
-[`docs/forge-worker.md`](docs/forge-worker.md).
+**Forge worker.** The `factory-worker` CLI runs AI-generated code on your machine. By
+default it runs inside a sandbox (`sandbox-exec` on macOS, `firejail` on Linux).
+Disabling it requires an explicit **double opt-in**:
+`FACTORY_WORKER_SANDBOX_MODE=none` **and** `FACTORY_WORKER_ALLOW_NO_SANDBOX=1`; if the
+second one is missing, the daemon starts but aborts every story before spawning the
+agent. See [`docs/forge-worker.md`](docs/forge-worker.md).
 
-### Añadido
+### Added
 
-#### Gestión de proyectos
+#### Project management
 
-- **Jerarquía completa de trabajo**: iniciativas → épicas → historias de usuario, con
-  estados, story points, fechas, asignación por células (pods) y matriz de trazabilidad.
-- **Vault de definiciones**: editor Tiptap propio respaldado por un repositorio de
-  GitHub, con árbol de carpetas, vista de grafo de documentos y changelog por documento.
-  El vault es la fuente de verdad del contenido; CENZONTLE es el único que escribe en él.
-- **Generación de épicas con IA**: un agente de Claude redacta la épica a partir de tu
-  contexto y la deja versionada en el vault.
-- **Generación de historias con tres agentes en cadena** (Product Owner → Tech Lead →
-  QA): el PO propone el alcance, el Tech Lead aporta diseño técnico y el QA la estrategia
-  de pruebas. El número de historias lo decide el agente según el alcance real de la
-  épica, con tope defensivo. Cada historia se materializa como carpeta en el vault con
-  definición de negocio, definición técnica y estrategia de testing.
-- **Dependencias y orden entre historias**: el Tech Lead emite un DAG de bloqueos
-  (`blockedBy`) y las dependencias externas descubiertas se listan con badges de tipo
-  duro/blando; aceptar propuestas refresca el grafo sin recargar la página.
-- **Diagramas de épica generados por IA** con panel lateral de pasos y documento de flujo
-  guardado en el vault, más un editor XYFlow con pan/zoom estilo Figma, nodos
-  personalizados, temas configurables, persistencia y autoguardado. Cada nodo del grafo
-  debe estar justificado en al menos un paso del documento (rango validado de 3 a 10
-  pasos).
-- **Tab de Diseño en épicas** con handoff a Claude para generar la referencia visual que
-  luego consume el Forge.
-- **Agente de conexiones del vault**: analiza todos los documentos, asigna tags temáticos
-  al frontmatter y así puebla la vista de grafo con conexiones reales. Preserva los tags
-  existentes y solo acepta tags que conecten entre 2 y 5 documentos.
-- **Resúmenes ejecutivos de iniciativa**: el backend calcula todas las métricas desde la
-  base (progreso, story points, distribución por estado, carga por pod, línea de tiempo,
-  dependencias) y la IA solo redacta la lectura ejecutiva anclada a esas cifras, con un
-  bloque de KPIs y cinco visualizaciones D3 (salud, calendario vs avance, distribución de
-  historias, carga por pod y progreso por épica). La IA nunca produce números.
-- **Asistente lateral de edición**: un chat que lee el vault, el código y los documentos,
-  y propone ediciones de iniciativas, épicas e historias con diff y aplicación
-  human-in-the-loop. El agente nunca escribe directo: tú apruebas cada cambio. Las
-  sesiones sobreviven a recargas del navegador.
-- **Protocolo de Visto Bueno** con tres aprobaciones (PO, Tech Lead, QA) y step-up
-  authentication por contraseña antes de aprobar. Alta Gerencia puede aprobar en
-  cualquier rol y el changelog conserva el nombre real de quien aprobó.
-- **Exportación de iniciativas, épicas e historias** a PDF, Excel, Word, CSV y JSON,
-  desde el menú contextual (clic derecho) con confirmación por escritura para acciones
-  destructivas.
-- **Documentos adjuntos**: subida a S3, preview inline de PDFs e imágenes en las tarjetas
-  y copia sincronizada al vault con el texto extraído, para que los agentes puedan leerlos
-  como contexto.
-- **Bóveda de secretos externos**: credenciales de terceros cifradas, con resolución
-  automática de la dependencia descubierta que las motivó. La API solo devuelve el valor
-  enmascarado.
-- **Modelo agnóstico de tracker**: los proyectos pueden vivir con o sin herramienta
-  externa; cuando no hay integración configurada, la UI usa identificadores cortos
-  internos y oculta los botones del tracker.
-- **Módulos de Equipo, Aprobaciones y Reportes**, con dashboards de gráficas y gestión de
-  miembros y células vía la Management API de Auth0.
+- **The full work hierarchy**: initiatives → epics → user stories, with statuses,
+  story points, dates, assignment to pods — **Células** ("Pods") in the UI — and a
+  traceability matrix.
+- **Definitions vault**: an in-house Tiptap editor backed by a GitHub repository, with
+  a folder tree, a document graph view and a per-document changelog. The vault is the
+  source of truth for content; CENZONTLE is its only writer.
+- **AI epic generation**: a Claude agent drafts the epic from your context and leaves
+  it versioned in the vault.
+- **Story generation with three chained agents** (Product Owner → Tech Lead → QA): the
+  PO proposes the scope, the Tech Lead adds the technical design and QA the test
+  strategy. The number of stories is the agent's call based on the epic's real scope,
+  with a defensive cap. Each story materializes as a vault folder holding its business
+  definition, technical definition and testing strategy.
+- **Dependencies and ordering between stories**: the Tech Lead emits a DAG of blockers
+  (`blockedBy`), and discovered external dependencies are listed with hard/soft type
+  badges; accepting a proposal refreshes the graph without a page reload.
+- **AI-generated epic diagrams**, with a side panel of steps and a flow document saved
+  to the vault, plus an XYFlow editor with Figma-style pan and zoom, custom nodes,
+  configurable themes, persistence and autosave. Every node in the graph must be
+  justified by at least one step of the document (validated range of 3 to 10 steps).
+- **A Design tab on epics**, with a handoff to Claude that generates the visual
+  reference the Forge later consumes.
+- **Vault connections agent**: it reads every document, assigns thematic tags to the
+  frontmatter and populates the graph view with real connections. It preserves
+  existing tags and only accepts tags that connect between 2 and 5 documents.
+- **Executive summaries per initiative**: the backend computes every metric from the
+  database (progress, story points, distribution by status, load per pod, timeline,
+  dependencies) and the AI only writes the executive reading, anchored to those
+  figures, with a KPI block and five D3 visualizations (health, calendar versus
+  progress, story distribution, load per pod and progress per epic). The AI never
+  produces numbers.
+- **Editing assistant sidebar**: a chat that reads the vault, the code and the
+  documents, and proposes edits to initiatives, epics and stories as a diff you apply
+  human-in-the-loop. The agent never writes directly — you accept every change.
+  Sessions survive a browser reload.
+- **Sign-off protocol** with three approvals (PO, Tech Lead, QA) and step-up
+  authentication by password before approving. The button is **Dar VoBo** ("sign
+  off"). Senior management (`alta_gerencia`) can sign off in any role, and the
+  changelog keeps the real name of whoever approved.
+- **Export of initiatives, epics and stories** to PDF, Excel, Word, CSV and JSON from
+  the right-click context menu, with type-to-confirm on destructive actions.
+- **Attached documents**: upload to S3, inline preview of PDFs and images on the
+  cards, and a synchronized copy in the vault with the extracted text, so the agents
+  can read them as context.
+- **External secrets vault**: encrypted third-party credentials, automatically
+  resolving the discovered dependency that motivated them. The API only ever returns
+  the masked value.
+- **Tracker-agnostic model**: projects can live with or without an external tool; when
+  no integration is configured, the UI falls back to short internal identifiers and
+  hides the tracker buttons.
+- **Team, Approvals and Reports modules**, with chart dashboards and management of
+  members and pods through the Auth0 Management API.
 
-#### El Forge
+#### The Forge
 
-- **Command Center de la software factory**: dashboard multi-batch, monitor de flota y
-  gestión de nodos de cómputo.
-- **CLI `factory-worker`**: se registra contra el dashboard con un token, expone slots de
-  ejecución y corre Claude Code en modo headless para implementar historias. Incluye
-  scripts de preflight que detectan setup faltante antes de arrancar el runner.
-- **Pipeline de cuatro etapas** — Forge → Staged → QA Testing → Released — con tablero
-  visual del estado de cada batch.
-- **Cola del Forge**: envías al Forge una épica ya aprobada y un planner LLM organiza las
-  historias en waves respetando el DAG de dependencias.
-- **Definition of Done configurable**: criterios basados en evidencia, verificador
-  adversarial que juzga cada criterio contra el diff, reintentos con backoff ante fallos
-  de infraestructura, escaneo de seguridad **diferencial** (solo penaliza advisories
-  nuevos frente a la rama base) y un verificador dedicado de seguridad de código donde
-  solo los hallazgos altos bloquean.
-- **Auto-merge entre historias** con resolución automática de conflictos.
-- **Staging gate**: aprobación humana del batch consolidado con cinco capas defensivas
-  (intersección de células, rol, step-up de contraseña, readiness de estado y control de
-  concurrencia optimista).
-- **Preview de batches**: levanta la aplicación generada en un entorno aislado, con
-  allowlist de variables de entorno (nunca expone la llave de cifrado ni la cadena de la
-  base) y bind a `127.0.0.1`.
-- **Pipeline de QA automático multi-agente**: al mergear un batch, una campaña abre en
-  paralelo cuatro lentes (suite de pruebas del repositorio, E2E en entorno efímero,
-  seguridad diferencial y rendimiento/accesibilidad), verifica los fallos de forma
-  adversarial —refutadores que votan por mayoría conservadora—, sintetiza un reporte con
-  recomendación de rollout o rollback y confianza honesta, y lo presenta en un release
-  gate humano con step-up auth. Un lente que falla no aborta la campaña.
-- **Dashboards con datos reales**, todos alimentados por endpoints del backend y no por
-  datos de ejemplo:
-  - **PRs**: qué pull requests existen por historia y por batch, cruzado con el estado y
-    el diffstat en vivo de GitHub, con caché de TTL asimétrico para no quemar el rate
-    limit.
-  - **Costos**: agregación de costo y tokens de todas las corridas de agentes (planner,
-    generador y verificador, reintentos incluidos) por batch y por historia, con
-    proyección a 30 días y un panel de "Costo de reintentos del DoD" que mide el
-    desperdicio del loop de verificación.
-  - **Logs**: stream de eventos derivado del estado ya persistido (ciclo de vida de la
-    épica y de la corrida, hitos técnicos del worker y veredictos del DoD), así que
-    sobrevive a reinicios del API, del worker o del navegador y se reconstruye
-    retroactivamente para batches viejos.
-  - **Velocity**: estimado en story points contra esfuerzo real (costo, duración y
-    reintentos), con clasificación sobre/calibrado/sub-estimado y un badge de desviación
-    en el detalle de la historia.
-  - **QA**: estado de la campaña, hallazgos por lente y aprobación del release gate.
-- **Loop de calibración al agente PO**: los agregados numéricos de velocity se inyectan
-  al prompt del Product Owner para que sus próximas estimaciones aprendan del histórico.
-- **Terminal en vivo del agente** (ttyd + tmux) para ver a Claude Code trabajando, con
-  subida de imágenes, hitos, resumen al completar la corrida y drawer de detalle por
-  agente.
-- **Ajustes de IA por agente** en `/factory/settings → Tokens IA`: cada agente (PO, Tech
-  Lead, QA, épicas, diagramas, asistente, worker y verificador de DoD) elige su modelo de
-  Claude y su nivel de esfuerzo, con catálogo de modelos verificado en vivo, además de
-  máximo de reintentos del DoD y duración máxima de corrida.
-- **Métricas de la factory** de costo y latencia por agente.
+- **Software factory command center**: a multi-batch dashboard, the Fleet Monitor on
+  `/factory/agents`, and compute-node management in Settings ("Configuración") →
+  Infraestructura → **Nodos de cómputo** ("Compute nodes")
+  (`/factory/settings?section=nodes`).
+- **`factory-worker` CLI**: registers against the dashboard with a worker token,
+  exposes execution slots, and runs Claude Code in headless mode to implement stories.
+  Ships preflight scripts that detect missing setup before the runner starts.
+- **Five-stage pipeline** — In Queue → Forge → Staged → QA Testing → Released — with a
+  visual board showing where every batch sits. The stage is derived from the epic's
+  timestamps, never stored as an enum.
+- **Forge queue**: you send a signed-off epic to the Forge with **Enviar al Forge**
+  ("Send to the Forge"), and an LLM planner arranges its stories into waves that
+  respect the dependency DAG.
+- **Configurable Definition of Done**: evidence-based criteria, an adversarial
+  verifier that judges each criterion against the diff, retries with backoff on
+  infrastructure failures, a **differential** security scan (only new advisories
+  against the base branch count against you) and a dedicated code-security verifier
+  where only high-severity findings block.
+- **Cross-story auto-merge** with automatic conflict resolution.
+- **Staging gate**: human approval of the consolidated batch behind five defensive
+  layers (pod intersection, role, password step-up, state readiness and optimistic
+  concurrency control).
+- **Batch previews**: brings the generated application up in an isolated environment,
+  with an environment-variable allowlist (it never exposes the encryption key or the
+  database connection string) and a bind to `127.0.0.1`.
+- **Automated multi-agent QA pipeline**: when a batch merges, a campaign opens four
+  lenses in parallel (the repository's test suite, e2e in an ephemeral preview
+  environment, differential security, and performance/accessibility), verifies the
+  findings adversarially — refuters that vote under a conservative majority rule —
+  synthesizes a report with a rollout-or-rollback recommendation and an honest
+  confidence score, and presents it at a human release gate with step-up
+  authentication. One failing lens does not abort the campaign.
+- **Dashboards on real data**, all fed by backend endpoints rather than sample data:
+  - **Pull Requests**: which pull requests exist per story and per batch, crossed with
+    live status and diffstat from GitHub, with an asymmetric TTL cache so the rate
+    limit survives.
+  - **Cost**: aggregated cost and tokens across every agent run (planner, generator
+    and verifier, retries included) per batch and per story, with a 30-day run-rate
+    projection and a **Costo de reintentos del DoD** ("Cost of DoD retries") panel that
+    measures the waste of the verification loop. All figures are client-side SDK
+    estimates, not billing.
+  - **Logs**: an event stream derived from state that is already persisted (epic and
+    run lifecycle, worker technical milestones and DoD verdicts), so it survives a
+    restart of the API, the worker or the browser and is reconstructed retroactively
+    for old batches.
+  - **Velocity**: story-point estimates against measured effort (cost, duration and
+    attempts), classified as over/calibrated/under-estimated, with a deviation badge
+    in the story detail.
+  - **QA**: campaign status, findings per lens, and release-gate approval.
+- **Calibration loop back to the PO agent**: the numeric velocity aggregates are
+  injected into the Product Owner's prompt so its next estimates learn from history.
+- **Live agent terminal** (ttyd + tmux) to watch Claude Code working, with image
+  upload, milestones, a summary when the run completes, and a per-agent detail drawer.
+- **Per-agent AI settings** in Settings → Automatización → **Tokens IA** ("AI tokens")
+  (`/factory/settings?section=agent-tokens`): every agent (PO, Tech Lead, QA, epics,
+  diagrams, assistant, worker and DoD verifier) picks its own Claude model and effort
+  level, from a live-verified model catalog, alongside the maximum number of DoD
+  attempts and the maximum run duration.
+- **Factory metrics** for cost and latency per agent.
 
-#### Infraestructura y seguridad
+#### Infrastructure and security
 
-- **Monorepo Turborepo + pnpm workspaces**: `apps/web` (Next.js 16, React 19, Tailwind 4,
-  Radix UI), `apps/api` (NestJS 11, Prisma 7, PostgreSQL, Redis, Socket.IO),
-  `apps/worker` (CLI del Forge) y los paquetes compartidos `shared`, `ts-config` y
+- **Turborepo + pnpm workspaces monorepo**: `apps/web` (Next.js 16, React 19,
+  Tailwind 4, Radix UI), `apps/api` (NestJS 11, Prisma 7, PostgreSQL, Redis),
+  `apps/worker` (the Forge CLI) and the shared packages `shared`, `ts-config` and
   `eslint-config`.
-- **Autenticación Auth0 con patrón BFF**: el navegador nunca habla directo con el API;
-  el frontend proxea las llamadas del lado del servidor.
-- **RBAC de cinco roles y 25 permisos** sobre toda la aplicación, más **ReBAC a nivel de
-  carpeta** en el vault, con matriz de permisos editable en la UI y aplicación del lado
-  del servidor.
-- **Cifrado en reposo AES-256-GCM** de todos los secretos guardados en la base.
-- **Sandbox de ejecución** del código generado por IA, específico por sistema operativo.
-- **Aislamiento por git worktree** para los agentes, de modo que dos corridas nunca se
-  pisen el árbol de trabajo.
-- **Branding por organización**: logo expandido, imagotipo colapsado, favicon y nombre,
-  configurables desde la UI, con almacenamiento S3/MinIO compatible con AWS y R2. Título
-  del navegador, sidebar y pantalla de login reaccionan sin recargar.
-- **`docker-compose.yml`** con PostgreSQL 16, Redis 7 y MinIO para levantar el entorno
-  local completo.
-- **Observabilidad**: logging estructurado con Pino y redacción de cabeceras y campos
-  sensibles, filtro de excepciones de Prisma que traduce los errores de base a mensajes
-  accionables (por ejemplo, "corre `prisma migrate deploy`"), healthcheck de S3 al
-  arranque y auditoría estructurada de las mutaciones administrativas.
-- **Throttling** de endpoints sensibles con almacenamiento en Redis compartido entre
-  réplicas y comportamiento fail-open si Redis se cae.
-- **Documentación de onboarding** siguiendo el framework Diátaxis en
-  [`docs/`](docs/README.md): tutorial de puesta en marcha, explicación de la arquitectura,
-  referencia de configuración y guías de Auth0, base de datos, worker del Forge y
-  resolución de problemas. Más [`README.md`](README.md),
-  [`CONTRIBUTING.md`](CONTRIBUTING.md) y [`SECURITY.md`](SECURITY.md).
-- **Plantillas de colaboración** en [`.github/`](.github): reporte de bug, solicitud de
-  funcionalidad, plantilla de pull request y configuración de Dependabot.
-- **Licencia Apache-2.0** ([`LICENSE`](LICENSE)), declarada también en el campo `license`
-  de los siete `package.json` del monorepo. Las atribuciones de terceros —incluidas las
-  dependencias con copyleft (LGPL, EPL, AGPL) y la única cuya licencia no está aprobada
-  por la OSI— viven en [`NOTICES.md`](NOTICES.md), con los textos completos en
-  [`LICENSES/`](LICENSES). La convivencia en el proyecto se rige por el
+- **Auth0 authentication with the BFF pattern**: the browser never talks to the API
+  directly; the front end proxies the calls server-side.
+- **RBAC with five roles and 25 permissions** across the whole application, with a
+  permission matrix you edit in the UI and enforcement on the server. Vault access
+  adds a relationship layer (ReBAC) on top: the server checks that you belong to one
+  of the vault's allowed pods and applies a deny-by-default role map. The richer
+  per-folder ACL model is consumed by the web client only — do not read folder-level
+  inheritance as a server-enforced guarantee.
+- **AES-256-GCM encryption at rest** for every secret stored in the database.
+- **Execution sandbox** for AI-generated code, specific to each operating system.
+- **Git worktree isolation** for the agents, so two runs never step on each other's
+  working tree.
+- **Per-organization branding**: expanded logo, collapsed mark, favicon and name,
+  configurable from the UI, with S3/MinIO storage compatible with AWS and R2. The
+  browser title, the sidebar and the login screen react without a reload.
+- **`docker-compose.yml`** with PostgreSQL 16, Redis 7 and MinIO to bring the whole
+  local environment up.
+- **Observability**: structured logging with Pino, with redaction of sensitive headers
+  and fields; a Prisma exception filter that translates database errors into
+  actionable messages (for example, "run `prisma migrate deploy`"); an S3 healthcheck
+  at boot; and structured auditing of administrative mutations.
+- **Throttling** of sensitive endpoints, stored in Redis and shared across replicas,
+  with fail-open behavior if Redis goes down.
+- **Onboarding documentation** following the Diátaxis framework in
+  [`docs/`](docs/README.md): a getting-started tutorial, an explanation of the
+  architecture, a configuration reference, and guides for Auth0, the database, the
+  Forge worker and troubleshooting. Plus [`README.md`](README.md),
+  [`CONTRIBUTING.md`](CONTRIBUTING.md) and [`SECURITY.md`](SECURITY.md).
+- **Collaboration templates** in [`.github/`](.github): bug report, feature request,
+  pull request template and Dependabot configuration.
+- **Apache-2.0 license** ([`LICENSE`](LICENSE)), also declared in the `license` field
+  of all seven `package.json` files in the monorepo. Third-party attributions —
+  including the copyleft dependencies (LGPL, EPL, AGPL) and the single one whose
+  license is not OSI-approved — live in [`NOTICES.md`](NOTICES.md), with the full
+  texts in [`LICENSES/`](LICENSES). Life in the project is governed by the
   [`CODE_OF_CONDUCT.md`](CODE_OF_CONDUCT.md) (Contributor Covenant 2.1).
-- El cliente de Prisma se regenera solo en el `postinstall` del API, así que después de
-  un `pull` con migraciones nuevas el proyecto compila sin pasos manuales.
+- The Prisma client regenerates itself in the API's `postinstall`, so after a `pull`
+  that brings new migrations the project compiles with no manual steps.
 
-### Cambiado
+### Changed
 
-- El repositorio pasó de ser una aplicación Next.js única a un **monorepo Turborepo con
-  backend NestJS**. Los comandos ahora se corren desde la raíz (`pnpm dev`, `pnpm build`,
-  `pnpm test`) o con `--filter` por workspace.
-- El vault se **reestructuró a una jerarquía anidada** (`iniciativas/<slug-id>/epics/<slug-id>/`
-  con subcarpetas de diagramas, documentos, dependencias, matrices e historias), de modo
-  que los agentes leen automáticamente todo el material de una épica antes de proponer
-  historias. La migración de vaults existentes es idempotente y se dispara desde un
-  endpoint de administración.
-- **Épicas e historias colapsaron sus campos separados a un único documento markdown**
-  por entidad, lo que simplifica la edición y la sincronización con el vault.
-- Los **dashboards del Forge dejaron de mostrar datos de ejemplo**: PRs, costos, logs y
-  velocity consumen endpoints reales, y las vistas que todavía no tienen fuente de datos
-  muestran un estado vacío honesto en lugar de cifras inventadas.
-- El panel de eficiencia por componente se reemplazó por **"Costo de reintentos del
-  DoD"**: el costo por cada mil tokens era una constante del modelo y no accionable; el
-  desperdicio del loop de verificación sí lo es.
-- Un fallo del verificador de DoD ahora marca el criterio como **omitido**, no como
-  fallido: un error del medidor no penaliza al agente que escribió el código.
-- El editor de definiciones dejó de depender de Obsidian y pasó a ser un **editor propio
-  basado en Tiptap** dentro de la aplicación.
-- El selector de vault se movió a Ajustes y la acción se renombró a "Vincular", para que
-  quede claro que asocia un repositorio existente en lugar de crear uno.
-- La referencia de diseño ahora viaja **inline en el prompt** del agente que escribe el
-  código, porque el worker corre Claude Code sin herramientas de vault y no podía leerla
-  de otro modo. Es lo que permite resultados fieles al diseño.
-- **Una instalación nueva arranca vacía de verdad.** Antes, los sprints y las ceremonias
-  se inicializaban con datos inventados que ninguna API reemplazaba nunca, y el detalle de
-  un batch del Forge mostraba épicas de ejemplo fijas. Ahora ambos parten vacíos y la UI
-  muestra su estado vacío correspondiente hasta que exista información real.
-- El ejemplo que guía al agente de épicas se reescribió sobre un **dominio ficticio**. El
-  formato y el nivel de detalle son los mismos —de ellos depende la calidad de lo que
-  genera—, pero ya no describe la operación de ninguna organización concreta.
+- The repository went from a single Next.js application to a **Turborepo monorepo with
+  a NestJS backend**. Commands now run from the repo root (`pnpm dev`, `pnpm build`,
+  `pnpm test`) or per workspace with `--filter`.
+- The vault was **restructured into a nested hierarchy**
+  (`iniciativas/<slug-id>/epics/<slug-id>/` with subfolders for diagrams, documents,
+  dependencies, matrices and stories), so the agents automatically read all of an
+  epic's material before proposing stories. Migrating existing vaults is idempotent
+  and is triggered from an admin endpoint.
+- **Epics and stories collapsed their separate fields into a single markdown document**
+  per entity, which simplifies both editing and vault synchronization.
+- The **Forge dashboards stopped showing sample data**: Pull Requests, Cost, Logs and
+  Velocity consume real endpoints, and the views that still have no data source show an
+  honest empty state instead of invented figures.
+- The per-component efficiency panel was replaced by **Costo de reintentos del DoD**
+  ("Cost of DoD retries"): cost per thousand tokens was a constant of the model and not
+  actionable; the waste of the verification loop is.
+- A DoD verifier failure now marks the criterion **skipped**, not failed: an error in
+  the measuring instrument does not penalize the agent that wrote the code.
+- The definitions editor stopped depending on Obsidian and became an **in-house
+  Tiptap-based editor** inside the application.
+- The vault selector moved into Settings → Integraciones → **Vault**
+  (`/factory/settings?section=vault`) and the action was renamed to **Vincular**
+  ("Link"), to make clear that it associates an existing repository rather than
+  creating one.
+- The design reference now travels **inline in the prompt** of the agent that writes
+  the code, because the worker runs Claude Code without vault tools and could not read
+  it any other way. That is what makes the output faithful to the design.
+- **A fresh install now really does start empty.** Sprints and ceremonies used to be
+  initialized with invented data that no API ever replaced, and the detail of a Forge
+  batch showed fixed sample epics. Both now start empty, and the UI shows its
+  corresponding empty state until real information exists.
+- The example that guides the epic agent was rewritten around a **fictional domain**.
+  The format and the level of detail are the same — the quality of what it generates
+  depends on them — but it no longer describes any real organization's operation.
 
-### Corregido
+### Fixed
 
-- El dashboard de costos del Forge crasheaba con `Cannot read properties of undefined` y,
-  cuando no crasheaba, mostraba datos ficticios.
-- La vista de logs del Forge quedaba permanentemente vacía con el mensaje "Logs del Forge
-  sin conectar".
-- El preview de proyectos Vite mostraba una página en blanco (ahora se sirve por el dev
-  server en vez de como estático) y los procesos de preview quedaban huérfanos al cerrar
-  el API (ahora se matan por grupo de procesos y en `SIGINT`/`SIGTERM`).
-- Épicas válidas se reportaban como "definición incompleta" por un desajuste entre los
-  encabezados requeridos del frontend y los del backend.
-- Recargar `/factory/settings` redirigía a `/factory` porque el gate de autenticación
-  evaluaba permisos antes de terminar de cargar la sesión.
-- Los gráficos D3 provocaban un hydration mismatch en el render del servidor.
-- `pnpm lint` fallaba en los workspaces `web` y `shared` por configuraciones de ESLint
-  inexistentes.
-- El build de Next.js rompía en la página de Definiciones por usar `useSearchParams()` sin
-  un límite de `Suspense`.
-- El agente de diagramas podía emitir nodos decorativos sin ningún paso que los
-  justificara, y el rango declarado de 3 a 10 pasos era solo una sugerencia del prompt:
-  ahora ambos se validan y se rechaza el diagrama incoherente.
-- El agente PO alucinaba rutas del vault cuando el prompt le pedía leer material que la
-  épica no tenía; ahora descubre las rutas reales antes de leer.
-- Las respuestas de los agentes se truncaban a mitad de JSON al superar el límite de
-  tokens de salida.
-- Los identificadores cortos internos sustituyen al guión vacío que aparecía en siete
-  lugares de la UI cuando no había tracker externo configurado.
-- Los enlaces a ramas y pull requests del Forge apuntaban a un repositorio fijo, así que
-  daban 404 para cualquiera que configurara el suyo. Ahora se derivan del repositorio
-  configurado, y cuando no hay ninguno muestran texto plano en vez de un enlace roto.
-- Tres vistas del Forge llamaban `useMemo` de forma condicional, después de un retorno
-  temprano. React identifica los hooks por orden de llamada, así que ese orden se
-  desalineaba al pasar de "cargando" a "cargado" — y en dos de ellas el hook afectado era
-  el que valida el esquema de la URL que se carga en un `iframe`.
-- La tarjeta de métricas de un batch leía el reloj durante el render, lo que hacía el
-  render impuro y podía provocar desajustes de hidratación.
+- The Forge cost dashboard crashed with `Cannot read properties of undefined` and,
+  when it did not crash, showed fictional data.
+- The Forge logs view stayed permanently empty with the message *"Logs del Forge sin
+  conectar"* ("Forge logs not connected").
+- Previews of Vite projects rendered a blank page (they are now served by the dev
+  server instead of statically), and preview processes were orphaned when the API shut
+  down (they are now killed by process group and on `SIGINT`/`SIGTERM`).
+- Valid epics were reported as *"definición incompleta"* ("incomplete definition")
+  because the headings the front end required did not match the backend's.
+- Reloading `/factory/settings` redirected to `/factory`, because the authentication
+  gate evaluated permissions before the session had finished loading.
+- The D3 charts caused a hydration mismatch during server rendering.
+- `pnpm lint` failed in the `web` and `shared` workspaces because of ESLint
+  configurations that did not exist.
+- The Next.js build broke on the Definitions page because it used `useSearchParams()`
+  without a `Suspense` boundary.
+- The diagram agent could emit decorative nodes with no step to justify them, and the
+  declared range of 3 to 10 steps was only a suggestion in the prompt: both are now
+  validated, and an incoherent diagram is rejected.
+- The PO agent hallucinated vault paths when the prompt asked it to read material the
+  epic did not have; it now discovers the real paths before reading.
+- Agent responses were truncated mid-JSON when they hit the output token limit.
+- Short internal identifiers now replace the empty dash that showed up in seven places
+  in the UI when no external tracker was configured.
+- Links to Forge branches and pull requests pointed at a hard-coded repository, so they
+  404'd for anyone who configured their own. They are now derived from the configured
+  repository, and when there is none they render plain text instead of a broken link.
+- Three Forge views called `useMemo` conditionally, after an early return. React
+  identifies hooks by call order, so that order shifted when the view went from
+  "loading" to "loaded" — and in two of them the affected hook was the one validating
+  the scheme of the URL loaded into an `iframe`.
+- A batch's metrics card read the clock during render, which made the render impure and
+  could cause hydration mismatches.
 
-### Seguridad
+### Security
 
-- **Inyección de prompt (CWE-1427)**: el texto que escribe el usuario se escapa antes de
-  llegar a los agentes generadores, y el contenido de documentos y rutas del vault se
-  inyecta con banners que lo marcan explícitamente como datos, no como instrucciones.
-- **Autorización a nivel de objeto por células (CWE-639 / BOLA)** en iniciativas, épicas
-  e historias, fail-closed: quien no tiene células asignadas no ve nada, y `findOne`
-  devuelve `404` en vez de `403` para no filtrar la existencia de identificadores. Los
-  agentes que emiten eventos autorizan por la **unión** de las células de la épica y las
-  de sus historias, cerrando una fuga en épicas sin células propias. Crear o reasignar
-  contenido a otra célula también quedó bloqueado.
-- **Path traversal**: guards en la resolución de rutas del vault, en las referencias de
-  diseño y en los documentos de flujo previos.
-- **Secretos**: cifrado AES-256-GCM con derivación de llave e IV aleatorio por operación;
-  el valor en claro nunca se devuelve por HTTP ni se escribe en logs. Escaneo del diff
-  antes de hacer push, bloqueo de nombres de variables reservadas y depuración de
-  secretos (`scrubSecrets`) en salidas de herramientas, en el razonamiento visible de los
-  agentes y en la evidencia de QA. El sandbox del worker le niega al agente la lectura de
-  las credenciales del host (`~/.ssh`, `~/.aws`, `~/.config/gh`, `~/.netrc`, `~/.npmrc` y
-  compañía), y la URL autenticada del clon se redacta de logs y mensajes de error antes de
-  llegar al backend o a la UI.
-- **Inyección de YAML** en el frontmatter del vault y **inyección en logs (CWE-117)**
-  neutralizadas con normalización estricta.
-- **Assets de branding**: solo se aceptan imágenes ráster (nada de SVG, para evitar XSS),
-  se validan los magic bytes contra el tipo declarado y se sirven con `nosniff`, CSP
-  restrictiva y `Content-Disposition: inline`.
-- **Terminal de agentes**: defensa en tres capas contra escape de shell y bitácora de
-  auditoría en JSONL.
-- **Guard del worker fail-closed** por defecto y forzado de completitud bloqueado cuando
+- **Prompt injection (CWE-1427)**: user-written text is escaped before it reaches the
+  generating agents, and the content of vault documents and paths is injected with
+  banners that mark it explicitly as data, not instructions.
+- **Object-level authorization by pod (CWE-639 / BOLA)** on initiatives, epics and
+  stories, fail-closed: someone with no pods assigned sees nothing, and `findOne`
+  returns `404` instead of `403` so it does not leak the existence of identifiers. The
+  agents that emit events authorize against the **union** of the epic's pods and its
+  stories' pods, closing a leak on epics with no pods of their own. Creating or
+  reassigning content into another pod is blocked too.
+- **Path traversal**: guards on vault path resolution, on design references and on
+  prior flow documents.
+- **Secrets**: AES-256-GCM encryption with key derivation and a random IV per
+  operation; the plaintext value is never returned over HTTP and never written to
+  logs. The diff is scanned before every push, reserved variable names are blocked, and
+  secrets are scrubbed (`scrubSecrets`) from tool output, from the agents' visible
+  reasoning and from QA evidence. The worker sandbox denies the agent any read of the
+  host's credentials (`~/.ssh`, `~/.aws`, `~/.config/gh`, `~/.netrc`, `~/.npmrc` and
+  friends), and the authenticated clone URL is redacted from logs and error messages
+  before it reaches the backend or the UI.
+- **YAML injection** in the vault frontmatter and **log injection (CWE-117)**
+  neutralized with strict normalization.
+- **Branding assets**: only raster images are accepted (no SVG, to avoid XSS), magic
+  bytes are validated against the declared type, and they are served with `nosniff`, a
+  restrictive CSP and `Content-Disposition: inline`.
+- **Agent terminal**: three layers of defense against shell escape, plus a JSONL audit
+  log.
+- **Worker guard fail-closed** by default, and forced completion blocked when
   `NODE_ENV=production`.
-- **Throttling** en `verify-password` y en los endpoints de aprobación.
-- Operaciones destructivas (como realinear la rama de desarrollo contra `main`)
-  protegidas por rol y step-up de contraseña.
-- Política de reporte de vulnerabilidades publicada en [`SECURITY.md`](SECURITY.md).
+- **Throttling** on `verify-password` and on the approval endpoints.
+- Destructive operations (such as realigning the development branch against `main`)
+  protected by role and password step-up.
+- Vulnerability reporting policy published in [`SECURITY.md`](SECURITY.md).
 
 ---
 
-## Nota sobre la estabilidad
+## A note on stability
 
-CENZONTLE está **antes de la 1.0**. Mientras la versión mayor sea `0`, cualquier release
-menor puede traer cambios incompatibles: endpoints de la API, formas de los payloads,
-esquema de la base de datos, nombres de variables de entorno y contratos de los tipos
-compartidos pueden cambiar sin período de deprecación. Fija una versión concreta si
-construyes encima y lee el bloque **⚠️ Requiere acción** de cada versión antes de
-actualizar.
+CENZONTLE is **pre-1.0**. While the major version is `0`, any minor release can bring
+breaking changes: API endpoints, payload shapes, the database schema, environment
+variable names and the shared type contracts can all change with no deprecation
+period. Pin a specific version if you build on top of this, and read the **⚠️ Action
+required** block of every release before you upgrade.
+
+<!--
+  There is no `v0.1.0` git tag yet, and the root `package.json` declares no `version`.
+  The 0.1.0 link points at the commit that published the repository, so it keeps
+  resolving to that state once `main` moves on. Replace both links with tag
+  comparisons the day tags exist.
+-->
 
 [Unreleased]: https://github.com/DamballahWedo99/CENZONTLE/commits/main
-[0.1.0]: https://github.com/DamballahWedo99/CENZONTLE/tree/main
+[0.1.0]: https://github.com/DamballahWedo99/CENZONTLE/commit/42437e8de2ec40d6aa964783928421e3e2a54648

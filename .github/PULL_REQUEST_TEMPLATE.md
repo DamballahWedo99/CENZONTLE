@@ -1,45 +1,46 @@
 <!--
-Gracias por contribuir. Antes de abrir el PR, revisa CONTRIBUTING.md.
-Las secciones que no apliquen puedes borrarlas — no dejes plantilla vacía.
+Thanks for contributing. Read CONTRIBUTING.md before you open the PR.
+Delete the sections that don't apply — don't leave an empty template behind.
 -->
 
-## Qué cambia
+## What changes
 
-<!-- Una o dos frases. El título del PR ya dice el "qué"; aquí interesa el alcance. -->
+<!-- One or two sentences. The PR title already says the "what"; what matters here is the scope. -->
 
-## Por qué
+## Why
 
 <!--
-El contexto que no se ve en el diff: qué problema resuelve, qué alternativa
-descartaste y por qué. Si cierra un issue, escribe "Closes #123".
+The context the diff doesn't show: what problem this solves, what alternative you
+discarded and why. If it closes an issue, write "Closes #123".
 -->
 
-## Cómo lo probaste
+## How you tested it
 
 <!--
-Concreto y reproducible. "Corrí los tests" no dice nada; "agregué un caso en
-apps/api/src/modules/factory/qa/qa-campaign.service.spec.ts que cubre el CAS
-concurrente, y verifiqué a mano el gate en la UI" sí.
+Be concrete and reproducible. "I ran the tests" says nothing; "I added a case to
+apps/api/src/modules/factory/qa/qa-stage.spec.ts covering the precedence between
+qaCompletedAt and releaseApprovedAt, and checked the gate by hand in the UI" does.
 -->
 
 ## Checklist
 
-- [ ] `pnpm type-check` pasa
-- [ ] `pnpm lint` pasa
-- [ ] `pnpm test` pasa
-- [ ] El commit usa un prefijo del repo (`Feat:` `Fix:` `Refactor:` `Docs:` `Test:` `Chore:`)
-- [ ] No incluye secretos, `.env`, ni credenciales reales (tampoco en logs o capturas)
+- [ ] `pnpm type-check` passes
+- [ ] `pnpm lint` passes
+- [ ] `pnpm test` passes
+- [ ] The commit uses one of the repo's prefixes (`Feat:` `Fix:` `Refactor:` `Docs:` `Test:` `Chore:`)
+- [ ] No secrets, no `.env`, no real credentials (not in logs or screenshots either)
 
-<!-- Marca solo lo que aplique a este cambio: -->
+<!-- Check only what applies to this change: -->
 
-- [ ] **Schema de Prisma tocado** → generé la migración con `pnpm --filter @cenzontle/api exec prisma migrate dev --name <desc>` y commiteé el `.sql`
-- [ ] **Variable de entorno nueva** → la documenté en el `.env.example` correspondiente **y** en `docs/configuration.md`
-- [ ] **Dependencia nueva con licencia copyleft o de atribución** (GPL/LGPL/AGPL/MPL/EPL) → la agregué a `NOTICES.md`
-- [ ] **Cambio de comportamiento visible** → actualicé la documentación en `docs/`
+- [ ] **Touched the Prisma schema** → I generated the migration with `pnpm --filter @cenzontle/api exec prisma migrate dev --name <desc>` and committed the `.sql`
+- [ ] **New environment variable** → I documented it in the matching `.env.example` **and** in `docs/configuration.md`
+- [ ] **New dependency under a copyleft or attribution license** (GPL/LGPL/AGPL/MPL/EPL) → I added it to `NOTICES.md`
+- [ ] **User-visible behavior change** → I updated the documentation under `docs/`
 
-## Notas para quien revisa
+## Notes for reviewers
 
 <!--
-Dónde mirar primero, qué parte te preocupa, qué dejaste fuera a propósito.
-Si hay algo que sabes que está a medias, dilo aquí en vez de esperar que se note.
+Where to look first, which part worries you, what you deliberately left out.
+If you know something is half-finished, say it here instead of waiting for someone
+to notice.
 -->
