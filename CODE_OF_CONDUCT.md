@@ -1,180 +1,185 @@
-# Código de conducta
+# Code of Conduct
 
-## Nuestro compromiso
+## Our Pledge
 
-Quienes integramos, contribuimos y mantenemos este proyecto nos comprometemos a
-hacer de la participación en CENZONTLE una experiencia libre de acoso para toda
-la gente, sin importar edad, complexión física, discapacidad visible o invisible,
-origen étnico, características sexuales, identidad y expresión de género, nivel
-de experiencia, formación, situación socioeconómica, nacionalidad, apariencia
-personal, raza, religión, o identidad y orientación sexual.
+We as members, contributors, and leaders pledge to make participation in our
+community a harassment-free experience for everyone, regardless of age, body
+size, visible or invisible disability, ethnicity, sex characteristics, gender
+identity and expression, level of experience, education, socio-economic status,
+nationality, personal appearance, race, caste, color, religion, or sexual
+identity and orientation.
 
-Nos comprometemos a actuar e interactuar de maneras que construyan una comunidad
-abierta, acogedora, diversa, inclusiva y sana.
-
----
-
-## Nuestros estándares
-
-Ejemplos de comportamiento que contribuye a un ambiente positivo:
-
-- Mostrar empatía y amabilidad hacia otras personas.
-- Respetar opiniones, puntos de vista y experiencias distintas a las propias.
-- Dar y aceptar retroalimentación constructiva.
-- Asumir la responsabilidad de nuestros errores, disculparnos con quienes se
-  vieron afectados y aprender de la experiencia.
-- Enfocarnos en lo que es mejor para la comunidad, no solo para nosotros.
-
-Ejemplos de comportamiento inaceptable:
-
-- Lenguaje o imágenes sexualizadas, y atención o insinuaciones sexuales de
-  cualquier tipo.
-- Comentarios ofensivos o despectivos, y ataques personales o políticos.
-- Acoso público o privado.
-- Publicar información privada de otras personas —dirección física, correo
-  electrónico— sin su permiso explícito.
-- Cualquier otra conducta que razonablemente se consideraría inapropiada en un
-  entorno profesional.
+We pledge to act and interact in ways that contribute to an open, welcoming,
+diverse, inclusive, and healthy community.
 
 ---
 
-## Cómo se ve esto en CENZONTLE
+## Our Standards
 
-Lo anterior es genérico a propósito. Estas son las formas concretas en que
-aplica a este repo:
+Examples of behavior that contributes to a positive environment for our
+community include:
 
-- **La revisión de código es sobre el código.** "Este query hace un N+1" es
-  retroalimentación; "no sabes SQL" es un ataque personal. La distinción no es
-  de tono, es de sujeto: se critica el cambio, no a quien lo escribió.
-- **Parte del código de este repo lo escriben agentes de IA** (el Forge genera
-  PRs). Revisa un PR generado por un agente con el mismo rigor que uno humano —
-  y no uses "lo escribió un agente" ni como excusa para abrir un PR que no
-  revisaste, ni como argumento para descalificar a quien lo abrió. Quien manda
-  el PR responde por él.
-- **Reportar un problema de seguridad de buena fe nunca es motivo de sanción**,
-  aunque el reporte resulte ser un falso positivo. Lee
-  [SECURITY.md](SECURITY.md) antes de reportar.
-- **Aquí se escribe en español y en inglés.** Que alguien escriba en su segundo
-  idioma, o mezcle los dos, no es motivo de burla ni de corrección no pedida.
-- **"No sé" y "me equivoqué" son respuestas válidas** y no bajan el estatus de
-  nadie. Este es un proyecto mantenido por poca gente: la persona que responde
-  tu issue probablemente está aprendiendo la mitad de esto contigo.
+- Demonstrating empathy and kindness toward other people
+- Being respectful of differing opinions, viewpoints, and experiences
+- Giving and gracefully accepting constructive feedback
+- Accepting responsibility and apologizing to those affected by our mistakes,
+  and learning from the experience
+- Focusing on what is best not just for us as individuals, but for the overall
+  community
 
----
+Examples of unacceptable behavior include:
 
-## Responsabilidades de aplicación
-
-Quienes mantienen el proyecto son responsables de aclarar y hacer cumplir estos
-estándares, y tomarán acciones correctivas justas y apropiadas ante cualquier
-comportamiento que consideren inapropiado, amenazante, ofensivo o dañino.
-
-Tienen el derecho y la responsabilidad de eliminar, editar o rechazar
-comentarios, commits, código, issues, pull requests y otras contribuciones que
-no se alineen con este código de conducta, y comunicarán las razones de sus
-decisiones de moderación cuando sea apropiado.
+- The use of sexualized language or imagery, and sexual attention or advances of
+  any kind
+- Trolling, insulting or derogatory comments, and personal or political attacks
+- Public or private harassment
+- Publishing others' private information, such as a physical or email address,
+  without their explicit permission
+- Other conduct which could reasonably be considered inappropriate in a
+  professional setting
 
 ---
 
-## Alcance
+## What this looks like in CENZONTLE
 
-Este código de conducta aplica en todos los espacios del proyecto: issues, pull
-requests, discusiones, revisiones de código y los avisos privados de seguridad.
-Aplica también cuando alguien representa al proyecto en espacios públicos —por
-ejemplo, usando una cuenta oficial o participando como representante en un
-evento.
+The section above is generic on purpose. These are the concrete ways it applies
+to this repo:
 
----
-
-## Reportes
-
-**No existe un correo dedicado.** Usa el canal privado de GitHub, el mismo que
-[SECURITY.md](SECURITY.md):
-
-**[→ Enviar un reporte privado](https://github.com/DamballahWedo99/CENZONTLE/security/advisories/new)**
-
-Escribe **"Código de conducta"** al inicio del título para distinguirlo de una
-vulnerabilidad técnica. Ese formulario está pensado para reportes de seguridad,
-así que verás campos técnicos (producto afectado, severidad, CWE): son
-opcionales, déjalos vacíos. Solo el título y la descripción son obligatorios.
-
-Incluye lo que puedas:
-
-- Qué pasó, con enlaces al issue, PR o comentario específico.
-- Cuándo pasó, y si es un incidente aislado o algo repetido.
-- Quiénes estuvieron involucrados, incluidas las personas testigo.
-
-Todos los reportes se revisan e investigan con prontitud y de forma justa. Se
-respeta la privacidad y la seguridad de quien reporta. Si tu reporte involucra a
-alguien que mantiene el proyecto, dilo explícitamente en el reporte.
+- **Code review is about the code, never about the person who wrote it.** "This
+  query does an N+1" is feedback; "you don't know SQL" is a personal attack. The
+  distinction isn't about tone, it's about the subject: you criticize the
+  change, not whoever wrote it.
+- **Some of the code in this repo is written by AI agents** (the Forge opens
+  pull requests). Review an agent-generated PR with the same rigor as a human
+  one — and don't use "an agent wrote it" either as an excuse for opening a PR
+  you never read, or as an argument to dismiss the person who opened it.
+  Whoever sends the PR answers for it.
+- **Reporting a security problem in good faith is never grounds for sanction**,
+  even if the report turns out to be a false positive. Read
+  [SECURITY.md](SECURITY.md) before you report.
+- **The documentation is in English; issues and pull requests are welcome in
+  Spanish or English.** Use the language you express yourself best in. Writing
+  in your second language, or mixing the two, is not something anyone gets
+  mocked or given an unsolicited correction for.
+- **"I don't know" and "I was wrong" are valid answers** and cost nobody
+  standing. This project is maintained by a small number of people: the person
+  answering your issue is probably learning half of this alongside you.
 
 ---
 
-## Guías de aplicación
+## Enforcement Responsibilities
 
-Estas guías se usan para determinar las consecuencias de cualquier acción que se
-considere una violación a este código de conducta.
+Community leaders are responsible for clarifying and enforcing our standards of
+acceptable behavior and will take appropriate and fair corrective action in
+response to any behavior that they deem inappropriate, threatening, offensive,
+or harmful.
 
-### 1. Corrección
-
-**Impacto:** uso de lenguaje inapropiado u otro comportamiento considerado poco
-profesional o no bienvenido en la comunidad.
-
-**Consecuencia:** una advertencia privada y por escrito, con claridad sobre la
-naturaleza de la violación y una explicación de por qué el comportamiento fue
-inapropiado. Se puede pedir una disculpa pública.
-
-### 2. Advertencia
-
-**Impacto:** una violación a través de un incidente único o una serie de
-acciones.
-
-**Consecuencia:** una advertencia con consecuencias por el comportamiento
-continuado. Sin interacción con las personas involucradas —incluida la
-interacción no solicitada con quienes aplican este código de conducta— durante
-un periodo determinado. Esto incluye evitar interacciones en los espacios del
-proyecto y en canales externos. Incumplir estos términos puede llevar a una
-expulsión temporal o permanente.
-
-### 3. Expulsión temporal
-
-**Impacto:** una violación grave de los estándares, incluido el comportamiento
-inapropiado sostenido.
-
-**Consecuencia:** expulsión temporal de cualquier tipo de interacción o
-comunicación pública con la comunidad durante un periodo determinado. Durante
-ese periodo no se permite ninguna interacción pública o privada con las personas
-involucradas, incluida la interacción no solicitada con quienes aplican este
-código de conducta. Incumplir estos términos puede llevar a una expulsión
-permanente.
-
-### 4. Expulsión permanente
-
-**Impacto:** demostrar un patrón de violación de los estándares, incluido el
-comportamiento inapropiado sostenido, el acoso a una persona, o la agresión o
-el menosprecio hacia grupos de personas.
-
-**Consecuencia:** expulsión permanente de cualquier tipo de interacción pública
-dentro de la comunidad del proyecto.
+Community leaders have the right and responsibility to remove, edit, or reject
+comments, commits, code, wiki edits, issues, and other contributions that are
+not aligned to this Code of Conduct, and will communicate reasons for moderation
+decisions when appropriate.
 
 ---
 
-## Atribución
+## Scope
 
-Este código de conducta es una **adaptación al español del
-[Contributor Covenant](https://www.contributor-covenant.org), versión 2.1**,
-disponible en
+This Code of Conduct applies within all community spaces, and also applies when
+an individual is officially representing the community in public spaces.
+Examples of representing our community include using an official email address,
+posting via an official social media account, or acting as an appointed
+representative at an online or offline event.
+
+---
+
+## Enforcement
+
+**There is no dedicated email address.** Use GitHub's private channel, the same
+one as [SECURITY.md](SECURITY.md):
+
+**[→ Send a private report](https://github.com/DamballahWedo99/CENZONTLE/security/advisories/new)**
+
+Start the title with **"Code of conduct"** so it is easy to tell apart from a
+technical vulnerability. That form is built for security reports, so you will
+see technical fields (affected product, severity, CWE) — they are optional,
+leave them blank. Only the title and the description are required.
+
+Include what you can:
+
+- What happened, with links to the specific issue, pull request, or comment.
+- When it happened, and whether it is an isolated incident or something
+  repeated.
+- Who was involved, including any witnesses.
+
+All complaints will be reviewed and investigated promptly and fairly. The
+privacy and security of the reporter of any incident will be respected. If your
+report involves a maintainer, say so explicitly in the report.
+
+---
+
+## Enforcement Guidelines
+
+Community leaders will follow these Community Impact Guidelines in determining
+the consequences for any action they deem in violation of this Code of Conduct:
+
+### 1. Correction
+
+**Community Impact**: Use of inappropriate language or other behavior deemed
+unprofessional or unwelcome in the community.
+
+**Consequence**: A private, written warning from community leaders, providing
+clarity around the nature of the violation and an explanation of why the
+behavior was inappropriate. A public apology may be requested.
+
+### 2. Warning
+
+**Community Impact**: A violation through a single incident or series of
+actions.
+
+**Consequence**: A warning with consequences for continued behavior. No
+interaction with the people involved, including unsolicited interaction with
+those enforcing the Code of Conduct, for a specified period of time. This
+includes avoiding interactions in community spaces as well as external channels
+like social media. Violating these terms may lead to a temporary or permanent
+ban.
+
+### 3. Temporary Ban
+
+**Community Impact**: A serious violation of community standards, including
+sustained inappropriate behavior.
+
+**Consequence**: A temporary ban from any sort of interaction or public
+communication with the community for a specified period of time. No public or
+private interaction with the people involved, including unsolicited interaction
+with those enforcing the Code of Conduct, is allowed during this period.
+Violating these terms may lead to a permanent ban.
+
+### 4. Permanent Ban
+
+**Community Impact**: Demonstrating a pattern of violation of community
+standards, including sustained inappropriate behavior, harassment of an
+individual, or aggression toward or disparagement of classes of individuals.
+
+**Consequence**: A permanent ban from any sort of public interaction within the
+community.
+
+---
+
+## Attribution
+
+This Code of Conduct is adapted from the
+[Contributor Covenant](https://www.contributor-covenant.org), version 2.1,
+available at
 <https://www.contributor-covenant.org/version/2/1/code_of_conduct.html>.
 
-Las Guías de aplicación están inspiradas en la
-[escalera de aplicación del código de conducta de Mozilla](https://github.com/mozilla/inclusion).
+Community Impact Guidelines were inspired by
+[Mozilla's code of conduct enforcement ladder](https://github.com/mozilla/inclusion).
 
-El Contributor Covenant se distribuye bajo la licencia
-[Creative Commons Attribution 4.0 International (CC BY 4.0)](https://creativecommons.org/licenses/by/4.0/),
-y esta adaptación conserva esa licencia. **Cambios respecto del original:**
-traducción al español, la sección "Cómo se ve esto en CENZONTLE" y la
-sustitución del canal de reporte genérico por el aviso privado de seguridad de
-GitHub de este repositorio.
+The Contributor Covenant is distributed under the
+[Creative Commons Attribution 4.0 International (CC BY 4.0)](https://creativecommons.org/licenses/by/4.0/)
+license, and this adaptation keeps that license. **Changes from the original:**
+the "What this looks like in CENZONTLE" section, and replacing the generic
+reporting channel with this repository's GitHub private security advisory.
 
-Respuestas a preguntas frecuentes sobre el Contributor Covenant:
-<https://www.contributor-covenant.org/faq>. Traducciones oficiales a otros
-idiomas: <https://www.contributor-covenant.org/translations>.
+For answers to common questions about the Contributor Covenant, see the FAQ at
+<https://www.contributor-covenant.org/faq>. Official translations into other
+languages: <https://www.contributor-covenant.org/translations>.

@@ -18,7 +18,8 @@
     "test:watch": "vitest",
     "test:coverage": "vitest run --coverage",
     "verify:secrets": "tsx src/verify-secret-read.ts",
-    "start": "node dist/cli.js"
+    "start": "node dist/cli.js",
+    "clean": "rm -rf dist coverage"
   },
   "dependencies": {
     "@cenzontle/shared": "workspace:*",

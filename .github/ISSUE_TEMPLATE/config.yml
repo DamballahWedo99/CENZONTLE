@@ -1,11 +1,11 @@
 blank_issues_enabled: false
 contact_links:
-  - name: 💬 Preguntas y discusión
+  - name: 💬 Questions and discussion
     url: https://github.com/DamballahWedo99/CENZONTLE/discussions
-    about: Dudas de uso, ideas a medio cocinar y conversación general. Los issues son para bugs y propuestas concretas.
-  - name: 🔒 Reportar una vulnerabilidad
+    about: Usage questions, half-baked ideas, and general conversation. Issues are for bugs and concrete proposals.
+  - name: 🔒 Reporting a vulnerability
     url: https://github.com/DamballahWedo99/CENZONTLE/security/advisories/new
-    about: NO abras un issue público. Usa el reporte privado de seguridad de GitHub.
-  - name: 📖 Documentación
+    about: Do NOT open a public issue. Use GitHub's private security reporting.
+  - name: 📖 Documentation
     url: https://github.com/DamballahWedo99/CENZONTLE/tree/main/docs
-    about: Guía de instalación, arquitectura, configuración y troubleshooting.
+    about: Installation guide, architecture, configuration, and troubleshooting.

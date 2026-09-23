@@ -1,322 +1,340 @@
-# Cómo contribuir a CENZONTLE
+# Contributing to CENZONTLE
 
-Gracias por tomarte el tiempo. Esta guía cubre lo que necesitas saber para que tu
-contribución llegue a `main`: cómo orientarte en el repo, qué flujo seguir y qué
-checks debe pasar tu cambio.
+Thanks for taking the time. This guide covers what you need to know to get your
+contribution into `main`: how to find your way around the repo, which workflow to
+follow, and which checks your change has to pass.
 
-Si es tu primera vez aquí, arranca por el
-**[Getting Started](docs/getting-started.md)**: te lleva de `git clone` a la app
-corriendo y con login en ~20–30 min. No sigas leyendo esto hasta tenerla
-levantada — casi todo lo de abajo asume que puedes correr el proyecto.
+If this is your first time here, start with the
+**[Getting Started](docs/getting-started.md)** guide: it takes you from `git clone`
+to the app running and logged in in about 20–30 min. Don't read further until you
+have it up — almost everything below assumes you can run the project.
 
-Participar implica aceptar el [Código de Conducta](CODE_OF_CONDUCT.md).
+The vocabulary this repo uses for itself — Forge, batch, wave, Pod, sign-off, gate —
+is defined in [docs/glossary.md](docs/glossary.md). Use those terms exactly.
 
----
-
-## Cómo puedes ayudar
-
-El código no es la única contribución valiosa, ni la más escasa:
-
-- **Reproducciones de bugs.** Un repro mínimo que podamos correr vale más que
-  cinco reportes vagos. Confirmar (o descartar) un bug que alguien más reportó
-  también ayuda muchísimo.
-- **Documentación.** Si un paso de la instalación te falló, si un `.env.example`
-  no explica para qué sirve una variable, si `docs/troubleshooting.md` no cubre
-  el error con el que chocaste — arréglalo. Ese PR se mergea rápido.
-- **Traducciones.** La documentación está en español. Si quieres traducir `docs/`
-  o el README a otro idioma, abre un issue primero para acordar dónde vivirían
-  los archivos; todavía no hay una estructura definida para eso.
-- **Triage.** Responder issues, pedir la información que falta, señalar
-  duplicados.
-- **Código.** Bugs, funcionalidades acordadas, tests que hoy no existen.
+Participating means accepting the [Code of Conduct](CODE_OF_CONDUCT.md).
 
 ---
 
-## Por dónde empezar
+## How you can help
 
-Dos etiquetas en GitHub marcan trabajo listo para agarrar:
+Code isn't the only valuable contribution, and it isn't the scarcest one either:
+
+- **Bug reproductions.** A minimal repro we can run is worth more than five vague
+  reports. Confirming (or ruling out) a bug someone else reported helps enormously
+  too.
+- **Documentation.** If a setup step failed for you, if an `.env.example` doesn't
+  explain what a variable is for, if `docs/troubleshooting.md` doesn't cover the
+  error you hit — fix it. That pull request gets merged fast.
+- **Translations.** The documentation is written in English, and English is the
+  canonical version: corrections and new documents land there first. If you want to
+  translate `docs/` or the README into another language, open an issue first so we
+  can agree where those files would live; there is no structure for that yet.
+  Issues and pull requests themselves are welcome in Spanish or English — use the
+  language you express yourself best in.
+- **Triage.** Answering issues, asking for the information that's missing, pointing
+  out duplicates.
+- **Code.** Bugs, agreed-on features, tests that don't exist yet.
+
+---
+
+## Where to start
+
+Two GitHub labels mark work that's ready to pick up:
 
 - **[`good first issue`](https://github.com/DamballahWedo99/CENZONTLE/issues?q=is%3Aissue+is%3Aopen+label%3A%22good+first+issue%22)**
-  — acotado, con contexto suficiente para resolverlo sin conocer todo el repo.
+  — bounded, with enough context to solve it without knowing the whole repo.
 - **[`help wanted`](https://github.com/DamballahWedo99/CENZONTLE/issues?q=is%3Aissue+is%3Aopen+label%3A%22help+wanted%22)**
-  — cosas que sabemos que hacen falta y que no vamos a alcanzar a hacer pronto.
-  Suelen ser más grandes que las anteriores.
+  — things we know are missing and won't get to any time soon. Usually bigger than
+  the ones above.
 
-Comenta en el issue antes de ponerte a trabajar ("voy con este") para que nadie
-duplique el esfuerzo. Si llevas tiempo y ya no puedes seguir, dilo también: no
-pasa nada, pero que quede libre.
+Comment on the issue before you start working ("I'm taking this one") so nobody
+duplicates the effort. If you've been at it a while and can't continue, say that
+too: no hard feelings, but let it go free.
 
-¿No hay nada etiquetado que te llame? Levanta el proyecto y usa la lista de
-verificación del [Getting Started](docs/getting-started.md#checklist-de-verificación).
-Todo lo que te haya costado más de lo debido es un buen primer PR de docs.
-
----
-
-## Antes de escribir código
-
-**Para cambios grandes, abre o comenta un issue primero.** Funcionalidad nueva,
-refactor amplio, cambio en el schema de Prisma, nueva dependencia, cambio en un
-contrato de API: describe qué quieres hacer y por qué antes de escribirlo. Cuesta
-diez minutos y evita las dos peores formas de perder el tiempo — duplicar lo que
-alguien ya está haciendo, o terminar un PR que no se va a mergear porque va en
-contra de una decisión que no estaba escrita en ningún lado.
-
-**Los arreglos pequeños y obvios van directo a PR.** Un typo, un enlace roto, un
-bug de una línea con causa evidente, un mensaje de error confuso. No hace falta
-ceremonia para eso.
-
-Si dudas de qué lado cae tu cambio, abre el issue. Es la opción barata.
+Nothing labeled catches your eye? Bring the project up and work through the
+[Getting Started verification checklist](docs/getting-started.md#verification-checklist).
+Anything that cost you more than it should have is a good first docs PR.
 
 ---
 
-## Reportar un bug
+## Before you write code
 
-Los issues usan plantillas — elige la que corresponda:
+**For large changes, open or comment on an issue first.** New functionality, a broad
+refactor, a change to the Prisma schema, a new dependency, a change to an API
+contract: describe what you want to do and why before you write it. It costs ten
+minutes and avoids the two worst ways to waste time — duplicating what someone else
+is already doing, or finishing a PR that won't be merged because it goes against a
+decision that wasn't written down anywhere.
 
-| Plantilla | Para |
+**Small, obvious fixes go straight to a PR.** A typo, a broken link, a one-line bug
+with an evident cause, a confusing error message. No ceremony needed for that.
+
+If you're unsure which side your change falls on, open the issue. It's the cheap
+option.
+
+---
+
+## Reporting a bug
+
+Issues use templates — pick the one that fits:
+
+| Template | For |
 |---|---|
-| [🐛 Reporte de bug](https://github.com/DamballahWedo99/CENZONTLE/issues/new?template=bug_report.yml) | Algo no funciona como debería |
-| [✨ Propuesta de funcionalidad](https://github.com/DamballahWedo99/CENZONTLE/issues/new?template=feature_request.yml) | Una mejora o capacidad nueva |
+| [🐛 Bug report](https://github.com/DamballahWedo99/CENZONTLE/issues/new?template=bug_report.yml) | Something doesn't work the way it should |
+| [✨ Feature request](https://github.com/DamballahWedo99/CENZONTLE/issues/new?template=feature_request.yml) | An improvement or a new capability |
 
-Las preguntas de uso y las ideas a medio cocinar van a
-[Discussions](https://github.com/DamballahWedo99/CENZONTLE/discussions), no a
+Usage questions and half-baked ideas go to
+[Discussions](https://github.com/DamballahWedo99/CENZONTLE/discussions), not to
 issues.
 
 > [!WARNING]
-> **Las vulnerabilidades de seguridad nunca van en un issue público.** Sigue
-> [SECURITY.md](SECURITY.md), que explica cómo abrir un reporte privado y qué
-> comportamientos ya conocemos y son intencionales (el worker corriendo con
-> permisos amplios dentro de un sandbox, entre otros). Léelo antes de reportar:
-> te ahorra el trabajo de documentar algo que ya está documentado.
+> **Security vulnerabilities never go in a public issue.** Follow
+> [SECURITY.md](SECURITY.md), which explains how to open a private report and which
+> behaviors we already know about and are intentional (the worker running with broad
+> permissions inside a sandbox, among others). Read it before you report: it saves
+> you the work of documenting something that is already documented.
 
-Antes de abrir un issue de bug, revisa
-[docs/troubleshooting.md](docs/troubleshooting.md) — cubre la mayoría de los
-fallos de setup. Y al pegar logs, **borra los secretos** (tokens,
-`INTERNAL_API_KEY`, `VAULT_ENCRYPTION_KEY`, claves de Anthropic o de Auth0).
-
----
-
-## Dónde vive qué
-
-Mapa para orientarte sin tener que leer todo el repo. El detalle de cómo encaja
-está en [docs/architecture.md](docs/architecture.md).
-
-| Quieres tocar… | Vas a `…` |
-|---|---|
-| Una pantalla o ruta del frontend | `apps/web/src/app/` (App Router: `proyectos/`, `factory/`, `equipo/`, `login/`) |
-| Un componente de UI | `apps/web/src/components/` (los primitivos de Radix en `components/ui/`) |
-| Estado compartido del frontend | `apps/web/src/context/` — React Context, alcance por layout de ruta |
-| La llamada del frontend a la API | `apps/web/src/app/api/proxy/[...path]/route.ts` (el BFF proxy) |
-| **Un endpoint nuevo** | `apps/api/src/modules/<feature>/` — controller + service + dto en el mismo módulo |
-| Guards, filtros, throttler, storage | `apps/api/src/common/` |
-| El modelo de datos | `apps/api/prisma/schema.prisma` + la migración generada en `apps/api/prisma/migrations/` |
-| **Cómo el worker ejecuta una historia** | `apps/worker/src/lib/runner.ts` |
-| El aislamiento del código generado | `apps/worker/src/lib/sandbox.ts` (`sandbox-exec` en macOS, `firejail` en Linux) |
-| La verificación de Definition of Done | `apps/worker/src/lib/dod-verifier.ts` y `dod-verifier-agent.ts` |
-| El CLI del worker (`register`, `start`) | `apps/worker/src/cli.ts` y `apps/worker/src/commands/` |
-| **Un tipo que usan web y api** | `packages/shared/src/types/` + exportarlo en `packages/shared/src/index.ts` |
-| Config base de TypeScript o ESLint | `packages/ts-config/`, `packages/eslint-config/` |
-| Una variable de entorno | el `.env.example` del workspace **y** [docs/configuration.md](docs/configuration.md) |
-| La documentación | `docs/` (framework [Diátaxis](https://diataxis.fr)) |
-
-Dónde van los tests:
-
-- **api** — Jest, archivos `*.spec.ts` **junto al código** que prueban.
-- **web** y **worker** — Vitest, archivos `*.test.ts` junto al código (en web
-  también hay carpetas `__tests__/` para módulos grandes).
-- **e2e de web** — Playwright en `apps/web/e2e/`
-  (`pnpm --filter @cenzontle/web test:e2e`; la primera vez, `test:e2e:install`
-  baja Chromium). No corren en `pnpm test`.
-
-### El directorio `.claude/`
-
-El repo versiona la configuración de [Claude Code](https://claude.com/claude-code)
-que usan quienes lo mantienen. Un detalle que conviene conocer antes de que te
-sorprenda:
-
-`.claude/settings.json` registra un hook `SessionStart` que ejecuta
-`.claude/hooks/start-dev-servers.sh` **automáticamente** al abrir el proyecto con
-Claude Code. Ese script copia los `.env` que falten desde el repo principal, corre
-`pnpm install`, compila `packages/shared`, ejecuta `prisma generate` y pasa el
-lint. Está escrito para el flujo de worktrees de quienes mantienen el proyecto:
-en un clon normal no hará nada útil, pero sí correrá.
-
-Si prefieres que no se ejecute, borra `.claude/settings.json` de tu copia local
-(no lo commitees) o abre el proyecto con otro editor. Nada del desarrollo normal
-depende de ese hook: los comandos de `pnpm` documentados aquí funcionan por sí
-solos.
+Before opening a bug issue, check
+[docs/troubleshooting.md](docs/troubleshooting.md) — it covers most setup failures.
+And when you paste logs, **strip the secrets** (worker tokens,
+`VAULT_ENCRYPTION_KEY`, Anthropic keys, Auth0 keys).
 
 ---
 
-## Flujo de trabajo (git)
+## Where things live
 
-- **Branches por feature**, nunca commits directos a `main`.
-- Nombra la branch por su intención: `feat/qa-pipeline`, `fix/staging-gate`, etc.
-- Abre un **PR contra `main`**. Mantén los PRs enfocados (un cambio coherente).
-  Tres cambios independientes son tres PRs, y los tres avanzan más rápido así.
-- Antes de stagear: `git status` y `git diff` para revisar lo que vas a commitear.
-- La [plantilla de PR](.github/PULL_REQUEST_TEMPLATE.md) se llena sola al abrirlo;
-  borra las secciones que no apliquen, pero no la dejes vacía.
+A map to orient yourself without reading the whole repo. How the pieces fit together
+is in [docs/architecture.md](docs/architecture.md).
 
-### Mensajes de commit
-
-Prefijo + descripción del **por qué** (no solo el qué). Consistente dentro del PR
-(español o inglés, pero uno solo):
-
-| Prefijo | Para |
+| You want to touch… | Go to `…` |
 |---|---|
-| `Feat:` | Nueva funcionalidad |
-| `Fix:` | Corrección de bug |
-| `Refactor:` | Cambio interno sin alterar comportamiento |
-| `Docs:` | Documentación |
+| A frontend screen or route | `apps/web/src/app/` (App Router: `proyectos/`, `factory/`, `equipo/`, `login/`) |
+| A UI component | `apps/web/src/components/` (the Radix primitives live in `components/ui/`) |
+| Shared frontend state | `apps/web/src/context/` — React Context, scoped per route layout |
+| The frontend's call into the API | `apps/web/src/app/api/proxy/[...path]/route.ts` (the BFF proxy) |
+| **A new endpoint** | `apps/api/src/modules/<feature>/` — controller + service + `dto/` in the same module |
+| Guards, filters, throttler, storage | `apps/api/src/common/` |
+| The data model | `apps/api/prisma/schema.prisma` + the generated migration in `apps/api/prisma/migrations/` |
+| **How the worker runs a story** | `apps/worker/src/lib/runner.ts` |
+| Isolation of generated code | `apps/worker/src/lib/sandbox.ts` (`sandbox-exec` on macOS, `firejail` on Linux) |
+| Definition of Done verification | `apps/worker/src/lib/dod-verifier.ts` and `dod-verifier-agent.ts` |
+| The worker CLI (`register`, `start`) | `apps/worker/src/cli.ts` and `apps/worker/src/commands/` |
+| **A type used by both web and api** | `packages/shared/src/types/` + export it from `packages/shared/src/index.ts` |
+| Base TypeScript or ESLint config | `packages/ts-config/`, `packages/eslint-config/` |
+| An environment variable | the workspace's `.env.example` **and** [docs/configuration.md](docs/configuration.md) |
+| The documentation | `docs/` ([Diátaxis](https://diataxis.fr) framework) |
+
+Where the tests go:
+
+- **api** — Jest, `*.spec.ts` files **next to the code** they test.
+- **web** and **worker** — Vitest, `*.test.ts` files next to the code (web also has
+  `__tests__/` folders for the larger modules).
+- **web end-to-end** — Playwright in `apps/web/e2e/`
+  (`pnpm --filter @cenzontle/web test:e2e`; the first time, `test:e2e:install`
+  pulls Chromium). They do **not** run in `pnpm test`. Prerequisites and the
+  environment variables the suite reads are in
+  [apps/web/e2e/README.md](apps/web/e2e/README.md).
+
+### The `.claude/` directory
+
+The repo versions the [Claude Code](https://claude.com/claude-code) configuration
+the maintainers use. One detail worth knowing before it surprises you:
+
+`.claude/settings.json` registers a `SessionStart` hook that runs
+`.claude/hooks/start-dev-servers.sh` **automatically** when you open the project
+with Claude Code. That script copies any missing `.env` files from the main repo
+(only when you are in a worktree), runs `pnpm install` if `node_modules/` is
+missing, builds `packages/shared` if its `dist/` is missing, runs `prisma generate`,
+and finishes with a non-blocking `pnpm lint`. It is written for the maintainers'
+worktree flow: in a plain clone the `.env` copy does nothing, but everything else
+still runs.
+
+If you'd rather it didn't run, delete `.claude/settings.json` from your local copy
+(don't commit that) or open the project with another editor. Nothing in normal
+development depends on that hook: the `pnpm` commands documented here work on their
+own.
+
+---
+
+## Git workflow
+
+- **Feature branches**, never commit directly to `main`.
+- Name the branch after its intent: `feat/qa-pipeline`, `fix/staging-gate`, and so
+  on.
+- Open a **PR against `main`**. Keep PRs focused (one coherent change). Three
+  independent changes are three PRs, and all three move faster that way.
+- Before you stage: `git status` and `git diff` to review what you're about to
+  commit.
+- The [PR template](.github/PULL_REQUEST_TEMPLATE.md) fills itself in when you open
+  the PR; delete the sections that don't apply, but don't leave it empty.
+
+### Commit messages
+
+Prefix + a description of the **why** (not just the what). Consistent within one PR
+(Spanish or English, but only one):
+
+| Prefix | For |
+|---|---|
+| `Feat:` | New functionality |
+| `Fix:` | Bug fix |
+| `Refactor:` | Internal change that doesn't alter behavior |
+| `Docs:` | Documentation |
 | `Test:` | Tests |
-| `Chore:` | Tooling, deps, mantenimiento |
+| `Chore:` | Tooling, deps, maintenance |
 
-Ejemplo: `Feat: pipeline de QA multi-agente con verificación adversarial`.
+Example: `Feat: multi-agent QA pipeline with adversarial verification`.
 
 ---
 
-## Checks antes de abrir el PR
+## Checks before opening the PR
 
-El CI ([`.github/workflows/ci.yml`](.github/workflows/ci.yml)) corre
-**type-check, lint, test y build** en cada PR. Correr lo mismo en local antes de
-abrirlo te ahorra el ciclo de push → esperar → arreglar → push:
+CI ([`.github/workflows/ci.yml`](.github/workflows/ci.yml)) runs **type-check, lint,
+test, and build** on every PR. Running the same thing locally first saves you the
+push → wait → fix → push cycle:
 
 ```bash
-pnpm type-check     # tipos en shared + web + api + worker
-pnpm lint           # ESLint en todos los workspaces
+pnpm type-check     # types across shared + web + api + worker
+pnpm lint           # ESLint in every workspace
 pnpm test           # Jest (api) + Vitest (web/worker)
-pnpm build          # build de producción de todo
+pnpm build          # production build of everything
 ```
 
-Para iterar más rápido, filtra por workspace:
+To iterate faster, filter by workspace:
 `pnpm --filter @cenzontle/api test`, `pnpm --filter @cenzontle/web type-check`.
 
-- Si tocaste `packages/shared`, recuerda que `pnpm dev`/`type-check` ya hacen su
-  build; en duda: `pnpm --filter @cenzontle/shared build`.
-- Si tocaste el schema de Prisma, genera la migración con
-  `pnpm --filter @cenzontle/api exec prisma migrate dev --name <desc>` y commitea
-  el `.sql` resultante (el CLI de Prisma vive en `apps/api`, no en la raíz — ver
-  [docs/database.md](docs/database.md)).
-- Si `pnpm test` te falla en algo que no tocaste, verifica contra `main` limpio
-  antes de perseguirlo: puede ser un fallo preexistente y no tuyo. Si lo es,
-  dilo en el PR en vez de intentar arreglarlo ahí mismo.
+- The Playwright end-to-end suite is **not** part of `pnpm test` and does not run in
+  CI — it needs the app up and a browser. If you touched the frontend or the BFF
+  proxy, run it yourself: `pnpm --filter @cenzontle/web test:e2e` (the first time,
+  `pnpm --filter @cenzontle/web test:e2e:install`). Read
+  [apps/web/e2e/README.md](apps/web/e2e/README.md) first — the suite needs
+  PostgreSQL reachable and `packages/shared` built.
+- If you touched `packages/shared`, remember that `pnpm dev` and `pnpm type-check`
+  already build it; when in doubt: `pnpm --filter @cenzontle/shared build`.
+- If you touched the Prisma schema, generate the migration with
+  `pnpm --filter @cenzontle/api exec prisma migrate dev --name description_of_the_change`
+  and commit the resulting `.sql` (the Prisma CLI lives in `apps/api`, not at the
+  root — see [docs/database.md](docs/database.md)).
+- If `pnpm test` fails on something you didn't touch, check against a clean `main`
+  before chasing it: it may be a pre-existing failure and not yours. If it is, say
+  so in the PR instead of trying to fix it there and then.
 
 ---
 
-## Convenciones de código
+## Code conventions
 
-Resumen; el detalle vive en [CLAUDE.md](CLAUDE.md).
+A summary; the detail lives in [CLAUDE.md](CLAUDE.md).
 
-### Nombrado
-- Directorios: `kebab-case` (`modules/proyectos`, `app/factory/agents`).
-- Componentes React: `PascalCase` (`AgentCard.tsx`).
-- Módulos NestJS: `kebab-case`, estructura `modules/<feature>/` (controller +
-  service + dto).
-- Tipos compartidos: `PascalCase`, en `packages/shared/src/types/`.
+### Naming
+- Directories: `kebab-case` (`modules/proyectos`, `app/factory/agents`).
+- React components: `PascalCase` (`AgentCard.tsx`).
+- NestJS modules: `kebab-case`, `modules/<feature>/` shape (controller + service +
+  `dto/`).
+- Shared types: `PascalCase`, in `packages/shared/src/types/`.
 
 ### Imports
-- Dependencias de workspace con `workspace:*`.
-- Tipos compartidos desde `@cenzontle/shared`.
-- Web: alias `@/*` → `./src/*`. Componentes UI desde `@/components/ui/`.
-- No subir más de 2 niveles con imports relativos (`../../` máx).
+- Workspace dependencies with `workspace:*`.
+- Shared types from `@cenzontle/shared`.
+- Web: `@/*` alias → `./src/*`. UI components from `@/components/ui/`.
+- Keep relative imports shallow. In web and worker, never climb past `../../` —
+  reach for the `@/*` alias instead. The API has no alias, so nested modules do
+  reach `src/common/` with longer relative paths; that is the established pattern
+  there.
 
-### Estilo
-- **Frontend:** Tailwind 4 (no CSS modules), Radix UI como base, Lucide para
-  iconos, React Context para estado (no Redux/Zustand). D3/XYFlow para viz.
-- **Backend:** un módulo NestJS por feature; `class-validator` en los DTOs;
-  Swagger documentado; logging con pino estructurado.
-- Strict mode de TypeScript en todos los workspaces.
+### Style
+- **Frontend:** Tailwind 4 (no CSS modules), Radix UI as the base, Lucide for icons,
+  React Context for state (no Redux/Zustand). D3 and XYFlow for visualizations.
+- **Backend:** one NestJS module per feature; `class-validator` on the DTOs;
+  documented with Swagger; structured logging with pino.
+- TypeScript strict mode in every workspace.
 
-### Principios
-SOLID, DRY, KISS, YAGNI (en ese orden de prioridad). Sin TODOs ni stubs en código
-que se mergea; arregla causas raíz, no síntomas; no deshabilites tests para que
-pase el build.
-
----
-
-## Migraciones y secretos
-
-- **No edites `.sql` de migraciones a mano** (salvo SQL que Prisma no expresa,
-  como índices parciales — documéntalo en el archivo).
-- **Nunca commitees secretos.** Los `.env`/`.env.local` están en `.gitignore`. Si
-  agregas una variable nueva, **documéntala** en el `.env.example` correspondiente
-  y en [docs/configuration.md](docs/configuration.md).
-- Tampoco pegues secretos en la descripción del PR, en los logs que adjuntes ni
-  en capturas de pantalla.
+### Principles
+SOLID, DRY, KISS, YAGNI (in that priority order). No TODOs and no stubs in code that
+gets merged; fix root causes, not symptoms; never disable tests to make the build
+pass.
 
 ---
 
-## Autorevisión antes de pedir review
+## Migrations and secrets
 
-Antes de marcar el PR como listo, date una pasada adversarial sobre lo que
-cambiaste, especialmente si tocaste:
-
-- **Auth, endpoints, input de usuario, crypto, env vars** → revisión de seguridad.
-- **Módulos nuevos, schema, contratos de API** → revisión de arquitectura.
-- **Cualquier código** → revisión de calidad (bugs, edge cases, cobertura).
-
-Incluye en el PR: qué cambió, por qué, cómo lo probaste, y cualquier hallazgo
-pendiente. Si sabes que algo quedó a medias, escríbelo tú en "Notas para quien
-revisa" en vez de esperar a que se note en el review.
+- **Don't hand-edit migration `.sql` files** (except for SQL that Prisma can't
+  express, such as partial indexes — document it in the file).
+- **Never commit secrets.** `.env` and `.env.local` are in `.gitignore`. If you add
+  a new variable, **document it** in the matching `.env.example` and in
+  [docs/configuration.md](docs/configuration.md).
+- Don't paste secrets into the PR description either, or into the logs you attach,
+  or into screenshots.
 
 ---
 
-## Qué esperar del review
+## Self-review before requesting review
 
-Sé honesto contigo: **CENZONTLE lo mantiene poca gente, en tiempo limitado.** No
-hay SLA. Un PR puede tener respuesta el mismo día o quedarse quieto una o dos
-semanas, sobre todo si es grande o toca el Forge. Si pasó ese tiempo sin señales,
-un comentario recordatorio en el PR es bienvenido y no molesta a nadie.
+Before you mark the PR ready, take an adversarial pass over what you changed,
+especially if you touched:
 
-Lo que hace que un PR se mergee rápido:
+- **Auth, endpoints, user input, crypto, env vars** → security review.
+- **New modules, schema, API contracts** → architecture review.
+- **Any code** → quality review (bugs, edge cases, coverage).
 
-- **Alcance acotado.** Un cambio coherente que se puede revisar de una sentada.
-- **El porqué explicado.** El diff dice qué cambiaste; la descripción tiene que
-  decir por qué, y qué alternativa descartaste.
-- **Tests.** Idealmente uno que falla sin tu cambio y pasa con él. Para un bug,
-  ese test es la mejor prueba de que lo entendiste.
-- **Checks verdes** antes de pedir review.
-- **Un issue previo** cuando el cambio no es trivial.
-
-Lo que lo frena, en orden de gravedad:
-
-- Mezclar refactor + feature + reformateo en el mismo PR. Es la causa número uno
-  de los PRs que se quedan estancados: nadie puede revisarlo por partes.
-- Reformatear archivos que no tenían que ver con tu cambio (ensucia el diff).
-- Cambiar comportamiento visible sin actualizar `docs/`.
-- Agregar dependencias sin justificar por qué no alcanzaba con lo que ya hay.
-
-El review va a hacer preguntas y a pedir cambios. Va sobre el código, nunca sobre
-quien lo escribió; y si un comentario del review no se entiende o te parece
-equivocado, discútelo — eso también es parte del proceso.
+Include in the PR: what changed, why, how you tested it, and any finding still open.
+If you know something came out half-done, write it yourself under "Notes for
+reviewers" instead of waiting for it to surface in review.
 
 ---
 
-## Licencia de las contribuciones
+## What to expect from review
 
-CENZONTLE se distribuye bajo la **[Apache License 2.0](./LICENSE)**. Al enviar un
-PR aceptas que tu contribución se licencie bajo esos mismos términos (es lo que
-la propia Apache-2.0 establece en su sección 5). Conservas el copyright de lo que
-escribiste; lo que otorgas es la licencia para usarlo.
+Let's be honest: **CENZONTLE is maintained by a small number of people with limited
+time.** There is no SLA. A PR may get an answer the same day or sit for a week or
+two, especially if it's large or touches the Forge. If that much time passed with no
+signal, a reminder comment on the PR is welcome and won't bother anyone.
 
-**No hay CLA que firmar** ni papeleo adicional: abrir el PR es todo.
+What makes a PR merge fast:
 
-Si incorporas código de terceros, asegúrate de que su licencia sea compatible,
-consérvale sus avisos de copyright, y agrégalo a
-[NOTICES.md](NOTICES.md) si trae obligaciones de atribución o es copyleft
-(GPL/LGPL/AGPL/MPL/EPL).
+- **Narrow scope.** One coherent change that can be reviewed in a single sitting.
+- **The why, explained.** The diff says what you changed; the description has to say
+  why, and which alternative you discarded.
+- **Tests.** Ideally one that fails without your change and passes with it. For a
+  bug, that test is the best proof you understood it.
+- **Green checks** before you request review.
+- **A prior issue** when the change isn't trivial.
+
+What slows it down, in order of severity:
+
+- Mixing refactor + feature + reformatting in the same PR. It's the number one cause
+  of PRs that stall: nobody can review it in parts.
+- Reformatting files that had nothing to do with your change (it muddies the diff).
+- Changing visible behavior without updating `docs/`.
+- Adding dependencies without justifying why what's already there wasn't enough.
+
+Review will ask questions and request changes. Code review is about the code, never
+about the person who wrote it; and if a review comment isn't clear or seems wrong to
+you, argue it — that's part of the process too.
 
 ---
 
-## Código de conducta
+## Licensing of contributions
 
-Este proyecto se rige por el [Código de Conducta](CODE_OF_CONDUCT.md). Aplica a
-issues, PRs, discussions y a cualquier otro espacio del proyecto. Léelo antes de
-participar.
+CENZONTLE is distributed under the **[Apache License 2.0](./LICENSE)**. By sending a
+PR you agree that your contribution is licensed under those same terms (which is
+what Apache-2.0 itself establishes in its section 5). You keep the copyright on what
+you wrote; what you grant is the license to use it.
+
+**There is no CLA to sign** and no extra paperwork: opening the PR is all of it.
+
+If you incorporate third-party code, make sure its license is compatible, keep its
+copyright notices, and add it to [NOTICES.md](NOTICES.md) if it carries attribution
+obligations or is copyleft (GPL/LGPL/AGPL/MPL/EPL).
 
 ---
 
-¿Dudas que esta guía no resuelve?
-[Discussions](https://github.com/DamballahWedo99/CENZONTLE/discussions) o
+## Code of conduct
+
+This project is governed by the [Code of Conduct](CODE_OF_CONDUCT.md). It applies to
+issues, PRs, discussions, and any other project space. Read it before you take part.
+
+---
+
+Questions this guide doesn't answer?
+[Discussions](https://github.com/DamballahWedo99/CENZONTLE/discussions) or
 [docs/](docs/README.md).

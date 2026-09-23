@@ -1,225 +1,302 @@
 # Getting Started
 
-Esta guía te lleva de **`git clone`** a la app **corriendo y con login**, paso a
-paso. Sigue el orden tal cual — cada paso asume el anterior. Tiempo estimado:
-~20–30 min (la mayoría es configurar Auth0 la primera vez).
+This guide takes you from **`git clone`** to the app **running and logged in**,
+step by step. Follow the steps exactly in order — each one assumes the previous
+one. Estimated time: ~20–30 min (most of it is setting up Auth0 the first time).
 
-> Es un **tutorial**: el camino feliz garantizado. La referencia exhaustiva de
-> variables vive en [configuration.md](configuration.md); los errores comunes en
-> [troubleshooting.md](troubleshooting.md).
+> This is a **tutorial**: the guaranteed happy path. The exhaustive variable
+> reference lives in [configuration.md](configuration.md); common errors in
+> [troubleshooting.md](troubleshooting.md). For the vocabulary, see
+> [glossary.md](glossary.md).
 
 ---
 
-## 0. Prerrequisitos
+## 0. Prerequisites
 
-| Herramienta | Versión | Cómo |
+| Tool | Version | How |
 |---|---|---|
-| **Node.js** | **22.19+** | https://nodejs.org — recomendado vía `nvm` |
-| **pnpm** | 9.15+ | `corepack enable` (viene con Node) o `npm i -g pnpm@9.15.0` |
-| **Docker** | reciente | https://docs.docker.com/get-docker/ (para Postgres/Redis/MinIO) |
-| **Cuenta Auth0** | — | https://auth0.com (gratis) — **el login es obligatorio** |
-| `openssl` | cualquiera | ya viene en macOS/Linux — para generar secretos |
+| **Node.js** | **22.19+** | https://nodejs.org — recommended via `nvm` |
+| **pnpm** | 9.15+ | `corepack enable` (ships with Node) or `npm i -g pnpm@9.15.0` |
+| **Docker** | recent | https://docs.docker.com/get-docker/ (for Postgres/Redis/MinIO) |
+| **Auth0 account** | — | https://auth0.com (free) — **login is mandatory** |
+| `openssl` | any | already on macOS/Linux — used to generate secrets |
 
-> El repo trae un `.nvmrc` con Node 22: `nvm use` lo toma solo, y el CI arranca de
-> ese mismo archivo. Node 22.19 es un piso REAL, no una recomendación: `undici@8`
-> (dependencia del cliente HTTP del API) lo exige. pnpm es obligatorio (`packageManager` lo
-> fija); no uses npm/yarn para instalar el monorepo.
+> The repo ships a `.nvmrc` pinned to Node 22: `nvm use` picks it up on its own,
+> and CI starts from that same file. Node 22.19 is a REAL floor, not a
+> recommendation: `undici@8` **is** the API's HTTP client and a direct
+> dependency of `apps/api`, and it requires that version.
+> pnpm is mandatory (`packageManager` pins it); do not use npm/yarn to install
+> the monorepo.
 
 ---
 
-## 1. Clonar
+## 1. Clone
 
 ```bash
 git clone https://github.com/DamballahWedo99/CENZONTLE.git
 cd CENZONTLE
 ```
 
-> **No corras `pnpm install` todavía.** El `postinstall` del API ejecuta
-> `prisma generate`, que carga `apps/api/prisma.config.ts`; ese archivo exige
-> `DATABASE_URL` y aborta la instalación si no existe. Por eso el paso de
-> variables de entorno va **antes** que la instalación. Si te saltas el orden,
-> verás `PrismaConfigEnvError: Cannot resolve environment variable: DATABASE_URL`
-> — no está roto el repo, solo falta el `.env`.
+> **Do not run `pnpm install` yet.** The API's `postinstall` runs
+> `prisma generate`, which loads `apps/api/prisma.config.ts`; that file requires
+> `DATABASE_URL` and aborts the install if it is missing. That is why the
+> environment-variable step comes **before** the install. If you skip the order,
+> you will see `PrismaConfigEnvError: Cannot resolve environment variable: DATABASE_URL`
+> — the repo isn't broken, you're just missing the `.env`.
 
 ---
 
-## 2. Levantar los servicios locales (Docker)
+## 2. Bring up the local services (Docker)
 
-El repo trae un `docker-compose.yml` que arranca **todo** lo que la app necesita
-como infraestructura, con un comando:
+The repo ships a `docker-compose.yml` that starts **everything** the app needs as
+infrastructure, in one command:
 
 ```bash
 docker compose up -d
 ```
 
-Esto levanta:
+That brings up:
 
-| Servicio | Puerto | Credenciales dev |
+| Service | Port | Dev credentials |
 |---|---|---|
 | **PostgreSQL 16** | 5432 | `cenzontle` / `cenzontle_dev`, db `cenzontle` |
-| **Redis 7** | 6379 | — (rate-limit + caché; degrada elegante si falta) |
-| **MinIO** (S3) | 9000 (API), 9001 (consola) | `cenzontle` / `cenzontle_dev` |
+| **Redis 7** | 6379 | — (rate limiting + cache; degrades gracefully if absent) |
+| **MinIO** (S3) | 9000 (API), 9001 (console) | `cenzontle` / `cenzontle_dev` |
 
-Verifica que todo esté arriba:
+Check that everything is up:
 
 ```bash
 docker compose ps -a
 ```
 
-Los tres servicios de arriba deben aparecer con **STATUS `Up`** (o `running`, según
-tu versión de Docker Compose). **No esperes ver `healthy`**: el `docker-compose.yml`
-no define `healthcheck` en ningún servicio, así que Docker nunca reporta ese estado.
+The three services above must show **STATUS `Up`** (or `running`, depending on
+your Docker Compose version). **Do not expect to see `healthy`**: the
+`docker-compose.yml` defines no `healthcheck` on any service, so Docker never
+reports that state.
 
-En esa lista aparece además un **cuarto** servicio, `minio-init`, en `Exited (0)`.
-Es correcto: es un job de un solo uso que crea el bucket `cenzontle-documents` y
-termina. Un `Exited (0)` ahí **no es un fallo** — es el trabajo hecho. Ojo con el
-flag: `docker compose ps` **sin `-a`** lista solo los contenedores vivos, así que
-`minio-init` no sale ahí y su ausencia tampoco es un problema.
+That listing also shows a **fourth** service, `minio-init`, in `Exited (0)`. That
+is correct: it is a one-shot job that creates the `cenzontle-documents` bucket and
+exits. An `Exited (0)` there **is not a failure** — it is the work done. Watch the
+flag: `docker compose ps` **without `-a`** lists only live containers, so
+`minio-init` does not show up there and its absence is not a problem either.
 
-> **¿Ya tienes Postgres nativo en :5432?** Cuidado con la "trampa dual" — lee
-> [database.md › Postgres dual](database.md#postgres-dual-nativo-vs-docker).
+> **Already running a native Postgres on :5432?** Watch out for the "dual trap" —
+> read [database.md › Dual Postgres](database.md#dual-postgres-native-vs-docker).
 
 ---
 
-## 3. Variables de entorno
+## 3. Environment variables
 
-Copia los templates:
+Copy the templates:
 
 ```bash
 cp apps/api/.env.example  apps/api/.env
 cp apps/web/.env.example  apps/web/.env.local
 ```
 
-Genera los secretos:
+Generate the secrets:
 
 ```bash
 openssl rand -base64 32   # → VAULT_ENCRYPTION_KEY   (apps/api/.env)
 openssl rand -hex 32      # → AUTH0_SECRET           (apps/web/.env.local)
-openssl rand -hex 32      # → INTERNAL_API_KEY       (¡EL MISMO en api y web!)
 ```
 
-Edita los dos archivos:
+Edit the two files:
 
-- **`apps/api/.env`** — `DATABASE_URL` ya viene correcto para Docker. Pega
-  `VAULT_ENCRYPTION_KEY`, `INTERNAL_API_KEY`, y los `AUTH0_*` (paso 5).
-- **`apps/web/.env.local`** — pega `AUTH0_*`, `AUTH0_SECRET`, y el **mismo**
-  `INTERNAL_API_KEY` que pusiste en el API.
+- **`apps/api/.env`** — `DATABASE_URL` is already correct for Docker. Paste
+  `VAULT_ENCRYPTION_KEY` and the `AUTH0_*` values (step 5).
+- **`apps/web/.env.local`** — paste the `AUTH0_*` values and `AUTH0_SECRET`.
 
-> `INTERNAL_API_KEY` debe ser **idéntico** en ambos: es el secreto compartido del
-> BFF proxy (web → api). Si difieren, el frontend no puede hablar con la API.
+> `VAULT_ENCRYPTION_KEY` is the AES-256-GCM master key for every secret stored in
+> the database: the vault's GitHub token, code-repo tokens, external secrets and
+> the Anthropic API key. Rotating it invalidates everything already encrypted.
 >
-> La lista completa de variables (qué es requerido, opcional, su default y para
-> qué sirve) está en [configuration.md](configuration.md).
+> The complete list of variables (what is required, what is optional, its default
+> and what it's for) is in [configuration.md](configuration.md).
 
-Ya con `apps/api/.env` en su lugar, instala las dependencias:
+With `apps/api/.env` in place, install the dependencies:
 
 ```bash
 pnpm install
 ```
 
-El `postinstall` del API corre `prisma generate` y deja el cliente listo. Necesita
-leer `DATABASE_URL` del `.env` que acabas de crear — por eso este paso va aquí y no
-al principio.
+The API's `postinstall` runs `prisma generate` and leaves the client ready. It
+needs to read `DATABASE_URL` from the `.env` you just created — that is why this
+step is here and not at the beginning.
 
 ---
 
-## 4. Migrar la base de datos
+## 4. Migrate the database
 
 ```bash
 pnpm --filter @cenzontle/api exec prisma migrate deploy
 ```
 
-Esto aplica todas las migraciones contra la BD de Docker. **Usa `migrate deploy`,
-no `migrate dev`** (deploy solo aplica lo pendiente y nunca resetea). Más detalle
-en [database.md](database.md).
+This applies every migration against the Docker database. **Use `migrate deploy`,
+not `migrate dev`** (deploy only applies what is pending and never resets). More
+detail in [database.md](database.md).
 
-> El `seed` (`prisma db seed`) **solo limpia tablas** — no crea datos. La data se
-> crea desde la UI tras loguearte. Córrelo solo si quieres una BD vacía limpia.
+Optionally, load the sample dataset:
 
----
+```bash
+pnpm --filter @cenzontle/api exec prisma db seed
+```
 
-## 5. Configurar Auth0 (obligatorio)
-
-La app **falla cerrada (503) sin Auth0** — no hay bypass de dev. Necesitas crear,
-en el [dashboard de Auth0](https://manage.auth0.com):
-
-1. Una **API** (audience `https://api.cenzontle.app`).
-2. Una **Regular Web Application** (callbacks a `http://localhost:3000/auth/callback`).
-3. Una **post-login Action** que inyecta el `role` y `pod_ids` en el token.
-4. Tu **primer usuario** con `app_metadata.role = "alta_gerencia"`.
-
-Los valores van a los `AUTH0_*` de ambos `.env`. **Pasos exactos con capturas de
-qué copiar dónde:** [auth0-setup.md](auth0-setup.md). Hazlo ahora y vuelve aquí.
+> The seed creates a small sample dataset — 2 Pods, 1 initiative, 1 epic and 3
+> stories — so there is something to look at on first boot. It is idempotent
+> (re-running it updates the same rows) and it **never deletes anything**. Skip it
+> if you would rather start from an empty database; everything else is created
+> from the UI.
 
 ---
 
-## 6. Arrancar la app
+## 5. Configure Auth0 (required)
+
+The app **fails closed (503) without Auth0** — there is no dev bypass. In the
+[Auth0 dashboard](https://manage.auth0.com) you need to create:
+
+1. An **API** (audience `https://api.cenzontle.app`).
+2. A **Regular Web Application** (callbacks to `http://localhost:3000/auth/callback`).
+3. A **post-login Action** that injects `role` and `pod_ids` into the token.
+4. Your **first user**, with `app_metadata.role = "alta_gerencia"`.
+
+The values go into the `AUTH0_*` variables of both `.env` files. **Exact steps for
+what to copy where:** [auth0-setup.md](auth0-setup.md). Do it now and come back.
+
+---
+
+## 6. Start the app
 
 ```bash
 pnpm dev
 ```
 
-Esto compila `@cenzontle/shared` y levanta web + api en paralelo:
+This builds `@cenzontle/shared` and brings up web + api in parallel:
 
-| URL | Qué es |
+| URL | What it is |
 |---|---|
-| **http://localhost:3000** | Frontend (te redirige al login de Auth0) |
+| **http://localhost:3000** | Frontend (redirects you to the Auth0 login) |
 | **http://localhost:3001** | API |
-| **http://localhost:3001/api/docs** | Swagger (referencia de endpoints) |
+| **http://localhost:3001/api/docs** | Swagger (endpoint reference) |
 
-Abre **http://localhost:3000**, inicia sesión con el usuario que creaste en Auth0,
-y aterrigas en **`/proyectos`**. 🎉
+Swagger is only mounted when `NODE_ENV !== 'production'`, so that last URL exists
+in dev and is absent in a production build.
 
----
-
-## 7. Primer uso (post-login)
-
-Como `AltaGerencia` puedes ahora, desde la UI:
-
-- **Crear Pods, iniciativas, épicas e historias.**
-- **Pegar tu API key de Anthropic** (Tokens IA / config) — se guarda **cifrada en
-  la BD**, no en `.env`. Sin esto, los agentes de IA no generan.
-- **Configurar el repo de GitHub** del Forge y del vault (Integraciones).
-- **Generar un worker token** (Factory → Fleet) si vas a usar el Forge.
+Open **http://localhost:3000**, sign in with the user you created in Auth0, and
+you land on **`/proyectos`**. 🎉
 
 ---
 
-## 8. (Opcional) Levantar un worker del Forge
+## 7. First run (after login)
 
-El Forge es opcional — la app de proyectos funciona sin él. Para procesar
-historias con agentes de IA, levanta un worker.
+Signed in as `alta_gerencia` ("Alta Gerencia", senior management) you see the
+whole product. The sidebar has three
+destinations — **Proyectos** ("Projects", `/proyectos`), **Matriz** ("Matrix") and
+**Vault** — plus the Factory dashboards under `/factory`. Settings
+("Configuración") lives in the avatar menu at the bottom of the sidebar and is
+only rendered for `alta_gerencia`.
 
-> **En Linux, instala `firejail` antes** (`sudo apt install firejail`). Es la
-> herramienta de sandbox del worker; sin ella el daemon arranca pero toda historia
-> aborta. En macOS no instalas nada (`sandbox-exec` viene con el sistema).
+A sensible order for the first session:
+
+1. **Paste your Anthropic API key.** Go to Settings → Automatización →
+   **Anthropic API Key** (`/factory/settings?section=anthropic-key`). The key is
+   stored **encrypted in the database** with `VAULT_ENCRYPTION_KEY`, not in
+   `.env`. Without it the AI agents generate nothing.
+2. **Review your Pods.** Settings → Ecosistema → **Células** ("Pods")
+   (`/factory/settings?section=pods`). Every story belongs to exactly one Pod,
+   and Pod membership is also an authorization boundary. The seed leaves you
+   two; add your own.
+3. **Connect the repositories.** Two different things, on two screens that sit
+   in two different groups of the settings rail:
+   - the **vault** — the GitHub repo where initiatives, epics and stories are
+     stored as markdown: Settings → Integraciones → **Vault**
+     (`/factory/settings?section=vault`);
+   - the **target repository of the Forge** — the repo the agents clone, commit
+     to and open pull requests against: Settings → Control de código →
+     **Código** ("Code") (`/factory/settings?section=codigo`). A repo added here
+     is read-only for the agents by default; writing is a per-repo opt-in you
+     turn on with **Activar Forge write** ("Enable Forge write").
+4. **Create work.** In `/proyectos` the buttons are **Nueva Iniciativa** ("New
+   initiative"), **Nueva Épica** ("New epic") and **Nueva Historia** ("New
+   story"), following the initiative → epic → story hierarchy.
+5. **Collect the three sign-offs.** An epic needs a Product Owner, a Tech Lead
+   and a QA sign-off — the **Dar VoBo** ("sign off") button on the epic — before
+   **Enviar al Forge** ("Send to the Forge") will enqueue it. The dialog
+   **always** asks for your password (step-up authentication) and will not
+   submit while the field is empty. Whether that password is actually *checked*
+   is a separate question. Without the M2M credentials from the optional
+   [step 5 of auth0-setup.md](auth0-setup.md#5-optional-step-up-authentication-and-user-management),
+   the API skips verification outside production and accepts anything you type —
+   so on a fresh local install you type any string and the sign-off lands.
+6. **Register a compute node**, if you plan to run the Forge. Settings →
+   Infraestructura → **Nodos de cómputo** ("Compute nodes")
+   (`/factory/settings?section=nodes`). There is no token without a node, so the
+   order is fixed: fill in the row at the bottom and click **Crear nodo**
+   ("Create node") first — that on its own opens the token dialog. Afterwards,
+   **Generar** ("Generate") on that node's row mints a fresh token whenever you
+   need one. Either way the token is shown **exactly once** — copy it now, you
+   need it in step 8.
+
+If a term on screen doesn't map onto anything you have read here, look it up in
+[glossary.md](glossary.md); it is written against the schema and the `factory`
+module, not against prose.
+
+---
+
+## 8. (Optional) Bring up a Forge worker
+
+The Forge is optional — the projects app works without it. To have AI agents
+implement stories, bring up a worker.
+
+Prerequisites on the worker machine:
+
+- The **API running** (`pnpm dev:api` or `pnpm dev`).
+- The **Claude Code CLI** (`claude`) installed and on your `PATH`. The worker
+  spawns it for every story; without it the daemon starts fine and no story ever
+  makes progress.
+- **`tmux` and `ttyd`** installed and on your `PATH`. They are not optional: the
+  worker streams the agent's log through `tmux` + `ttyd`, and if either binary is
+  missing every claimed story fails immediately with exit code `127`. Install
+  with `brew install tmux ttyd` on macOS; on Linux take `tmux` from your package
+  manager and `ttyd` from
+  [its own instructions](https://github.com/tsl0922/ttyd#installation).
+- A **worker token**, minted in Settings → **Nodos de cómputo** → **Generar**
+  (step 7).
+- On **Linux**, install `firejail` first (`sudo apt install firejail`). It is the
+  worker's sandbox tool; without it the daemon starts but every story aborts. On
+  macOS you install nothing (`sandbox-exec` ships with the system).
 
 ```bash
-# build del worker
+# build the worker
 pnpm --filter @cenzontle/worker build
 
-# registra esta máquina como nodo de cómputo (token desde la UI: Factory → Fleet)
+# The worker refuses any dashboard URL that is not https — no exception for
+# localhost. Export this in the shell you run BOTH commands below from.
+# Local dev only: the claim response carries the Anthropic key in cleartext.
+export FACTORY_WORKER_ALLOW_INSECURE=1
+
+# register this machine as a compute node (token from step 7)
 node apps/worker/dist/cli.js register \
   --dashboard http://localhost:3001 \
   --token worker_XXXXXXXX \
   --slots 1
 
-# arranca el daemon (heartbeat + claim de historias)
+# start the daemon (heartbeat + story claiming)
 node apps/worker/dist/cli.js start
 ```
 
-Guía completa (sandbox, tmux/ttyd, gotchas): [forge-worker.md](forge-worker.md).
+Full guide (sandbox, tmux/ttyd, gotchas): [forge-worker.md](forge-worker.md).
 
 ---
 
-## Checklist de verificación
+## Verification checklist
 
-- [ ] `docker compose ps -a` muestra postgres + redis + minio en `Up` (y `minio-init` en `Exited (0)`)
-- [ ] `apps/api/.env` y `apps/web/.env.local` existen y tienen los secretos
-- [ ] `INTERNAL_API_KEY` es idéntico en ambos
-- [ ] `prisma migrate deploy` corrió sin error
-- [ ] Auth0 configurado + usuario admin con rol `alta_gerencia`
-- [ ] `pnpm dev` levanta sin errores
+- [ ] `docker compose ps -a` shows postgres + redis + minio as `Up` (and `minio-init` as `Exited (0)`)
+- [ ] `apps/api/.env` and `apps/web/.env.local` exist and carry the secrets
+- [ ] `prisma migrate deploy` ran without error
+- [ ] Auth0 configured + admin user with role `alta_gerencia`
+- [ ] `pnpm dev` starts without errors
 - [ ] http://localhost:3000 → login → `/proyectos`
-- [ ] http://localhost:3001/api/docs carga el Swagger
+- [ ] http://localhost:3001/api/docs loads Swagger
 
-¿Algún paso falló? → [troubleshooting.md](troubleshooting.md).
+Did a step fail? → [troubleshooting.md](troubleshooting.md).

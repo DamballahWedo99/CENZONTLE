@@ -57,5 +57,5 @@ test-results/
 package-lock.json
 yarn.lock
 
-# claude code harness — agent worktrees (temporales, no parte del repo)
+# claude code harness — agent worktrees (temporary, not part of the repo)
 .claude/worktrees/

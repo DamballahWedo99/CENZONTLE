@@ -1,8 +1,8 @@
 version: 2
 
 updates:
-  # Dependencias de npm/pnpm. Dependabot entiende pnpm workspaces desde la raíz,
-  # así que un solo bloque cubre apps/* y packages/*.
+  # npm/pnpm dependencies. Dependabot understands pnpm workspaces from the root,
+  # so a single block covers apps/* and packages/*.
   - package-ecosystem: "npm"
     directory: "/"
     schedule:
@@ -15,14 +15,14 @@ updates:
       prefix: "Chore"
       include: "scope"
     groups:
-      # Los parches y minors agrupados en un PR: reducen ruido y casi nunca rompen.
+      # Patches and minors grouped into one PR: less noise, and they almost never break.
       patch-and-minor:
         update-types:
           - "patch"
           - "minor"
     ignore:
-      # Los majors de estos marcan el ritmo del monorepo entero y se suben a mano,
-      # coordinando el cambio de código que implican.
+      # Majors of these set the pace of the whole monorepo and get bumped by hand,
+      # together with the code changes they imply.
       - dependency-name: "next"
         update-types: ["version-update:semver-major"]
       - dependency-name: "react"

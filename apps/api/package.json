@@ -12,7 +12,8 @@
     "start:prod": "node dist/main",
     "lint": "eslint \"{src,test}/**/*.ts\"",
     "test": "jest",
-    "type-check": "tsc --noEmit",
+    "type-check": "tsc --noEmit && tsc --noEmit -p tsconfig.seed.json",
+    "clean": "rm -rf dist coverage",
     "verify:secrets": "node scripts/verify-worker-secret-read.js"
   },
   "dependencies": {

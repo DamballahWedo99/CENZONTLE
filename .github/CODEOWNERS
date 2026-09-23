@@ -1,31 +1,32 @@
-# CODEOWNERS — quién revisa qué.
+# CODEOWNERS — who reviews what.
 #
-# GitHub pide review automáticamente a la persona dueña de cada ruta tocada por
-# un PR. Gana la ÚLTIMA regla que matchee, no la más específica: el orden de este
-# archivo importa.
+# GitHub automatically requests a review from the owner of every path a PR
+# touches. The LAST rule that matches wins, not the most specific one: the order
+# of this file matters.
 #
-# Hoy hay una sola persona manteniendo el repo, así que todas las reglas apuntan
-# al mismo owner. Las rutas de abajo siguen listadas aparte a propósito: dejan
-# escrito qué partes cargan el riesgo del proyecto y quedan listas para apuntar a
-# otra persona cuando el equipo crezca.
+# Today one person maintains the repo, so every rule points at the same owner.
+# The paths below are still listed separately on purpose: they write down which
+# parts carry the project's risk, and they are ready to point at someone else
+# when the team grows.
 
-# Owner por defecto de todo lo que no matchee una regla posterior.
+# Default owner for anything no later rule matches.
 *                                @DamballahWedo99
 
-# El worker ejecuta código generado por IA en la máquina anfitriona, con las
-# credenciales de Git de quien lo corre. Aquí vive el sandbox (sandbox.ts) y los
-# flags que lo desactivan.
+# The worker runs AI-generated code on the host machine, with the Git
+# credentials of whoever runs it. This is where the sandbox (sandbox.ts) and the
+# flags that disable it live.
 /apps/worker/                    @DamballahWedo99
 
-# El vault guarda y cifra secretos (tokens de GitHub, API keys) con AES-256-GCM.
+# The vault stores and encrypts secrets (GitHub tokens, API keys) with
+# AES-256-GCM.
 /apps/api/src/modules/vault/     @DamballahWedo99
 
-# Documentos de gobernanza: cambiarlos cambia las reglas del proyecto, no el
-# código.
+# Governance documents: changing them changes the project's rules, not the
+# code.
 /SECURITY.md                     @DamballahWedo99
 /CODE_OF_CONDUCT.md              @DamballahWedo99
 /LICENSE                         @DamballahWedo99
 
-# Automatización del repo: CI, dependabot, plantillas y este mismo archivo. Un
-# cambio aquí puede desactivar los checks que protegen a todo lo demás.
+# Repo automation: CI, dependabot, templates, and this file itself. A change
+# here can disable the checks that protect everything else.
 /.github/                        @DamballahWedo99
