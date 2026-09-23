@@ -41,7 +41,7 @@
     "ioredis": "^5.10.1",
     "jose": "^6.2.2",
     "mime-types": "^3.0.2",
-    "nestjs-pino": "^4.6.1",
+    "nestjs-pino": "^5.2.0",
     "node-pty": "^1.1.0",
     "pdf-parse": "2.4.5",
     "pg": "^8.20.0",
