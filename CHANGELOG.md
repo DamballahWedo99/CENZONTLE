@@ -42,6 +42,20 @@ project adheres to [Semantic Versioning](https://semver.org).
 
 ### Fixed
 
+- **Settings → Ecosistema → "Roles y permisos" reported saves it never made.** The
+  screen rendered an editable role × permission matrix with a **Guardar cambios**
+  ("Save changes") button, but the handler was an 800 ms timer that flipped a "Saved"
+  badge and wrote nothing: the edits lived in React state and vanished on reload, while
+  the server kept resolving permissions against the compile-time `ROLE_PERMISSIONS`
+  constant. The section is now hidden behind `ROLES_SECTION_ENABLED`, and
+  `?section=roles` falls back to the default section instead of rendering a blank
+  panel. The component is untouched — the flag restores it once it has a server to talk
+  to. Changing what a role may do still means editing
+  `packages/shared/src/types/auth.ts` and redeploying.
+- **An unknown `?section=` on the settings page left it blank.** The query parameter was
+  cast straight to the section type without validation, so any unrecognized value
+  selected nothing in the sidebar and rendered an empty panel. It is now checked against
+  the real section list.
 - **`prisma db seed` did not compile.** It referenced two models (`productOwner`,
   `podProductOwner`) that had been dropped from the schema, so it failed before it
   ever opened a connection. Rewritten: it now creates a small sample dataset — 2 pods,

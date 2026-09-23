@@ -472,8 +472,9 @@ fixed permission set, delivered in the Auth0 token and checked by API guards:
 | `qa` | **QA** | QA |
 | `viewer` | **Viewer** | Viewer |
 
-Editable in Settings → Ecosistema → **Roles y permisos** ("Roles and permissions")
-(`/factory/settings?section=roles`).
+Not editable at runtime: the role → permission map is a compile-time constant in
+`packages/shared/src/types/auth.ts`. See
+[`authorization.md`](authorization.md#the-role--permission-matrix).
 
 ### ReBAC
 

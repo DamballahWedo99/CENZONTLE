@@ -174,16 +174,19 @@ if you edit one, edit both, or the "reset to defaults" button will start proposi
 matrix the server does not honor.
 
 > [!WARNING]
-> **The matrix is compile-time. The screen that appears to edit it does not persist
-> anything.** Settings ("Configuración") → Ecosistema → **Roles y permisos** ("Roles
-> and permissions") (`/factory/settings?section=roles`) renders checkboxes and a
-> **Guardar cambios** ("Save changes") button
-> (`apps/web/src/components/factory/settings/RolesPermissionsSection.tsx:176`), but the
-> save handler is an 800 ms timer that flips a "Saved" badge and writes nothing
-> (`RolesPermissionsSection.tsx:114-120`).
-> The edits live in React state (`apps/web/src/context/AuthContext.tsx:108-114`) and
-> vanish on reload. Changing what a role may do means editing
-> `packages/shared/src/types/auth.ts` and redeploying.
+> **The matrix is compile-time.** Changing what a role may do means editing
+> `packages/shared/src/types/auth.ts` and redeploying. There is no runtime path.
+>
+> A Settings screen used to render an editable matrix, but its save handler was an
+> 800 ms timer that flipped a "Saved" badge and wrote nothing
+> (`RolesPermissionsSection.tsx:114-120`) — the edits lived in React state
+> (`apps/web/src/context/AuthContext.tsx:108-114`) and vanished on reload. Because a
+> screen that reports success without persisting is worse than no screen, it is
+> disabled behind `ROLES_SECTION_ENABLED`
+> (`apps/web/src/components/factory/settings/SettingsDashboard.tsx:134`): it is absent
+> from the sidebar and `?section=roles` falls back to the default section. The
+> component is untouched in the tree, so flipping that flag to `true` restores it once
+> it has a server to talk to.
 
 ---
 

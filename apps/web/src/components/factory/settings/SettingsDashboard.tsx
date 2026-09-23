@@ -124,6 +124,16 @@ interface SidebarItem {
   group: string;
 }
 
+// "Roles y permisos" está deshabilitada mientras no tenga respaldo en el
+// servidor: la pantalla edita estado de React y no persiste nada — `handleSave`
+// solo dispara un timeout que muestra el badge "Guardado". El backend siempre
+// resuelve los permisos contra `ROLE_PERMISSIONS`, que es una constante de
+// compilación (`packages/shared/src/types/auth.ts`), así que un cambio hecho
+// ahí no surte efecto y la UI daba a entender lo contrario.
+// Con el flag en `false` la sección desaparece del sidebar y del deep link
+// `?section=roles`; ponerlo en `true` la devuelve tal cual estaba.
+const ROLES_SECTION_ENABLED: boolean = false;
+
 const SIDEBAR_ITEMS: SidebarItem[] = [
   // "Código" vive aquí (NO en Integraciones) porque es el control real del
   // repositorio destino del Forge: read-only por default + opt-in
@@ -140,7 +150,9 @@ const SIDEBAR_ITEMS: SidebarItem[] = [
   { id: 'dod', label: 'Definition of Done', icon: ClipboardCheck, group: 'Automatización' },
   { id: 'pods', label: 'Células', icon: Boxes, group: 'Ecosistema' },
   { id: 'team', label: 'Equipo', icon: Users, group: 'Ecosistema' },
-  { id: 'roles', label: 'Roles y permisos', icon: Shield, group: 'Ecosistema' },
+  ...(ROLES_SECTION_ENABLED
+    ? [{ id: 'roles' as const, label: 'Roles y permisos', icon: Shield, group: 'Ecosistema' }]
+    : []),
   // Identidad de marca — customización por organización del logo (sidebar
   // expandido/colapsado) y favicon de la pestaña. Restringido a Alta
   // Gerencia (gate por grupo en el sidebar render + MANAGE_BRANDING en API).
@@ -2910,7 +2922,7 @@ function SectionContent({ section }: { section: SettingsSection }) {
     case 'team':
       return <TeamSection />;
     case 'roles':
-      return <RolesPermissionsSection />;
+      return ROLES_SECTION_ENABLED ? <RolesPermissionsSection /> : null;
     case 'branding':
       return <BrandingSection />;
     default:
@@ -2928,7 +2940,16 @@ export function SettingsDashboard() {
   const { hasRole, isLoading } = useAuthContext();
   // Default section: 'codigo' es la primera del sidebar (Control de código).
   // Antes era 'repository' que ya no existe (la tarjeta mockeada se eliminó).
-  const initialSection = (searchParams.get('section') as SettingsSection) || 'codigo';
+  //
+  // El `?section=` se valida contra el sidebar en vez de castearse a ciegas: un
+  // valor desconocido —o el de una sección deshabilitada, como 'roles'— dejaba
+  // el panel en blanco sin nada seleccionado. Ahora cae al default.
+  const requestedSection = searchParams.get('section');
+  const initialSection: SettingsSection = SIDEBAR_ITEMS.some(
+    (item) => item.id === requestedSection,
+  )
+    ? (requestedSection as SettingsSection)
+    : 'codigo';
   const [activeSection, setActiveSection] = useState<SettingsSection>(initialSection);
 
   // Redirect como efecto, no durante render — evita ReferenceError: location is not defined
