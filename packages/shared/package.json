@@ -23,6 +23,6 @@
     "@cenzontle/eslint-config": "workspace:*",
     "@cenzontle/ts-config": "workspace:*",
     "tsup": "^8.0.0",
-    "typescript": "^5"
+    "typescript": "^7"
   }
 }
