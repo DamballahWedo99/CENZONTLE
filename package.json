@@ -14,7 +14,7 @@
     "clean": "turbo run clean && rm -rf .turbo apps/*/.turbo packages/*/.turbo node_modules/.cache/turbo"
   },
   "devDependencies": {
-    "turbo": "^2.5.0"
+    "turbo": "^2.11.10"
   },
   "packageManager": "pnpm@9.15.0",
   "engines": {
